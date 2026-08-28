@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,15 +7,15 @@ name = "evolvekit"
 version = "0.3.0"
 requires-python = ">=3.11"
 dependencies = [
-    "pyyaml>=6.0",
-    "openai>=1.0",
+    "pyyaml>=6.0.3",
+    "openai>=3.3.1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
 # Keyless Entra ID auth against an Azure AI Foundry / Azure OpenAI resource
 # whose key auth is disabled. The core suite never imports it.
 entra = ["azure-identity>=1.17"]
+dev = ["pytest>=9.1.1"]
 # The PyVRP configuration-search example only. The core suite never imports
 # pyvrp: tests/test_pyvrp_example.py is skipped when it is absent.
 pyvrp = ["pyvrp>=0.14"]
