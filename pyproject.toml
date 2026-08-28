@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=9.1.1"]
 # The PyVRP configuration-search example only. The core suite never imports
 # pyvrp: tests/test_pyvrp_example.py is skipped when it is absent.
 pyvrp = ["pyvrp>=0.14"]
