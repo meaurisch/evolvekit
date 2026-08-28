@@ -2,9 +2,24 @@
 
 Credentials come from the environment only:
 
-    AZURE_OPENAI_ENDPOINT     https://<resource>.openai.azure.com
-    AZURE_OPENAI_API_KEY      the key
-    AZURE_OPENAI_API_VERSION  optional, defaults to 2024-10-21
+    AZURE_OPENAI_ENDPOINT     the resource root. All three forms work:
+                                https://<resource>.openai.azure.com          (classic Azure OpenAI)
+                                https://<resource>.cognitiveservices.azure.com   (AI Foundry)
+                                https://<resource>.services.ai.azure.com         (AI Foundry)
+                              A path copied off the Foundry portal
+                              (`/openai/v1`, `/models`, a trailing slash) is
+                              stripped -- the client builds its own routes.
+    AZURE_OPENAI_API_KEY      the key. `AZURE_OPENAI_KEY`, the name some
+                              Foundry portal snippets use, is accepted too.
+    AZURE_OPENAI_API_VERSION  optional, defaults to 2024-10-21. Foundry
+                              features newer than the GA surface (strict
+                              json_schema and friends) want 2025-04-01-preview.
+
+With an endpoint but **no key**, the backend falls back to keyless Microsoft
+Entra ID auth via `azure.identity.DefaultAzureCredential` -- the route a
+corporate Foundry resource with key auth disabled requires. That path needs
+`pip install evolvekit[entra]` (or `azure-identity` directly) and whatever
+login the machine's policy expects (`az login`, managed identity, ...).
 
 `models.<role>.model` is the **deployment** name, not the model name -- Azure
 routes on deployment, and a deployment called `gpt-4o` and a model called
@@ -39,6 +54,27 @@ __all__ = ["AzureOpenAIProvider", "AzureProvider", "DEFAULT_API_VERSION"]
 
 DEFAULT_API_VERSION = "2024-10-21"
 
+# The token scope every Azure AI Foundry / Azure OpenAI resource accepts for
+# Entra ID bearer auth, regardless of which of the three endpoint domains it
+# answers on.
+ENTRA_SCOPE = "https://cognitiveservices.azure.com/.default"
+
+# Path suffixes the Foundry portal's copy-paste snippets append to the
+# resource root. `openai.AzureOpenAI` wants the bare root and builds its own
+# `/openai/deployments/...` routes, so a pasted suffix would 404 every call.
+_ENDPOINT_SUFFIXES = ("/openai/v1", "/openai", "/models")
+
+
+def _normalise_endpoint(raw: str | None) -> str | None:
+    if not raw:
+        return raw
+    endpoint = raw.strip().rstrip("/")
+    for suffix in _ENDPOINT_SUFFIXES:
+        if endpoint.endswith(suffix):
+            endpoint = endpoint[: -len(suffix)]
+            break
+    return endpoint
+
 
 class AzureOpenAIProvider:
     """Chat completions and embeddings through `openai.AzureOpenAI`."""
@@ -64,27 +100,45 @@ class AzureOpenAIProvider:
             raise ProviderError(
                 "the 'openai' package is required for the azure provider"
             ) from exc
-        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
-        api_key = os.environ.get("AZURE_OPENAI_API_KEY")
-        missing = [
-            n
-            for n, v in (
-                ("AZURE_OPENAI_ENDPOINT", endpoint),
-                ("AZURE_OPENAI_API_KEY", api_key),
-            )
-            if not v
-        ]
-        if missing:
+        endpoint = _normalise_endpoint(os.environ.get("AZURE_OPENAI_ENDPOINT"))
+        api_key = os.environ.get("AZURE_OPENAI_API_KEY") or os.environ.get(
+            "AZURE_OPENAI_KEY"
+        )
+        if not endpoint:
             raise ProviderError(
-                f"azure provider: missing environment variable(s) {missing}; "
-                "copy .env.example to .env and fill it in"
+                "azure provider: missing environment variable(s) "
+                "['AZURE_OPENAI_ENDPOINT']; copy .env.example to .env and "
+                "fill it in"
             )
+        api_version = os.environ.get(
+            "AZURE_OPENAI_API_VERSION", DEFAULT_API_VERSION
+        )
+        if api_key:
+            return AzureOpenAI(
+                azure_endpoint=endpoint,
+                api_key=api_key,
+                api_version=api_version,
+            )
+        # No key set: keyless Entra ID auth, the route a Foundry resource
+        # with key auth disabled requires.
+        try:
+            from azure.identity import (
+                DefaultAzureCredential,
+                get_bearer_token_provider,
+            )
+        except ImportError as exc:
+            raise ProviderError(
+                "azure provider: missing environment variable(s) "
+                "['AZURE_OPENAI_API_KEY'] (or AZURE_OPENAI_KEY) -- copy "
+                ".env.example to .env and fill it in. For keyless Entra ID "
+                "auth instead, pip install 'evolvekit[entra]'"
+            ) from exc
         return AzureOpenAI(
             azure_endpoint=endpoint,
-            api_key=api_key,
-            api_version=os.environ.get(
-                "AZURE_OPENAI_API_VERSION", DEFAULT_API_VERSION
+            azure_ad_token_provider=get_bearer_token_provider(
+                DefaultAzureCredential(), ENTRA_SCOPE
             ),
+            api_version=api_version,
         )
 
     def complete(
