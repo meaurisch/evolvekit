@@ -15,9 +15,12 @@ real endpoint would produce -- not on the stub.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
+
+import evolvekit.providers.azure as azure_module
 
 from evolvekit.providers.azure import AzureOpenAIProvider, AzureProvider
 from evolvekit.providers.base import Completion, ProviderError
@@ -385,5 +388,121 @@ def test_a_missing_environment_variable_is_named_before_anything_is_sent(
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://x.openai.azure.com")
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "k")
     monkeypatch.delenv(missing, raising=False)
+    # A missing key must fail the same way whether or not this machine
+    # happens to have azure-identity installed or AZURE_OPENAI_KEY exported.
+    monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "azure.identity", None)
     with pytest.raises(ProviderError, match=missing):
         AzureOpenAIProvider()
+
+
+# the Azure AI Foundry contract: endpoint forms, the portal's key name,
+# and keyless Entra ID auth
+# --------------------------------------------------------------------------
+
+
+def _capture_client_kwargs(monkeypatch):
+    captured: dict = {}
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr("openai.AzureOpenAI", fake_client)
+    return captured
+
+
+def test_the_foundry_portals_key_name_is_accepted_as_an_alias(monkeypatch):
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT", "https://x.cognitiveservices.azure.com"
+    )
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("AZURE_OPENAI_KEY", "portal-key")
+    captured = _capture_client_kwargs(monkeypatch)
+
+    AzureOpenAIProvider()
+
+    assert captured["api_key"] == "portal-key"
+    assert captured["azure_endpoint"] == "https://x.cognitiveservices.azure.com"
+
+
+@pytest.mark.parametrize(
+    ("pasted", "root"),
+    [
+        (
+            "https://x.services.ai.azure.com/models",
+            "https://x.services.ai.azure.com",
+        ),
+        (
+            "https://x.services.ai.azure.com/openai/v1",
+            "https://x.services.ai.azure.com",
+        ),
+        (
+            "https://x.cognitiveservices.azure.com/openai",
+            "https://x.cognitiveservices.azure.com",
+        ),
+        ("https://x.openai.azure.com/", "https://x.openai.azure.com"),
+    ],
+)
+def test_a_pasted_portal_path_is_stripped_to_the_resource_root(
+    monkeypatch, pasted, root
+):
+    """The client builds its own routes; a pasted suffix would 404 them all."""
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", pasted)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "k")
+    captured = _capture_client_kwargs(monkeypatch)
+
+    AzureOpenAIProvider()
+
+    assert captured["azure_endpoint"] == root
+
+
+def test_no_key_and_no_azure_identity_names_both_routes_out(monkeypatch):
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT", "https://x.services.ai.azure.com"
+    )
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "azure.identity", None)
+
+    with pytest.raises(ProviderError, match="AZURE_OPENAI_API_KEY") as err:
+        AzureOpenAIProvider()
+    # The message must offer the fix for both worlds: fill the key in, or
+    # install the keyless extra.
+    assert "entra" in str(err.value)
+
+
+def test_no_key_falls_back_to_keyless_entra_id(monkeypatch):
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT", "https://x.services.ai.azure.com"
+    )
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
+
+    token_provider = object()
+    seen: dict = {}
+
+    identity = ModuleType("azure.identity")
+
+    class FakeCredential:
+        pass
+
+    def fake_bearer_provider(credential, scope):
+        seen["credential"] = credential
+        seen["scope"] = scope
+        return token_provider
+
+    identity.DefaultAzureCredential = FakeCredential
+    identity.get_bearer_token_provider = fake_bearer_provider
+    azure_pkg = ModuleType("azure")
+    azure_pkg.identity = identity
+    monkeypatch.setitem(sys.modules, "azure", azure_pkg)
+    monkeypatch.setitem(sys.modules, "azure.identity", identity)
+    captured = _capture_client_kwargs(monkeypatch)
+
+    AzureOpenAIProvider()
+
+    assert captured["azure_ad_token_provider"] is token_provider
+    assert "api_key" not in captured
+    assert isinstance(seen["credential"], FakeCredential)
+    assert seen["scope"] == azure_module.ENTRA_SCOPE

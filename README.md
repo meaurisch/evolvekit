@@ -581,7 +581,7 @@ turn tokens into USD.
 
 | Backend | Environment | Notes |
 |---|---|---|
-| `azure` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_API_VERSION` (optional, defaults `2024-10-21`) | `openai.AzureOpenAI`. `models.<role>.model` is the **deployment** name. Sends `max_completion_tokens`, falling back once to `max_tokens` on older API versions. Implements `embed()`. Contract-tested against recorded responses in `tests/test_azure_contract.py`. |
+| `azure` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY` (or `AZURE_OPENAI_KEY`; leave empty for keyless Entra ID via `evolvekit[entra]`), `AZURE_OPENAI_API_VERSION` (optional, defaults `2024-10-21`) | `openai.AzureOpenAI`, against classic Azure OpenAI **and** Azure AI Foundry resources — any of the `openai.azure.com` / `cognitiveservices.azure.com` / `services.ai.azure.com` endpoint forms; pasted portal paths are stripped. `models.<role>.model` is the **deployment** name. Sends `max_completion_tokens`, falling back once to `max_tokens` on older API versions. Implements `embed()`. Contract-tested against recorded responses in `tests/test_azure_contract.py`. |
 | `openrouter` | `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (optional) | `openai.OpenAI` with `base_url=https://openrouter.ai/api/v1`. Implements `embed()`. |
 | `claude-cli` | none; `CLAUDE_CLI_PATH` only if the binary is off `PATH` | Runs `claude -p --output-format json` as a subprocess on the local subscription's own auth. **No `embed()`** — the CLI is completions only, and config validation rejects `search.novelty.near.method: embedding` against it. The prompt goes in on stdin, so a long big-step prompt cannot hit the Windows argv limit. Reports real spend via `total_cost_usd`, which the ledger prefers over the price table. Its own system context costs ~13k cached input tokens per call even with `--system-prompt` set. |
 | `fake` | none | Replays a scripted list of responses from `options.responses` or `options.responses_path`. `embed()` returns deterministic hash-seeded vectors. Used by the tests and by `python tasks.py run`. |
@@ -664,15 +664,24 @@ few enough calls that the CLI's overhead does not dominate.
 
 ### 2. Everything on `azure` (Azure OpenAI / Azure AI Foundry)
 
-No `claude-cli` and no OpenRouter key on that machine, so both slots are Azure
-deployments. `models.<role>.model` is the **deployment** name, not the model
-name.
+The all-Azure form for a machine where Azure is the only route out — a
+locked-down corporate laptop with an Azure AI Foundry resource, say. Both
+slots are Azure deployments; `models.<role>.model` is the **deployment**
+name, not the model name.
 
 ```
-AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
-AZURE_OPENAI_API_KEY=...
+# the resource root — openai.azure.com, cognitiveservices.azure.com and
+# services.ai.azure.com all work, pasted portal paths are stripped
+AZURE_OPENAI_ENDPOINT=https://<resource>.cognitiveservices.azure.com
+AZURE_OPENAI_API_KEY=...               # or AZURE_OPENAI_KEY; leave empty
+                                       # for keyless Entra ID auth
 AZURE_OPENAI_API_VERSION=2024-10-21    # optional
 ```
+
+On a Foundry resource with key auth disabled, set only the endpoint and
+`pip install 'evolvekit[entra]'`: the provider authenticates through
+`DefaultAzureCredential` (`az login`, managed identity, whatever the machine's
+policy provides).
 
 ```yaml
 extends: evolvekit.yaml

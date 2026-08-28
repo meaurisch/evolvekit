@@ -13,6 +13,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Keyless Entra ID auth against an Azure AI Foundry / Azure OpenAI resource
+# whose key auth is disabled. The core suite never imports it.
+entra = ["azure-identity>=1.17"]
 # The PyVRP configuration-search example only. The core suite never imports
 # pyvrp: tests/test_pyvrp_example.py is skipped when it is absent.
 pyvrp = ["pyvrp>=0.14"]
