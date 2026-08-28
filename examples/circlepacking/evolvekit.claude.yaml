@@ -1,0 +1,57 @@
+# Circle packing n = 26 through a real backend. `extends` folds this onto
+# evolvekit.yaml, so `problem`, `evaluate` and `search` are that file's exactly
+# and cannot drift from it. Everything here is what differs about a paid run:
+# the backend, the budget, and a stop rule denominated in money.
+#
+#   python -m evolvekit run --config examples/circlepacking/evolvekit.claude.yaml \
+#       --run-dir runs/circles-claude
+#
+# Swap `models` for the openrouter block at the bottom to run it on a key
+# instead of a subscription. See the README for expected cost.
+
+# NEVER run two claude-cli jobs at once. The subscription's five-hour session
+# window is shared, so a second job does not queue: it eats the same allowance
+# and both runs hit the cap together. See the README's "Running for real".
+
+extends: evolvekit.yaml
+
+models:
+  small:
+    provider: claude-cli
+    model: haiku
+    price_in_per_mtok: 1.00
+    price_out_per_mtok: 5.00
+    max_tokens: 4096
+    temperature: 1.0
+    # `null` clears the base file's fake-provider options rather than merging.
+    options: null
+  strong:
+    provider: claude-cli
+    model: sonnet
+    price_in_per_mtok: 3.00
+    price_out_per_mtok: 15.00
+    max_tokens: 8192
+    temperature: 1.0
+    options: null
+
+budget:
+  max_usd: 5.00
+  max_tokens: 2000000
+  max_full_evals_per_day: 400
+
+stop:
+  patience: 8
+  epsilon: 0.0005
+  target: null
+  min_big_steps: 1
+  # A paid run can afford a money-denominated plateau rule where the offline
+  # demo cannot. Half a dollar with nothing to show for it is the signal to
+  # stop; it only fires after a big step has already been tried.
+  max_usd_since_improvement: 0.50
+
+search:
+  generations: 30
+
+# For an OpenRouter key on the small slot and this subscription on the big
+# steps -- the cheapest breadth available -- use evolvekit.openrouter.yaml
+# beside this file instead. See the README's "Running for real".

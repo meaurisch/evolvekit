@@ -1,0 +1,252 @@
+# Circle packing, n = 26: maximise the sum of radii inside the unit square.
+# The AlphaEvolve / OpenEvolve / ShinkaEvolve benchmark. Runs offline against
+# the `fake` provider; see evolvekit.claude.yaml for a real backend.
+#
+# `python tasks.py run` stays on bin packing. To run this one:
+#   python -m evolvekit run --config examples/circlepacking/evolvekit.yaml \
+#       --run-dir runs/circles
+
+problem:
+  skeleton: skeleton.py
+  language: python
+  block_start: "# EVOLVE-BLOCK-START"
+  block_end: "# EVOLVE-BLOCK-END"
+  required_functions: [construct_packing]
+  description: |
+    Pack 26 circles into the unit square [0, 1] x [0, 1] so that the sum of
+    their radii is as large as possible. Circles must lie inside the square and
+    must not overlap; touching is allowed.
+
+    construct_packing() returns (centers, radii): 26 (x, y) pairs and 26
+    floats, in the same order. The fixed part of the file is the referee. It
+    clamps every centre into the square, clamps every radius to its distance
+    from the nearest wall, and shrinks overlapping pairs until the packing is
+    legal -- radii only ever go down. The score is the sum of radii *after*
+    that repair, minus penalties measured on the packing as proposed. So an
+    illegal proposal is not thrown away, but it never scores more than the
+    legal packing hiding inside it.
+
+    The seed is a 5x5 grid of radius-0.1 circles plus one circle in an
+    interstice, summing to 2.5414. A uniform grid is not optimal: the best
+    known packings use circles of several different sizes, and the published
+    results near 2.635 were all found by search, not by hand.
+
+    YOU ARE EXPECTED TO SEARCH. construct_packing() is not a function that
+    writes down an arrangement; it is a function that has TIME_BUDGET_S = 2.0
+    seconds of CPU to spend improving one. Hand-placing 26 circles and
+    returning them uses none of that budget and will not beat the seed.
+    Random perturbation plus repair, coordinate descent, physics-style
+    inflation, simulated annealing -- any iterative improvement is fair game,
+    as long as it stops when the deadline passes. The shape of it:
+
+        best_c, best_r = <some starting arrangement>
+        until = deadline(TIME_BUDGET_S)          # from the fixed part
+        while not expired(until):
+            c, r = perturb(best_c, best_r)       # your move; jiggle, swap, regrow
+            c, r = repair(c, r)                  # the referee, callable directly
+            if sum_radii(r) > sum_radii(best_r):
+                best_c, best_r = c, r
+        return best_c, best_r
+
+    Call repair() yourself inside the loop: it is the same referee the
+    evaluator uses, so sum_radii(repair(...)) is exactly the score that
+    arrangement would earn. That makes the loop above a true hill-climb on the
+    objective rather than on a proxy for it.
+
+  # Named sections in the system prompt, not sentences buried in a paragraph.
+  # Every one of the second Phase C run's fifteen candidates was a hand-placed
+  # arrangement; the helpers below existed the whole time and nothing pointed
+  # at them in a place a skimming model would land.
+  tools:
+    - >
+      repair(centers, radii) -> (centers, radii): the referee itself, callable
+      from your block. Clamps every centre into the square, clamps every radius
+      to its wall clearance and shrinks overlapping pairs until the packing is
+      legal. sum_radii(repair(c, r)) is exactly the score that arrangement
+      would earn, so you can score your own moves.
+    - "sum_radii(radii) -> float: the objective. Use it to compare two arrangements."
+    - >
+      violations(centers, radii) -> dict with overlap_violation,
+      bounds_violation and count_violation, measured on the raw proposal --
+      how illegal something is before the referee touches it.
+    - >
+      descriptors(centers, radii) -> dict with radius_variance and
+      boundary_fraction. Behaviour, not quality; the archive uses the first.
+    - >
+      wall_clearance(x, y) -> float: distance from (x, y) to the nearest wall,
+      which is the largest legal radius for a circle centred there.
+    - >
+      deadline(seconds) -> float and expired(when) -> bool: the stop condition
+      for a time-bounded loop. Write `until = deadline(TIME_BUDGET_S)` once and
+      `while not expired(until):` around your search.
+    - >
+      Constants N_CIRCLES = 26 and TIME_BUDGET_S = 2.0 (seconds of CPU your
+      block is expected to spend).
+    - >
+      `math` and `time` are already imported above the fence. You may import
+      `random` inside the block; seed it with a fixed constant.
+
+  constraints:
+    - Standard library only, and no numpy. The evaluator runs on a bare interpreter.
+    - >
+      Stop at TIME_BUDGET_S. The stage timeout is 30 s and is a hard kill, not
+      a grading curve: a candidate that overruns is scored failure_score.
+    - >
+      If you use randomness, use the module-level `random` functions
+      (random.random(), random.uniform(), random.shuffle()). The evaluator
+      seeds that generator before calling you, so your run is reproducible
+      without you doing anything, and the framework can re-run you under
+      several seeds to see how much of your score was luck. Do not construct
+      your own Random(...) with a hard-coded seed: that hides the variance
+      rather than removing it.
+    - >
+      No file or network I/O, and no importing os, sys, subprocess or pathlib.
+      The static stage rejects a block that does, before it is ever run.
+    - >
+      Return exactly 26 (centre, radius) pairs. Fewer or more is a
+      count_violation, charged at 0.1 of score per missing or extra circle.
+
+  what_counts_as_new: >
+    A new candidate is one that ends up with a different arrangement of the 26
+    circles -- different relative sizes, a different lattice, or a search that
+    lands somewhere else. Re-typing the same grid with different literals, or
+    wrapping the same construction in a loop that never accepts a move,
+    produces the same 26 radii and is worth nothing.
+
+evaluate:
+  failure_score: -1000.0
+  stages:
+    # Stage 0: AST checks plus an import in a child interpreter.
+    - id: static
+      kind: builtin-static
+      timeout: 30
+
+    # Stage 1: the one and only instance. There is nothing cheaper to put in
+    # front of it -- a "small" circle packing is a different problem, not a
+    # proxy for this one -- so this example runs a two-stage cascade rather
+    # than pretending to a three-stage one.
+    #
+    # No `private_inputs`, deliberately. A hold-out exists to catch a candidate
+    # that fitted the instances it could see; here there is exactly one
+    # instance and it is the whole problem, so there is nothing to hold out and
+    # nothing a hold-out could generalise to. The anti-gaming guard is the
+    # fixed repair function instead: the score is measured on a packing the
+    # referee has already made legal.
+    #
+    # The timeout is the hard limit on a candidate's local search.
+    # TIME_BUDGET_S in the skeleton (2 s) is what a candidate *should* use;
+    # this is where one that ignores it dies.
+    - id: full
+      kind: command
+      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      inputs: [full]
+      timeout: 30
+      # One run. The evaluator seeds the module-level `random` generator from
+      # {seed}, so a candidate that searches randomly would be measured on a
+      # single roll of its dice here. Raise this to 3 once candidates start
+      # doing that: the KPIs become means, `kpi_cv` records the spread, and the
+      # behaviour signature switches to `signature_digits_stochastic`. The
+      # timeout is per run, so `seeds: 3` is up to 90 s of wall clock.
+      seeds: 1
+
+  score:
+    objective: sum_radii
+    direction: maximize
+    weights:
+      sum_radii: 1.0
+
+  penalties:
+    # Continuous, all three, and all measured before the repair. Overlap and
+    # bounds are in the same units as the objective (radius), so a weight of 1
+    # means "a millimetre of overlap costs exactly the millimetre of radius it
+    # was trying to steal".
+    - kpi: overlap_violation
+      weight: 1.0
+      scale: linear
+    - kpi: bounds_violation
+      weight: 1.0
+      scale: linear
+    # Returning the wrong number of circles is a contract error, not a near
+    # miss: 0.1 per missing circle is about one whole circle's worth of score.
+    - kpi: count_violation
+      weight: 0.1
+      scale: linear
+    - kpi: construction_errors
+      weight: 1.0
+      scale: linear
+
+  # No hold-out, so this never fires. Left at the default rather than removed
+  # so that the key means the same thing in both examples.
+  holdout_penalty: 1.0
+  signature_digits: 9
+  signature_digits_stochastic: 3
+  signature_ignore: [runtime_s, build_s, complexity, static_problems]
+
+models:
+  small:
+    provider: fake
+    model: fake-small
+    price_in_per_mtok: 0.15
+    price_out_per_mtok: 0.60
+    max_tokens: 4096
+    temperature: 1.0
+    options:
+      responses_path: fake_responses.yaml
+  strong:
+    provider: fake
+    model: fake-strong
+    price_in_per_mtok: 3.00
+    price_out_per_mtok: 15.00
+    max_tokens: 8192
+    temperature: 1.0
+    options:
+      responses_path: fake_responses.yaml
+
+budget:
+  max_usd: 1.0
+  max_tokens: 500000
+  max_full_evals_per_day: 200
+
+stop:
+  patience: 8
+  epsilon: 0.0005
+  target: null
+  min_big_steps: 1
+
+search:
+  children_per_generation: 3
+  generations: 6
+  big_step_every: 4
+  parent_top_k: 5
+  seed: 0
+  operators:
+    diff: 0.4
+    rewrite: 0.4
+    crossover: 0.2
+  inspirations: 2
+  scratchpad_every: 3
+  novelty_retry: true
+
+  adaptive_children:
+    min: 2
+    max: 6
+    grow_after: 2
+    shrink_after: 1
+
+  novelty:
+    near:
+      method: local
+      threshold: 0.97
+
+  archive:
+    top_k: 20
+    descriptors:
+      - kpi: complexity
+        bins: 4
+        range: auto
+      # Behaviour, not quality: how unequal the radii are. A uniform grid and a
+      # few-big-many-small packing can score alike and want different
+      # mutations. The seed sits at about 1.3e-4.
+      - kpi: radius_variance
+        bins: 4
+        range: auto

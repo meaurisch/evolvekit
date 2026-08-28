@@ -1,0 +1,40 @@
+# Online bin packing, FunSearch-style: evolve priority() inside a fixed greedy
+# skeleton. Real-provider variant of evolvekit.yaml: claude-cli backend, $1 cap.
+#
+# `extends` folds this file onto evolvekit.yaml, so `problem`, `evaluate` and
+# `search` are that file's, exactly, and cannot drift from it. Everything below
+# is what genuinely differs about a paid run: the backend and the budget.
+# tests/test_config.py asserts the three shared sections parse identically.
+
+# NEVER run two claude-cli jobs at once. The subscription's five-hour session
+# window is shared, so a second job does not queue: it eats the same allowance
+# and both runs hit the cap together. See the README's "Running for real".
+
+extends: evolvekit.yaml
+
+models:
+  # Real run through a Claude subscription (claude CLI). The CLI reports
+  # total_cost_usd, so the price table below is only a fallback for the ledger.
+  small:
+    provider: claude-cli
+    model: haiku
+    price_in_per_mtok: 1.00
+    price_out_per_mtok: 5.00
+    max_tokens: 2048
+    temperature: 1.0
+    # `null` clears the base file's fake-provider options rather than merging
+    # with them; see `deep_merge` in evolvekit/config.py.
+    options: null
+  strong:
+    provider: claude-cli
+    model: sonnet
+    price_in_per_mtok: 3.00
+    price_out_per_mtok: 15.00
+    max_tokens: 4096
+    temperature: 1.0
+    options: null
+
+budget:
+  max_usd: 1.0
+  max_tokens: 500000
+  max_full_evals_per_day: 40

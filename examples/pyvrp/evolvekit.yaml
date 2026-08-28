@@ -1,0 +1,226 @@
+# PyVRP configuration search, offline demo size. The search space is PyVRP's
+# own `SolveParams`; the instance and the solver are frozen.
+#
+# This file is the *tiny* variant: the 300-order instance at a 20-second solve
+# budget for two generations against the `fake` provider. No network, no keys,
+# under three minutes, and it is what `tests/test_pyvrp_example.py` drives.
+# `evolvekit.real.yaml` folds itself onto this one for the real thing.
+#
+# `python tasks.py run` stays on bin packing. To run this one you need PyVRP,
+# so use the example's own interpreter:
+#   .venv-pyvrp/Scripts/python -m evolvekit run \
+#       --config examples/pyvrp/evolvekit.yaml --run-dir runs/pyvrp
+
+problem:
+  skeleton: skeleton.py
+  language: python
+  block_start: "# EVOLVE-BLOCK-START"
+  block_end: "# EVOLVE-BLOCK-END"
+  required_functions: [configure]
+
+  # The default list forbids `pathlib` and `importlib`, which the fixed part of
+  # this skeleton needs to read its instance file. Everything genuinely
+  # dangerous is still refused, and the fenced block has no reason to import
+  # anything at all: `pyvrp`, `numpy`, `math` and `time` are already in scope.
+  forbidden_imports:
+    [os, sys, subprocess, socket, shutil, importlib, ctypes, requests, urllib, http, pickle]
+
+  description: |
+    Configure PyVRP, do not reimplement it.
+
+    The task: a 3,000-order metro parcel-delivery instance must be routed as
+    cheaply as possible, and PyVRP gets a hard 15-minute wall clock to do it
+    in. Everything about the instance and about how it is solved is frozen.
+    The one thing you choose is the solver's configuration -- the object
+    `configure(data, time_limit, seed)` returns.
+
+    THE TOOL. PyVRP 0.14.0. Its solver is an *iterated local search* (not the
+    hybrid genetic search of older releases): a granular-neighbourhood local
+    search over a set of operator classes, a ruin-and-recreate perturbation
+    step between local searches, late-acceptance hill climbing as the
+    acceptance rule, and a penalty manager that prices load/time-warp/distance
+    violations and adapts those prices so that a target share of visited
+    solutions is feasible. `pyvrp.solve(data, stop, seed, params=...)` is
+    called for you; `params` is what you return.
+
+    WHAT YOU MAY USE. `pyvrp.SolveParams`, `pyvrp.IteratedLocalSearchParams`,
+    `pyvrp.PenaltyParams`, `pyvrp.search.NeighbourhoodParams`,
+    `pyvrp.search.PerturbationParams`, `pyvrp.search.OPERATORS` and the
+    individual operator classes -- all already imported at the top of the
+    skeleton, so the block needs no import statement. You may read anything
+    off `data` (`data.num_clients`, `data.num_vehicle_types`,
+    `data.num_load_dimensions`, `data.num_profiles`, `data.distance_matrix(p)`,
+    `data.vehicle_type(i)`, ...) and configure differently for a large
+    instance than for a small one. You may optionally return a
+    `(SolveParams, initial_solution)` pair to warm-start the search.
+
+    THE CONSTRAINTS. The solve budget is `min(requested, 900)` seconds and is
+    enforced above the fence; whatever time `configure()` itself burns is
+    deducted from it, so an expensive warm start has to earn its keep. A block
+    that raises, or returns the wrong type, is counted as `config_errors` and
+    replaced by PyVRP's defaults -- it scores, it just scores badly. Do not
+    try to solve the instance yourself: the objective is measured on what
+    `pyvrp.solve()` returns.
+
+    WHAT COUNTS AS NEW. A different *structure*, not a different constant.
+    Changing `num_neighbours` from 50 to 49 is the same configuration.
+    Dropping the wide-exchange operators to buy iterations, turning
+    `exhaustive_on_best` off and spending the time on perturbation instead,
+    running the penalty schedule aggressively so the search lives in the
+    infeasible region, or scaling the neighbourhood with `data.num_clients` --
+    those are different configurations. The evolve block's docstring lists
+    every tunable with PyVRP's default and what it does.
+
+    THE SCORE. `objective` is the PyVRP cost of the best feasible solution in
+    EUR, and lower is better. If no feasible solution was found, `objective`
+    is the penalised cost instead and `infeasible` is 1, which is priced out
+    of contention. Optional prize-collecting orders that were skipped are
+    charged a small amount on top of the prizes the objective already forgoes.
+
+evaluate:
+  failure_score: -1000000000.0
+
+  stages:
+    # Stage 0: AST checks plus an import in a child interpreter. That child is
+    # `sys.executable`, so evolvekit itself has to be run from an interpreter
+    # that has pyvrp installed -- see the README.
+    - id: static
+      kind: builtin-static
+      timeout: 120
+      import_check: true
+
+    # Stage 1: the 300-order cousin of the real instance at a 20-second
+    # budget. `--seed` and `--time-limit` are pinned here; once the framework
+    # grows the `{seed}` placeholder and multi-seed stages, `--seed {seed}` is
+    # the only change this line needs.
+    - id: full
+      kind: command
+      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed 42 --time-limit 20"
+      inputs: [metro300]
+      timeout: 90
+
+  score:
+    objective: objective
+    direction: minimize
+    weights:
+      objective: 1.0
+
+  penalties:
+    # An infeasible solution can never outrank a feasible one: objectives on
+    # this instance are in the low thousands of EUR at 300 orders and the low
+    # tens of thousands at 3,000, and this term is 100,000. The penalised cost
+    # still varies underneath it, so the search keeps a gradient inside the
+    # infeasible region instead of a cliff.
+    - kpi: infeasible
+      weight: 100000.0
+      scale: linear
+    # Skipping a prize-collecting order is legal and is already priced by the
+    # prize the objective forgoes. This is a small extra charge on top, so a
+    # configuration cannot win by quietly dropping every optional order if the
+    # generator's prizes turn out to be a shade too generous. Five euro against
+    # an objective of thousands is a nudge, not a veto.
+    - kpi: unassigned_clients
+      weight: 5.0
+      scale: linear
+    # These three are contract violations rather than choices: a required
+    # client, a required group or a required shipment left unserved.
+    - kpi: missing_required_clients
+      weight: 1000.0
+      scale: linear
+    - kpi: missing_groups
+      weight: 1000.0
+      scale: linear
+    - kpi: unassigned_shipments
+      weight: 1000.0
+      scale: linear
+    # configure() raised, or returned something that was not a SolveParams.
+    # The run still happened -- on PyVRP's defaults -- so the candidate has a
+    # score; this is what stops that score from looking like a success.
+    - kpi: config_errors
+      weight: 500.0
+      scale: linear
+
+  # No hold-out at this size: `evolvekit.real.yaml` adds one. Left at the
+  # default so the key means the same thing in both files.
+  holdout_penalty: 1.0
+
+  signature_digits: 9
+  # A PyVRP solve is wall-clock bounded, so two runs of the *same* config on
+  # the same machine differ in iteration count and therefore in objective. The
+  # behavioural-duplicate filter is consequently close to inert on this
+  # example, and that is expected rather than broken; everything timing-shaped
+  # is dropped from the signature anyway so that what remains is at least the
+  # shape of the routing.
+  signature_ignore:
+    [runtime_s, complexity, static_problems, time_used_s, configure_s, budget_s, iterations]
+
+models:
+  small:
+    provider: fake
+    model: fake-small
+    price_in_per_mtok: 0.15
+    price_out_per_mtok: 0.60
+    max_tokens: 4096
+    temperature: 1.0
+    options:
+      responses_path: fake_responses.yaml
+  strong:
+    provider: fake
+    model: fake-strong
+    price_in_per_mtok: 3.00
+    price_out_per_mtok: 15.00
+    max_tokens: 8192
+    temperature: 1.0
+    options:
+      responses_path: fake_responses.yaml
+
+budget:
+  max_usd: 1.0
+  max_tokens: 500000
+  max_full_evals_per_day: 200
+
+stop:
+  patience: 8
+  # An objective in EUR on a 2,000 EUR instance: one euro of improvement is
+  # real, a cent of it is the wall clock wobbling.
+  epsilon: 1.0
+  target: null
+  min_big_steps: 1
+
+search:
+  children_per_generation: 2
+  generations: 2
+  big_step_every: 4
+  parent_top_k: 5
+  seed: 0
+  operators:
+    diff: 0.4
+    rewrite: 0.3
+    crossover: 0.2
+    # The evolve block declares a `# PARAMS:` line, so this operator is real
+    # here: it draws a Latin-hypercube variant of the ten numeric tunables
+    # without calling a model at all. On a problem where every evaluation
+    # costs a quarter of an hour, a free child is worth having.
+    param_lhs: 0.1
+  inspirations: 2
+  scratchpad_every: 0
+  novelty_retry: true
+
+  novelty:
+    near:
+      method: local
+      threshold: 0.97
+
+  archive:
+    top_k: 20
+    descriptors:
+      - kpi: complexity
+        bins: 4
+        range: auto
+      # Behaviour, not quality: how the routes spread over the twelve vehicle
+      # types, in bits. 0 = every route on the same type; log2(12) ~ 3.58 =
+      # spread evenly. A one-lineage all-vans plan and a mixed-fleet plan can
+      # cost the same and want completely different mutations.
+      - kpi: fleet_mix_entropy
+        bins: 4
+        range: [0.0, 3.6]

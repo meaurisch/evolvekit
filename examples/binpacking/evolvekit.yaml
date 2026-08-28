@@ -1,0 +1,230 @@
+# Online bin packing, FunSearch-style: evolve priority() inside a fixed greedy
+# skeleton. Runs offline against the `fake` provider; swap `models` for a real
+# backend to run it for money.
+
+problem:
+  skeleton: skeleton.py
+  language: python
+  block_start: "# EVOLVE-BLOCK-START"
+  block_end: "# EVOLVE-BLOCK-END"
+  required_functions: [priority]
+  description: |
+    Online bin packing. Items arrive one at a time and must be placed
+    immediately and irrevocably into an open bin that still has room, or into a
+    new bin when none does. The greedy skeleton is fixed: it always places the
+    item in the feasible open bin with the highest priority() score.
+
+    priority(item, bins) receives the size of the arriving item and the list of
+    remaining capacities of the bins that can still take it, and must return one
+    float per bin in the same order. All bins in an instance share one capacity,
+    so the only information that distinguishes them is how full they already are.
+
+    The evaluator packs a set of synthetic instances (uniform "OR-like" sizes,
+    and Weibull-shaped sizes) and reports the mean excess of bins used over the
+    L1 lower bound, in percent. Best fit -- the seed rule -- scores about 5.9%.
+    Lower excess is better; FunSearch's published 5.30% on the OR1 file is the
+    yardstick.
+
+    Only the *ranking* your scores induce matters, because the skeleton takes
+    the argmax and nothing else. Two rules that order every bin the same way
+    are the same rule, however differently they compute their numbers.
+
+  tools:
+    - >
+      `bins` is the list of remaining capacities of the feasible bins, so
+      `b - item` is the gap a placement would leave and `b - item >= 0` always.
+    - >
+      The instance capacity is not passed in, but max(bins) is a usable proxy
+      for how empty the emptiest open bin is, and item / b is a fill ratio.
+    - >
+      `math` is imported in the fixed part and available inside the block.
+      Standard library only; no I/O and no numpy.
+    - >
+      Any pure function of (item, bins) is allowed: piecewise rules,
+      thresholds, ratios, tie-breaks on a second quantity. You may define
+      helper functions inside the block as long as priority() stays.
+    - >
+      A `# PARAMS: {"NAME": [lo, hi]}` line in the block declares numeric
+      constants for the free `param_lhs` operator to sweep. The seed declares
+      none; adding one costs nothing and buys a no-LLM mutation operator.
+
+  constraints:
+    - >
+      Return exactly one float per entry of `bins`, in the same order. A wrong
+      length or a non-finite value is counted as a priority_error, the step
+      falls back to best fit, and the score is penalised.
+    - >
+      No state between calls. priority() is called once per arriving item and
+      must not depend on module-level mutable state; the evaluator packs many
+      instances with one module.
+    - >
+      Keep it fast: priority() runs once per item per instance, tens of
+      thousands of times per evaluation, under a 120 s proxy stage timeout.
+    - No file, network or process I/O; no importing os, sys, subprocess or pathlib.
+
+  what_counts_as_new: >
+    Only a change to which bin wins is a change. The skeleton takes the argmax
+    of your scores, so any strictly increasing transform of an existing rule --
+    scaling it, raising it to a power, negating a distance you already used,
+    adding a constant -- packs every instance identically and scores identically.
+    A new candidate has to reorder bins: a threshold that switches rule below
+    some gap, a term that depends on item and b in a way the parent's does not,
+    or a tie-break that fires on cases the parent left tied.
+
+evaluate:
+  failure_score: -1000.0
+  stages:
+    # Stage 0: AST checks plus an import in a child interpreter. The only stage
+    # that may hard-reject; everything below it produces a score.
+    - id: static
+      kind: builtin-static
+      timeout: 30
+      import_check: true
+
+    # Stage 1: 5 small instances, a couple of seconds. Most candidates die here.
+    - id: proxy
+      kind: command
+      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      inputs: [proxy]
+      timeout: 120
+      # `seeds: N` runs the command N times with {seed} = 0..N-1, averages the
+      # KPIs and records each one's coefficient of variation as `kpi_cv`. This
+      # evaluator is deterministic per seed (the seed re-draws the instance
+      # set), so 1 is right here -- raise it on a problem whose evaluator is
+      # genuinely noisy and you get a mean instead of a single sample.
+      seeds: 1
+      promote:
+        top_k_per_generation: 2
+
+    # Stage 2: 20 instances, plus a 5-instance private hold-out scored
+    # separately so the public/private gap is recorded, never optimised.
+    - id: full
+      kind: command
+      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      inputs: [full]
+      private_inputs: [holdout]
+      timeout: 300
+      seeds: 1
+
+  score:
+    objective: excess_pct
+    direction: minimize
+    weights:
+      excess_pct: 1.0
+
+  penalties:
+    # Contract violations (wrong-length or non-finite scores) are counted by the
+    # skeleton and priced here. They lower the score; they never void it.
+    - kpi: priority_errors
+      weight: 2.0
+      scale: log1p
+    - kpi: overfull_bins
+      weight: 5.0
+      scale: linear
+
+  # Ranking = public - penalty * max(0, public - private). The first real run's
+  # winner improved the public set and lost on the hold-out; at 1.0 that trade
+  # is exactly cancelled out instead of being rewarded.
+  holdout_penalty: 1.0
+
+  # Behavioural duplicates. After every command stage the candidate's KPIs are
+  # rounded to `signature_digits` significant digits and hashed; a candidate
+  # whose fingerprint matches one already seen at that stage is a re-expression
+  # of something already paid for, and is stopped there. Both values are the
+  # built-in defaults, spelled out here because they are worth knowing about.
+  signature_digits: 9
+  # Used instead on any stage with `seeds: N > 1`. Coarser on purpose: a
+  # stochastic evaluator moves the eighth digit for free, so at nine digits
+  # every candidate looks novel and the behavioural filter stops filtering.
+  signature_digits_stochastic: 3
+  signature_ignore: [runtime_s, complexity, static_problems]
+
+models:
+  small:
+    provider: fake
+    model: fake-small
+    price_in_per_mtok: 0.15
+    price_out_per_mtok: 0.60
+    max_tokens: 2048
+    temperature: 1.0
+    options:
+      responses_path: fake_responses.yaml
+  strong:
+    provider: fake
+    model: fake-strong
+    price_in_per_mtok: 3.00
+    price_out_per_mtok: 15.00
+    max_tokens: 4096
+    temperature: 1.0
+    options:
+      responses_path: fake_responses.yaml
+
+budget:
+  max_usd: 1.0
+  max_tokens: 500000
+  max_full_evals_per_day: 40
+
+stop:
+  # Raised from 4 in Phase C. The second real run gave up after twelve novel
+  # samples on `patience: 4`; twelve samples is not a search, it is a sighting.
+  # A plateau's answer is more sampling (see search.adaptive_children below),
+  # and the money caps below are the real stop.
+  patience: 8
+  epsilon: 0.001
+  target: null
+  min_big_steps: 1
+  # The two economics stops, left off here because the offline demo spends
+  # fractions of a cent and any threshold would be theatre. For a paid run see
+  # evolvekit.claude.yaml.
+  # max_usd_since_improvement: 0.30
+  # min_gain_per_usd: {window: 3, threshold: 0.5}
+
+search:
+  # The starting breadth; `adaptive_children` below moves it from here.
+  children_per_generation: 3
+  generations: 6
+  big_step_every: 4
+  parent_top_k: 5
+  seed: 0
+  operators:
+    diff: 0.4
+    rewrite: 0.3
+    crossover: 0.3
+    # param_lhs is not listed: this skeleton declares no `# PARAMS:` line, so
+    # there is nothing to sweep. See tests/test_params.py for one that does.
+  inspirations: 2
+  scratchpad_every: 2
+  novelty_retry: true
+
+  # TurboEvolve's K-adaptation. Two flat generations buy one more child, up to
+  # six; a generation that improves gives one back, down to three. Breadth is
+  # worth little while the search is climbing and it is the only way out of a
+  # plateau, so the run decides rather than the config.
+  adaptive_children:
+    min: 3
+    max: 6
+    grow_after: 2
+    shrink_after: 1
+
+  # The near-duplicate gate, between the exact structure hash and the
+  # evaluator. `local` compares canonical-AST node-type n-grams, so a child
+  # that only moves constants scores 1.00 and is re-prompted once -- then
+  # evaluated anyway and flagged, never thrown away.
+  novelty:
+    near:
+      method: local
+      threshold: 0.97
+
+  archive:
+    top_k: 20
+    descriptors:
+      # Complexity comes free from the static stage (module AST node count),
+      # and widens as the run finds bigger blocks.
+      - kpi: complexity
+        bins: 4
+        range: auto
+      # Behaviour, not quality: 0 = always the tightest feasible bin, 1 = always
+      # the emptiest. Two rules can score alike and sit at opposite ends of it.
+      - kpi: mean_openness
+        bins: 4
+        range: [0.0, 0.25]

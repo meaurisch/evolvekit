@@ -1,0 +1,36 @@
+#!/bin/sh
+# Repo convention: no push path bypasses gitleaks, and master is
+# pull-request-only — anything that changes the repo opens a PR for review.
+#
+# Enable with: git config core.hooksPath .githooks
+#
+# Scans only the range this push publishes, not full history. Uses git's
+# pre-push stdin contract, one line per ref:
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+command -v gitleaks >/dev/null 2>&1 || { echo "gitleaks not installed"; exit 1; }
+
+zero="0000000000000000000000000000000000000000"
+while read local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue   # deleting a ref — nothing to scan
+
+    # master/main is pull-request-only. A zero remote_sha means the branch
+    # does not exist on the remote yet — that is the initial push that
+    # creates it, which must still work. Every later push to it is blocked.
+    case "$remote_ref" in
+        refs/heads/master|refs/heads/main)
+            if [ "$remote_sha" != "$zero" ] && [ "$EVOLVEKIT_ALLOW_MASTER_PUSH" != "1" ]; then
+                echo "$remote_ref is pull-request-only — open a PR instead:"
+                echo "    git switch -c <branch> && git push -u origin <branch>"
+                echo "    gh pr create"
+                echo "  (genuine emergency: EVOLVEKIT_ALLOW_MASTER_PUSH=1 git push ...)"
+                exit 1
+            fi
+            ;;
+    esac
+    if [ "$remote_sha" = "$zero" ]; then
+        log_opts="$local_sha --not --remotes"    # new branch: everything not already on a remote
+    else
+        log_opts="$remote_sha..$local_sha"       # existing branch: just the new commits
+    fi
+    gitleaks git --no-banner --redact --log-opts "$log_opts" || { echo "gitleaks: push blocked"; exit 1; }
+done

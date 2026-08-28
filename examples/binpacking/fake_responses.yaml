@@ -1,0 +1,262 @@
+# Scripted responses for the `fake` provider, replayed offline and deterministic.
+#
+# They exist so `python tasks.py run` and the end-to-end test never touch a
+# network and never cost anything. Between them they exercise every path the
+# real loop has: a regression, a SEARCH/REPLACE edit with a full-rewrite
+# fallback, a genuine improvement, a crossover, a big step, a candidate that
+# violates an invariant (penalty, not None), a candidate the static stage
+# hard-rejects, a response that cannot be applied at all -- and the three things
+# Phase B exists to catch: a block that is its parent restated (a *no-op*), a
+# block that is an earlier candidate restated (a *duplicate*), and a block that
+# is structurally new but decides everything exactly the way an earlier one did
+# (a *behavioural duplicate*).
+#
+# Two kinds of entry:
+#
+#   `when:` + `response:`   answers a specific call, matched on a substring of
+#                           the prompt. Used for the calls whose position in
+#                           the queue depends on what happened earlier: the
+#                           novelty re-prompt, the scratchpad refresh, a
+#                           crossover, a big step. Matched in file order.
+#   a plain string          taken from the queue, in order, then cycled.
+
+# ---------------------------------------------------------------- keyed ----
+
+# The novelty re-prompt. The model does what the small model did in the first
+# real run: says it differently and means the same thing. One retry, then the
+# child is written off -- this is what `no-op` and `duplicate` look like from
+# the inside. Listed first so that a re-prompted crossover matches it, not the
+# crossover entry below.
+- when: "was structurally identical to"
+  response: |
+    ```python
+    def priority(item, bins):
+        """Minimise the leftover space (best fit), stated plainly."""
+        # renamed the loop variable; the rule itself is unchanged
+        return [-(space - item) for space in bins]
+    ```
+
+# The near-duplicate re-prompt. Asked to change the rule rather than the
+# constants, the model moves the constants again. That is the whole point of
+# the verdict: the child is flagged `near` and evaluated anyway, because a
+# filter that can refuse twelve of twelve samples is worse than one that
+# occasionally pays for a cousin.
+- when: "change the decision rule, not the constants"
+  response: |
+    ```python
+    def priority(item, bins):
+        """Third set of constants for the same usable-residual rule."""
+        scores = []
+        for b in bins:
+            residual = b - item
+            usable_bonus = 17.0 * math.exp(-((residual - 33.0) ** 2) / 112.0)
+            scores.append(-residual + usable_bonus)
+        return scores
+    ```
+
+# The meta-scratchpad refresh, every `search.scratchpad_every` generations.
+- when: "keeping the running notes"
+  response: |
+    - Best fit (the seed) is the reference: taking an exact fit is worth a lot.
+    - First fit regressed hard; the age of a bin carries no information here.
+    - The usable-residual bonus is the only change that has paid so far. Keep
+      the best-fit backbone and shape the reward around the residual.
+    - Restating best fit in different words is not a proposal: children have
+      already been thrown away for exactly that.
+
+# A crossover: one parent's mechanism plus the inspiration's idea.
+- when: "Combine the two blocks"
+  response: |
+    ```python
+    def priority(item, bins):
+        """Usable-residual bonus, with a fullness tie-break.
+
+        From the current block: reward a residual a later item can still use.
+        From the inspiration: among otherwise equal bins prefer the one that
+        is already fuller, which keeps the emptier bins free for big arrivals.
+        """
+        scores = []
+        for b in bins:
+            residual = b - item
+            usable_bonus = 18.0 * math.exp(-((residual - 30.0) ** 2) / 128.0)
+            scores.append(-residual + usable_bonus - 0.01 * b)
+        return scores
+    ```
+
+# The scheduled big step: a different principle, not a tweak.
+- when: "scheduled big step"
+  response: |
+    ```python
+    def priority(item, bins):
+        """Dead-space rule: score the leftover by whether it is still usable.
+
+        Best fit minimises the residual and therefore manufactures residuals
+        that are too small for anything. Instead: an almost-exact fit is best,
+        a residual big enough for another typical item is acceptable, and the
+        gap in between is dead space and is avoided.
+        """
+        scores = []
+        for b in bins:
+            residual = b - item
+            if residual <= 2.0:
+                scores.append(100.0 - residual)
+            elif residual >= 45.0:
+                scores.append(50.0 - 0.1 * residual)
+            else:
+                scores.append(-residual)
+        return scores
+    ```
+
+# ---------------------------------------------------------------- queue ----
+# 1. A regression: first fit. Ranks below the best-fit seed, as it should.
+- |
+  ```python
+  def priority(item, bins):
+      """First fit: always take the oldest bin that still has room."""
+      return [float(len(bins) - i) for i in range(len(bins))]
+  ```
+
+# 2. A NO-OP: best fit, restated. Different words, a different variable name,
+#    the same program -- what the first real run paid for twice.
+- |
+  ```python
+  def priority(item, bins):
+      """Prefer whichever open bin ends up with the smallest gap.
+
+      Rewritten for clarity: the residual is the space that would be left
+      over, and the smallest one wins, so we negate it.
+      """
+      return [-(remaining - item) for remaining in bins]
+  ```
+
+# 3. The improvement. Beats best fit on the proxy set, the full set *and* the
+#    private hold-out, so it survives the cascade rather than overfitting it.
+- |
+  ```python
+  def priority(item, bins):
+      """Best fit, but with a bonus for leaving a *usable* residual.
+
+      A residual near 30 can still absorb a future item; a residual just below
+      that is dead space that will never be filled. The bonus is small enough
+      that an exact or near-exact fit still wins.
+      """
+      scores = []
+      for b in bins:
+          residual = b - item
+          usable_bonus = 20.0 * math.exp(-((residual - 30.0) ** 2) / 128.0)
+          scores.append(-residual + usable_bonus)
+      return scores
+  ```
+
+# 4. A NEAR-DUPLICATE of (3): the same rule with three constants moved. A
+#    different AST and a different hash, so the exact filter passes it, and
+#    identical node types, so the similarity gate scores it 1.00 against (3).
+#    It gets one re-prompt (keyed above), the re-prompt moves the constants
+#    again, and the child is then evaluated anyway with `novelty: near`.
+- |
+  ```python
+  def priority(item, bins):
+      """Best fit with a usable-residual bonus. Retuned constants."""
+      scores = []
+      for b in bins:
+          residual = b - item
+          usable_bonus = 18.0 * math.exp(-((residual - 32.0) ** 2) / 120.0)
+          scores.append(-residual + usable_bonus)
+      return scores
+  ```
+
+# 5. A BEHAVIOURAL duplicate: best fit scaled by two. Structurally different
+#    from the seed -- different constant, different AST -- so the novelty
+#    filter passes it, and it is a strictly monotone re-expression of the same
+#    rule, so it packs every instance identically and reports the seed's KPIs
+#    to the last digit. Five of these got through in the first real Phase B
+#    run and were promoted to the full stage. Now the signature stops them.
+- |
+  ```python
+  def priority(item, bins):
+      """Best fit, on a doubled scale."""
+      return [-(b - item) * 2 for b in bins]
+  ```
+
+# 6. A SEARCH/REPLACE edit against the seed block, with a full-rewrite fallback
+#    in the same response for when the SEARCH text no longer matches the parent.
+- |
+  <<<<<<< SEARCH
+      return [-(b - item) for b in bins]
+  =======
+      scores = []
+      for b in bins:
+          residual = b - item
+          scores.append(-residual + 10.0 * math.exp(-((residual - 20.0) ** 2) / 18.0))
+      return scores
+  >>>>>>> REPLACE
+
+  ```python
+  def priority(item, bins):
+      """Best fit with a small bonus for residuals near 20."""
+      scores = []
+      for b in bins:
+          residual = b - item
+          scores.append(-residual + 10.0 * math.exp(-((residual - 20.0) ** 2) / 18.0))
+      return scores
+  ```
+
+# 7. A DUPLICATE: first fit again, restated. Identical to candidate (1) once
+#    docstrings, comments and variable names are normalised away.
+- |
+  ```python
+  def priority(item, bins):
+      """Take the oldest bin with room -- earlier bins score higher."""
+      return [float(len(bins) - k) for k in range(len(bins))]
+  ```
+
+# 8. Violates the "one score per bin" contract. The skeleton falls back to
+#    best fit and counts the incident; the candidate is penalised, not voided.
+- |
+  ```python
+  def priority(item, bins):
+      """Skips the last bin -- returns the wrong number of scores."""
+      return [-(b - item) for b in bins[:-1]]
+  ```
+
+# 9. Hard-rejected by the static stage: a forbidden import.
+- |
+  ```python
+  import os
+
+
+  def priority(item, bins):
+      """Reads a tuning constant from the environment."""
+      tweak = float(os.environ.get("TWEAK", "1.0"))
+      return [-(b - item) * tweak for b in bins]
+  ```
+
+# 10. Commentary with no code. Neither the diff path nor the rewrite fallback
+#    can use it, so the child fails to apply and the generation moves on.
+- |
+  Looking at the current heuristic, I believe the main weakness is that it is
+  purely greedy about immediate waste and never considers what sizes are still
+  to come. I would want to see the arrival distribution before proposing a
+  concrete change.
+
+# 11. A SECOND improvement, structurally new rather than retuned: two bonus
+#     terms instead of one. It arrives late, after the breadth has grown on a
+#     stagnant stretch, so the run's log shows `adaptive_children` giving a
+#     child back once the search is climbing again.
+- |
+  ```python
+  def priority(item, bins):
+      """Two bonuses, not one: a usable residual and an almost-exact fit.
+
+      The single-bonus rule rewards a residual another item can still use. It
+      says nothing about residuals near zero, which are the ones that close a
+      bin for good. A second, smaller bump near zero pays for those.
+      """
+      scores = []
+      for b in bins:
+          residual = b - item
+          usable = 30.0 * math.exp(-((residual - 35.0) ** 2) / 128.0)
+          snug = 5.0 * math.exp(-((residual - 5.0) ** 2) / 32.0)
+          scores.append(-residual + usable + snug)
+      return scores
+  ```

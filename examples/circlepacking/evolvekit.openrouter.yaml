@@ -1,0 +1,69 @@
+# Circle packing n = 26 through the cheapest breadth available: an OpenRouter
+# key for the many small calls, a Claude subscription for the few big
+# steps.
+#
+#   python -m evolvekit preflight --config examples/circlepacking/evolvekit.openrouter.yaml --provider-check
+#   python -m evolvekit run --config examples/circlepacking/evolvekit.openrouter.yaml \
+#       --run-dir runs/circles-openrouter
+#
+# `extends` folds this onto evolvekit.yaml, so `problem`, `evaluate` and
+# `search` are that file's exactly and cannot drift from it.
+#
+# Environment (see .env.example):
+#   OPENROUTER_API_KEY     for models.small and models.embed
+#   (nothing for claude-cli -- it carries the subscription's own auth)
+#
+# NEVER run two claude-cli jobs at once. The subscription's five-hour session
+# window is shared, so a second job does not queue: it eats the same allowance
+# and both runs hit the cap together. See the README's "Running for real".
+
+extends: evolvekit.yaml
+
+models:
+  small:
+    provider: openrouter
+    # FILL THIS IN. Any cheap instruction-following model with a decent grasp
+    # of Python; this slot takes ~90 % of the calls, so the price here is what
+    # the run costs. Check https://openrouter.ai/models for current ids and
+    # prices, and put the real per-million-token prices below -- the ledger
+    # bills from this table, and a wrong price silently breaks budget.max_usd.
+    model: <openrouter-model-id>
+    price_in_per_mtok: 0.00
+    price_out_per_mtok: 0.00
+    max_tokens: 4096
+    temperature: 1.0
+    # `null` clears the base file's fake-provider options rather than merging.
+    options: null
+  strong:
+    # The big steps, on the subscription rather than the key. On this problem
+    # the big step is the one that has to invent a search loop rather than an
+    # arrangement, so it is worth the stronger model.
+    provider: claude-cli
+    model: sonnet
+    price_in_per_mtok: 3.00     # a fallback only; the CLI reports actual spend
+    price_out_per_mtok: 15.00
+    max_tokens: 8192
+    temperature: 1.0
+    options: null
+  # Only read when search.novelty.near.method is `embedding`; the default
+  # `local` method costs nothing. Here so that `preflight --provider-check`
+  # exercises the key end to end.
+  embed:
+    provider: openrouter
+    model: <openrouter-embedding-model-id>   # FILL THIS IN
+    price_in_per_mtok: 0.02                  # only the input price is read
+    options: null
+
+budget:
+  max_usd: 5.00
+  max_tokens: 2000000
+  max_full_evals_per_day: 400
+
+stop:
+  patience: 8
+  epsilon: 0.0005
+  min_big_steps: 1
+  max_usd_since_improvement: 0.50
+
+search:
+  generations: 30

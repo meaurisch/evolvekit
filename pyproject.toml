@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evolvekit"
+version = "0.3.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+# The PyVRP configuration-search example only. The core suite never imports
+# pyvrp: tests/test_pyvrp_example.py is skipped when it is absent.
+pyvrp = ["pyvrp>=0.14"]
+
+[project.scripts]
+evolvekit = "evolvekit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["evolvekit*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: a driver-level or timing-sensitive test, excluded from the fast `python tasks.py test` default -- run it with `python tasks.py full` (and always in `check`, the CI gate).",
+]

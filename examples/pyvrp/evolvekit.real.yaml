@@ -1,0 +1,132 @@
+# PyVRP configuration search, for real: the 3,000-order instance, a hard
+# 15-minute solve limit, and a paid backend.
+#
+# `extends` folds this onto evolvekit.yaml, so `problem` (the skeleton, the
+# fence, the description) is that file's exactly and cannot drift from it.
+# What differs here is the cascade, the backend, and the budget.
+#
+#   .venv-pyvrp/Scripts/python -m evolvekit run \
+#       --config examples/pyvrp/evolvekit.real.yaml --run-dir runs/pyvrp-real
+#
+# Generate the two 3,000-order instances first -- they are gitignored because
+# they are a megabyte each and the generator is deterministic:
+#   cd examples/pyvrp
+#   python make_instance.py --orders 3000 --seed 7  --out instance-3000-s7.json
+#   python make_instance.py --orders 3000 --seed 23 --out instance-3000-s23.json
+#
+# WALL CLOCK, and it is the whole story on this problem. Stage 1 is 120 s per
+# candidate. Stage 2 is 900 s on the public instance plus 900 s on the private
+# hold-out, so 30 minutes per candidate that reaches it. With `promote:
+# top_k_per_generation: 2` and 3-6 children, one generation is roughly
+# 6-12 minutes of proxy plus one hour of full, i.e. about 70-80 minutes.
+# `budget.max_full_evals_per_day: 6` is what stops that becoming three days:
+# six full evaluations is three hours of solver, which is one afternoon.
+
+extends: evolvekit.yaml
+
+evaluate:
+  stages:
+    - id: static
+      kind: builtin-static
+      timeout: 120
+      import_check: true
+
+    # Stage 1: the real instance at a *short* budget. Deliberately the same
+    # 3,000 orders rather than the 300-order cousin: a configuration is being
+    # chosen for a 15-minute run on 3,000 clients, and what works at 300
+    # clients (a big neighbourhood, expensive operators) is exactly what does
+    # not work at 3,000. The proxy shortens the clock, not the instance.
+    #
+    # Timeout is 1.5x the budget with room to spare: building the two 3,003 x
+    # 3,003 travel matrices takes a couple of seconds, and MaxRuntime is only
+    # checked between iterations, so a solve overruns its budget slightly.
+    - id: proxy
+      kind: command
+      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed 42 --time-limit 120"
+      inputs: [metro3000]
+      timeout: 300
+      promote:
+        top_k_per_generation: 2
+
+    # Stage 2: the real thing. 900 seconds -- the hard cap in the skeleton --
+    # on the public instance, and the same again on a private hold-out drawn
+    # from the same generator with a different seed. The gap between the two
+    # is charged once through `holdout_penalty`, which is what catches a
+    # configuration tuned to one instance's geography rather than to the
+    # instance *class*.
+    #
+    # A PyVRP solve is wall-clock bounded, so one seed's objective carries a
+    # few tenths of a percent of noise; two seeds is the cheapest halving of
+    # it, and the per-KPI CV the framework records is the noise floor any
+    # 'improvement' has to clear.
+    - id: full
+      kind: command
+      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed} --time-limit 900"
+      inputs: [metro3000]
+      private_inputs: [metro3000b]
+      timeout: 1400
+      seeds: 2  # each seed is a separate 900 s solve; timeout is per run
+
+models:
+  small:
+    provider: claude-cli
+    model: haiku
+    price_in_per_mtok: 1.00
+    price_out_per_mtok: 5.00
+    max_tokens: 4096
+    temperature: 1.0
+    # `null` clears the base file's fake-provider options rather than merging.
+    options: null
+  strong:
+    provider: claude-cli
+    model: sonnet
+    price_in_per_mtok: 3.00
+    price_out_per_mtok: 15.00
+    max_tokens: 8192
+    temperature: 1.0
+    options: null
+
+budget:
+  max_usd: 10.00
+  max_tokens: 4000000
+  # Six full evaluations a day. Each is 900 s public + 900 s private, so this
+  # is three hours of solver -- an afternoon, and the reason the cap is a
+  # number rather than a hope.
+  max_full_evals_per_day: 6
+
+stop:
+  patience: 8
+  epsilon: 1.0
+  target: null
+  min_big_steps: 1
+  # A dollar with nothing to show for it is the signal to stop. It cannot fire
+  # until a big step has already been spent on the plateau.
+  max_usd_since_improvement: 1.50
+
+search:
+  generations: 20
+  scratchpad_every: 4
+  children_per_generation: 3
+  adaptive_children:
+    min: 3
+    max: 6
+    grow_after: 2
+    shrink_after: 1
+
+# For openrouter instead of the local CLI, replace `models` above with:
+#
+# models:
+#   small:
+#     provider: openrouter
+#     model: anthropic/claude-haiku-4.5
+#     price_in_per_mtok: 1.00
+#     price_out_per_mtok: 5.00
+#     max_tokens: 4096
+#     options: null
+#   strong:
+#     provider: openrouter
+#     model: anthropic/claude-sonnet-4.5
+#     price_in_per_mtok: 3.00
+#     price_out_per_mtok: 15.00
+#     max_tokens: 8192
+#     options: null

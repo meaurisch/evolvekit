@@ -1,0 +1,287 @@
+# Scripted responses for the `fake` provider: offline, deterministic, free.
+#
+# They exist so `tests/test_pyvrp_example.py` can drive the whole loop on this
+# example without a network and without a key. Each one is a *structurally*
+# different configuration rather than a nudged constant -- a different operator
+# set, a different penalty schedule, a different restart policy -- because that
+# is what this example asks a real model for, and a scripted answer that only
+# moved a number would demonstrate the wrong thing.
+#
+# Every response replaces the whole evolve block, so each one is self-contained
+# and does not rely on the seed block's `# PARAMS:` constants.
+#
+# No claim is made that any of these beats PyVRP's defaults. Whether they do is
+# the question the real run is for; the offline run only has to show that the
+# loop proposes a different configuration and records what it scored.
+
+# ---------------------------------------------------------------- keyed ----
+
+# The novelty re-prompt, in case a scripted answer ever repeats itself.
+- when: "was structurally identical to"
+  response: |
+    ```python
+    def configure(data, time_limit, seed):
+        """Default operators, but restart often and accept more worsening moves."""
+        return SolveParams(
+            ils=IteratedLocalSearchParams(
+                num_iters_no_improvement=5_000,
+                history_length=2_000,
+                exhaustive_on_best=True,
+            ),
+            penalty=PenaltyParams(),
+            neighbourhood=NeighbourhoodParams(num_neighbours=64),
+            operators=list(OPERATORS),
+            perturbation=PerturbationParams(min_perturbations=2, max_perturbations=30),
+            display_interval=1e9,
+        )
+    ```
+
+# The near-duplicate re-prompt.
+- when: "previous answer was closest to"
+  response: |
+    ```python
+    def configure(data, time_limit, seed):
+        """Wide exchanges on a small neighbourhood: fewer, better moves."""
+        return SolveParams(
+            ils=IteratedLocalSearchParams(
+                num_iters_no_improvement=150_000,
+                history_length=300,
+                exhaustive_on_best=True,
+            ),
+            penalty=PenaltyParams(),
+            neighbourhood=NeighbourhoodParams(num_neighbours=16, weight_wait_time=0.6),
+            operators=list(OPERATORS) + [Relocate3, Swap31, Swap32, Swap33],
+            perturbation=PerturbationParams(min_perturbations=1, max_perturbations=12),
+            display_interval=1e9,
+        )
+    ```
+
+# The scheduled big step. Not reached in a two-generation run, but a run with
+# `--generations 6` walks into it and should find something here.
+- when: "scheduled big step"
+  response: |
+    ```python
+    def configure(data, time_limit, seed):
+        """Size the whole configuration off the instance and the clock.
+
+        One block that covers both the 300-order proxy and the 3,000-order
+        instance: the neighbourhood and the perturbation size shrink as the
+        instance grows, because iteration count is what a big instance is
+        short of, and the restart interval is set from the time budget rather
+        than from a constant.
+        """
+        n = max(1, data.num_clients)
+        neighbours = max(12, min(60, int(24_000 / n) + 12))
+        ruin = max(8, min(60, n // 60))
+        # Roughly one restart per minute of budget, whatever the budget is.
+        restart_after = max(2_000, int(400 * max(1.0, time_limit) / max(1, n) * 1_000))
+
+        operators = [
+            Relocate1,
+            Relocate2,
+            Swap11,
+            Swap21,
+            SwapTails,
+            RelocateWithDepot,
+            RemoveAdjacentDepot,
+            RelocatePickup,
+            RelocateDelivery,
+            RelocateAlternative,
+            RemoveOptionalClient,
+            InsertOptionalClient,
+            ReplaceOptionalClient,
+            RemoveOptionalShipment,
+            InsertOptionalShipment,
+            ReplaceOptionalShipment,
+            ReplaceGroup,
+            RelocateShipment,
+        ]
+        return SolveParams(
+            ils=IteratedLocalSearchParams(
+                num_iters_no_improvement=restart_after,
+                history_length=400,
+                exhaustive_on_best=n < 1_000,
+            ),
+            penalty=PenaltyParams(
+                solutions_between_updates=200,
+                penalty_increase=1.8,
+                penalty_decrease=0.85,
+                target_feasible=0.5,
+                feas_tolerance=0.05,
+                min_penalty=0.1,
+                max_penalty=1_000_000.0,
+            ),
+            neighbourhood=NeighbourhoodParams(
+                weight_wait_time=0.35,
+                num_neighbours=neighbours,
+                symmetric_proximity=True,
+            ),
+            operators=operators,
+            perturbation=PerturbationParams(
+                min_perturbations=2, max_perturbations=ruin
+            ),
+            display_interval=1e9,
+        )
+    ```
+
+# The meta-scratchpad refresh (off in this config, on in the real one).
+- when: "keeping the running notes"
+  response: |
+    - PyVRP 0.14 is an iterated local search, so the two things that actually
+      move on a 15-minute run are the number of iterations it gets through and
+      how far each perturbation throws the incumbent.
+    - `exhaustive_on_best` is the single most expensive switch at 3,000
+      clients. Turning it off roughly doubles the iteration count; whether the
+      cheaper iterations are worth it is instance-dependent and is worth
+      testing both ways.
+    - `num_neighbours` at the default 50 is generous for a 3,000-client
+      instance. Shrinking it buys iterations directly.
+    - The penalty ladder decides whether the search ever gets *back* to
+      feasibility once it leaves. `max_penalty` is the knob to look at first
+      when a candidate comes back infeasible.
+
+# ---------------------------------------------------------------- queue ----
+
+# 1. Buy iterations. A lean operator set, no exhaustive pass on new bests, a
+#    neighbourhood sized to the instance and a much larger ruin step.
+- |
+  ```python
+  def configure(data, time_limit, seed):
+      """Trade move quality for iteration count.
+
+      The default configuration spends a lot per iteration: nineteen operator
+      classes, fifty neighbours each, and a full exhaustive local search every
+      time a new best turns up. On a 3,000-client instance inside fifteen
+      minutes the binding constraint is how many perturbations the search gets
+      through, so this drops the expensive parts and ruins much harder.
+      """
+      neighbours = 20 if data.num_clients > 1_000 else 40
+      return SolveParams(
+          ils=IteratedLocalSearchParams(
+              num_iters_no_improvement=20_000,
+              history_length=150,
+              exhaustive_on_best=False,
+          ),
+          penalty=PenaltyParams(),
+          neighbourhood=NeighbourhoodParams(
+              weight_wait_time=0.4,
+              num_neighbours=neighbours,
+              symmetric_proximity=True,
+          ),
+          operators=[
+              Relocate1,
+              Relocate2,
+              Swap11,
+              SwapTails,
+              RelocateWithDepot,
+              RemoveAdjacentDepot,
+              RelocatePickup,
+              RelocateDelivery,
+              RelocateAlternative,
+              RemoveOptionalClient,
+              InsertOptionalClient,
+              ReplaceOptionalClient,
+              RemoveOptionalShipment,
+              InsertOptionalShipment,
+              ReplaceOptionalShipment,
+              ReplaceGroup,
+              RelocateShipment,
+          ],
+          perturbation=PerturbationParams(min_perturbations=3, max_perturbations=45),
+          display_interval=1e9,
+      )
+  ```
+
+# 2. The opposite bet: feasibility first. A stiff penalty ladder with a high
+#    feasible target and a huge ceiling, plus the wide exchange operators.
+- |
+  ```python
+  def configure(data, time_limit, seed):
+      """Stay feasible, and pay for it with wider moves.
+
+      Time windows and two load dimensions make this instance easy to leave
+      feasibility and hard to re-enter it. This raises penalties faster, lets
+      them climb far higher, and targets a mostly-feasible search; the wide
+      exchange operators are added back because a feasible search needs bigger
+      moves to escape a local optimum.
+      """
+      return SolveParams(
+          ils=IteratedLocalSearchParams(
+              num_iters_no_improvement=60_000,
+              history_length=600,
+              exhaustive_on_best=True,
+          ),
+          penalty=PenaltyParams(
+              solutions_between_updates=100,
+              penalty_increase=2.5,
+              penalty_decrease=0.95,
+              target_feasible=0.85,
+              feas_tolerance=0.02,
+              min_penalty=1.0,
+              max_penalty=5_000_000.0,
+          ),
+          neighbourhood=NeighbourhoodParams(
+              weight_wait_time=1.0,
+              num_neighbours=35,
+              symmetric_proximity=False,
+          ),
+          operators=list(OPERATORS) + [Relocate3, Swap31, Swap32, Swap33],
+          perturbation=PerturbationParams(min_perturbations=1, max_perturbations=15),
+          display_interval=1e9,
+      )
+  ```
+
+# 3. A contract error on purpose: a dict of settings instead of a SolveParams.
+#    `config_errors` prices it, PyVRP's defaults run anyway, and the candidate
+#    gets a score rather than a `None` -- the penalties-not-void rule, on the
+#    mistake a model is most likely to actually make here.
+- |
+  ```python
+  def configure(data, time_limit, seed):
+      """Describe the configuration as a mapping. (Wrong type: counted, not fatal.)"""
+      return {
+          "num_neighbours": 30,
+          "max_perturbations": 40,
+          "exhaustive_on_best": False,
+          "target_feasible": 0.5,
+      }
+  ```
+
+# 4. The tuple form of the contract, with restarts instead of a long run.
+- |
+  ```python
+  def configure(data, time_limit, seed):
+      """Restart-heavy, with no warm start.
+
+      Late-acceptance hill climbing over a long history drifts; this keeps the
+      history short and restarts from the best solution every few thousand
+      iterations instead. Returns the `(params, initial_solution)` form of the
+      contract with `None` for the warm start, which is the shape a candidate
+      that *does* build one would use.
+      """
+      params = SolveParams(
+          ils=IteratedLocalSearchParams(
+              num_iters_no_improvement=3_000,
+              history_length=80,
+              exhaustive_on_best=True,
+          ),
+          penalty=PenaltyParams(
+              solutions_between_updates=250,
+              penalty_increase=1.25,
+              penalty_decrease=0.8,
+              target_feasible=0.4,
+              feas_tolerance=0.1,
+              min_penalty=0.1,
+              max_penalty=250_000.0,
+          ),
+          neighbourhood=NeighbourhoodParams(
+              weight_wait_time=0.1,
+              num_neighbours=45,
+              symmetric_proximity=True,
+          ),
+          operators=list(OPERATORS),
+          perturbation=PerturbationParams(min_perturbations=6, max_perturbations=60),
+          display_interval=1e9,
+      )
+      return params, None
+  ```

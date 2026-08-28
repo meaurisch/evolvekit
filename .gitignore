@@ -1,0 +1,12 @@
+*.egg-info/
+.env
+.pytest_cache/
+.venv/
+.ci-venv/
+__pycache__/
+runs/
+*.local.yaml
+.venv-pyvrp/
+# The 3,000-order PyVRP instances are a megabyte each and the generator is
+# deterministic; regenerate them with examples/pyvrp/make_instance.py.
+examples/pyvrp/instance-3000-*.json
