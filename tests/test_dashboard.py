@@ -90,7 +90,9 @@ def test_the_page_and_status_json_are_given_the_same_document(server, run_dir):
 def test_the_root_serves_the_page_itself(server):
     status, content_type, body = _get(server, "")
     assert status == 200 and content_type.startswith("text/html")
-    assert body == PAGE.read_text(encoding="utf-8")
+    # Bytes, not `read_text`: a checkout that converts line endings serves CRLF,
+    # and universal newlines would make the file on disk look different from it.
+    assert body == PAGE.read_bytes().decode("utf-8")
 
 
 def test_a_candidate_is_served_with_its_code_and_its_diff(server):
