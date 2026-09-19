@@ -207,9 +207,11 @@ class Archive:
 
         Rejected candidates -- hard rejects and the novelty filter's no-ops and
         duplicates alike -- are recorded in the ledger but never placed: they
-        must not become parents.
+        must not become parents. Neither must a candidate that did not finish
+        the final stage (`Candidate.competes`): its score is `failure_score`, or
+        comes from a cheaper input set, and is not comparable with an elite's.
         """
-        if candidate.rejected or candidate.fitness is None:
+        if candidate.rejected or not candidate.competes or candidate.fitness is None:
             return Placement()
 
         widened = False

@@ -101,6 +101,19 @@ There is one LLM call per child and one attempt at applying its response — the
 single exception is the novelty re-prompt, bounded to one extra call, because
 v1's nested 3×3 retry was the largest single multiplier on its token bill.
 
+**A finite score is not a comparable score.** A candidate *competes* — is
+ranked, archived, sampled as a parent, reported as `best` — only when it got
+through the final stage, hold-out included, without a failure. Four kinds of
+candidate keep their finite score in `runs.jsonl` (`competes: false`) and are
+never ranked: one whose evaluation failed or timed out, one that was not
+promoted past a cheaper stage, one whose final stage was skipped by
+`budget.max_full_evals_per_day`, and one whose hold-out run failed. The reason
+is arithmetic rather than taste: a proxy score comes from a different input set,
+and the default `failure_score: -1000` *outranks* every healthy candidate whose
+minimised cost is above 1000. `run` and `status` report the count as
+`unfinished`; a number that keeps climbing is an evaluator problem, not a
+search problem.
+
 ### The archive
 
 `search.archive.descriptors` is a list of axes, each naming a KPI the evaluator
