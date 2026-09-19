@@ -65,8 +65,9 @@ Any command. It receives placeholders (any order) and writes JSON to `{out}`:
 }
 ```
 
-KPIs are numbers or lists of numbers (lists sharpen the behaviour signature
-but never reach the score). Accept `--seed` even if you ignore it today —
+KPIs are finite numbers or lists of finite numbers (lists sharpen the
+behaviour signature but never reach the score). `NaN`, `Infinity` or a missing
+`evaluate.score.objective` KPI fail the stage rather than score as 0. Accept `--seed` even if you ignore it today —
 one argparse line, and `seeds: N` becomes available later without touching
 the evaluator. Emit `text_feedback`: a sentence like "losing on the Weibull
 instances, using 0.02 % of the time budget" is worth more to the next child
