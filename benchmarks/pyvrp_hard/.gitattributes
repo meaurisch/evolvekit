@@ -1,0 +1,4 @@
+# manifest.json records the SHA-256 of every instance file, and the tests
+# compare the committed smoke instances against it byte for byte. A checkout
+# with core.autocrlf=true would rewrite "\n" as "\r\n" and break both.
+*.json text eol=lf
