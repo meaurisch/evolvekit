@@ -20,7 +20,7 @@ from __future__ import annotations
 import random
 import socket
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -135,7 +135,14 @@ class Driver:
         self.config = config
         self.ledger = Ledger(run_dir)
         self.budget = BudgetGuard(config.budget)
-        self.stop_policy = StopPolicy(config.stop)
+        # `min_big_steps` holds a plateau open until the strong model has been
+        # tried. A run without a model has no big step to wait for, and would
+        # never be allowed to stop on patience.
+        self.stop_policy = StopPolicy(
+            config.stop
+            if config.search.takes_big_steps
+            else replace(config.stop, min_big_steps=0)
+        )
         self.behaviour = BehaviourIndex()
         self.events = EventLog(self.ledger.run_dir)
         self.heartbeat = Heartbeat(self.ledger.run_dir, session=self.events.session)
@@ -646,11 +653,19 @@ class Driver:
         ]
         shares = [weights[n] for n in names]
         if not names:  # only param_lhs configured, against a param-less skeleton
+            if not self.config.search.uses_llm:
+                raise ValueError(
+                    "search.operators gives a share only to `param_lhs`, but the seed "
+                    "block declares no `# PARAMS: {...}` line, so there is nothing to "
+                    "sweep. Declare the block's tunable constants, or give an LLM "
+                    "operator a share (and configure `models`)"
+                )
             names, shares = ["rewrite"], [1.0]
 
         plan = [self.rng.choices(names, weights=shares, k=1)[0] for _ in range(count)]
-        scheduled = generation % self.config.search.big_step_every == 0
-        if scheduled or plateau:
+        every = self.config.search.big_step_every
+        scheduled = every > 0 and generation % every == 0
+        if self.config.search.takes_big_steps and (scheduled or plateau):
             plan[0] = "big_step"
             self.stop_policy.note_big_step()
         return plan
@@ -965,6 +980,8 @@ class Driver:
     # -- the meta-scratchpad ---------------------------------------------
 
     def _maybe_refresh_scratchpad(self, generation: int) -> None:
+        if not self.config.search.uses_llm:
+            return  # the scratchpad is written by the small model
         if not self.scratchpad.due(generation) or not self.budget.check().allowed:
             return
         elites = self.grid.elites()[:8]
