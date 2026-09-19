@@ -27,7 +27,7 @@ from evolvekit.candidate import Candidate, extract_block, splice_block
 from evolvekit.config import Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
-from evolvekit.evaluate.cascade import Cascade
+from evolvekit.evaluate.cascade import Cascade, finished_final_stage
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.ledger import Ledger
@@ -55,6 +55,11 @@ class RunSummary:
     duplicates: int = 0
     behavioural: int = 0
     near: int = 0
+    unfinished: int = 0
+    """Candidates that were evaluated but did not finish the final stage: a
+    failed or timed-out evaluation, a proxy-only candidate, a skipped final
+    stage, a failed hold-out. Recorded, never ranked -- and a number that is
+    climbing is an evaluator problem, not a search problem."""
     embedding_calls: int = 0
     children_per_generation: int = 0
     """The breadth the run ended on. Equal to the configured value unless
@@ -198,7 +203,7 @@ class Driver:
 
     def top_k(self, k: int) -> list[Candidate]:
         """Best first, by the hold-out-aware ranking score."""
-        alive = [c for c in self.archive if not c.rejected and c.fitness is not None]
+        alive = [c for c in self.archive if _competes(c)]
         return sorted(alive, key=lambda c: (-(c.fitness or 0.0), c.id))[:k]
 
     def _economics(self) -> list[GenerationPoint]:
@@ -216,11 +221,7 @@ class Driver:
         )
 
     def _archive_scores(self) -> list[float]:
-        return [
-            c.fitness
-            for c in self.archive
-            if not c.rejected and c.fitness is not None
-        ]
+        return [c.fitness for c in self.archive if _competes(c)]
 
     # -- resume ----------------------------------------------------------
 
@@ -231,7 +232,7 @@ class Driver:
         that died between the last append and the last snapshot still comes
         back consistent, which is the whole reason the rebuild reads the log.
         """
-        rows = self.ledger.runs()
+        rows = [self._settle_competes(row) for row in self.ledger.runs()]
         if not rows:
             return 0
         self.grid = Archive.from_records(rows, self.config.search.archive)
@@ -257,6 +258,26 @@ class Driver:
                 self._counter = max(self._counter, int(suffix))
         self._resumed_generation = last_generation
         return last_generation
+
+    def _settle_competes(self, row: dict) -> dict:
+        """Judge a row written before `competes` existed by today's rule.
+
+        Without this a resumed older run would put its failed and proxy-only
+        candidates straight back into the archive, which is the defect the
+        field exists to end.
+        """
+        if "competes" in row:
+            return row
+        return {
+            **row,
+            "competes": finished_final_stage(
+                self.config,
+                rejected=bool(row.get("rejected")),
+                last_failure=row.get("last_failure"),
+                stages_reached=row.get("stages_reached") or [],
+                private_score=row.get("private_score"),
+            ),
+        }
 
     # -- the loop --------------------------------------------------------
 
@@ -374,6 +395,9 @@ class Driver:
             1 for c in self.archive if c.novelty == "behavioural"
         )
         summary.near = sum(1 for c in self.archive if c.novelty == "near")
+        summary.unfinished = sum(
+            1 for c in self.archive if not c.rejected and not c.competes
+        )
         summary.embedding_calls = self.ledger.embedding_calls
         summary.cells = len(self.grid.cells)
         summary.occupancy = self.grid.occupancy()
@@ -570,11 +594,13 @@ class Driver:
             self._provider_halt = outcome.error or "provider error"
         if not outcome.ok:
             child.rejected = True
+            child.competes = False
             child.reject_reason = outcome.error
             child.last_failure = outcome.error
             child.score = self.config.evaluate.failure_score
         elif verdict is not None and verdict.rejects:
             child.rejected = True
+            child.competes = False
             child.novelty = verdict.kind
             child.twin_id = verdict.twin_id
             child.reject_reason = verdict.reason
@@ -775,6 +801,7 @@ class Driver:
             result = results[candidate.id]
             self.results[candidate.id] = result
             candidate.score = result.score
+            candidate.competes = result.competes
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis
@@ -835,6 +862,14 @@ class Driver:
 
 def _fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6g}"
+
+
+def _competes(candidate: Candidate) -> bool:
+    return (
+        not candidate.rejected
+        and candidate.competes
+        and candidate.fitness is not None
+    )
 
 
 def _fingerprint_line(block: str, limit: int = 90) -> str:

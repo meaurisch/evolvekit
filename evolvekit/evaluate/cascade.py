@@ -28,7 +28,49 @@ from evolvekit.evaluate.stages import (
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
 
-__all__ = ["Cascade", "select_promoted", "archive_threshold"]
+__all__ = [
+    "Cascade",
+    "select_promoted",
+    "archive_threshold",
+    "finished_final_stage",
+]
+
+
+def finished_final_stage(
+    config: Config,
+    *,
+    rejected: bool,
+    last_failure: str | None,
+    stages_reached: Sequence[str],
+    private_score: float | None,
+) -> bool:
+    """Whether a candidate's score may be compared with anybody else's.
+
+    A score means something only next to scores from the same stage on the
+    same inputs, so a candidate competes -- is ranked, archived, bred from --
+    only when it got all the way through. That rules out four cases which used
+    to be ranked as if they had:
+
+    * a **failed** evaluation. It carries `evaluate.failure_score`, and the
+      default `-1000` outranks every healthy candidate whose minimised cost is
+      above 1000;
+    * a candidate **not promoted** past a cheaper stage, whose score comes from
+      a different input set;
+    * a final stage **skipped** by `budget.max_full_evals_per_day`;
+    * a **hold-out run that failed**, which would otherwise keep its public
+      score with no discount -- the one thing the hold-out is there to prevent.
+
+    Takes plain values rather than an `EvalResult` so that a `runs.jsonl` row
+    written before the `competes` field existed can be judged by the same rule.
+    """
+    if rejected or last_failure:
+        return False
+    final = config.final_stage
+    if final.id not in stages_reached:
+        return False
+    if final.kind == "command" and final.private_inputs and private_score is None:
+        return False
+    return True
 
 
 def archive_threshold(scores: Sequence[float], percentile: float) -> float | None:
@@ -134,6 +176,14 @@ class Cascade:
             scored = [(cid, results[cid].score) for cid in survivors]
             alive = select_promoted(scored, stage.promote, prior)
 
+        for result in results.values():
+            result.competes = finished_final_stage(
+                self.config,
+                rejected=result.rejected,
+                last_failure=result.last_failure,
+                stages_reached=result.stages_reached,
+                private_score=result.private_score,
+            )
         return results
 
     # -- internals -------------------------------------------------------
