@@ -1,4 +1,4 @@
-"""`python -m evolvekit init | preflight | run | status | leaderboard`."""
+"""`python -m evolvekit init | preflight | run | status | dashboard | leaderboard`."""
 
 from __future__ import annotations
 
@@ -227,6 +227,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
     p_run.add_argument("--generations", type=int, default=None)
     p_run.add_argument("--quiet", action="store_true")
+    p_run.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="serve the live dashboard for this run on localhost while it runs "
+        "(afterwards: `evolvekit dashboard --run-dir ...`)",
+    )
+    p_run.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="first port to try for --dashboard (default 8765; the next free one is used)",
+    )
 
     p_status = sub.add_parser(
         "status",
@@ -240,6 +252,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the whole status document as JSON: the same document the "
         "text view and the dashboard are rendered from",
+    )
+
+    p_dash = sub.add_parser(
+        "dashboard",
+        help="the live dashboard for a run directory: running, finished or dead",
+    )
+    p_dash.add_argument(
+        "--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}"
+    )
+    p_dash.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (this machine only)")
+    p_dash.add_argument(
+        "--port", type=int, default=None, help="first port to try (default 8765)"
+    )
+    p_dash.add_argument(
+        "--no-browser", action="store_true", help="print the URL; do not open a browser"
+    )
+    p_dash.add_argument(
+        "--export",
+        metavar="FILE",
+        help="write the dashboard as one self-contained HTML file and exit: "
+        "opens from disk, works offline, can be attached to a ticket",
     )
 
     p_board = sub.add_parser("leaderboard", help="render the leaderboard")
@@ -289,7 +322,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     log = (lambda _m: None) if args.quiet else print
     driver = Driver(config, run_dir=args.run_dir, log=log)
-    summary = driver.run(args.generations)
+    server = None
+    if args.dashboard:
+        from evolvekit.dashboard import DEFAULT_PORT, DashboardServer
+
+        server = DashboardServer(driver.ledger.run_dir, port=args.port or DEFAULT_PORT)
+        print(f"dashboard   : {server.start()}   (agents: {server.url}api/status)")
+    try:
+        summary = driver.run(args.generations)
+    finally:
+        if server is not None:
+            server.stop()
 
     print()
     print(
@@ -319,6 +362,42 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"{int(totals.get('total_tokens', 0))} token(s)"
     )
     print(f"run dir     : {driver.ledger.run_dir}")
+    if args.dashboard:
+        print(
+            "dashboard   : stopped with the run. To look again:\n"
+            f"              python -m evolvekit dashboard --run-dir {driver.ledger.run_dir}"
+        )
+    return 0
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Serve (or export) the dashboard for a run directory. Reads only."""
+    from evolvekit.dashboard import (
+        DEFAULT_PORT,
+        DashboardServer,
+        export_html,
+        open_in_browser,
+    )
+
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        print(f"error: there is no run directory at {run_dir.resolve()}", file=sys.stderr)
+        return 1
+    if args.export:
+        print(f"wrote {export_html(run_dir, args.export).resolve()}")
+        return 0
+    server = DashboardServer(run_dir, host=args.host, port=args.port or DEFAULT_PORT)
+    print(f"dashboard   : {server.url}")
+    print(f"for agents  : {server.url}api/status   (the same document as `status --json`)")
+    print("Ctrl+C to stop. The run, if there is one, is not affected.")
+    if not args.no_browser:
+        open_in_browser(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        server.stop()
     return 0
 
 
@@ -409,6 +488,7 @@ _COMMANDS = {
     "preflight": cmd_preflight,
     "run": cmd_run,
     "status": cmd_status,
+    "dashboard": cmd_dashboard,
     "leaderboard": cmd_leaderboard,
 }
 
