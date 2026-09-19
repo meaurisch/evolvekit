@@ -234,6 +234,7 @@ def _run_stages(
             inputs=stage.inputs,
             out_path=work_dir / f"{stage.id}.json",
             cwd=config.base_dir,
+            required_kpis=(config.evaluate.score.objective,),
         )
         report.stages.append(_stage_report(stage, outcome))
         if not outcome.ok:
@@ -248,6 +249,7 @@ def _run_stages(
                 out_path=work_dir / f"{stage.id}.private.json",
                 cwd=config.base_dir,
                 private=True,
+                required_kpis=(config.evaluate.score.objective,),
             )
             report.stages.append(_stage_report(stage, private))
             if not private.ok:

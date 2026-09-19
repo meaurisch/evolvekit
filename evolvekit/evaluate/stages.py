@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import shlex
 import subprocess
 import sys
@@ -184,6 +185,7 @@ def run_command_stage(
     out_path: Path,
     cwd: Path,
     private: bool = False,
+    required_kpis: tuple[str, ...] = (),
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -195,6 +197,10 @@ def run_command_stage(
     The first failure ends the stage. Averaging over the runs that happened to
     survive would report a mean the candidate never achieved, and the failure
     is the more interesting fact anyway.
+
+    `required_kpis` names scalar KPIs every run must report -- the caller passes
+    `evaluate.score.objective`. A run that leaves one out is a failed run, for
+    the reason spelled out in `_missing_required`.
     """
     if stage.seeds <= 1:
         return _run_once(
@@ -205,6 +211,7 @@ def run_command_stage(
             cwd=cwd,
             private=private,
             seed=0,
+            required_kpis=required_kpis,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -216,6 +223,7 @@ def run_command_stage(
             cwd=cwd,
             private=private,
             seed=seed,
+            required_kpis=required_kpis,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -302,6 +310,7 @@ def _run_once(
     cwd: Path,
     private: bool = False,
     seed: int = 0,
+    required_kpis: tuple[str, ...] = (),
 ) -> StageOutcome:
     """Run one external evaluator and read the KPI JSON it wrote to `{out}`."""
     started = time.perf_counter()
@@ -366,6 +375,8 @@ def _run_once(
         )
 
     kpis, vectors, feedback, problem = _read_kpis(out_path)
+    if problem is None:
+        problem = _missing_required(kpis, required_kpis)
     if problem is not None:
         return StageOutcome(
             stage_id=stage.id,
@@ -391,6 +402,45 @@ def _run_once(
 
 def _is_number(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float))
+
+
+def _is_finite(value: Any) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an integer literal beyond the range of a float
+        return False
+
+
+def _non_finite(key: object, value: Any) -> str:
+    """`json.loads` accepts `NaN` and `Infinity`, and a solver that found no
+    feasible solution prints exactly those. Scoring used to coerce them to 0.0,
+    which under `direction: minimize` is the best score a run can hold."""
+    return (
+        f"KPI {key!r} was {value!r}; a KPI must be a finite number. Report a run "
+        "that produced no usable value with a non-zero exit code, or as a finite "
+        "penalty KPI"
+    )
+
+
+def _missing_required(
+    kpis: dict[str, float], required: tuple[str, ...]
+) -> str | None:
+    """A run that did not report the objective has not been scored.
+
+    `compute_score` counts an absent KPI as 0 so that a forgotten *secondary*
+    weight cannot blow a run up three hours in. For the objective itself that
+    default is wrong in the worst possible direction: minimising a cost, 0
+    outranks every candidate that actually ran. So the objective is checked
+    here, where the evaluator's output is read, and its absence fails the run.
+    """
+    missing = [name for name in required if name not in kpis]
+    if not missing:
+        return None
+    wanted = ", ".join(repr(name) for name in missing)
+    return (
+        f"evaluator reported no {wanted}, the objective KPI named by "
+        f"evaluate.score.objective; it reported: {', '.join(sorted(kpis))}"
+    )
 
 
 def _read_kpis(
@@ -434,9 +484,13 @@ def _read_kpis(
     vectors: dict[str, list[float]] = {}
     for key, value in raw.items():
         if _is_number(value):
+            if not _is_finite(value):
+                return {}, {}, "", _non_finite(key, value)
             kpis[str(key)] = float(value)
             continue
         if isinstance(value, list) and all(_is_number(v) for v in value):
+            if not all(_is_finite(v) for v in value):
+                return {}, {}, "", _non_finite(key, value)
             vectors[str(key)] = [float(v) for v in value]
             continue
         return (
