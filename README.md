@@ -90,6 +90,34 @@ live run is built from:
   process is suspended or the machine slept — which, on a wall-clock-limited
   evaluator, also means the evaluation in flight at the time cannot be trusted.
 
+### Watching a run: `status` and `status --json`
+
+```
+python -m evolvekit status --run-dir runs/demo           # for a person
+python -m evolvekit status --run-dir runs/demo --json    # for a script or an agent
+```
+
+Both print the same thing, because there is only one thing to print:
+`evolvekit.status.build_status(run_dir)` reads the run directory and returns one
+JSON document, and every view — the text, `--json`, the dashboard — renders it.
+It reads only (a mistyped `--run-dir` is an error with exit code 1, and is not
+created), needs no config file, and works on a run that is live, finished,
+interrupted or dead.
+
+| Section | Answers |
+|---|---|
+| `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
+| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `within noise`, or `unknown` when each score is a single run. The verdict is a paired comparison over the seeds both candidates ran on, and says in words that those are the seeds the search selected on. |
+| `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
+| `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
+| `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
+| `failures` | Every failed evaluator run, newest first, with its stage, seed, hold-out flag, exit status, duration, **command line**, stderr tail and the path of the full log; plus responses that could not be applied and candidates the static stage refused. |
+| `candidates`, `archive`, `spend`, `log_tail` | One light row per candidate (no code), the grid snapshot, USD / tokens / evaluator seconds, and the run's last console lines. |
+
+`schema` is bumped when a key changes meaning or disappears; adding keys does not
+bump it. The document never contains `NaN` or `Infinity`. A view that fails is
+listed under `errors` and leaves the other sections intact.
+
 ### How it works
 
 ```
