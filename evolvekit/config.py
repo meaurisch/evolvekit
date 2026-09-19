@@ -976,6 +976,10 @@ class NoveltyConfig:
 
 KNOWN_OPERATORS = ("diff", "rewrite", "crossover", "param_lhs")
 
+MODEL_FREE_OPERATORS = frozenset({"param_lhs"})
+"""Operators that never call a model. A search made only of these needs no
+provider, no key and no `models` section -- and must never reach for one."""
+
 
 @dataclass(frozen=True)
 class DescriptorConfig:
@@ -1072,6 +1076,29 @@ class SearchConfig:
     novelty: NoveltyConfig = field(default_factory=NoveltyConfig)
     adaptive_children: AdaptiveChildrenConfig | None = None
 
+    @property
+    def llm_operators(self) -> list[str]:
+        """The operators with a share that call a model, by name."""
+        return sorted(
+            name
+            for name, share in self.operators.items()
+            if share > 0 and name not in MODEL_FREE_OPERATORS
+        )
+
+    @property
+    def uses_llm(self) -> bool:
+        """False for a run made only of model-free operators. Such a run plans
+        no big steps, refreshes no scratchpad and needs no `models`: all three
+        are model calls, whatever the operator shares say."""
+        return bool(self.llm_operators)
+
+    @property
+    def takes_big_steps(self) -> bool:
+        """A big step *is* a call to the strong model, so there are none in a
+        run without one, and none when `big_step_every` is 0 -- scheduled or on
+        a plateau. `stop.min_big_steps` is then not waited for either."""
+        return self.uses_llm and self.big_step_every > 0
+
     def parents_wanted(self, children: int) -> int:
         return self.parents_per_generation or children
 
@@ -1123,7 +1150,7 @@ class SearchConfig:
                 data.get("generations", 10), "search.generations", minimum=1
             ),
             big_step_every=_as_int(
-                data.get("big_step_every", 5), "search.big_step_every", minimum=1
+                data.get("big_step_every", 5), "search.big_step_every", minimum=0
             ),
             parent_top_k=_as_int(
                 data.get("parent_top_k", 5), "search.parent_top_k", minimum=1
@@ -1159,7 +1186,8 @@ class SearchConfig:
 class Config:
     problem: ProblemConfig
     evaluate: EvaluateConfig
-    models: ModelsConfig
+    models: ModelsConfig | None
+    """`None` only when `search.uses_llm` is false: see `_parse_models`."""
     budget: BudgetConfig
     stop: StopConfig
     search: SearchConfig
@@ -1182,18 +1210,33 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
         "<root>",
     )
     data = {k: v for k, v in data.items() if k != "extends"}
+    search = SearchConfig.parse(data.get("search"))
     config = Config(
         problem=ProblemConfig.parse(_require(data, "problem", "<root>"), base_dir),
         evaluate=EvaluateConfig.parse(_require(data, "evaluate", "<root>")),
-        models=ModelsConfig.parse(_require(data, "models", "<root>")),
+        models=_parse_models(data.get("models"), search),
         budget=BudgetConfig.parse(data.get("budget")),
         stop=StopConfig.parse(data.get("stop")),
-        search=SearchConfig.parse(data.get("search")),
+        search=search,
         base_dir=base_dir,
         source=source,
     )
     _check_embedding_route(config)
     return config
+
+
+def _parse_models(raw: Any, search: SearchConfig) -> ModelsConfig | None:
+    """`models` is required exactly when something will call one."""
+    if raw is not None:
+        return ModelsConfig.parse(raw)
+    if not search.uses_llm:
+        return None
+    raise ConfigError(
+        f"<root>.models: required, because search.operators gives a share to "
+        f"{search.llm_operators}, which call a model. For a run that calls none, "
+        "give a share only to `param_lhs` (a share of 0 switches an inherited "
+        "operator off); such a run needs no `models` section at all"
+    )
 
 
 def _check_embedding_route(config: Config) -> None:
@@ -1203,6 +1246,8 @@ def _check_embedding_route(config: Config) -> None:
     search loop, after the seed had been evaluated and the first children paid
     for. A config error costs nothing.
     """
+    if config.models is None:
+        return
     near = config.search.novelty.near
     if near.method != "embedding":
         return

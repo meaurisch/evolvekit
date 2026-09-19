@@ -168,6 +168,22 @@ WIDTH = 128.0
 Blocks without that line are never routed to it, so listing it in
 `search.operators` against a skeleton that declares nothing is harmless.
 
+**A run without any model.** When `param_lhs` is the only operator with a share,
+nothing in the run calls a model, and nothing may: no big steps are planned
+(scheduled or on a plateau), the scratchpad is not refreshed, `stop.patience`
+does not wait for `stop.min_big_steps`, and the `models` section can be left out
+altogether — no provider, no key, no network:
+
+```yaml
+search:
+  operators: {param_lhs: 1.0}     # in an `extends` child: {diff: 0, rewrite: 0, crossover: 0, param_lhs: 1}
+```
+
+`extends` merges `search.operators` key by key, so a child config switches an
+inherited operator off by giving it a share of `0`. Independently of that,
+`search.big_step_every: 0` switches big steps off in a run that does use a
+model.
+
 ### The problem description, in named sections
 
 `problem.description` is prose and stays prose. Three optional fields beside it

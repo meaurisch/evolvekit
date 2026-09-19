@@ -385,6 +385,8 @@ def _breadth(config: Config) -> int:
 
 
 def _configured_roles(config: Config) -> list[str]:
+    if config.models is None:  # a run made only of model-free operators
+        return []
     roles = ["small", "strong"]
     if config.models.embed is not None:
         roles.append("embed")
