@@ -175,6 +175,7 @@ clean, 1 warnings, 2 failures. Only then:
 ```
 python -m evolvekit run --config my-problem/evolvekit.real.yaml --run-dir runs/my-problem
 python -m evolvekit status --run-dir runs/my-problem
+python -m evolvekit status --run-dir runs/my-problem --json   # the same, for a script or an agent
 python -m evolvekit leaderboard --run-dir runs/my-problem --html board.html
 ```
 

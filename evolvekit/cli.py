@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from evolvekit.ledger import Ledger
 from evolvekit.lock import RunLockError
 from evolvekit.preflight import run_preflight
 from evolvekit.search.driver import Driver
+from evolvekit.status import build_status, render_text
 
 __all__ = ["main", "build_parser"]
 
@@ -226,8 +228,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--generations", type=int, default=None)
     p_run.add_argument("--quiet", action="store_true")
 
-    p_status = sub.add_parser("status", help="spend and progress for a run directory")
-    p_status.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
+    p_status = sub.add_parser(
+        "status",
+        help="how a run is doing: alive or not, progress, best, failures, spend",
+    )
+    p_status.add_argument(
+        "--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}"
+    )
+    p_status.add_argument(
+        "--json",
+        action="store_true",
+        help="print the whole status document as JSON: the same document the "
+        "text view and the dashboard are rendered from",
+    )
 
     p_board = sub.add_parser("leaderboard", help="render the leaderboard")
     p_board.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
@@ -310,17 +323,31 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    """Exit 0 when there is a run to report on, 1 when there is none.
+
+    Reads only. It used to build a `Ledger`, which creates the directory it is
+    given -- so `status` on a mistyped path made the path exist and reported an
+    empty run with exit code 0.
+    """
+    document = build_status(args.run_dir)
+    state = (document.get("health") or {}).get("state")
+    if args.json:
+        print(json.dumps(document, indent=2, allow_nan=False))
+        return 1 if state == "missing" else 0
+    print(render_text(document))
+    if state in ("missing", "empty"):
+        return 1 if state == "missing" else 0
+
     ledger = Ledger(args.run_dir)
     rows = ledger.runs()
     if not rows:
-        print(f"no runs recorded in {ledger.run_dir}")
         return 0
+    print()
     totals = ledger.totals()
     ranked = rank(rows, 1)
     best = ranked[0] if ranked else None
     counts = novelty_counts(rows)
     archive = ledger.read_archive()
-    print(f"run dir      : {ledger.run_dir}")
     print(f"candidates   : {len(rows)} ({counts['rejected']} rejected)")
     print(
         f"novelty      : {counts['no_op']} no-op, {counts['duplicate']} duplicate "
