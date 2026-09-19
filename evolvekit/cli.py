@@ -15,6 +15,7 @@ from evolvekit.leaderboard import (
     rank,
     render_html,
     render_markdown,
+    unfinished_count,
 )
 from evolvekit.ledger import Ledger
 from evolvekit.lock import RunLockError
@@ -297,6 +298,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"archive     : {summary.occupancy}")
     print(f"rejected    : {summary.rejection_breakdown}")
     print(f"near-dupes  : {summary.near_breakdown}")
+    print(f"unfinished  : {summary.unfinished} (evaluated, never ranked)")
     totals = summary.totals
     print(
         f"spend       : ${totals.get('usd', 0.0):.4f} over "
@@ -331,6 +333,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(
         f"near-dupes   : {counts['near']} flagged by the similarity gate "
         "(evaluated anyway)"
+    )
+    print(
+        f"unfinished   : {unfinished_count(rows)} did not finish the final stage "
+        "(failed, not promoted or skipped; never ranked)"
     )
     print(f"generations  : {max(int(r.get('generation', 0)) for r in rows)}")
     print(

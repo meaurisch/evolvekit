@@ -30,6 +30,8 @@ __all__ = [
     "fitness_of",
     "lineage_of",
     "novelty_counts",
+    "unfinished_count",
+    "competes",
     "render_economics",
     "economics_svg",
 ]
@@ -45,11 +47,16 @@ def fitness_of(row: Mapping[str, Any]) -> float | None:
     return None if value is None else float(value)
 
 
+def competes(row: Mapping[str, Any]) -> bool:
+    """Whether a row's score is comparable with the others: not rejected, and
+    all the way through the final stage. A row from before the `competes` field
+    existed is given the benefit of the doubt, as it always was."""
+    return not row.get("rejected") and bool(row.get("competes", True))
+
+
 def rank(rows: Sequence[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
-    """Best first by ranking score, rejected candidates excluded."""
-    alive = [
-        r for r in rows if not r.get("rejected") and fitness_of(r) is not None
-    ]
+    """Best first by ranking score. Only candidates that compete are ranked."""
+    alive = [r for r in rows if competes(r) and fitness_of(r) is not None]
     alive.sort(key=lambda r: (-(fitness_of(r) or 0.0), str(r.get("id", ""))))
     return alive[:limit]
 
@@ -87,6 +94,15 @@ def novelty_counts(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
         if kind in counts:
             counts[kind] += 1
     return counts
+
+
+def unfinished_count(rows: Sequence[Mapping[str, Any]]) -> int:
+    """Evaluated, not rejected, and still not ranked: the evaluation failed or
+    timed out, the candidate was not promoted to the final stage, the final
+    stage was skipped by the daily cap, or the hold-out run failed."""
+    return sum(
+        1 for row in rows if not row.get("rejected") and not row.get("competes", True)
+    )
 
 
 def _seed_private(rows: Sequence[dict[str, Any]]) -> float | None:
@@ -205,6 +221,13 @@ def render_markdown(
         f"{counts['behavioural']} behavioural), {counts['near']} near-duplicate(s) "
         f"evaluated and flagged, {len(top)} shown."
     )
+    unfinished = unfinished_count(rows)
+    if unfinished:
+        lines.append(
+            f"{unfinished} did not finish the final stage (evaluation failed, not "
+            "promoted, or skipped) and are not ranked: their scores are not "
+            "comparable with a full evaluation's."
+        )
     if any_flag:
         lines.append(
             f"{HOLDOUT_FLAG} private hold-out score is below the seed's: the gain "
