@@ -274,7 +274,9 @@ class Driver:
         summary = RunSummary()
 
         started_at = self.resume()
-        if started_at:
+        # Not `if started_at`: a run stopped before generation 1 finished holds
+        # only its seed, and the seed's generation is 0.
+        if self.archive:
             self.log(
                 f"resumed {len(self.archive)} candidate(s) from runs.jsonl "
                 f"({self.grid.occupancy()})"
