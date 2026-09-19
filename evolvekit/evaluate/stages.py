@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 from statistics import fmean, stdev
-from typing import Any
+from typing import Any, Callable
 
 from evolvekit.config import ProblemConfig, StageConfig
 from evolvekit.evaluate.process import read_tail, run_bounded
@@ -35,6 +35,10 @@ __all__ = [
     "STDERR_LIMIT",
     "FEEDBACK_LIMIT",
 ]
+
+Observer = Callable[..., None]
+"""`observer(type, **fields)`: told about every evaluator run as it starts and
+as it ends. The cascade supplies one that knows which candidate this is."""
 
 STDERR_LIMIT = 2000
 """Prompt artefacts are truncated here; the post-mortem's context blow-up was
@@ -187,6 +191,7 @@ def run_command_stage(
     cwd: Path,
     private: bool = False,
     required_kpis: tuple[str, ...] = (),
+    observer: Observer | None = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -213,6 +218,7 @@ def run_command_stage(
             private=private,
             seed=0,
             required_kpis=required_kpis,
+            observer=observer,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -225,6 +231,7 @@ def run_command_stage(
             private=private,
             seed=seed,
             required_kpis=required_kpis,
+            observer=observer,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -303,6 +310,70 @@ def _combine(outcomes: list[StageOutcome]) -> StageOutcome:
 
 
 def _run_once(
+    candidate_path: Path,
+    stage: StageConfig,
+    *,
+    inputs: tuple[str, ...] | list[str],
+    out_path: Path,
+    cwd: Path,
+    private: bool = False,
+    seed: int = 0,
+    required_kpis: tuple[str, ...] = (),
+    observer: Observer | None = None,
+) -> StageOutcome:
+    """One evaluator run, announced to `observer` before and after.
+
+    The two events bracket the subprocess itself, so a reader of the event log
+    can tell at any moment which run is in flight and for how long it has been.
+    """
+    if observer is not None:
+        observer("eval_started", seed=seed, timeout_s=stage.timeout)
+    outcome = _execute_once(
+        candidate_path,
+        stage,
+        inputs=inputs,
+        out_path=out_path,
+        cwd=cwd,
+        private=private,
+        seed=seed,
+        required_kpis=required_kpis,
+    )
+    outcome.stdout_log = str(out_path.with_suffix(".stdout.log"))
+    outcome.stderr_log = str(out_path.with_suffix(".stderr.log"))
+    try:
+        outcome.argv = tuple(
+            build_argv(
+                stage.command, candidate=candidate_path, inputs=inputs, out=out_path, seed=seed
+            )
+        )
+    except (ValueError, KeyError, IndexError):
+        pass  # a bad template: the outcome's own failure already says so
+    if observer is not None:
+        failed = (
+            {
+                "failure": outcome.failure,
+                "stderr_tail": outcome.stderr,
+                "stdout_tail": outcome.stdout,
+            }
+            if not outcome.ok
+            else {}
+        )
+        observer(
+            "eval_finished",
+            seed=seed,
+            ok=outcome.ok,
+            duration_s=round(outcome.duration_s, 3),
+            kpis=outcome.kpis,
+            vector_kpis=outcome.vector_kpis,
+            argv=list(outcome.argv),
+            stdout_log=outcome.stdout_log,
+            stderr_log=outcome.stderr_log,
+            **failed,
+        )
+    return outcome
+
+
+def _execute_once(
     candidate_path: Path,
     stage: StageConfig,
     *,

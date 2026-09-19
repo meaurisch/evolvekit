@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from statistics import quantiles
-from typing import Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import Candidate
@@ -123,8 +123,12 @@ class Cascade:
         work_dir: Path,
         budget: BudgetGuard | None = None,
         signatures: BehaviourIndex | None = None,
+        on_event: Callable[..., Any] | None = None,
     ) -> None:
         self.config = config
+        self.on_event = on_event
+        """`on_event(type, **fields)`, called for every evaluator run as it starts
+        and ends. The driver points it at the run's event log."""
         self.work_dir = Path(work_dir)
         self.candidates_dir = self.work_dir / "candidates"
         self.candidates_dir.mkdir(parents=True, exist_ok=True)
@@ -212,10 +216,41 @@ class Cascade:
             out_path=self.work_dir / "stage_out" / f"{candidate.id}.{stage.id}.json",
             cwd=self.config.base_dir,
             required_kpis=(self.config.evaluate.score.objective,),
+            observer=self._observer(candidate.id, stage, private=False),
         )
         if self._is_final(stage) and self.budget is not None:
             self.budget.record_full_eval()
         return outcome
+
+    def _observer(
+        self, candidate_id: str, stage: StageConfig, *, private: bool
+    ) -> Callable[..., None] | None:
+        """What `run_command_stage` reports to, with the context it lacks.
+
+        The stage runner knows a seed and a duration; which candidate that was,
+        at which stage, on the public inputs or the hold-out, is known here.
+        Log paths are rewritten relative to the run directory so the event log
+        still makes sense after the directory has been moved or copied.
+        """
+        if self.on_event is None:
+            return None
+        run_dir = self.work_dir.parent
+
+        def relative(path: str) -> str:
+            try:
+                return Path(path).relative_to(run_dir).as_posix()
+            except ValueError:
+                return path
+
+        def observe(type: str, **fields: Any) -> None:
+            for key in ("stdout_log", "stderr_log"):
+                if fields.get(key):
+                    fields[key] = relative(fields[key])
+            self.on_event(
+                type, candidate_id=candidate_id, stage=stage.id, private=private, **fields
+            )
+
+        return observe
 
     def _note_behaviour(
         self,
@@ -320,6 +355,7 @@ class Cascade:
                 cwd=self.config.base_dir,
                 private=True,
                 required_kpis=(self.config.evaluate.score.objective,),
+                observer=self._observer(cid, stage, private=True),
             )
             result = results[cid]
             result.outcomes.append(outcome)
