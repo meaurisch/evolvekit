@@ -811,7 +811,12 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    }
    ```
 
-   A KPI is a number, or a *list* of numbers — one entry per instance, say.
+   A KPI is a **finite** number, or a *list* of finite numbers — one entry per
+   instance, say. `NaN` and `Infinity` fail the stage, and so does a run that
+   does not report the KPI named by `evaluate.score.objective`: a solver that
+   found nothing usable should exit non-zero or report a finite penalty KPI,
+   because an objective silently read as 0 is the best score a minimising run
+   can hold. `preflight` applies the same rule to the seed.
    Lists never reach the score or the archive descriptors, which need scalars;
    they sharpen the behaviour signature, so two candidates that merely agree on
    the mean are still told apart. `text_feedback` sits **beside** `kpis`, not

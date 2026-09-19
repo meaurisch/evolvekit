@@ -161,6 +161,7 @@ class Cascade:
             inputs=stage.inputs,
             out_path=self.work_dir / "stage_out" / f"{candidate.id}.{stage.id}.json",
             cwd=self.config.base_dir,
+            required_kpis=(self.config.evaluate.score.objective,),
         )
         if self._is_final(stage) and self.budget is not None:
             self.budget.record_full_eval()
@@ -268,6 +269,7 @@ class Cascade:
                 out_path=self.work_dir / "stage_out" / f"{cid}.{stage.id}.private.json",
                 cwd=self.config.base_dir,
                 private=True,
+                required_kpis=(self.config.evaluate.score.objective,),
             )
             result = results[cid]
             result.outcomes.append(outcome)
