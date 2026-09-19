@@ -41,7 +41,8 @@ python -m evolvekit preflight --config examples/binpacking/evolvekit.yaml
 python -m evolvekit run --config examples/binpacking/evolvekit.yaml
 python -m evolvekit run --config examples/circlepacking/evolvekit.yaml \
     --run-dir runs/circles                               # the second example
-python -m evolvekit status --run-dir runs/demo
+python -m evolvekit status --run-dir runs/demo           # add --json for a script or an agent
+python -m evolvekit dashboard --run-dir runs/demo        # the live dashboard, in a browser
 python -m evolvekit leaderboard --run-dir runs/demo --html board.html
 ```
 
@@ -117,6 +118,52 @@ interrupted or dead.
 `schema` is bumped when a key changes meaning or disappears; adding keys does not
 bump it. The document never contains `NaN` or `Infinity`. A view that fails is
 listed under `errors` and leaves the other sections intact.
+
+### The live dashboard
+
+```
+python -m evolvekit run --config ... --run-dir runs/x --dashboard    # while it runs
+python -m evolvekit dashboard --run-dir runs/x                       # any run: live, finished, killed
+python -m evolvekit dashboard --run-dir runs/x --export report.html  # one file, opens from disk
+```
+
+![The dashboard of a finished run](docs/img/dashboard/finished-light.png)
+
+`--dashboard` prints a localhost URL and serves the page for as long as the run
+lives; `evolvekit dashboard` is a separate, read-only process that can be
+pointed at any run directory at any time — including one whose run was killed
+an hour ago, which is when you most want to look. Both draw exactly one thing:
+the [status document](#watching-a-run-status-and-status---json), fetched from
+`/api/status`. There is no second implementation, so the page and
+`status --json` cannot disagree. From top to bottom it answers:
+
+| | |
+|---|---|
+| **Is the run healthy?** | `RUNNING` / `STALLED` / `FINISHED` / `INTERRUPTED` / `CRASHED` with the reason in a sentence; generation *k of N*; evaluations done, in flight and failed; elapsed and remaining time; one cell per generation showing which ones moved the best and where evaluations failed; what is in flight against its timeout; every stopping criterion against its cap |
+| **Is it improving?** | improvement over the baseline in percent of the baseline, with a verdict — *clear of the noise*, *within the noise*, or *noise unknown* — and its reasoning; best-so-far as a step line with a ± 1 standard-error band; every fully evaluated candidate with its seed-to-seed spread; failed and not-promoted candidates counted per generation but never plotted against a scale they were not measured on |
+| **What is the best, and how does it differ from the default?** | each declared parameter beside its default, placed within its declared range; the unified diff against the seed; the code; *Copy parameters as JSON* |
+| **Which parameters matter?** | importance (rank correlation with the score, with its sample size), and for the selected parameter every value tried against the objective plus a ten-cell strip of where in the range the search has and has not been |
+| **Where does it win and lose?** | a bar per instance, better or worse than the baseline, with wins / losses / ties |
+| **What went wrong?** | failures counted by reason, then one row each; one click opens the stage, seed, exit status, the **command line to reproduce it** (with a copy button), stderr and stdout tails, links to the full logs, and the configuration that was being evaluated |
+
+Every candidate and every failure has an address (`#candidate=g003-c0012`,
+`#failure=0`) that can be pasted into a ticket. `?theme=dark` forces a theme.
+
+It is built to stay out of the way. The server is `http.server` from the
+standard library, bound to `127.0.0.1`, read-only, and can read nothing outside
+the run directory. The page is **one HTML file with its styles and scripts
+inline**: no build step, no package manager, no CDN, so it renders on a machine
+that is offline. The document is rebuilt at most once a second and only while a
+page is open (about 12 ms for a run of 80 candidates and 150 evaluations). On
+the worst case for overhead — the five-second offline demo, polled every second
+— a run went from 5.35 s to 5.85 s, nearly all of it server start-up; against
+an evaluator that takes minutes it is not measurable. Candidate source and
+stderr are untrusted text: they reach the page through `textContent` only, and
+the exported file escapes every `<` in the data it embeds.
+
+| Killed mid-generation | At phone width, dark |
+|---|---|
+| ![A run that was killed](docs/img/dashboard/crashed-light.png) | ![Narrow, dark](docs/img/dashboard/narrow-dark.png) |
 
 ### How it works
 

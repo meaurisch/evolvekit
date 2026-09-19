@@ -472,3 +472,49 @@ def test_status_on_a_mistyped_directory_fails_and_leaves_no_trace(tmp_path, caps
     assert main(["status", "--run-dir", str(tmp_path / "typo"), "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["health"]["state"] == "missing"
     assert not (tmp_path / "typo").exists()
+
+
+# -- the rhythm of the run, and what is failing most -----------------------
+
+
+def test_the_generation_ribbon_covers_the_plan_and_marks_what_moved_the_best(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(1000, planned=5)
+    run.row("g000-c0001", 0, 100.0)
+    run.row("g001-c0002", 1, 90.0, parent_id="g000-c0001")   # a new best
+    run.row("g002-c0003", 2, 95.0, parent_id="g001-c0002")   # not one
+    for generation, ago in ((0, 900), (1, 700), (2, 500)):
+        run.event("generation_started", ago + 50, generation=generation, children_planned=1)
+        run.event("generation_finished", ago, generation=generation, duration_s=50.0, children=1)
+    run.event("generation_started", 100, generation=3, children_planned=1)
+    run.event("eval_finished", 60, candidate_id="g003-c0004", stage="full", seed=0, private=False,
+              ok=False, failure="exit code 134", duration_s=2.0)
+    ribbon = build_status(tmp_path, now=NOW)["progress"]["generations"]
+    assert [g["generation"] for g in ribbon] == [0, 1, 2, 3, 4, 5]
+    assert [g["state"] for g in ribbon] == ["done", "done", "done", "current", "planned", "planned"]
+    assert [g["improved"] for g in ribbon] == [False, True, False, False, False, False]
+    assert ribbon[1]["duration_s"] == 50.0 and ribbon[1]["best_objective"] == 90.0
+    # The failed child has no row yet -- its generation is still running -- but
+    # its id says where it belongs.
+    assert ribbon[3]["failed"] == 1
+
+
+def test_failures_are_counted_by_reason_because_ten_crashes_are_one_problem(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(100)
+    for i, (stage, failure) in enumerate(
+        [("full", "exit code 134"), ("proxy", "timeout after 60s"), ("full", "exit code 134")]
+    ):
+        run.event("eval_finished", 50 - i, candidate_id=f"g001-c000{i + 2}", stage=stage, seed=0,
+                  private=False, ok=False, failure=failure, duration_s=1.0)
+    reasons = build_status(tmp_path, now=NOW)["health"]["evaluations"]["failure_reasons"]
+    assert reasons == [
+        {"stage": "full", "failure": "exit code 134", "count": 2},
+        {"stage": "proxy", "failure": "timeout after 60s", "count": 1},
+    ]
+
+
+def test_the_run_directory_is_reported_as_an_absolute_path(tmp_path, monkeypatch):
+    RunDir(tmp_path / "run").started(10)
+    monkeypatch.chdir(tmp_path)
+    assert build_status("run", now=NOW)["run_dir"] == str((tmp_path / "run").resolve())

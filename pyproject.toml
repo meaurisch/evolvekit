@@ -26,6 +26,10 @@ evolvekit = "evolvekit.cli:main"
 [tool.setuptools.packages.find]
 include = ["evolvekit*"]
 
+[tool.setuptools.package-data]
+# The dashboard is one HTML file, served as it is: no build step.
+evolvekit = ["dashboard/*.html"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow: a driver-level or timing-sensitive test, excluded from the fast `python tasks.py test` default -- run it with `python tasks.py full` (and always in `check`, the CI gate).",

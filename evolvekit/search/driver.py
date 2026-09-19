@@ -521,9 +521,7 @@ class Driver:
         summary.totals = self.ledger.totals()
         summary.economics = self._economics()
         summary.children_per_generation = self.children_per_generation
-        archive_payload = self.grid.to_dict()
-        archive_payload["economics_window"] = self.config.stop.economics_window
-        self.ledger.write_archive(archive_payload)
+        self._snapshot_archive()
         return summary
 
     # -- resume: what the run directory has already used up -------------
@@ -607,6 +605,15 @@ class Driver:
             best_fitness=best.fitness if best else None,
             spent_usd=self.budget.state.usd,
         )
+        self._snapshot_archive()
+
+    def _snapshot_archive(self) -> None:
+        """`archive.json`, refreshed. It used to be written once, when a session
+        ended: blank for the whole of a live run, and never written at all by a
+        run that was killed."""
+        payload = self.grid.to_dict()
+        payload["economics_window"] = self.config.stop.economics_window
+        self.ledger.write_archive(payload)
 
     def _seed_candidate(self) -> Candidate:
         return Candidate(

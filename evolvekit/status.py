@@ -49,7 +49,7 @@ from evolvekit.ledger import read_jsonl
 from evolvekit.lock import pid_alive
 from evolvekit.search.params import current_values, declared_ranges
 
-__all__ = ["SCHEMA", "build_status", "render_text"]
+__all__ = ["SCHEMA", "build_status", "candidate_detail", "render_text"]
 
 SCHEMA = 1
 """Bumped when a key changes meaning or disappears. Adding keys does not."""
@@ -80,7 +80,7 @@ def build_status(
     document: dict[str, Any] = {
         "schema": SCHEMA,
         "generated_at": moment.isoformat(timespec="milliseconds"),
-        "run_dir": str(directory),
+        "run_dir": str(directory.resolve()) if directory.is_dir() else str(directory),
         "errors": [],
     }
     if not directory.is_dir():
@@ -378,11 +378,26 @@ class _Run:
                 "in_flight": len(in_flight),
                 "abandoned": self._abandoned(sessions, live),
                 "by_stage": by_stage,
+                "failure_reasons": self._failure_reasons(finished),
             },
             "in_flight": in_flight,
             "eta": self._eta(last_planned, done_generations, live is not None),
             "limits": self._limits(last_planned, done_generations),
         }
+
+    @staticmethod
+    def _failure_reasons(finished: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Failures counted by stage and message, most frequent first: ten
+        crashes with one exit code are one problem, not ten."""
+        counts: dict[tuple[str, str], int] = {}
+        for event in finished:
+            if not event.get("ok"):
+                key = (str(event.get("stage")), str(event.get("failure") or "failed"))
+                counts[key] = counts.get(key, 0) + 1
+        return [
+            {"stage": stage, "failure": failure, "count": count}
+            for (stage, failure), count in sorted(counts.items(), key=lambda kv: -kv[1])
+        ]
 
     def _open_evaluations(self, items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         open_: dict[tuple, dict[str, Any]] = {}
@@ -608,7 +623,57 @@ class _Run:
                 **self._verdict(baseline, best),
             },
             "series": per_generation,
+            "generations": self._generation_ribbon(per_generation),
         }
+
+    def _generation_ribbon(self, per_generation: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """One entry per generation from 0 to the last planned one: finished,
+        in progress or still to come, whether it moved the best, how long it
+        took and how many of its evaluations failed."""
+        finished = {
+            int(e["generation"]): e for e in self.events
+            if e.get("type") == "generation_finished" and isinstance(e.get("generation"), int)
+        }
+        started = {
+            int(e["generation"]) for e in self.events
+            if e.get("type") == "generation_started" and isinstance(e.get("generation"), int)
+        }
+        failed: dict[int, int] = {}
+        for event in self.events:
+            if event.get("type") == "eval_finished" and not event.get("ok"):
+                row = self.by_id.get(str(event.get("candidate_id")))
+                generation = (row or {}).get("generation")
+                if generation is None:  # not recorded yet: its id says which generation
+                    text = str(event.get("candidate_id") or "")
+                    generation = int(text[1:4]) if text[1:4].isdigit() else None
+                if generation is not None:
+                    failed[int(generation)] = failed.get(int(generation), 0) + 1
+        best_by_generation = {int(p["generation"]): p for p in per_generation}
+        first = self.described.get("first_generation")
+        planned = self.described.get("generations_planned")
+        last_planned = first + planned - 1 if isinstance(first, int) and isinstance(planned, int) else 0
+        last = max([last_planned, *finished, *started, *best_by_generation], default=0)
+        ribbon, previous_best = [], None
+        for generation in range(0, last + 1):
+            point = best_by_generation.get(generation)
+            best_id = point.get("best_id") if point else None
+            event = finished.get(generation)
+            state = "done" if event or (generation not in started and point) else (
+                "current" if generation in started else "planned"
+            )
+            ribbon.append(
+                {
+                    "generation": generation,
+                    "state": state,
+                    "improved": bool(best_id) and previous_best is not None and best_id != previous_best,
+                    "duration_s": _number((event or {}).get("duration_s")),
+                    "children": (event or {}).get("children"),
+                    "failed": failed.get(generation, 0),
+                    "best_objective": point.get("best_objective") if point else None,
+                }
+            )
+            previous_best = best_id or previous_best
+        return ribbon
 
     # -- best --------------------------------------------------------------
 
@@ -698,7 +763,13 @@ class _Run:
         for name in sorted(ranges):
             low, high = ranges[name]
             points = [
-                {"id": r.get("id"), "value": v[name], "fitness": fitness_of(r), "competes": competes(r)}
+                {
+                    "id": r.get("id"),
+                    "value": v[name],
+                    "fitness": fitness_of(r),
+                    "objective": self._objective_of(r),
+                    "competes": competes(r),
+                }
                 for r, v in observed
                 if name in v
             ]
@@ -916,6 +987,96 @@ class _Run:
     def log_tail(self, limit: int) -> list[dict[str, Any]]:
         lines = [e for e in self.events if e.get("type") == "log"]
         return [{"ts": e.get("ts"), "message": e.get("message")} for e in lines[-limit:]]
+
+
+def _unified(before: str, after: str, label_before: str, label_after: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=label_before,
+            tofile=label_after,
+            n=2,
+        )
+    )
+
+
+def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] | None:
+    """Everything about one candidate: the part of the picture that is too big
+    to poll. Its code, its diff against its parent and against the seed, and
+    every evaluator run it cost, with the command line and the logs.
+
+    `None` when the run directory holds no such candidate.
+    """
+    directory = Path(run_dir)
+    rows = {str(r.get("id")): r for r in read_jsonl(directory / "runs.jsonl")}
+    row = rows.get(candidate_id)
+    if row is None:
+        return None
+    seed = next((r for r in rows.values() if r.get("operator") == SEED_OPERATOR), None)
+    parent = rows.get(str(row.get("parent_id")))
+    block = str(row.get("block") or "")
+    evaluations = [
+        {
+            key: event.get(key)
+            for key in (
+                "ts", "stage", "seed", "private", "ok", "duration_s", "kpis", "failure",
+                "stderr_tail", "stdout_tail", "argv", "stdout_log", "stderr_log",
+            )
+        }
+        for event in read_events(directory)
+        if event.get("type") == "eval_finished"
+        and str(event.get("candidate_id")) == candidate_id
+    ]
+    seed_block = str((seed or {}).get("block") or "")
+    ranges = declared_ranges(seed_block)
+    defaults = current_values(seed_block, set(ranges))
+    values = current_values(block, set(ranges))
+    detail = {
+        "id": candidate_id,
+        "generation": row.get("generation"),
+        "operator": row.get("operator"),
+        "model": row.get("model"),
+        "parent_id": row.get("parent_id"),
+        "inspiration_ids": row.get("inspiration_ids") or [],
+        "created_at": row.get("created_at"),
+        "score": _number(row.get("score")),
+        "fitness": fitness_of(row),
+        "public_score": _number(row.get("public_score")),
+        "private_score": _number(row.get("private_score")),
+        "competes": competes(row),
+        "rejected": bool(row.get("rejected")),
+        "novelty": row.get("novelty"),
+        "reject_reason": row.get("reject_reason"),
+        "last_failure": row.get("last_failure"),
+        "stages_reached": row.get("stages_reached") or [],
+        "stage_scores": row.get("stage_scores") or {},
+        "kpis": row.get("kpis") or {},
+        "kpi_cv": row.get("kpi_cv") or {},
+        "feedback": row.get("feedback") or {},
+        "block": block,
+        "diff_vs_parent": (
+            _unified(str(parent.get("block") or ""), block, f"parent ({parent.get('id')})", candidate_id)
+            if parent
+            else ""
+        ),
+        "diff_vs_seed": (
+            _unified(seed_block, block, f"seed ({seed.get('id')})", candidate_id)
+            if seed and seed.get("id") != candidate_id
+            else ""
+        ),
+        "parameters": [
+            {
+                "name": name,
+                "default": defaults.get(name),
+                "value": values.get(name),
+                "changed": name in values and values.get(name) != defaults.get(name),
+            }
+            for name in sorted(ranges)
+        ],
+        "evaluations": evaluations,
+    }
+    return _jsonable(detail)
 
 
 def _first_line(text: Any) -> str | None:
