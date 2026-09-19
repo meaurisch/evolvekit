@@ -55,7 +55,12 @@ and novelty verdict), `usage.jsonl` (one row per LLM call, with tokens and
 USD), `archive.json` (the MAP-Elites grid: cells, elites, children counts and
 lineage), `scratchpad.md` (the running notes), `.lock` (the owning pid) and
 `traces/<candidate-id>.json` (the exact messages sent and the response
-received; framework calls live under `traces/meta/`).
+received; framework calls live under `traces/meta/`). Under `work/` are the
+spliced candidates (`candidates/<id>.py`) and, per evaluator run, the KPI file
+it wrote plus its **complete** stdout and stderr
+(`stage_out/<id>.<stage>.json`, `.stdout.log`, `.stderr.log`) — the prompt only
+ever sees the last 2,000 characters; the files are for whoever has to debug
+the solver.
 
 ### How it works
 
@@ -818,6 +823,17 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    inside it, and reaches the next prompt as
    [Evaluator notes](#evaluator-notes-what-the-kpis-cannot-say). Same evaluator,
    different `inputs`, for each stage.
+
+   **The timeout covers the whole process tree.** An evaluator is usually a
+   wrapper around something else — a solver binary, a second interpreter — so
+   `timeout` is a wall-clock bound on the command *and everything it started*:
+   when it expires, all of it is killed, and the run moves on within seconds.
+   The same happens when the command returns: whatever it left running is
+   killed, because on a time-limited objective a leftover solver shares a core
+   with the next candidate and silently becomes that candidate's score. An
+   evaluator that needs a long-lived helper should start it outside evolvekit.
+   stdin is closed; stdout and stderr go to the log files described under
+   [Quickstart](#quickstart), so nothing the evaluator prints can block it.
 
    Accept `--seed` even if you ignore it today. It costs one argparse line, and
    it is what lets you turn `seeds: N` on later without touching the evaluator.
