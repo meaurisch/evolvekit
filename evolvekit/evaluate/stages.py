@@ -24,6 +24,7 @@ from statistics import fmean, stdev
 from typing import Any
 
 from evolvekit.config import ProblemConfig, StageConfig
+from evolvekit.evaluate.process import read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
 
 __all__ = [
@@ -333,41 +334,42 @@ def _run_once(
             private=private,
         )
 
-    try:
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=stage.timeout,
-            cwd=str(cwd),
+    # Output goes to files beside the result, never to pipes: see `process.py`.
+    stdout_log = out_path.with_suffix(".stdout.log")
+    stderr_log = out_path.with_suffix(".stderr.log")
+    run = run_bounded(
+        argv,
+        timeout=stage.timeout,
+        cwd=cwd,
+        stdout_path=stdout_log,
+        stderr_path=stderr_log,
+    )
+    duration = time.perf_counter() - started
+    if run.error is not None:
+        return StageOutcome(
+            stage_id=stage.id,
+            ok=False,
+            failure=f"could not run {argv[0]!r}: {run.error}",
+            duration_s=duration,
+            private=private,
         )
-    except subprocess.TimeoutExpired:
+    stderr = read_tail(stderr_log, STDERR_LIMIT)
+    stdout = read_tail(stdout_log, STDERR_LIMIT)
+    if run.timed_out:
         return StageOutcome(
             stage_id=stage.id,
             ok=False,
             failure=f"timeout after {stage.timeout:g}s",
-            duration_s=time.perf_counter() - started,
+            stderr=stderr,
+            stdout=stdout,
+            duration_s=duration,
             private=private,
         )
-    except OSError as exc:
+    if run.returncode != 0:
         return StageOutcome(
             stage_id=stage.id,
             ok=False,
-            failure=f"could not run {argv[0]!r}: {exc}",
-            duration_s=time.perf_counter() - started,
-            private=private,
-        )
-
-    duration = time.perf_counter() - started
-    stderr = (proc.stderr or "")[-STDERR_LIMIT:]
-    stdout = (proc.stdout or "")[-STDERR_LIMIT:]
-    if proc.returncode != 0:
-        return StageOutcome(
-            stage_id=stage.id,
-            ok=False,
-            failure=f"exit code {proc.returncode}",
+            failure=f"exit code {run.returncode}",
             stderr=stderr,
             stdout=stdout,
             duration_s=duration,
