@@ -880,6 +880,14 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    resets 12:30pm"; wait it out and re-run the same directory (the lock and
    the ledger resume cleanly).
 
+   **The caps belong to the run directory, not to the process.** On resume the
+   guard is charged with everything `usage.jsonl` already records, today's
+   full evaluations are counted from `runs.jsonl`, and the stop policy is
+   replayed over the recorded generations — so a run stopped by `max_usd`,
+   `max_tokens`, `max_full_evals_per_day` or `stop.patience` stays stopped when
+   the same command is run again, and the `spent=` on each generation line is
+   the directory's total. To go on, raise the cap or use a new `--run-dir`.
+
 7. **Tell the model what it may use.** Fill in `problem.tools`,
    `problem.constraints` and `problem.what_counts_as_new` — see
    [the problem description](#the-problem-description-in-named-sections). If
