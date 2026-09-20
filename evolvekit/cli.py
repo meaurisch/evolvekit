@@ -21,6 +21,7 @@ from evolvekit.leaderboard import (
 from evolvekit.ledger import Ledger
 from evolvekit.lock import RunLockError
 from evolvekit.preflight import run_preflight
+from evolvekit.scaffold import TUNE_FILES, TUNE_NEXT
 from evolvekit.search.driver import Driver
 from evolvekit.status import build_status, render_text
 
@@ -201,6 +202,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="scaffold evolvekit.yaml and .env.example")
     p_init.add_argument("directory", nargs="?", default=".", help="target directory")
     p_init.add_argument("--force", action="store_true", help="overwrite existing files")
+    p_init.add_argument(
+        "--template", choices=("program", "tune"), default="program",
+        help="program (default): a config for evolving a block of code, to be pointed at your "
+        "skeleton and evaluator. tune: a complete, runnable setup for tuning the parameters of "
+        "a command-line program -- a stand-in solver, three instances, no model needed",
+    )
 
     p_pre = sub.add_parser(
         "preflight",
@@ -275,6 +282,45 @@ def build_parser() -> argparse.ArgumentParser:
         "opens from disk, works offline, can be attached to a ticket",
     )
 
+    p_confirm = sub.add_parser(
+        "confirm",
+        help="is the improvement real? the run's best against its baseline, paired, "
+        "on seeds (and instances) the search never saw",
+    )
+    p_confirm.add_argument("--config", default=DEFAULT_CONFIG)
+    p_confirm.add_argument("--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}")
+    p_confirm.add_argument(
+        "--seeds", required=True,
+        help="comma-separated seeds the search never used, e.g. 1001,1002,1003",
+    )
+    p_confirm.add_argument(
+        "--candidates", default="best",
+        help="`best` (default), `top:N`, or comma-separated candidate ids",
+    )
+    p_confirm.add_argument(
+        "--instances", action="append", metavar="ENTRY",
+        help="compare on these instead of the final stage's own instances "
+        "(a file, a pattern or a name; repeatable) -- e.g. instances held back from the search",
+    )
+    p_confirm.add_argument(
+        "--label", default="confirm",
+        help="the comparison lands in <run-dir>/confirm/<label>/ (default: confirm)",
+    )
+
+    p_export = sub.add_parser(
+        "export",
+        help="the winning configuration in a form another program can use",
+    )
+    p_export.add_argument("--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}")
+    p_export.add_argument("--candidate", default="best", help="a candidate id (default: the run's best)")
+    p_export.add_argument(
+        "--format", choices=("json", "yaml", "flags", "code"), default="json",
+        help="json / yaml: the parameter values; flags: `--name value` as a stage command "
+        "receives them; code: the candidate's block",
+    )
+    p_export.add_argument("--config", default=None, help="needed for --format flags (per-parameter flag names)")
+    p_export.add_argument("--out", metavar="FILE", help="write here instead of stdout")
+
     p_board = sub.add_parser("leaderboard", help="render the leaderboard")
     p_board.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
     p_board.add_argument("--limit", type=int, default=20)
@@ -290,20 +336,27 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_init(args: argparse.Namespace) -> int:
     target = Path(args.directory).resolve()
     target.mkdir(parents=True, exist_ok=True)
+    tune = args.template == "tune"
+    files = (
+        tuple(TUNE_FILES.items())
+        if tune
+        else ((DEFAULT_CONFIG, _STARTER_CONFIG), (".env.example", _ENV_EXAMPLE))
+    )
     written = []
-    for name, content in (
-        (DEFAULT_CONFIG, _STARTER_CONFIG),
-        (".env.example", _ENV_EXAMPLE),
-    ):
+    for name, content in files:
         path = target / name
         if path.exists() and not args.force:
             print(f"exists, not overwritten: {path}  (use --force)")
             continue
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
         written.append(path)
     for path in written:
         print(f"wrote {path}")
-    if written:
+    if written and tune:
+        shown = Path(args.directory) / DEFAULT_CONFIG
+        print(TUNE_NEXT.format(config=shown.as_posix(), run_dir=(Path(args.directory) / "runs" / "first").as_posix()))
+    elif written:
         print("\nNext: point problem.skeleton at your skeleton file, then")
         print("  python -m evolvekit run --config evolvekit.yaml")
     return 0
@@ -483,7 +536,80 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_confirm(args: argparse.Namespace) -> int:
+    """Exit 0 when every candidate's 95 % interval lies above zero, 1 otherwise
+    -- so a script can gate on "the improvement is real"."""
+    from evolvekit.confirm import confirm, render_markdown
+
+    try:
+        seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    except ValueError:
+        raise ValueError(f"--seeds: expected comma-separated integers, got {args.seeds!r}") from None
+    if not Path(args.run_dir).is_dir():
+        raise ValueError(f"there is no run directory at {args.run_dir}")
+    comparison = confirm(
+        load_config(args.config), args.run_dir, seeds=seeds, candidates=args.candidates,
+        instances=args.instances, label=args.label,
+    )
+    print(render_markdown(comparison))
+    print(f"written to {Path(args.run_dir) / 'confirm' / args.label}")
+    confirmed = all(
+        (result["summary"].get("ci95") or [0.0])[0] > 0 for result in comparison.per_candidate.values()
+    )
+    return 0 if confirmed else 1
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from evolvekit.leaderboard import rank
+    from evolvekit.ledger import read_jsonl
+
+    if not Path(args.run_dir).is_dir():
+        raise ValueError(f"there is no run directory at {args.run_dir}")
+    rows = list(read_jsonl(Path(args.run_dir) / "runs.jsonl"))
+    if args.candidate == "best":
+        ranked = rank(rows, 1)
+        if not ranked:
+            raise ValueError("the run has no fully evaluated candidate yet")
+        row = ranked[0]
+    else:
+        row = next((r for r in rows if r.get("id") == args.candidate), None)
+        if row is None:
+            raise ValueError(f"the run directory holds no candidate {args.candidate!r}")
+    params = row.get("params")
+    if args.format == "code":
+        text = str(row.get("block") or "")
+    elif not isinstance(params, dict):
+        raise ValueError(
+            f"{row.get('id')} has no parameter values: the run declares no `problem.parameters`. "
+            "Use --format code for its block"
+        )
+    elif args.format == "json":
+        text = json.dumps(params, indent=2) + "\n"
+    elif args.format == "yaml":
+        import yaml
+
+        text = yaml.safe_dump(params, sort_keys=False)
+    else:
+        if not args.config:
+            raise ValueError("--format flags needs --config: a parameter may declare its own flag")
+        space = load_config(args.config).problem.parameters
+        if space is None:
+            raise ValueError(f"{args.config} declares no `problem.parameters`")
+        resolved, problems = space.validate(params)
+        if problems:
+            raise ValueError(f"{row.get('id')} does not fit {args.config}: {problems[0]}")
+        text = " ".join(space.render_flags(resolved)) + "\n"
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+        print(f"{row.get('id')} -> {args.out}", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 _COMMANDS = {
+    "confirm": cmd_confirm,
+    "export": cmd_export,
     "init": cmd_init,
     "preflight": cmd_preflight,
     "run": cmd_run,

@@ -71,6 +71,9 @@ headroom is a timeout that will start killing the search's better ideas.
 
 SECONDS_PER_DAY = 24 * 60 * 60
 
+SAID_LINES = 6
+"""How many of a failed command's last lines the report repeats."""
+
 BASELINE_QUIET_MACHINE_S = 60.0
 """A command stage timed out at or above this many seconds gets a reminder to
 measure baselines on a quiet machine.
@@ -108,6 +111,9 @@ class StageReport:
     """How many of the stage's runs are in flight at once (a per-instance stage)."""
     instances: int = 0
     """How many instances the stage ran one by one; 0 for a classic stage."""
+    said: str = ""
+    """What the command printed (stderr, else stdout), for a stage that failed:
+    "exit code 1" is a fact, the solver's own last words are the explanation."""
 
     @property
     def per_run_s(self) -> float:
@@ -313,6 +319,7 @@ def _stage_report(stage: StageConfig, outcome: StageOutcome) -> StageReport:
         kpi_cv=dict(outcome.kpi_cv),
         feedback=outcome.text_feedback,
         failure=outcome.failure,
+        said=(outcome.stderr or outcome.stdout or "").strip(),
     )
 
 
@@ -612,6 +619,8 @@ def format_report(
         )
         if stage.failure:
             lines.append(f"    failure : {stage.failure}")
+            for said in stage.said.splitlines()[-SAID_LINES:]:
+                lines.append(f"            | {said[:200]}")
         if stage.kpis:
             lines.append("    kpis    : " + _kpi_line(stage, first=config.evaluate.score.objective))
         if stage.feedback:

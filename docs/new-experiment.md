@@ -13,7 +13,9 @@ version of everything below; `examples/pyvrp/` is the heavyweight version
 python -m evolvekit init my-problem/
 ```
 
-writes a commented starter `evolvekit.yaml` and a `.env.example`. Or copy the
+writes a commented starter `evolvekit.yaml` and a `.env.example`
+(`--template tune` instead writes a complete, runnable setup for tuning a
+command-line program: see `examples/cli-solver/`). Or copy the
 closest directory under `examples/` — that is usually faster, because the
 examples already have a working evaluator shape, a `fake_responses.yaml` and
 the three-config `extends` layout.

@@ -1,0 +1,56 @@
+# Tuning a command-line solver that was not written for evolvekit.
+# No model, no key, no Python of yours: README.md walks through it.
+#
+#   python -m evolvekit preflight --config examples/cli-solver/evolvekit.yaml
+#   python -m evolvekit run --config examples/cli-solver/evolvekit.yaml --run-dir runs/cli-solver --dashboard
+
+problem:
+  description: Minimise the tour length the solver reaches within its time limit.
+  parameters:
+    # name: what the solver calls it (underscores become dashes: --restart-after)
+    neighbours:    {type: int, low: 2, high: 30, default: 8, help: candidate moves per city}
+    restart_after: {type: int, low: 100, high: 50000, default: 2000, log: true, help: stalled moves before a restart}
+    accept_worse:  {type: float, low: 0.0, high: 0.05, default: 0.0, help: probability of accepting a worse move}
+    init:          {type: choice, choices: [random, nearest], default: random, help: starting tour}
+    or_opt:        {type: bool, default: false, help: also try moving short segments}
+
+evaluate:
+  stages:
+    - {id: static, kind: builtin-static}
+
+    # Cheap: two instances, a fraction of the time. Who is worth the full budget?
+    - id: screen
+      kind: command
+      # Your solver here: ./solver, java -jar solver.jar, solver.exe ...
+      command: "{python} solver.py --instance {instance} --seed {seed} --time-limit 0.5 {params}"
+      kpis_from: stdout              # the last JSON object the program prints
+      instances: [data/b-60.json, data/d-110.json]
+      timeout: 30
+      workers: 2
+      retries: 1
+      promote: {top_k_per_generation: 3}
+
+    # The objective itself: every instance, the real time limit, two seeds each.
+    - id: full
+      kind: command
+      command: "{python} solver.py --instance {instance} --seed {seed} --time-limit 1.5 {params}"
+      kpis_from: stdout
+      instances: ["data/*.json"]
+      seeds: 2
+      timeout: 30                    # per run: a hung solver is killed, tree and all
+      workers: 2                     # never more than physical cores; add `pin_cpus: [2, 4]` on your machine
+      retries: 1                     # c-80 crashes now and then; one retry, and the failure is on record
+
+  score: {objective: cost, direction: minimize}
+
+search:
+  operators: {param_local: 0.45, param_tpe: 0.25, param_lhs: 0.2, param_cross: 0.1}
+  children_per_generation: 6
+  generations: 6
+  seed: 1
+  novelty: {behavioural: "off"}      # a time-limited, seeded solver never fingerprints twice alike
+
+budget:
+  max_full_evals_per_day: 200
+stop:
+  patience: 6

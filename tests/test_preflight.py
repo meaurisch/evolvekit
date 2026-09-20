@@ -567,3 +567,26 @@ def test_the_cli_exits_two_on_a_bad_config_path(capsys):
     code = main(["preflight", "--config", "no/such/file.yaml"])
     assert code == 2
     assert "config error" in capsys.readouterr().err
+
+
+def test_a_failed_stage_repeats_the_commands_own_last_words(tmp_path, minimal_raw):
+    """"exit code 1" is a fact; what the solver said is the explanation."""
+    from evolvekit.config import build_config
+    from evolvekit.preflight import format_report, preflight
+
+    (tmp_path / "evaluate.py").write_text(
+        "import sys\n"
+        "print('Traceback (most recent call last): ...', file=sys.stderr)\n"
+        "print('ImportError: cannot import name Location from pyvrp', file=sys.stderr)\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    minimal_raw["evaluate"]["stages"].append(
+        {"id": "full", "kind": "command", "command": "{python} evaluate.py {candidate} {out}"}
+    )
+    config = build_config(minimal_raw, base_dir=tmp_path)
+    report = preflight(config)
+    assert report.exit_code == 2
+    text = format_report(report, config)
+    assert "failure : exit code 1" in text
+    assert "| ImportError: cannot import name Location from pyvrp" in text
