@@ -15,13 +15,20 @@ each section.
 | [#18](https://github.com/meaurisch/evolvekit/pull/18) | `fix/resumed-run-replays-its-random-stream` | a resumed sweep no longer re-draws what it holds | R-08 |
 | [#19](https://github.com/meaurisch/evolvekit/pull/19) | `feat/run-events` (stacked on #13–#18) | `events.jsonl` + `heartbeat.json` | O-01, O-02, O-03 (log kept), O-04, O-09 |
 | [#20](https://github.com/meaurisch/evolvekit/pull/20) | `feat/status-json` (on #19) | one status document; `status --json` | O-01, O-02, O-05, O-06, O-08, O-09, O-10, R-14 (status) |
-| [#21](https://github.com/meaurisch/evolvekit/pull/21) | `feat/dashboard` (on #20) | the live dashboard, export, deep links | O-01 … O-18 |
+| [#21](https://github.com/meaurisch/evolvekit/pull/21) | `feat/dashboard` (on #20) | the live dashboard, export, deep links. Follow-ups on the branch: a CRLF-proof page test; CSS custom properties through `setProperty` (the per-instance bars overflowed when every instance was a win) | O-01 … O-18 |
+| [#22](https://github.com/meaurisch/evolvekit/pull/22) | `fix/zero-llm-runs` | a run that calls no model needs none: `models` optional, no big steps, no scratchpad | G-04, G-08 |
+| [#23](https://github.com/meaurisch/evolvekit/pull/23) | `bench/pyvrp-hard` | the benchmark: seeded generator, 10 tuning + 4 fresh + 2 smoke instances, `solve.py` (27 tunables as flags), verifier, manifest | Goal 2 |
+| [#24](https://github.com/meaurisch/evolvekit/pull/24) | `feat/typed-parameters` (on #21 + #22) | `problem.parameters`: typed space, generated skeleton, validation before any solver time, `{params}` / `{params_json}`, `params` as data, typed views in status and dashboard, `#parameter=` links; preflight hands the configuration over | G-02 (input side), G-03, O-06 (values as data), G-05 (part: `<id>.params.json`, "Copy parameters as JSON") |
+| [#25](https://github.com/meaurisch/evolvekit/pull/25) | `feat/instance-fanout` (on #24) | one run per instance: `workers`, `pin_cpus`, `retries`, `normalize: baseline`, `private_instances`, stage progress + ETA, per-instance status by name | G-06, G-07, R-09, Q-10, O-07 (part) |
+| [#26](https://github.com/meaurisch/evolvekit/pull/26) | `feat/foreign-output` (on #25) | `kpis_from: stdout`, flat result objects with metadata, `kpi_patterns` | G-02 (output side) |
 
 Stack base for features: `c0bfd0d` = `origin/master` + the six fix branches.
+Every stacked PR names a compare link that shows its own diff.
 
 ## Bug-fix queue (each: failing test, fix, PR against master, merge into integration)
 
-1. G-04 zero-LLM run impossible (`big_step_every: 0`, plateau big step, mandatory models) — **needed for the proving run**
+1. ~~G-04 zero-LLM run impossible~~ → #22
+1a. `pytest` with no path collects a worktree or run output under `runs/` (`testpaths = ["tests"]`)
 2. R-10 `search.generations` means "N more" on resume
 3. R-02 a run directory accepts a different problem silently
 4. R-07 resume reuses candidate ids
@@ -37,9 +44,9 @@ Stack base for features: `c0bfd0d` = `origin/master` + the six fix branches.
 
 ## Feature queue (critical path to the proving run first)
 
-F5 typed parameters (`problem.parameters`), `{params}` / `{params_json}`,
-stdout KPI parsing, `init --template tune` → F3 instance fan-out, `workers`,
-retries, CPU pinning, per-instance records → F6 zero-LLM operators that exploit
+~~F5 typed parameters~~ (#24), ~~stdout KPI parsing~~ (#26), `init --template
+tune` → ~~F3 instance fan-out, `workers`, retries, CPU pinning, per-instance
+records~~ (#25) → F6 zero-LLM operators that exploit
 (local perturbation, parameter crossover, model-based) → F4 evaluation cache
 and crash-safe resume → F7 racing → F8 `confirm` (paired, held-out seeds) and
 `export` → F9 docs and a worked example with a foreign-language solver →
@@ -47,19 +54,38 @@ benchmark PR.
 
 ## Benchmark
 
-* A background agent is building `benchmarks/pyvrp_hard/` (generator, loader,
-  `solve.py`, verifier, manifest, smoke set, tests). Untracked and unreviewed
-  until it reports.
+* `benchmarks/pyvrp_hard/` is PR #23: generator, loader, `solve.py`, verifier,
+  manifest (SHA-256 per instance), smoke set, 40 tests. All 16 instances were
+  regenerated in a fresh worktree and matched the manifest byte for byte; all
+  are feasible with PyVRP's defaults (first feasible solution within 9 s).
 * Verified by probe: every PyVRP 0.14.0 modelling feature coexists in one
   feasible instance.
+* **Throughput** (t05, 1800 clients, 60 s, iterations per worker relative to
+  one worker alone): 1 worker 7,106 it; 2 workers 106 % each; 3 workers 106 %
+  each (3.17x in total); 4 workers 77 % each (3.06x). So `workers: 3`, pinned
+  to logical CPUs 2, 4, 6 -- one per physical core, core 0 left to the OS, the
+  driver and the dashboard.
+* PyVRP through the generic interface only: `solve.py --instance {instance}
+  --seed {seed} --time-limit N {params}` + `kpis_from: stdout`. Smoke-tuned for
+  two generations on the 60- and 120-client instances: 14 evaluations, 0
+  failures, nothing written to adapt the solver.
+* `runs/wt` is a detached worktree with the instances generated: measurements
+  and the tuning run use it, so that switching branches in the main checkout
+  cannot pull files out from under a running evaluation (it did, once).
 
 ## Dashboard requirements discovered while using it
 
 (to be filled during the PyVRP run: "every time the dashboard fails to tell you
 something you wanted to know, that is a dashboard requirement")
 
-* best-so-far over wall-clock time, not only over generations
-* instance names instead of indices (arrives with the instance fan-out)
+* best-so-far over wall-clock time, not only over generations -- open
+* ~~instance names instead of indices~~ (#25)
+* ~~how far is this two-hour generation?~~ stage progress line + refined ETA (#25)
+* ~~which instance did that crash belong to, and did the retry work?~~ (#25)
+* ~~what unit is an objective of 97.8?~~ `objective.unit` (#25)
+* ~~bool / choice / log-scale parameters were invisible~~ (#24)
+* does a short screening stage predict the full one? (proxy-vs-full agreement) -- open
+* no ETA at all until the first non-seed generation has finished -- open
 
 ## Machine notes
 
