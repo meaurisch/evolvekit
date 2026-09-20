@@ -80,7 +80,8 @@ live run is built from:
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
   | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
-  | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s`; then `ok`, `duration_s`, `kpis`, `argv`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
+  | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
+  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed` and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
 
@@ -107,7 +108,7 @@ interrupted or dead.
 
 | Section | Answers |
 |---|---|
-| `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
+| `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
 | `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `within noise`, or `unknown` when each score is a single run. The verdict is a paired comparison over the seeds both candidates ran on, and says in words that those are the seeds the search selected on. |
 | `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
 | `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
@@ -496,6 +497,71 @@ re-expression of its own seed, silently stops filtering. So on a stage with
 `evaluate.signature_digits_stochastic` (default `3`) instead. Three significant
 digits on a mean of N runs is a claim about the program; nine is a claim about
 the dice.
+
+### One run per instance: `instances`, `workers`, `retries`
+
+A classic stage hands the evaluator a whole input set and gets one JSON object
+back; what happened on which instance stays inside the evaluator. For a solver
+with a test set — and above all for a slow, time-limited one — list the
+instances on the stage instead, and let the command solve **one**:
+
+```yaml
+- id: full
+  kind: command
+  command: ./solver --instance {instance} --seed {seed} --time-limit 600 --out {out} {params}
+  instances: ["data/*.vrp"]        # a pattern, a list of files, or names the solver resolves itself
+  seeds: 1                         # runs per instance
+  timeout: 700                     # per run
+  workers: 3                       # runs in flight at once
+  pin_cpus: [2, 4, 6]              # one logical CPU per worker
+  retries: 1                       # run a crashed or timed-out run once more
+  normalize: baseline              # the default; `none` for the plain mean
+```
+
+The stage is then run once per instance and seed, each run a process of its
+own, and the framework knows what it could not know before:
+
+- **Parallelism that does not distort the objective.** For a time-limited
+  solver `workers` is a statement about the *score*: two runs sharing a core
+  each get less done in their time limit than one would alone. `pin_cpus` gives
+  every worker a logical CPU of its own (on a machine with simultaneous
+  multithreading, name one per *physical* core and leave a core to everything
+  else); the whole process tree of a run is pinned from its first instruction.
+  The pool spans the generation, not one candidate — six candidates on ten
+  instances are sixty runs for three workers, and no worker idles while another
+  finishes a candidate's last instance. `preflight` warns when there are more
+  workers than physical cores. Measure, do not guess: run 1, 2, 3 … copies of
+  your solver side by side and stay where the per-run throughput is still flat.
+- **A failure with an address.** A crash is *this* instance, *this* seed, *this*
+  attempt, with log files of its own (`work/stage_out/<id>.<stage>.<instance>.seed0[.try1].*`).
+  With `retries: 1` it is run once more before the candidate's stage fails —
+  the right setting for a solver that crashes once in a hundred runs — and a
+  candidate that has failed for good stops costing anything: its remaining
+  runs are never started. `status` and the dashboard list the failure with its
+  instance and say when a retry went through.
+- **Every instance has the same say.** The plain mean over instances is a mean
+  over *scales*: one instance with ten times the cost of the others decides the
+  search by itself. With `normalize: baseline` each instance counts as a
+  percentage of what the seed candidate — the defaults — reached on it. The seed
+  scores exactly 100, a candidate that is 2 % better on every instance scores
+  98, and the improvement the dashboard shows is that percentage. The divisor
+  is fixed for the whole run (kept in `work/reference.json`, so a resumed run
+  uses the same one): it is a weight, not a measurement, and a lucky baseline
+  run shifts where 100 lies but never which of two candidates is ahead. The
+  plain mean stays available as the KPI `<objective>_raw`.
+- **A per-instance picture without a list KPI.** The dashboard's per-instance
+  card, the noise estimate and the paired "is this more than the dice?" verdict
+  are built from the runs themselves — paired by instance and seed, in percent,
+  so a large instance and a small one count alike.
+
+| A generation in progress: runs done of planned, two retries in flight | Where the best wins and loses; every failure with its instance |
+|---|---|
+| ![A per-instance stage in progress](docs/img/dashboard/per-instance-live.png) | ![Per-instance comparison and failures, dark](docs/img/dashboard/per-instance-dark.png) |
+
+`private_instances` is the hold-out counterpart (`private_inputs` for a
+per-instance stage); its baseline is the seed's own hold-out run. Every other
+scalar KPI a run reports is averaged the same way (seeds within an instance,
+then instances), and reaches the behaviour signature as `<kpi>_per_instance`.
 
 ### The novelty filters — structural, near, and behavioural
 
@@ -1007,6 +1073,8 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    | `{out}` | path the KPI JSON must be written to | yes |
    | `{inputs}` | the stage's `inputs` (or `private_inputs`), comma-joined | no |
    | `{seed}` | `0`, or `0 … N-1` on a stage with `seeds: N` | only when `seeds > 1` |
+   | `{instance}` | one entry of the stage's `instances`: the command is run once for each ([one run per instance](#one-run-per-instance-instances-workers-retries)) | when `instances` is set |
+   | `{params}` / `{params_json}` | the configuration, as flags or as a JSON file ([tuning a command](#tuning-a-command-problemparameters)) — then `{candidate}` is optional | with `problem.parameters` |
 
    The document it writes:
 

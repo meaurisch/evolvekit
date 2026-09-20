@@ -438,7 +438,7 @@ def test_a_finished_run_reports_what_the_run_itself_reported(finished_run):
     assert health["state"] == "finished" and health["stop_reason"] == summary.stop_reason
     assert health["generation"]["last_finished"] == 2 == health["generation"]["last_planned"]
     assert health["evaluations"]["in_flight"] == 0 and health["evaluations"]["done"] > 0
-    assert document["objective"] == {"name": "excess_pct", "direction": "minimize", "known": True}
+    assert document["objective"] == {"name": "excess_pct", "direction": "minimize", "known": True, "unit": None}
     progress = document["progress"]
     assert progress["baseline"]["objective"] == pytest.approx(5.871, abs=0.001)
     assert progress["best"]["id"] == summary.best.id

@@ -34,18 +34,22 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-__all__ = ["BoundedRun", "run_bounded", "read_tail"]
+__all__ = ["BoundedRun", "run_bounded", "read_tail", "can_pin"]
 
 REAP_TIMEOUT_S = 10.0
 """How long to wait for a killed tree to be reaped before moving on. The kill
 is not a request, so this only ever runs out on a process stuck in the kernel."""
 
 TAIL_BYTES = 64 * 1024
+
+CANCEL_POLL_S = 0.2
+"""How often a run that can be called off looks whether it has been."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,8 @@ class BoundedRun:
     duration_s: float
     error: str | None = None
     """Why the command could not be started at all (`OSError`), else `None`."""
+    cancelled: bool = False
+    """Called off through `cancel` before it finished; its tree is gone."""
 
 
 def run_bounded(
@@ -67,8 +73,16 @@ def run_bounded(
     cwd: str | Path,
     stdout_path: Path,
     stderr_path: Path,
+    cpus: Sequence[int] = (),
+    cancel: threading.Event | None = None,
 ) -> BoundedRun:
-    """Run `argv`; never take longer than `timeout` plus the time to kill it."""
+    """Run `argv`; never take longer than `timeout` plus the time to kill it.
+
+    `cpus` pins the whole tree to those logical CPUs -- for a time-limited
+    solver, the difference between a run that had a core and one that shared
+    it. `cancel`, once set, ends the run as a timeout would: several runs in
+    flight on worker threads have no Ctrl+C of their own to be reached by.
+    """
     started = time.perf_counter()
     deadline = started + timeout
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +90,7 @@ def run_bounded(
         try:
             tree = _spawn(
                 list(argv),
+                tuple(cpus),
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=err,
@@ -86,14 +101,21 @@ def run_bounded(
 
         returncode: int | None = None
         timed_out = False
+        cancelled = False
         try:
             while True:
                 remaining = deadline - time.perf_counter()
                 if remaining <= 0:
                     timed_out = True
                     break
+                if cancel is not None and cancel.is_set():
+                    cancelled = True
+                    break
+                patience = min(remaining, tree.watch_interval())
+                if cancel is not None:
+                    patience = min(patience, CANCEL_POLL_S)
                 try:
-                    returncode = tree.proc.wait(timeout=min(remaining, tree.watch_interval()))
+                    returncode = tree.proc.wait(timeout=patience)
                     break
                 except subprocess.TimeoutExpired:
                     tree.watch()
@@ -105,7 +127,9 @@ def run_bounded(
             except subprocess.TimeoutExpired:  # pragma: no cover - kernel-stuck
                 pass
             tree.close()
-    return BoundedRun(returncode, timed_out, time.perf_counter() - started)
+    return BoundedRun(
+        returncode, timed_out, time.perf_counter() - started, cancelled=cancelled
+    )
 
 
 def read_tail(path: Path, limit: int) -> str:
@@ -126,11 +150,18 @@ def read_tail(path: Path, limit: int) -> str:
     return text[-limit:] if limit > 0 else ""
 
 
-def _spawn(argv: list[str], **popen_kwargs: Any) -> "_PosixTree | _WindowsTree":
+def _spawn(
+    argv: list[str], cpus: tuple[int, ...] = (), **popen_kwargs: Any
+) -> "_PosixTree | _WindowsTree":
     """Start `argv` as the root of a tree. Raises `OSError` exactly as `Popen`."""
     if sys.platform == "win32":
-        return _WindowsTree.spawn(argv, popen_kwargs)
-    return _PosixTree.spawn(argv, popen_kwargs)
+        return _WindowsTree.spawn(argv, popen_kwargs, cpus)
+    return _PosixTree.spawn(argv, popen_kwargs, cpus)
+
+
+def can_pin() -> bool:
+    """Whether this platform lets a process be pinned to CPUs at all."""
+    return sys.platform == "win32" or hasattr(os, "sched_setaffinity")
 
 
 # --------------------------------------------------------------------------
@@ -146,8 +177,25 @@ class _PosixTree:
         self.proc = proc
 
     @classmethod
-    def spawn(cls, argv: list[str], popen_kwargs: dict[str, Any]) -> "_PosixTree":
-        return cls(subprocess.Popen(argv, start_new_session=True, **popen_kwargs))
+    def spawn(
+        cls, argv: list[str], popen_kwargs: dict[str, Any], cpus: tuple[int, ...] = ()
+    ) -> "_PosixTree":
+        if not cpus or not hasattr(os, "sched_setaffinity"):  # macOS has no such call
+            return cls(subprocess.Popen(argv, start_new_session=True, **popen_kwargs))
+        # An affinity mask is per thread and inherited across fork, so the
+        # calling thread wears the child's mask for the length of the spawn.
+        # That pins the child from its first instruction -- setting it on the
+        # pid afterwards would miss any thread it had already started -- and
+        # needs no `preexec_fn`, which is not safe in a threaded parent.
+        before = os.sched_getaffinity(0)
+        try:
+            os.sched_setaffinity(0, set(cpus))
+        except OSError:  # a CPU outside this process's cpuset: run unpinned
+            return cls(subprocess.Popen(argv, start_new_session=True, **popen_kwargs))
+        try:
+            return cls(subprocess.Popen(argv, start_new_session=True, **popen_kwargs))
+        finally:
+            os.sched_setaffinity(0, before)
 
     def watch_interval(self) -> float:
         return float("inf")  # nothing to watch: the group is the container
@@ -224,9 +272,14 @@ class _WindowsTree:  # pragma: no cover - exercised on Windows only
         self._pinned: dict[int, tuple[int, int]] = {proc.pid: (root, _created(root))}
 
     @classmethod
-    def spawn(cls, argv: list[str], popen_kwargs: dict[str, Any]) -> "_WindowsTree":
+    def spawn(
+        cls, argv: list[str], popen_kwargs: dict[str, Any], cpus: tuple[int, ...] = ()
+    ) -> "_WindowsTree":
         proc = subprocess.Popen(argv, creationflags=_CREATE_SUSPENDED, **popen_kwargs)
         job = _open_job(proc)
+        # While it is still suspended: a process's mask is inherited by every
+        # process it starts, so the whole tree is pinned from its first instruction.
+        _pin(proc, cpus)
         if not _resume(proc):
             # A process that cannot be resumed can never finish. Start it the
             # plain way rather than make evaluation impossible; watching the
@@ -237,6 +290,7 @@ class _WindowsTree:  # pragma: no cover - exercised on Windows only
                 _close_handle(job)
             proc = subprocess.Popen(argv, **popen_kwargs)
             job = _open_job(proc)
+            _pin(proc, cpus)
         tree = cls(proc, job)
         tree.watch()
         return tree
@@ -308,6 +362,7 @@ def _kernel32() -> Any:  # pragma: no cover - Windows only
         "CloseHandle": (bool_, [handle]),
         "OpenProcess": (handle, [dword, bool_, dword]),
         "TerminateProcess": (bool_, [handle, wintypes.UINT]),
+        "SetProcessAffinityMask": (bool_, [handle, ctypes.c_size_t]),
         "GetProcessTimes": (bool_, [handle] + [wintypes.LPVOID] * 4),
         "CreateToolhelp32Snapshot": (handle, [dword, dword]),
         "Process32FirstW": (bool_, [handle, wintypes.LPVOID]),
@@ -371,6 +426,19 @@ def _open_job(proc: subprocess.Popen) -> Any | None:  # pragma: no cover
         return job
     except (OSError, AttributeError, ValueError):
         return None
+
+
+def _pin(proc: subprocess.Popen, cpus: tuple[int, ...]) -> bool:  # pragma: no cover - Windows only
+    """Restrict `proc` (and whatever it starts from now on) to `cpus`."""
+    if not cpus:
+        return False
+    mask = 0
+    for cpu in cpus:
+        mask |= 1 << cpu
+    try:
+        return bool(_kernel32().SetProcessAffinityMask(int(proc._handle), mask))  # type: ignore[attr-defined]
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def _resume(proc: subprocess.Popen) -> bool:  # pragma: no cover - Windows only

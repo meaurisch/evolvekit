@@ -26,7 +26,7 @@ from typing import Callable, Sequence
 
 from evolvekit import __version__
 from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
-from evolvekit.candidate import Candidate, extract_block, splice_block
+from evolvekit.candidate import SEED_OPERATOR, Candidate, extract_block, splice_block
 from evolvekit.config import Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
@@ -52,8 +52,6 @@ from evolvekit.search.params import has_params
 from evolvekit.search.scratchpad import Scratchpad
 
 __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
-
-SEED_OPERATOR = "human-seed"
 
 
 def _random_stream(seed: int, recorded: int) -> random.Random:
@@ -236,8 +234,13 @@ class Driver:
                     "timeout_s": stage.timeout,
                     "seeds": stage.seeds,
                     "promote": stage.promote.describe(),
-                    "holdout": bool(stage.private_inputs),
+                    "holdout": bool(stage.private_inputs or stage.private_instances),
                     "final": stage.id == final,
+                    "instances": list(stage.instance_names()),
+                    "normalize": stage.normalize if stage.fans_out else None,
+                    "workers": stage.workers,
+                    "pin_cpus": list(stage.pin_cpus),
+                    "retries": stage.retries,
                 }
                 for stage in config.evaluate.stages
             ],

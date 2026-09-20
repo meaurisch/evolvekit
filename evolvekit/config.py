@@ -8,7 +8,8 @@ exists to avoid.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -356,6 +357,7 @@ class PromoteRule:
 
 
 STAGE_KINDS = ("builtin-static", "command")
+NORMALIZE_MODES = ("baseline", "none")
 
 
 @dataclass(frozen=True)
@@ -382,10 +384,50 @@ class StageConfig:
     plus a per-KPI coefficient of variation, which is the difference between
     "this candidate is better" and "this candidate got a good roll".
     """
+    instances: tuple[str, ...] = ()
+    """Run the command once per instance (and per seed), `{instance}` set to
+    each in turn, instead of once for the whole set. The framework then knows
+    what the evaluator otherwise keeps to itself: which instance a failure
+    happened on, how every instance compares with the baseline, and that the
+    runs are independent -- so they can be spread over `workers`, retried one
+    at a time, and found again after a crash. A pattern (`data/*.vrp`) is
+    expanded relative to the config file; anything else is handed over as it
+    is written, so an instance does not have to be a file."""
+    private_instances: tuple[str, ...] = ()
+    """The hold-out counterpart of `instances`, as `private_inputs` is of `inputs`."""
+    workers: int = 1
+    """How many instance runs are in flight at once. For a time-limited solver
+    this is a statement about the *objective*: two runs sharing a core each get
+    less done in their time limit than they would alone. Never more than the
+    machine has physical cores to give; see `pin_cpus`."""
+    pin_cpus: tuple[int, ...] = ()
+    """Logical CPUs to pin the workers to, one each. With simultaneous
+    multithreading, naming one logical CPU per physical core (`[2, 4, 6]`)
+    keeps two runs from sharing a core, and leaving a core out keeps one free
+    for the operating system and for evolvekit itself."""
+    retries: int = 0
+    """Run a failed instance run again, this many times, before the stage
+    fails. For the solver that crashes once in a hundred runs."""
+    normalize: str = "baseline"
+    """How per-instance values of the objective combine (`instances` only).
+    `baseline`: each instance counts as a percentage of what the seed candidate
+    reached on it, so the seed scores 100 and an instance ten times the size of
+    the others does not decide the search on its own. `none`: the plain mean."""
 
     @property
     def stochastic(self) -> bool:
         return self.seeds > 1
+
+    @property
+    def fans_out(self) -> bool:
+        return bool(self.instances)
+
+    def instance_names(self, private: bool = False) -> tuple[str, ...]:
+        """Short names for `instances`, for people: the file's stem when that
+        tells them apart, the entry as written when it does not."""
+        entries = self.private_instances if private else self.instances
+        stems = tuple(Path(entry.replace("\\", "/")).stem or entry for entry in entries)
+        return stems if len(set(stems)) == len(stems) else tuple(entries)
 
     @staticmethod
     def parse(raw: Any, index: int) -> "StageConfig":
@@ -402,6 +444,12 @@ class StageConfig:
             "import_check",
             "max_per_day",
             "seeds",
+            "instances",
+            "private_instances",
+            "workers",
+            "pin_cpus",
+            "retries",
+            "normalize",
         }
         _reject_unknown(data, known, path)
         stage_id = _as_str(_require(data, "id", path), f"{path}.id")
@@ -434,10 +482,80 @@ class StageConfig:
                     "has no {seed} placeholder, so every run would be identical; "
                     "add {seed} to the command or set seeds: 1"
                 )
+        instances = tuple(
+            _as_str(v, f"{path}.instances[{i}]")
+            for i, v in enumerate(_as_list(data.get("instances"), f"{path}.instances"))
+        )
+        private_instances = tuple(
+            _as_str(v, f"{path}.private_instances[{i}]")
+            for i, v in enumerate(
+                _as_list(data.get("private_instances"), f"{path}.private_instances")
+            )
+        )
+        workers = _as_int(data.get("workers", 1), f"{path}.workers", minimum=1)
+        retries = _as_int(data.get("retries", 0), f"{path}.retries", minimum=0)
+        pin_cpus = tuple(
+            _as_int(v, f"{path}.pin_cpus[{i}]", minimum=0)
+            for i, v in enumerate(_as_list(data.get("pin_cpus"), f"{path}.pin_cpus"))
+        )
+        normalize = _as_str(data.get("normalize", "baseline"), f"{path}.normalize")
+        if normalize not in NORMALIZE_MODES:
+            raise ConfigError(
+                f"{path}.normalize: must be one of {list(NORMALIZE_MODES)}, got {normalize!r}"
+            )
+        if instances:
+            if kind != "command":
+                raise ConfigError(
+                    f"{path}.instances: only a 'command' stage runs per instance; "
+                    f"stage {stage_id!r} is {kind!r}"
+                )
+            if "{instance}" not in command:
+                raise ConfigError(
+                    f"{path}.instances: {len(instances)} instance(s) are listed but the "
+                    "command has no {instance} placeholder, so every run would solve the "
+                    "same thing; add {instance} to the command"
+                )
+        else:
+            if "{instance}" in command:
+                raise ConfigError(
+                    f"{path}.command: uses {{instance}} but the stage lists no `instances`"
+                )
+            for key, given in (
+                ("private_instances", bool(private_instances)),
+                ("workers", workers > 1),
+                ("pin_cpus", bool(pin_cpus)),
+                ("retries", retries > 0),
+            ):
+                if given:
+                    raise ConfigError(
+                        f"{path}.{key}: only applies to a stage that lists `instances` -- "
+                        "the runs of such a stage are independent, which is what makes "
+                        "them safe to spread, retry and hold out"
+                    )
+        if pin_cpus:
+            if len(set(pin_cpus)) != len(pin_cpus):
+                raise ConfigError(f"{path}.pin_cpus: lists a CPU twice: {list(pin_cpus)}")
+            if len(pin_cpus) < workers:
+                raise ConfigError(
+                    f"{path}.pin_cpus: {workers} workers cannot each have a CPU of their "
+                    f"own out of {len(pin_cpus)}; list at least {workers} or lower `workers`"
+                )
+            available = os.cpu_count()
+            if available is not None and max(pin_cpus) >= available:
+                raise ConfigError(
+                    f"{path}.pin_cpus: CPU {max(pin_cpus)} does not exist on this machine "
+                    f"(it has {available}, numbered from 0)"
+                )
         return StageConfig(
             id=stage_id,
             kind=kind,
             command=command,
+            instances=instances,
+            private_instances=private_instances,
+            workers=workers,
+            pin_cpus=pin_cpus,
+            retries=retries,
+            normalize=normalize,
             inputs=tuple(
                 _as_str(v, f"{path}.inputs[{i}]")
                 for i, v in enumerate(_as_list(data.get("inputs"), f"{path}.inputs"))
@@ -1255,7 +1373,50 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
     )
     _check_embedding_route(config)
     _check_parameter_placeholders(config)
-    return config
+    return _expand_instance_patterns(config)
+
+
+def _expand_instance_patterns(config: Config) -> Config:
+    """`data/*.vrp` means the files that are there; say so now if there are none.
+
+    Only an entry with a wildcard is looked up. Anything else is handed to the
+    command as written, because an instance need not be a file: a benchmark
+    name the solver resolves itself is as good.
+    """
+
+    def expand(entries: tuple[str, ...], path: str) -> tuple[str, ...]:
+        expanded: list[str] = []
+        for index, entry in enumerate(entries):
+            if not any(ch in entry for ch in "*?["):
+                expanded.append(entry)
+                continue
+            matches = sorted(
+                p.relative_to(config.base_dir).as_posix() for p in config.base_dir.glob(entry)
+            )
+            if not matches:
+                raise ConfigError(
+                    f"{path}[{index}]: the pattern {entry!r} matches no file under "
+                    f"{config.base_dir}"
+                )
+            expanded.extend(matches)
+        duplicates = sorted({e for e in expanded if expanded.count(e) > 1})
+        if duplicates:
+            raise ConfigError(f"{path}: lists {duplicates[0]!r} more than once")
+        return tuple(expanded)
+
+    stages = tuple(
+        replace(
+            stage,
+            instances=expand(stage.instances, f"evaluate.stages[{i}].instances"),
+            private_instances=expand(
+                stage.private_instances, f"evaluate.stages[{i}].private_instances"
+            ),
+        )
+        if stage.fans_out
+        else stage
+        for i, stage in enumerate(config.evaluate.stages)
+    )
+    return replace(config, evaluate=replace(config.evaluate, stages=stages))
 
 
 PARAMETER_PLACEHOLDERS = ("{params}", "{params_json}")

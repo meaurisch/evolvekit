@@ -50,6 +50,9 @@ class StageOutcome:
     stdout_log: str = ""
     stderr_log: str = ""
     """Where the run's complete output was kept (`evaluate/process.py`)."""
+    instance_names: tuple[str, ...] = ()
+    """For a stage that runs per instance: the instances, in the order of every
+    `<kpi>_per_instance` list in `vector_kpis`."""
 
 
 @dataclass

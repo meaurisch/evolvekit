@@ -534,12 +534,16 @@ function renderHealth(doc) {
         : gens.some((g) => g.state === "current") ? h("span", null, h("i", { style: { width: "12px", height: "10px", boxShadow: "inset 0 0 0 1.5px var(--critical)", borderRadius: "3px" } }), "where the run stopped") : null,
       h("span", null, h("i", { style: { width: "12px", height: "10px", boxShadow: "inset 0 0 0 1px var(--hair-strong)", borderRadius: "3px" } }), "planned"),
       gens.some((g) => g.failed) ? h("span", null, h("i", { style: { width: "12px", height: "12px", background: "var(--critical)", borderRadius: "6px" } }), "failed evaluations") : null))) : null;
-  const flights = he.in_flight || [];
-  const flight = h("div", { class: "sub" }, h("h3", null, "In flight now"),
+  const flights = he.in_flight || [], st = he.stage;
+  // A stage of a slow solver is most of a generation: say how long the bar is.
+  const stageLine = st ? h("div", { class: "flight-row", style: { marginBottom: "10px" } },
+    h("div", { class: "who" }, h("b", null, "stage " + st.id + (st.private ? " (hold-out)" : "")), ` · ${st.runs_done} of ${st.runs_planned} runs` + (st.candidates > 1 ? ` for ${st.candidates} candidates` : "") + (st.workers > 1 ? ` · ${st.workers} at a time` : "") + (st.candidates_out ? ` · ${st.candidates_out} candidate(s) out` : "")),
+    h("div", { class: "t" }, isNum(st.remaining_s) ? "about " + dur(st.remaining_s) + " left" : ""), meter(st.runs_planned ? st.runs_done / st.runs_planned : 0, "")) : null;
+  const flight = h("div", { class: "sub" }, h("h3", null, "In flight now"), stageLine,
     flights.length ? h("div", { class: "flight" }, flights.map((f) => {
       const ratio = f.timeout_s ? f.running_s / f.timeout_s : 0;
       return h("div", { class: "flight-row" },
-        h("div", { class: "who" }, h("b", { class: "id" }, f.candidate_id), " · stage " + f.stage + " · seed " + f.seed + (f.private ? " · hold-out" : "")),
+        h("div", { class: "who" }, h("b", { class: "id" }, f.candidate_id), " · stage " + f.stage + (f.instance != null ? " · " + f.instance : "") + " · seed " + f.seed + (f.attempt ? " · attempt " + (f.attempt + 1) : "") + (f.private ? " · hold-out" : "")),
         h("div", { class: "t" }, dur(f.running_s) + " of " + dur(f.timeout_s)), meter(ratio, ratioClass(ratio)));
     })) : h("div", { class: "note" }, he.state === "running" ? "Between evaluations: breeding the next children." : "Nothing: the run is not running."));
   const limits = h("div", { class: "sub" }, h("h3", null, "Stopping criteria"),
@@ -593,7 +597,7 @@ function drawProgress(doc, width) {
     svg.append(s("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: "var(--grid)" }),
                s("text", { x: m.l - 8, y: Y(t) + 4, "text-anchor": "end" }, num(t)));
   }
-  svg.append(s("text", { x: m.l, y: 11, class: "lbl" }, (doc.objective?.name || "objective") + (minimize ? "  ·  ↓ lower is better" : "  ·  ↑ higher is better")));
+  svg.append(s("text", { x: m.l, y: 11, class: "lbl" }, (doc.objective?.name || "objective") + (doc.objective?.unit ? " (" + doc.objective.unit + ")" : "") + (minimize ? "  ·  ↓ lower is better" : "  ·  ↑ higher is better")));
   const gStep = Math.max(1, Math.ceil(lastGen / Math.max(3, Math.floor((W - m.l - m.r) / 52))));
   for (let g = 0; g <= lastGen; g += gStep) svg.append(s("text", { x: X(g), y: H - m.b + 16, "text-anchor": "middle" }, g));
   svg.append(s("text", { x: W - m.r, y: H - m.b + 32, "text-anchor": "end" }, "generation →"),
@@ -688,7 +692,7 @@ function renderProgress(doc) {
     : holder;
   const legend = h("div", { class: "legend" },
     h("span", null, h("i", { style: { width: "18px", height: "2px", background: "var(--accent)" } }), "best so far", (pr.series || []).some((p) => p.sem) ? " (band: ± 1 standard error)" : ""),
-    h("span", null, h("i", { style: { width: "9px", height: "9px", borderRadius: "50%", background: "var(--ink-3)" } }), "fully evaluated candidate, ± 1 sd across seeds"),
+    h("span", null, h("i", { style: { width: "9px", height: "9px", borderRadius: "50%", background: "var(--ink-3)" } }), "fully evaluated candidate" + (pr.spread?.available === false ? "" : ", ± 1 sd across " + (pr.spread?.across || "seeds"))),
     h("span", null, h("i", { style: { width: "11px", height: "11px", borderRadius: "50%", background: "var(--accent)" } }), "current best"),
     h("span", null, h("i", { style: { width: "18px", height: "1px", background: "var(--ink-3)" } }), "baseline (the seed)"),
     h("span", null, "✕ failed · ○ not promoted: counted per generation, never plotted"));
@@ -826,13 +830,13 @@ function renderInstances(doc) {
   const mean = rows.reduce((a, r) => a + (r.improvement_pct || 0), 0) / (rows.length || 1);
   const summary = h("div", { class: "sum" }, h("span", null, h("b", { class: "up-t" }, ins.wins), " wins"), h("span", null, h("b", { class: "down-t" }, ins.losses), " losses"),
     h("span", null, h("b", null, ins.ties), " ties"), h("span", null, "mean ", h("b", null, pct(mean))),
-    h("span", { class: "note" }, `${ins.best_id} against ${ins.baseline_id}, from the list KPI “${ins.kpi}”`));
+    h("span", { class: "note" }, `${ins.best_id} against ${ins.baseline_id}, ` + (ins.rows.some((r) => r.name != null) ? `${ins.kpi}, one run per instance and seed` : `from the list KPI “${ins.kpi}”`)));
   const body = ui.instTable
     ? h("div", { class: "scroll" }, h("table", null, h("thead", null, h("tr", null, h("th", null, "instance"), h("th", { class: "num" }, "baseline"), h("th", { class: "num" }, "best"), h("th", { class: "num" }, "improvement"))),
-        h("tbody", null, rows.map((r) => h("tr", null, h("td", null, "#" + r.instance), h("td", { class: "num" }, num(r.baseline)), h("td", { class: "num" }, num(r.best)),
+        h("tbody", null, rows.map((r) => h("tr", null, h("td", null, r.name ?? "#" + r.instance), h("td", { class: "num" }, num(r.baseline)), h("td", { class: "num" }, num(r.best)),
           h("td", { class: "num " + ((r.improvement_pct || 0) > 0 ? "up-t" : (r.improvement_pct || 0) < 0 ? "down-t" : "") }, pct(r.improvement_pct)))))))
     : h("div", { class: "inst", style: { "--zero": zero + "%" } }, rows.map((r) => { const v = r.improvement_pct || 0, w = Math.abs(v) / range * 100;
-        return h("div", { class: "inst-row", title: `baseline ${num(r.baseline)} → best ${num(r.best)}` }, h("div", { class: "nm" }, "instance #" + r.instance),
+        return h("div", { class: "inst-row", title: `baseline ${num(r.baseline)} → best ${num(r.best)}` }, h("div", { class: "nm", title: r.name ?? "" }, r.name ?? "instance #" + r.instance),
           h("div", { class: "div" }, v ? h("i", { class: v > 0 ? "w" : "l", style: { width: w + "%" } }) : null), h("div", { class: "v " + (v > 0 ? "up-t" : v < 0 ? "down-t" : "") }, pct(v))); }));
   return [head, summary, body, h("div", { class: "legend" }, h("span", null, h("i", { style: { width: "12px", height: "10px", background: "var(--accent)", borderRadius: "2px" } }), "better than the baseline"),
     h("span", null, h("i", { style: { width: "12px", height: "10px", background: "var(--worse)", borderRadius: "2px" } }), "worse"))];
@@ -846,11 +850,11 @@ function renderFailures(doc) {
   const reasons = doc.health?.evaluations?.failure_reasons || [];
   return [head, reasons.length ? h("div", { class: "reasons" }, reasons.slice(0, 8).map((r) => h("span", { class: "reason" }, h("b", null, r.count + "×"), h("span", null, r.failure + " · stage " + r.stage)))) : null,
     h("div", { class: "scroll" }, h("table", null,
-    h("thead", null, h("tr", null, ["when", "kind", "candidate", "stage", "seed", "what happened", "took"].map((t, i) => h("th", { class: i === 6 || i === 4 ? "num" : "" }, t)))),
+    h("thead", null, h("tr", null, ["when", "kind", "candidate", "stage", "seed", "what happened", "took"].map((t, i) => h("th", { class: i === 6 || i === 4 ? "num" : "" }, t === "stage" && list.some((f) => f.instance != null) ? "stage · instance" : t)))),
     h("tbody", null, list.slice(0, 200).map((f, i) => h("tr", { class: "click", tabindex: 0, onclick: () => openFailure(i), onkeydown: (e) => { if (e.key === "Enter") openFailure(i); } },
       h("td", { style: { whiteSpace: "nowrap" } }, when(f.ts)), h("td", null, h("span", { class: "chip bad" }, f.kind)), h("td", { class: "id" }, f.candidate_id || "–"),
-      h("td", null, (f.stage || "–") + (f.holdout ? " · hold-out" : "")), h("td", { class: "num" }, f.seed ?? "–"),
-      h("td", null, h("div", { class: "clip" }, f.failure || "–")), h("td", { class: "num" }, dur(f.duration_s)))))))];
+      h("td", null, (f.stage || "–") + (f.instance != null ? " · " + f.instance : "") + (f.holdout ? " · hold-out" : "")), h("td", { class: "num" }, f.seed ?? "–"),
+      h("td", null, h("div", { class: "clip" }, f.recovered ? h("span", { class: "chip", title: "The same run was tried again and went through: this cost time, not the evaluation" }, "retried ✓") : null, f.recovered ? " " : "", f.failure || "–")), h("td", { class: "num" }, dur(f.duration_s)))))))];
 }
 
 /* -------------------------------------------------------------- candidates */
@@ -923,7 +927,7 @@ function copyButton(text, label = "Copy") { const b = h("button", { class: "ghos
 function quote(argv) { return (argv || []).map((a) => /[\s"']/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a).join(" "); }
 function logLink(path, label) { return !path || EMBEDDED ? null : h("a", { href: "api/log?path=" + encodeURIComponent(path), target: "_blank", rel: "noopener" }, label); }
 function evaluationBlock(e) {
-  return h("div", null, h("dl", { class: "kv" }, h("dt", null, "run"), h("dd", null, `stage ${e.stage} · seed ${e.seed}` + (e.private ? " · hold-out" : "") + ` · ${dur(e.duration_s)} · `, h("span", { class: "chip " + (e.ok ? "ok" : "bad") }, e.ok ? "ok" : e.failure || "failed")),
+  return h("div", null, h("dl", { class: "kv" }, h("dt", null, "run"), h("dd", null, `stage ${e.stage}` + (e.instance != null ? ` · ${e.instance}` : "") + ` · seed ${e.seed}` + (e.attempt ? ` · attempt ${e.attempt + 1}` : "") + (e.private ? " · hold-out" : "") + ` · ${dur(e.duration_s)} · `, h("span", { class: "chip " + (e.ok ? "ok" : "bad") }, e.ok ? "ok" : e.failure || "failed")),
       e.ok ? [h("dt", null, "KPIs"), h("dd", { class: "mono", style: { fontSize: "12px" } }, Object.entries(e.kpis || {}).map(([k, v]) => `${k}=${num(v)}`).join("  "))] : null,
       h("dt", null, "logs"), h("dd", null, logLink(e.stderr_log, "stderr"), " ", logLink(e.stdout_log, "stdout"), EMBEDDED ? h("span", { class: "note" }, e.stderr_log || "") : null)),
     e.argv?.length ? h("div", { class: "cmd", style: { marginTop: "8px" } }, h("pre", { class: "code" }, quote(e.argv)), copyButton(quote(e.argv))) : null,
@@ -934,7 +938,7 @@ function openFailure(index) {
   openDrawer((f.kind === "evaluation" ? "Failed evaluation" : f.kind === "static" ? "Rejected by the static stage" : "Response could not be applied") + " · " + (f.candidate_id || ""),
     [h("span", { class: "chip bad" }, f.failure || f.kind)],
     [h("dl", { class: "kv" }, h("dt", null, "when"), h("dd", null, when(f.ts)), h("dt", null, "candidate"), h("dd", null, h("a", { href: "#", onclick: (e) => { e.preventDefault(); openCandidate(f.candidate_id); } }, f.candidate_id), f.generation != null ? " · generation " + f.generation : ""),
-       f.stage ? [h("dt", null, "where"), h("dd", null, `stage ${f.stage}` + (f.seed != null ? ` · seed ${f.seed}` : "") + (f.holdout ? " · hold-out inputs" : ""))] : null,
+       f.stage ? [h("dt", null, "where"), h("dd", null, `stage ${f.stage}` + (f.instance != null ? ` · instance ${f.instance}` : "") + (f.seed != null ? ` · seed ${f.seed}` : "") + (f.attempt ? ` · attempt ${f.attempt + 1}` : "") + (f.holdout ? " · hold-out inputs" : "") + (f.recovered ? " · a retry went through" : ""))] : null,
        h("dt", null, "what"), h("dd", null, f.failure || "–"), isNum(f.duration_s) ? [h("dt", null, "took"), h("dd", null, dur(f.duration_s))] : null),
      f.argv?.length ? h("div", null, h("h3", null, "Command — run it yourself to reproduce"), h("div", { class: "cmd" }, h("pre", { class: "code" }, quote(f.argv)), copyButton(quote(f.argv)))) : null,
      f.stderr_tail ? h("div", null, h("h3", null, "stderr (tail)"), h("pre", { class: "log" }, f.stderr_tail), h("div", { class: "note", style: { marginTop: "6px" } }, logLink(f.stderr_log, "full stderr"), " ", logLink(f.stdout_log, "full stdout"))) : null,
