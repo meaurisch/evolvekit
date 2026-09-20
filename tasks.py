@@ -1,4 +1,4 @@
-"""Uniform entry points: python tasks.py test|full|run|check.
+"""Uniform entry points: python tasks.py test|full|run|check|lint.
 
 `test` is the fast loop for local iteration: everything except tests marked
 `slow` (driver-level runs and a couple of timing-sensitive ones), which was
@@ -56,10 +56,20 @@ def run():
     )
 
 
+def lint():
+    """Undefined names, unused imports and variables, syntax errors: the rules
+    that only ever find mistakes. Style is not checked, on purpose -- adopting a
+    formatter is a decision for the whole repository, not for a drive-by."""
+    paths = [p for p in ("evolvekit", "tests", "examples", "benchmarks", "tasks.py") if (ROOT / p).exists()]
+    return subprocess.call(
+        [sys.executable, "-m", "ruff", "check", "--select", "F,E9", *paths], cwd=str(ROOT)
+    )
+
+
 def check():
     return full()
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
-    sys.exit({"test": test, "full": full, "run": run, "check": check}[cmd]())
+    sys.exit({"test": test, "full": full, "run": run, "check": check, "lint": lint}[cmd]())

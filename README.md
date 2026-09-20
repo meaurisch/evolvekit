@@ -857,7 +857,9 @@ either way.
 
 ### Exit codes of `run`
 
-`0` the run ended as planned (generations exhausted, a stop rule, the budget). `1` an error.
+`0` the run ended as planned (generations exhausted, a stop rule, the budget — including
+`budget.max_full_evals_per_day`, which *stops* the run once no candidate can reach the final stage
+any more today; run the same command again tomorrow, or raise the cap). `1` an error.
 `2` a config error. `3` the run directory is locked by a live run. `4` **aborted**: the seed
 failed its own evaluation, or the model backend kept failing — nothing was searched, and a
 wrapper script, a CI step or an agent must not take that for a finished search. The reason

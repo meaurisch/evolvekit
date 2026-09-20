@@ -14,8 +14,6 @@ import pytest
 
 from evolvekit.config import load_config
 from evolvekit.leaderboard import novelty_counts, render_html, render_markdown
-from evolvekit.ledger import Ledger
-from evolvekit.prompts import build_messages, system_prompt
 from evolvekit.search.driver import Driver
 from evolvekit.search.lhs import latin_hypercube, sweep_params
 

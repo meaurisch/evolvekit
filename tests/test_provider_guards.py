@@ -9,7 +9,6 @@ bred 22 more children into the dead backend, each recorded as "rejected".
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
