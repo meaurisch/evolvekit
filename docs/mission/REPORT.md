@@ -18,7 +18,7 @@ working notes are next to this file.
 
 ## 1. What was built
 
-27 pull requests, #13–#39. Bug fixes started from a failing test; features are
+29 pull requests, #13–#41. Bug fixes started from a failing test; features are
 stacked, and each PR names a compare link that shows its own diff.
 
 ### Observability
@@ -41,7 +41,8 @@ stacked, and each PR names a compare link that shows its own diff.
 | #16 #17 #18 | budget and patience survive a resume; a run killed in generation 1 can be resumed; a resumed run does not replay its random stream |
 | #25 | `retries` per run; a candidate that failed for good stops costing |
 | #28 | **a run that dies mid-generation loses what was in flight**: evaluation cache + children written down before they are evaluated |
-| #35 #37 #39 | `run` exits 4 when it aborted; the daily cap stops the run instead of burning generations; a run directory belongs to one problem |
+| #35 #37 #39 #40 | `run` exits 4 when it aborted; the daily cap stops the run instead of burning generations; a run directory belongs to one problem; a resumed run finishes its plan instead of starting another |
+| #41 | **racing**: a candidate clearly behind the best after *k* instances stops costing |
 | #32 | `preflight` repeats a failed command's last words |
 
 ### Result quality
@@ -128,7 +129,7 @@ improvement is real — including, if that is how it comes out, that it is not.
 ## 5. Friction log
 
 `FRICTION_LOG.md`: 63 items found by six docs-only "new user" personas and by me
-before any fix was started. As of this draft: **39 fixed, 7 partly, 17 open**,
+before any fix was started. As of this draft: **40 fixed, 7 partly, 16 open**,
 each with the PR that did it. All six items rated *blocker* (R-01, R-02, R-03,
 Q-01, Q-02, Q-06) are among the fixed. The open ones are mostly documentation
 and small CLI items, plus
@@ -163,7 +164,7 @@ with no adapter (D18); nothing else on the machine during the run (D20).
 
 1. Review and merge the fix PRs #13–#18, #22, #29, #32, #35, #37, #38, #39: small, independent in spirit, each with its failing test.
 2. The observability stack #19 → #20 → #21, then #24 → #25 → #26 (the generic-user path), then #27, #28, #31, #33, #34, #36.
-3. Racing: stop a candidate that is already clearly behind after *k* instances. The per-instance runner already orders runs instance by instance across candidates, which is the order racing needs; on this benchmark it would save most of the 100 CPU-minutes of every losing full evaluation.
+3. Use racing (#41) in the next tuning run — it was written while this one was already going — and replace its fixed margin by a sequential test once there is data on how noisy paired differences are.
 4. Re-evaluate the incumbent on a second seed when it changes (intensification), so the search itself is less exposed to a lucky seed — today only `confirm` protects against that.
 5. R-10, R-12, R-07 and the documentation items in the friction log.
 6. One page that states the whole evaluator contract (G-10).

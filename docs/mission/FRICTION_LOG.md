@@ -47,7 +47,7 @@ made a broken candidate the run's "best", and at no point could they tell from
 outside whether the run was alive.
 
 
-> **Status as of 2026-09-20** (PR numbers refer to github.com/meaurisch/evolvekit): 39 of 63 items fixed, 7 partly, 17 open. "Fixed" means: in an open pull request, with tests, merged into `integration/expensive-tuning` -- none is merged into `master`.
+> **Status as of 2026-09-20** (PR numbers refer to github.com/meaurisch/evolvekit): 40 of 63 items fixed, 7 partly, 16 open. "Fixed" means: in an open pull request, with tests, merged into `integration/expensive-tuning` -- none is merged into `master`.
 
 ## A. Observability
 
@@ -85,7 +85,7 @@ outside whether the run was alive.
 | R-07 | major | 1 | Resume reuses candidate ids: traces are overwritten, stale candidate files sit under the same id, and per-candidate USD is double-attributed. | **part** #28 -- an interrupted generation is adopted under its own ids; a generation that was *recorded* partially still re-uses ids. open |
 | R-08 | major | 3 | Resume replays the `param_lhs` random stream: 89 of 100 (then 20 of 20) children of a resumed run were rejected as structural duplicates. Two runs with the same `search.seed` draw identical candidates. | **fixed** #18 |
 | R-09 | major | 3 | No retry and no tolerance for a flaky evaluator. One transient failure writes the candidate off at `failure_score` for good; on a `seeds: 3` stage a failure on seed 1 discards the finished seed-0 run. There is no way to mark a failure as infrastructure. | **fixed** #25 -- `retries`, per run, with every attempt's logs kept |
-| R-10 | minor | 4 | `search.generations` / `--generations` mean "N more" on resume, undocumented: a 6-generation run that crashed in generation 3 ran to generation 8; re-running a *finished* run buys N more. `--generations` has no help text and accepts negative values. | open -- `generations` still means "N more" on resume (documented nowhere) |
+| R-10 | minor | 4 | `search.generations` / `--generations` mean "N more" on resume, undocumented: a 6-generation run that crashed in generation 3 ran to generation 8; re-running a *finished* run buys N more. `--generations` has no help text and accepts negative values. | **fixed** #40 -- `search.generations` is the plan for the run directory; `--generations K` means K more |
 | R-11 | minor | 4 | `run` exits 0 for every stop reason, including `ABORT: seed failed evaluation`. Only `preflight`'s exit codes are documented. | **fixed** #35 -- `run` exits 4 when it aborted; exit codes documented |
 | R-12 | major | 1 | Nothing stops a run in which every child fails evaluation; adaptive breadth even *grows*, so it spends faster. | open -- nothing stops a run in which every child fails (the dashboard now makes it obvious: failed evaluations tile, failure reasons) |
 | R-13 | minor | 2 | A missing `fake_responses.yaml` is a raw Python traceback mid-run; `preflight` does not check for it and says "clean". | open |

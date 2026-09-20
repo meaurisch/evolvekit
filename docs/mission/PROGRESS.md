@@ -21,6 +21,21 @@ each section.
 | [#24](https://github.com/meaurisch/evolvekit/pull/24) | `feat/typed-parameters` (on #21 + #22) | `problem.parameters`: typed space, generated skeleton, validation before any solver time, `{params}` / `{params_json}`, `params` as data, typed views in status and dashboard, `#parameter=` links; preflight hands the configuration over | G-02 (input side), G-03, O-06 (values as data), G-05 (part: `<id>.params.json`, "Copy parameters as JSON") |
 | [#25](https://github.com/meaurisch/evolvekit/pull/25) | `feat/instance-fanout` (on #24) | one run per instance: `workers`, `pin_cpus`, `retries`, `normalize: baseline`, `private_instances`, stage progress + ETA, per-instance status by name | G-06, G-07, R-09, Q-10, O-07 (part) |
 | [#26](https://github.com/meaurisch/evolvekit/pull/26) | `feat/foreign-output` (on #25) | `kpis_from: stdout`, flat result objects with metadata, `kpi_patterns` | G-02 (output side) |
+| [#27](https://github.com/meaurisch/evolvekit/pull/27) | `feat/exploiting-operators` (on #26) | `param_local`, `param_cross`, `param_tpe`; `benchmarks/operator_mixes.py` | Q-07 |
+| [#28](https://github.com/meaurisch/evolvekit/pull/28) | `feat/crash-safe-generation` (on #27) | evaluation cache + `pending.json`: a killed run loses what was in flight | R-06, R-07 (part) |
+| [#29](https://github.com/meaurisch/evolvekit/pull/29) | `fix/stage-interpreter` (on #28) | `{python}` | G-09 |
+| [#30](https://github.com/meaurisch/evolvekit/pull/30) | `bench/pyvrp-hard-tuning` (on #29 + #23) | `tuning.yaml`, `tuning.smoke.yaml`, `TUNING_PLAN.md`; results to be added | Goal 2 |
+| [#31](https://github.com/meaurisch/evolvekit/pull/31) | `feat/confirm` (on #29) | `confirm` (paired, interleaved, CI + Wilcoxon, exit code) and `export` | Q-06, Q-08, G-05 |
+| [#32](https://github.com/meaurisch/evolvekit/pull/32) | `fix/preflight-says-why` (on #31) | a failed stage repeats the command's last words | O-16 (part) |
+| [#33](https://github.com/meaurisch/evolvekit/pull/33) | `feat/tune-scaffold` (on #32) | `init --template tune`; `examples/cli-solver/` | G-01, G-02 |
+| [#34](https://github.com/meaurisch/evolvekit/pull/34) | `feat/host-load` (on #33) | `host_busy` per evaluation, flagged in status and dashboard | O-18 |
+| [#35](https://github.com/meaurisch/evolvekit/pull/35) | `fix/run-exit-code` (on #34) | `run` exits 4 when it aborted | R-11 |
+| [#36](https://github.com/meaurisch/evolvekit/pull/36) | `feat/dashboard-from-the-real-run` (on #35) | stage ETA, progress by time, screening agreement, the right "nothing yet" message | dashboard requirements |
+| [#37](https://github.com/meaurisch/evolvekit/pull/37) | `fix/stop-at-the-daily-cap` (on #36) | the run stops at the cap | R-03 |
+| [#38](https://github.com/meaurisch/evolvekit/pull/38) | `chore/lint-gate` (on #37) | `tasks.py lint` in CI; `testpaths` | D8 |
+| [#39](https://github.com/meaurisch/evolvekit/pull/39) | `fix/run-dir-belongs-to-one-problem` (on #38) | a different problem is refused | R-02 |
+| [#40](https://github.com/meaurisch/evolvekit/pull/40) | `fix/resume-finishes-the-plan` (on #39) | `search.generations` is the plan for the directory | R-10 |
+| [#41](https://github.com/meaurisch/evolvekit/pull/41) | `feat/racing` (on #40) | `race: {after, margin_pct}` | tractability |
 
 Stack base for features: `c0bfd0d` = `origin/master` + the six fix branches.
 Every stacked PR names a compare link that shows its own diff.
