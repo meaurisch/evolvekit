@@ -90,7 +90,9 @@ def test_the_page_and_status_json_are_given_the_same_document(server, run_dir):
 def test_the_root_serves_the_page_itself(server):
     status, content_type, body = _get(server, "")
     assert status == 200 and content_type.startswith("text/html")
-    assert body == PAGE.read_text(encoding="utf-8")
+    # Bytes, not `read_text`: a checkout that converts line endings serves CRLF,
+    # and universal newlines would make the file on disk look different from it.
+    assert body == PAGE.read_bytes().decode("utf-8")
 
 
 def test_a_candidate_is_served_with_its_code_and_its_diff(server):
@@ -228,3 +230,13 @@ def test_the_archive_snapshot_is_refreshed_every_generation_not_only_at_the_end(
     Driver(config, run_dir=tmp_path / "run").run(generations=2)
     assert len(seen) >= 3, "one snapshot per generation (the seed's included)"
     assert seen[0] == 1 and seen[-1] > 1
+
+
+def test_css_custom_properties_reach_the_element():
+    """`Object.assign(node.style, {"--zero": ...})` drops a custom property
+    without a word -- the per-instance bars lost their zero line that way and
+    grew out of the page when every instance was a win -- so the element helper
+    has to route `--*` through `setProperty`."""
+    page = PAGE.read_text(encoding="utf-8")
+    assert 'style: { "--' in page, "no custom property is passed any more: this test can go"
+    assert "node.style.setProperty(" in page

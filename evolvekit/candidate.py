@@ -132,6 +132,11 @@ class Candidate:
     """The earlier candidate whose behaviour this one reproduced exactly."""
     behaviour_signatures: dict[str, str] = field(default_factory=dict)
     """One fingerprint per command stage reached, keyed by stage id."""
+    params: dict[str, Any] | None = None
+    """The configuration this candidate resolved to, as data, when the problem
+    declares `problem.parameters`. Validated by the static stage; what the
+    stage commands were given; what `status`, the dashboard and the model-free
+    operators read instead of parsing code."""
     competes: bool = True
     """False when the candidate did not finish the final stage -- a failed
     evaluation, a proxy-only candidate, a final stage skipped by the daily cap,

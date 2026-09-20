@@ -14,6 +14,7 @@ the `# PARAMS:` ranges the block declares (see `search/params.py`).
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 
 from evolvekit.candidate import Candidate
@@ -23,8 +24,15 @@ from evolvekit.evaluate.types import EvalResult
 from evolvekit.prompts import Inspiration, build_messages
 from evolvekit.providers.base import Completion, Provider, ProviderError
 from evolvekit.search.params import param_variant
+from evolvekit.space import ParameterSpace
 
-__all__ = ["OperatorResult", "run_operator", "param_lhs", "OPERATOR_ROLES"]
+__all__ = [
+    "OperatorResult",
+    "run_operator",
+    "param_lhs",
+    "param_lhs_typed",
+    "OPERATOR_ROLES",
+]
 
 OPERATOR_ROLES = {
     "diff": "small",
@@ -138,3 +146,33 @@ def param_lhs(parent: Candidate, *, seed: int, n_variants: int = 6) -> OperatorR
         mode="param_lhs",
         meta={"params": values},
     )
+
+
+def param_lhs_typed(
+    space: ParameterSpace, parent: Candidate, *, seed: int, n_variants: int = 6
+) -> OperatorResult:
+    """The same sweep over a declared `problem.parameters` space.
+
+    Types and scales come from the declaration, so a boolean is flipped rather
+    than frozen, a choice is drawn from its values, and a log-scale parameter is
+    covered decade by decade. The child's block is *rendered* from the sampled
+    values, so it does not matter what shape the parent's code is in.
+    """
+    rng = random.Random(seed)
+    base = parent.params or space.defaults()
+    variants = [v for v in space.latin_hypercube(max(2, n_variants), rng) if v != base]
+    if not variants:  # a space of one point
+        return OperatorResult(
+            operator="param_lhs",
+            messages=[],
+            error="param_lhs found nothing to sweep: every sample equals the parent",
+        )
+    values = variants[seed % len(variants)]
+    return OperatorResult(
+        operator="param_lhs",
+        messages=[],
+        block=space.render_block(values),
+        mode="param_lhs",
+        meta={"params": values},
+    )
+

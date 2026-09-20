@@ -19,6 +19,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, stdev
 from typing import Any, Callable
@@ -32,6 +33,7 @@ __all__ = [
     "run_command_stage",
     "static_checks",
     "build_argv",
+    "Configuration",
     "STDERR_LIMIT",
     "FEEDBACK_LIMIT",
 ]
@@ -116,7 +118,20 @@ def run_static_stage(
     started = time.perf_counter()
     problems, kpis = static_checks(source, problem)
     stderr = ""
-    if not problems and stage.import_check:
+    params: dict[str, Any] | None = None
+    if not problems and problem.parameters is not None:
+        # The candidate has to be run to know what it configures, so the import
+        # check and the resolution are one child interpreter, not two.
+        values, crash = _resolve_parameters(candidate_path, stage.timeout)
+        if crash is not None:
+            problems.append(crash.splitlines()[-1][:200] if crash.strip() else "configure() failed")
+            stderr = crash
+        else:
+            params, invalid = problem.parameters.validate(values)
+            problems.extend(f"configure() returned an invalid configuration -- {p}" for p in invalid)
+            if invalid:
+                params = None
+    elif not problems and stage.import_check:
         crash = _import_check(candidate_path, stage.timeout)
         if crash is not None:
             problems.append(crash.splitlines()[-1][:200] if crash.strip() else "import failed")
@@ -125,6 +140,7 @@ def run_static_stage(
         stage_id=stage.id,
         ok=not problems,
         kpis=kpis,
+        params=params,
         failure="; ".join(problems) if problems else None,
         stderr=stderr[-STDERR_LIMIT:],
         duration_s=time.perf_counter() - started,
@@ -157,6 +173,64 @@ def _import_check(candidate_path: Path, timeout: float) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class Configuration:
+    """A candidate's validated parameters, in the two shapes a command can take
+    them: `--flag value` arguments for `{params}`, a JSON file for
+    `{params_json}`."""
+
+    flags: tuple[str, ...] = ()
+    json_path: Path | None = None
+
+
+def _substitutions(configuration: "Configuration | None") -> dict[str, Any]:
+    if configuration is None:
+        return {}
+    return {"params_flags": list(configuration.flags), "params_json": configuration.json_path}
+
+
+_PARAMS_MARKER = "__EVOLVEKIT_PARAMS__"
+
+
+def _resolve_parameters(
+    candidate_path: Path, timeout: float
+) -> tuple[Any, str | None]:
+    """Import the candidate in a child interpreter and call `configure()`.
+
+    Returns `(values, None)` or `(None, what went wrong)`. The values come back
+    as JSON on a marked line, so anything the candidate prints is harmless.
+    """
+    snippet = (
+        "import importlib.util as u, json, sys;"
+        "spec = u.spec_from_file_location('evolvekit_candidate', sys.argv[1]);"
+        "mod = u.module_from_spec(spec);"
+        "spec.loader.exec_module(mod);"
+        f"print('\\n{_PARAMS_MARKER}' + json.dumps(mod.configure()))"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", snippet, str(candidate_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"configure() timed out after {timeout:g}s"
+    except OSError as exc:  # pragma: no cover - interpreter is always present
+        return None, f"could not start interpreter: {exc}"
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout or "configure() failed").strip()
+    for line in reversed((proc.stdout or "").splitlines()):
+        if line.startswith(_PARAMS_MARKER):
+            try:
+                return json.loads(line[len(_PARAMS_MARKER):]), None
+            except json.JSONDecodeError as exc:
+                return None, f"configure() returned something that is not JSON: {exc}"
+    return None, "configure() returned nothing"
+
+
 def build_argv(
     command: str,
     *,
@@ -164,22 +238,38 @@ def build_argv(
     inputs: tuple[str, ...] | list[str],
     out: Path,
     seed: int = 0,
+    params_flags: list[str] | None = None,
+    params_json: Path | None = None,
 ) -> list[str]:
     """Split the template first, substitute second.
 
     Splitting after substitution would let a Windows path's backslashes be eaten
     by POSIX shlex, and would let a filename with a space become two arguments.
+
+    `{params}` on its own expands to *several* arguments -- one `--flag value`
+    pair per declared parameter -- which is the other reason substitution has
+    to happen after the split. `{params_json}` is the path of a JSON file with
+    the same values, for a solver that would rather read a file.
     """
     tokens = shlex.split(command, posix=True)
     if not tokens:
         raise ValueError("stage command is empty")
+    flags = list(params_flags or [])
     mapping = {
         "candidate": str(candidate),
         "inputs": ",".join(inputs),
         "out": str(out),
         "seed": str(seed),
+        "params": " ".join(flags),
+        "params_json": str(params_json) if params_json is not None else "",
     }
-    return [token.format(**mapping) for token in tokens]
+    argv: list[str] = []
+    for token in tokens:
+        if token == "{params}":
+            argv.extend(flags)
+        else:
+            argv.append(token.format(**mapping))
+    return argv
 
 
 def run_command_stage(
@@ -192,6 +282,7 @@ def run_command_stage(
     private: bool = False,
     required_kpis: tuple[str, ...] = (),
     observer: Observer | None = None,
+    configuration: "Configuration | None" = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -219,6 +310,7 @@ def run_command_stage(
             seed=0,
             required_kpis=required_kpis,
             observer=observer,
+            configuration=configuration,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -232,6 +324,7 @@ def run_command_stage(
             seed=seed,
             required_kpis=required_kpis,
             observer=observer,
+            configuration=configuration,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -320,6 +413,7 @@ def _run_once(
     seed: int = 0,
     required_kpis: tuple[str, ...] = (),
     observer: Observer | None = None,
+    configuration: "Configuration | None" = None,
 ) -> StageOutcome:
     """One evaluator run, announced to `observer` before and after.
 
@@ -337,13 +431,19 @@ def _run_once(
         private=private,
         seed=seed,
         required_kpis=required_kpis,
+        configuration=configuration,
     )
     outcome.stdout_log = str(out_path.with_suffix(".stdout.log"))
     outcome.stderr_log = str(out_path.with_suffix(".stderr.log"))
     try:
         outcome.argv = tuple(
             build_argv(
-                stage.command, candidate=candidate_path, inputs=inputs, out=out_path, seed=seed
+                stage.command,
+                candidate=candidate_path,
+                inputs=inputs,
+                out=out_path,
+                seed=seed,
+                **_substitutions(configuration),
             )
         )
     except (ValueError, KeyError, IndexError):
@@ -383,6 +483,7 @@ def _execute_once(
     private: bool = False,
     seed: int = 0,
     required_kpis: tuple[str, ...] = (),
+    configuration: "Configuration | None" = None,
 ) -> StageOutcome:
     """Run one external evaluator and read the KPI JSON it wrote to `{out}`."""
     started = time.perf_counter()
@@ -395,6 +496,7 @@ def _execute_once(
             inputs=inputs,
             out=out_path,
             seed=seed,
+            **_substitutions(configuration),
         )
     except (ValueError, KeyError, IndexError) as exc:
         return StageOutcome(

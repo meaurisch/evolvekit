@@ -29,9 +29,18 @@ my-problem/
   fake_responses.yaml       # canned LLM responses for offline runs and tests
 ```
 
-## 1. The skeleton
+## 1. The skeleton — or, for a program you only want to configure, none
 
-A normal Python file with the evolvable part fenced:
+**Tuning the configuration of an existing program** (a solver with a command
+line, in any language)? Skip the skeleton and steps 1–2 altogether: declare
+`problem.parameters` — name, type, range, default — and put `{params}` or
+`{params_json}` in the stage command. The defaults are the baseline, every
+configuration is validated before the program is started, and with
+`search.operators: {param_lhs: 1.0}` the run needs no model and no key. The
+program only has to write `{"kpis": {...}}` to the `{out}` path. See
+[Tuning a command](../README.md#tuning-a-command-problemparameters).
+
+Otherwise: a normal Python file with the evolvable part fenced:
 
 ```python
 # EVOLVE-BLOCK-START

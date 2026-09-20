@@ -146,8 +146,9 @@ the [status document](#watching-a-run-status-and-status---json), fetched from
 | **Where does it win and lose?** | a bar per instance, better or worse than the baseline, with wins / losses / ties |
 | **What went wrong?** | failures counted by reason, then one row each; one click opens the stage, seed, exit status, the **command line to reproduce it** (with a copy button), stderr and stdout tails, links to the full logs, and the configuration that was being evaluated |
 
-Every candidate and every failure has an address (`#candidate=g003-c0012`,
-`#failure=0`) that can be pasted into a ticket. `?theme=dark` forces a theme.
+Every candidate, every failure and every parameter's view has an address
+(`#candidate=g003-c0012`, `#failure=0`, `#parameter=penalty`) that can be pasted
+into a ticket. `?theme=dark` forces a theme.
 
 It is built to stay out of the way. The server is `http.server` from the
 standard library, bound to `127.0.0.1`, read-only, and can read nothing outside
@@ -304,6 +305,74 @@ search:
 inherited operator off by giving it a share of `0`. Independently of that,
 `search.big_step_every: 0` switches big steps off in a run that does use a
 model.
+
+### Tuning a command: `problem.parameters`
+
+When what you want tuned is the *configuration* of a program — a solver
+written in C++, Java, Rust, anything with a command line — there is no code to
+evolve and you should not have to write any. Declare the parameters instead of
+a skeleton, and say where they go on the command line:
+
+```yaml
+problem:
+  description: Minimise the mean cost over the test set within the time limit.
+  parameters:
+    neighbours: {type: int, low: 10, high: 120, default: 50, help: arcs kept per client}
+    penalty:    {type: float, low: 1.0e+2, high: 1.0e+6, default: 1.0e+4, log: true}
+    exhaustive: {type: bool, default: true}
+    init:       {type: choice, choices: [greedy, savings, sweep], default: greedy}
+
+evaluate:
+  stages:
+    - {id: static, kind: builtin-static}
+    - id: full
+      kind: command
+      command: ./solver --instance data/a.vrp --out {out} --seed {seed} {params}
+      timeout: 900
+  score: {objective: cost, direction: minimize}
+
+search:
+  operators: {param_lhs: 1.0}      # no `models` section: nothing here calls one
+```
+
+| Placeholder | What the command receives |
+|---|---|
+| `{params}` | one `--name value` pair per parameter: `--neighbours 40 --penalty 5000.0 --exhaustive false --init savings`. An underscore in a name becomes a dash; a boolean is `true`/`false`; `flag: "-n"` on a declaration replaces the generated flag |
+| `{params_json}` | the path of a JSON file with the same values, for a program that would rather read a file |
+
+`{candidate}` is no longer required — there is no module the command would
+want — but a command that mentions neither of the two is refused, because it
+would never see what it is supposed to be tuned with.
+
+What happens to a declaration:
+
+- **The defaults are the baseline.** The seed candidate *is* the declared
+  defaults, so "improvement" always reads "against what the program does out of
+  the box".
+- **The static stage validates every configuration before it costs anything.**
+  An unknown name, a value outside its range, `"yes"` for a boolean: the
+  candidate is rejected with a sentence saying which, and the solver is never
+  started. A parameter a configuration leaves out takes its default.
+- **The configuration is recorded as data.** Each row of `runs.jsonl` carries
+  `params`; `status`, `status --json` and the dashboard read that — the best
+  configuration beside the defaults, the importance of each parameter, where in
+  each range (along a log scale where declared, per value for a boolean or a
+  choice) the search has been — and "Copy parameters as JSON" is the file you
+  hand to your program.
+- **`param_lhs` samples the declared space**: integers stay integers, a
+  log-scale range is covered decade by decade, booleans and choices are swept
+  rather than frozen.
+- **A model can still take part.** Behind the scenes the configuration is a
+  generated `configure()` function that returns a dict, so `diff`, `rewrite`
+  and `big_step` work on it like on any other block, and the prompt lists every
+  parameter with its type, range and `help`. Whatever a model writes, what
+  counts is the dict it returns — validated like any other.
+
+`parameters` and `skeleton` are alternatives: a config names one of them.
+
+| A three-way choice: a slot per value, its mean dashed | A log-scale range, decade by decade |
+|---|---|
+| ![A choice parameter on the dashboard](docs/img/dashboard/parameters-choice-light.png) | ![A log-scale parameter on the dashboard, dark](docs/img/dashboard/parameters-log-dark.png) |
 
 ### The problem description, in named sections
 
