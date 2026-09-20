@@ -405,7 +405,7 @@ def test_a_second_run_on_the_same_directory_resumes_the_archive(tmp_path):
     assert first.grid.members
 
     second = Driver(config, run_dir=run_dir)
-    summary = second.run()
+    summary = second.run(generations=1)  # one more: the plan of one generation is already done
 
     # No second seed, and the grid came back with everything that survived.
     seeds = [r for r in second.ledger.runs() if r["operator"] == "human-seed"]

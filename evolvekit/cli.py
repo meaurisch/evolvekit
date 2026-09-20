@@ -236,7 +236,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="run the evolutionary loop")
     p_run.add_argument("--config", default=DEFAULT_CONFIG)
     p_run.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
-    p_run.add_argument("--generations", type=int, default=None)
+    p_run.add_argument(
+        "--generations", type=int, default=None,
+        help="run this many *more* generations. Without it the run directory is taken to "
+        "`search.generations` in total: a resumed run finishes its plan",
+    )
     p_run.add_argument("--quiet", action="store_true")
     p_run.add_argument(
         "--allow-changed-problem", action="store_true",

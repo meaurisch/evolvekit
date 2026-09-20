@@ -905,6 +905,10 @@ two things keep a power cut from costing those hours:
 
 What is lost is what was in flight when the run died.
 
+`search.generations` is the plan for the run *directory*, not for the session: a twelve-generation
+run that died in generation 9 is resumed to finish the twelve, and a run directory that already
+holds them says so and does nothing. `run --generations K` means K *more*, whatever the plan was.
+
 ## Before you spend anything: `preflight`
 
 ```
