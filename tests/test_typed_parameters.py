@@ -319,3 +319,20 @@ def test_a_whole_run_tunes_a_foreign_solver_with_no_model_and_no_python_written(
 
     started = read_events(tmp_path / "run")[0]
     assert [p["name"] for p in started["parameters"]] == list(PARAMETERS)
+
+
+# -- preflight -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("placeholder", ["{params}", "--config {params_json}"])
+def test_preflight_runs_the_command_with_the_default_configuration(tmp_path, placeholder):
+    """The seed *is* the declared defaults, so that is what `preflight` has to
+    hand the command -- not an empty `{params}`, which measures whatever the
+    program does when it is told nothing."""
+    from evolvekit.preflight import preflight
+
+    raw = _raw(tmp_path, command=f'"{sys.executable}" solver.py --out {{out}} {placeholder}')
+    raw["problem"]["parameters"]["neighbours"]["default"] = 31
+    report = preflight(build_config(raw, base_dir=tmp_path))
+    assert report.failures == []
+    assert report.stages[-1].kpis["seen_neighbours"] == 31

@@ -24,6 +24,7 @@ wrapper script can gate on it.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -32,7 +33,7 @@ from typing import Callable
 
 from evolvekit.candidate import extract_block, splice_block
 from evolvekit.config import Config, ModelConfig, StageConfig
-from evolvekit.evaluate.stages import run_command_stage, run_static_stage
+from evolvekit.evaluate.stages import Configuration, run_command_stage, run_static_stage
 from evolvekit.evaluate.types import StageOutcome
 from evolvekit.ledger import price_completion
 from evolvekit.providers import Provider, ProviderError, build_provider
@@ -214,6 +215,7 @@ def _run_stages(
         )
     candidate_path = work_dir / "seed_candidate.py"
     candidate_path.write_text(source, encoding="utf-8", newline="\n")
+    configuration: Configuration | None = None
 
     for stage in config.evaluate.stages:
         if stage.kind == "builtin-static":
@@ -226,37 +228,53 @@ def _run_stages(
                 )
                 # Nothing downstream can be trusted once the seed is invalid.
                 return
+            if outcome.params is not None and config.problem.parameters is not None:
+                # `problem.parameters`: what the static stage resolved is what
+                # the commands are given, exactly as in a run (`Cascade._configure`).
+                json_path = work_dir / "seed_candidate.params.json"
+                json_path.write_text(json.dumps(outcome.params, indent=2) + "\n", encoding="utf-8")
+                configuration = Configuration(
+                    flags=tuple(config.problem.parameters.render_flags(outcome.params)),
+                    json_path=json_path,
+                )
             continue
 
-        outcome = run_command_stage(
-            candidate_path,
-            stage,
-            inputs=stage.inputs,
-            out_path=work_dir / f"{stage.id}.json",
-            cwd=config.base_dir,
-            required_kpis=(config.evaluate.score.objective,),
-        )
+        outcome = _run_command(config, stage, candidate_path, configuration, work_dir, private=False)
         report.stages.append(_stage_report(stage, outcome))
         if not outcome.ok:
             report.failures.append(f"stage {stage.id}: {outcome.failure}")
             return
 
         if stage.private_inputs:
-            private = run_command_stage(
-                candidate_path,
-                stage,
-                inputs=stage.private_inputs,
-                out_path=work_dir / f"{stage.id}.private.json",
-                cwd=config.base_dir,
-                private=True,
-                required_kpis=(config.evaluate.score.objective,),
-            )
+            private = _run_command(config, stage, candidate_path, configuration, work_dir, private=True)
             report.stages.append(_stage_report(stage, private))
             if not private.ok:
                 report.failures.append(
                     f"stage {stage.id} hold-out: {private.failure}"
                 )
                 return
+
+
+def _run_command(
+    config: Config,
+    stage: StageConfig,
+    candidate_path: Path,
+    configuration: Configuration | None,
+    work_dir: Path,
+    *,
+    private: bool,
+) -> StageOutcome:
+    """The seed through one command stage, the way a run would put it through."""
+    return run_command_stage(
+        candidate_path,
+        stage,
+        inputs=stage.private_inputs if private else stage.inputs,
+        out_path=work_dir / (f"{stage.id}.private.json" if private else f"{stage.id}.json"),
+        cwd=config.base_dir,
+        private=private,
+        required_kpis=(config.evaluate.score.objective,),
+        configuration=configuration,
+    )
 
 
 def _stage_report(stage: StageConfig, outcome: StageOutcome) -> StageReport:
