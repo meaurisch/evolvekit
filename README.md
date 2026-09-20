@@ -1023,7 +1023,12 @@ python -m evolvekit export --run-dir runs/x --candidate g004-c0025 --format code
 ## Configuring a provider
 
 Secrets are read from environment variables only. Copy `.env.example` to `.env`
-(gitignored) and fill in what you need. Each `models.small` / `models.strong`
+(gitignored) and fill in what you need: every command loads the nearest `.env`
+going up from the config file's directory, and the nearest going up from the
+working directory. A variable that is already set in the environment is never
+overridden, an empty value sets nothing, and values are never printed —
+`preflight` names the file and the *variables* it set, which is the first thing
+to look at when a key is wrong. `EVOLVEKIT_NO_DOTENV=1` switches the loading off. Each `models.small` / `models.strong`
 slot names a backend, a model, and its prices, which is what the ledger uses to
 turn tokens into USD.
 

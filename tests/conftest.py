@@ -16,6 +16,13 @@ EXAMPLE_DIR = EXAMPLES_ROOT / "binpacking"
 EXAMPLE_CONFIG = EXAMPLE_DIR / "evolvekit.yaml"
 
 
+@pytest.fixture(autouse=True)
+def _no_developer_secrets(monkeypatch):
+    """The suite is offline: it must neither need nor read the real keys in a
+    developer's `.env`. Tests of the loader itself switch it back on."""
+    monkeypatch.setenv("EVOLVEKIT_NO_DOTENV", "1")
+
+
 @pytest.fixture(scope="session")
 def example_root() -> Path:
     """`examples/`, for tests that assert across both worked examples."""
