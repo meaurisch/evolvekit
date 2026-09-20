@@ -8,7 +8,6 @@ that looked busy and searched nothing.
 
 from __future__ import annotations
 
-import sys
 
 import pytest
 
