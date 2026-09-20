@@ -146,6 +146,8 @@ def _spread(values: Sequence[float]) -> dict[str, Any]:
     if n < 2:
         return {"n": n, "mean": mean, "sd": None, "sem": None}
     sd = stdev(values)
+    if sd <= 1e-12 * max(1.0, abs(mean)):
+        sd = 0.0  # 100 * x / x is not always exactly 100; that is arithmetic, not spread
     return {"n": n, "mean": mean, "sd": sd, "sem": sd / math.sqrt(n)}
 
 
@@ -341,10 +343,15 @@ class _Run:
     # -- objective ---------------------------------------------------------
 
     def objective(self) -> dict[str, Any]:
+        stage = self._per_instance_stage
+        normalised = stage is not None and stage.get("normalize") == "baseline"
         return {
             "name": self.described.get("objective"),
             "direction": self.described.get("direction"),
             "known": bool(self.described),
+            # With `normalize: baseline` every value of the objective is a mean
+            # of per-instance percentages: the baseline is 100 by definition.
+            "unit": "% of the baseline, per instance" if normalised else None,
         }
 
     @property

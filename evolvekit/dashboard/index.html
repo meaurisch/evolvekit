@@ -597,7 +597,7 @@ function drawProgress(doc, width) {
     svg.append(s("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: "var(--grid)" }),
                s("text", { x: m.l - 8, y: Y(t) + 4, "text-anchor": "end" }, num(t)));
   }
-  svg.append(s("text", { x: m.l, y: 11, class: "lbl" }, (doc.objective?.name || "objective") + (minimize ? "  ·  ↓ lower is better" : "  ·  ↑ higher is better")));
+  svg.append(s("text", { x: m.l, y: 11, class: "lbl" }, (doc.objective?.name || "objective") + (doc.objective?.unit ? " (" + doc.objective.unit + ")" : "") + (minimize ? "  ·  ↓ lower is better" : "  ·  ↑ higher is better")));
   const gStep = Math.max(1, Math.ceil(lastGen / Math.max(3, Math.floor((W - m.l - m.r) / 52))));
   for (let g = 0; g <= lastGen; g += gStep) svg.append(s("text", { x: X(g), y: H - m.b + 16, "text-anchor": "middle" }, g));
   svg.append(s("text", { x: W - m.r, y: H - m.b + 32, "text-anchor": "end" }, "generation →"),

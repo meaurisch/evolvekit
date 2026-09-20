@@ -441,7 +441,8 @@ def test_a_whole_run_reads_back_instance_by_instance(tmp_path):
 
     progress = document["progress"]
     assert progress["baseline"]["objective"] == pytest.approx(100.0)
-    assert progress["baseline"]["n"] == 3 and progress["baseline"]["sd"] == pytest.approx(0.0)
+    assert progress["baseline"]["n"] == 3 and progress["baseline"]["sd"] == 0.0, "no floating-point dust"
+    assert document["objective"]["unit"] == "% of the baseline, per instance"
     assert progress["spread"] == {
         "across": "instances", "available": True,
         "why": "each instance's value in percent of the baseline's, as the objective counts it",

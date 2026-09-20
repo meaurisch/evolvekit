@@ -554,6 +554,10 @@ own, and the framework knows what it could not know before:
   are built from the runs themselves — paired by instance and seed, in percent,
   so a large instance and a small one count alike.
 
+| A generation in progress: runs done of planned, two retries in flight | Where the best wins and loses; every failure with its instance |
+|---|---|
+| ![A per-instance stage in progress](docs/img/dashboard/per-instance-live.png) | ![Per-instance comparison and failures, dark](docs/img/dashboard/per-instance-dark.png) |
+
 `private_instances` is the hold-out counterpart (`private_inputs` for a
 per-instance stage); its baseline is the seed's own hold-out run. Every other
 scalar KPI a run reports is averaged the same way (seeds within an instance,
