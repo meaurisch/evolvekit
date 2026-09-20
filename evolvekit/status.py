@@ -724,10 +724,16 @@ class _Run:
         if remaining <= 0:
             return {"seconds": 0.0, "at": None, "basis": "the last planned generation has finished"}
         if not durations:
+            left = _number((stage or {}).get("remaining_s"))
             return {
                 "seconds": None,
                 "at": None,
-                "basis": f"{remaining} generation(s) to go; none has finished yet, so there is nothing to extrapolate from",
+                "stage_seconds": left,
+                "basis": (
+                    f"{remaining} generation(s) to go; none has finished yet, so there is nothing to "
+                    "extrapolate the run from"
+                    + (f". The stage in progress has about {left:.0f} s left" if left is not None else "")
+                ),
             }
         typical = median(durations)
         seconds = typical * remaining
@@ -951,6 +957,7 @@ class _Run:
             per_generation.append(
                 {
                     "generation": generation,
+                    "elapsed_s": self._elapsed_at_generation_end(generation),
                     "best_id": measured["id"] if measured else None,
                     "best_fitness": measured["fitness"] if measured else None,
                     "best_objective": measured["objective"] if measured else None,
@@ -984,6 +991,61 @@ class _Run:
             "series": per_generation,
             "generations": self._generation_ribbon(per_generation),
             "spread": self._spread_basis(),
+            "screening": self._screening_agreement(),
+        }
+
+    def _elapsed_at_generation_end(self, generation: int) -> float | None:
+        """Evaluation wall clock spent when `generation` finished: the sum of the
+        generations' own durations, so that a night between two sessions does
+        not count. What a slow run is paid in is hours, not generations."""
+        total, seen = 0.0, False
+        for event in self.events:
+            if event.get("type") != "generation_finished" or not isinstance(event.get("generation"), int):
+                continue
+            if event["generation"] <= generation and _number(event.get("duration_s")) is not None:
+                total += float(event["duration_s"])
+            seen = seen or event["generation"] == generation
+        return total if seen else None
+
+    def _screening_agreement(self) -> dict[str, Any]:
+        """Does a cheap stage predict the expensive one?
+
+        A cascade bets that it does: whoever a short screening run ranks first
+        gets the full budget. Every promoted candidate has a score at both
+        stages, so the bet can be checked -- by the rank correlation between
+        the two, stage pair by stage pair. Only promoted candidates can be
+        compared, and they are the best by the earlier stage: the range is
+        restricted, which pulls a correlation towards zero. Read a high value
+        as agreement, and a low one as "look", not as proof of disagreement.
+        """
+        stages = [s.get("id") for s in self.described.get("stages") or [] if s.get("kind") == "command"]
+        pairs = []
+        for earlier, later in zip(stages, stages[1:]):
+            points = []
+            for row in self.rows:
+                scores = row.get("stage_scores") or {}
+                a, b = _number(scores.get(earlier)), _number(scores.get(later))
+                if a is None or b is None or row.get("rejected") or row.get("last_failure"):
+                    continue
+                points.append({"id": row.get("id"), "earlier": a, "later": b, "is_seed": row.get("operator") == SEED_OPERATOR})
+            rho = _spearman([p["earlier"] for p in points], [p["later"] for p in points])
+            if rho is None:
+                verdict = "too few candidates have been through both stages to say"
+            elif rho >= 0.6:
+                verdict = "the earlier stage ranks candidates much as the later one does"
+            elif rho >= 0.2:
+                verdict = "the earlier stage agrees with the later one only loosely"
+            else:
+                verdict = "the earlier stage does not predict the later one: it may be promoting the wrong candidates"
+            pairs.append({"earlier": earlier, "later": later, "n": len(points), "spearman": rho, "verdict": verdict, "points": points})
+        return {
+            "available": bool(pairs),
+            "pairs": pairs,
+            "why": (
+                "rank correlation of the scores at two consecutive stages, over the candidates that reached "
+                "both. Those are the ones the earlier stage liked best, so the range is restricted and the "
+                "correlation understates the agreement"
+            ),
         }
 
     def _spread_basis(self) -> dict[str, Any]:
@@ -1318,7 +1380,16 @@ class _Run:
             ),
         }
         if not self.seed or not self.best_row:
-            return unavailable
+            # Not "this run cannot show it": nothing has been through the final
+            # stage yet. With a slow solver that is the first hour of every run.
+            return {
+                "available": False,
+                "rows": [],
+                "why": (
+                    "nothing has finished the final stage yet. The comparison appears with the "
+                    "first candidate that beats the baseline"
+                ),
+            }
         named = self._instances_by_name()
         if named is not None:
             return named
