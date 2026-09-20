@@ -613,7 +613,7 @@ def format_report(
         if stage.failure:
             lines.append(f"    failure : {stage.failure}")
         if stage.kpis:
-            lines.append("    kpis    : " + _kpi_line(stage))
+            lines.append("    kpis    : " + _kpi_line(stage, first=config.evaluate.score.objective))
         if stage.feedback:
             head = stage.feedback.splitlines()
             for line in head[:8]:
@@ -654,8 +654,10 @@ def format_report(
     return "\n".join(lines)
 
 
-def _kpi_line(stage: StageReport, limit: int = 6) -> str:
-    items = sorted(stage.kpis.items())[:limit]
+def _kpi_line(stage: StageReport, limit: int = 6, first: str = "") -> str:
+    # The objective leads: a solver that reports thirty numbers must not push
+    # the one the run is about off the end of the line.
+    items = sorted(stage.kpis.items(), key=lambda item: (item[0] != first, item[0]))[:limit]
     parts = []
     for name, value in items:
         cv = stage.kpi_cv.get(name)

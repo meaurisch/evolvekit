@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import math
 import shlex
 import subprocess
@@ -26,7 +27,7 @@ from statistics import fmean, stdev
 from typing import Any, Callable
 
 from evolvekit.config import ProblemConfig, StageConfig
-from evolvekit.evaluate.process import read_tail, run_bounded
+from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
 
 __all__ = [
@@ -588,7 +589,7 @@ def _execute_once(
             private=private,
         )
 
-    kpis, vectors, feedback, problem = _read_kpis(out_path)
+    kpis, vectors, feedback, problem = _collect_kpis(stage, out_path, stdout_log)
     if problem is None:
         problem = _missing_required(kpis, required_kpis)
     if problem is not None:
@@ -657,17 +658,61 @@ def _missing_required(
     )
 
 
-def _read_kpis(
-    out_path: Path,
-) -> tuple[dict[str, float], dict[str, list[float]], str, str | None]:
-    """Split the evaluator's output into scalars, vectors and prose.
+Kpis = tuple[dict[str, float], dict[str, list[float]], str, "str | None"]
+"""Scalars, vectors, the evaluator's note, and what was wrong (or `None`)."""
 
-    Scalars are the contract every consumer already relies on -- the score, the
-    penalties, the archive descriptors. A list value is accepted too and kept
-    aside: only the behaviour signature reads it, so an evaluator that emits
-    nothing but scalars behaves exactly as it did before. `text_feedback` sits
-    beside `kpis` rather than inside it, is optional, and is truncated here.
-    """
+
+def _collect_kpis(stage: StageConfig, out_path: Path, stdout_log: Path) -> Kpis:
+    """The run's KPIs from wherever the stage says the command reports them:
+    the `{out}` file, the last JSON object on stdout, patterns over its text."""
+    kpis: dict[str, float] = {}
+    vectors: dict[str, list[float]] = {}
+    note = ""
+    if stage.kpis_from == "stdout":
+        payload = _last_json_object(read_tail(stdout_log, TAIL_BYTES))
+        if payload is None:
+            return {}, {}, "", "the program printed no JSON object on stdout"
+        kpis, vectors, note, problem = _parse_kpis(payload)
+        if problem is not None:
+            return {}, {}, "", problem
+    elif "{out}" in stage.command:
+        kpis, vectors, note, problem = _read_kpis(out_path)
+        if problem is not None:
+            return {}, {}, "", problem
+    if stage.kpi_patterns:
+        printed = read_tail(stdout_log, TAIL_BYTES)
+        for name, pattern in stage.kpi_patterns:
+            found = re.findall(pattern, printed)
+            if not found:
+                return {}, {}, "", (
+                    f"`kpi_patterns.{name}` matched nothing in what the program printed"
+                )
+            try:
+                value = float(found[-1])  # a solver logs its progress before its result
+            except ValueError:
+                return {}, {}, "", f"`kpi_patterns.{name}` captured {found[-1]!r}, which is not a number"
+            if not _is_finite(value):
+                return {}, {}, "", _non_finite(name, value)
+            kpis[name] = value
+    return kpis, vectors, note, None
+
+
+def _last_json_object(printed: str) -> dict[str, Any] | None:
+    for line in reversed(printed.splitlines()):
+        line = line.strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _read_kpis(out_path: Path) -> Kpis:
+    """The JSON object the command wrote to `{out}`."""
     if not out_path.is_file():
         return {}, {}, "", f"evaluator wrote no output file at {out_path.name}"
     try:
@@ -676,6 +721,24 @@ def _read_kpis(
         return {}, {}, "", f"evaluator output was not readable JSON: {exc}"
     if not isinstance(payload, dict):
         return {}, {}, "", "evaluator output must be a JSON object"
+    return _parse_kpis(payload)
+
+
+def _parse_kpis(payload: dict[str, Any]) -> Kpis:
+    """Split the evaluator's output into scalars, vectors and prose.
+
+    Scalars are the contract every consumer already relies on -- the score, the
+    penalties, the archive descriptors. A list value is accepted too and kept
+    aside: only the behaviour signature reads it, so an evaluator that emits
+    nothing but scalars behaves exactly as it did before. `text_feedback` sits
+    beside `kpis` rather than inside it, is optional, and is truncated here.
+
+    Two shapes. Under an explicit `"kpis"` key every value has to be a KPI --
+    whoever wrote that key knows the contract, and a string there is a mistake
+    worth hearing about. Without the key the object is the program's *own*
+    result (a solver's `{"cost": ..., "instance": "...", "params": {...}}`):
+    its numbers and booleans are the KPIs and the rest is metadata, left alone.
+    """
 
     feedback = payload.get("text_feedback")
     if feedback is not None and not isinstance(feedback, str):
@@ -688,7 +751,8 @@ def _read_kpis(
     note = (feedback or "").strip()[:FEEDBACK_LIMIT]
 
     raw = payload.get("kpis")
-    if raw is None:
+    foreign = raw is None
+    if foreign:
         # The flat shape: the whole document is the KPI mapping. `text_feedback`
         # is the framework's key, not a KPI, so it never counts as one.
         raw = {k: v for k, v in payload.items() if k != "text_feedback"}
@@ -697,6 +761,9 @@ def _read_kpis(
     kpis: dict[str, float] = {}
     vectors: dict[str, list[float]] = {}
     for key, value in raw.items():
+        if isinstance(value, bool):  # `"feasible": true` is a KPI worth having
+            kpis[str(key)] = 1.0 if value else 0.0
+            continue
         if _is_number(value):
             if not _is_finite(value):
                 return {}, {}, "", _non_finite(key, value)
@@ -707,6 +774,8 @@ def _read_kpis(
                 return {}, {}, "", _non_finite(key, value)
             vectors[str(key)] = [float(v) for v in value]
             continue
+        if foreign:
+            continue  # a name, a nested object, a list with a hole in it: not a KPI
         return (
             {},
             {},

@@ -37,7 +37,9 @@ line, in any language)? Skip the skeleton and steps 1–2 altogether: declare
 `{params_json}` in the stage command. The defaults are the baseline, every
 configuration is validated before the program is started, and with
 `search.operators: {param_lhs: 1.0}` the run needs no model and no key. The
-program only has to write `{"kpis": {...}}` to the `{out}` path. See
+program reports however it already does: a JSON file at `{out}`, a JSON object
+on its last line of stdout (`kpis_from: stdout`), or text that `kpi_patterns`
+picks numbers out of. See
 [Tuning a command](../README.md#tuning-a-command-problemparameters).
 
 Otherwise: a normal Python file with the evolvable part fenced:
