@@ -94,7 +94,8 @@ spec = json.load(open(a.instance, encoding="utf-8"))
 rng = random.Random(a.seed * 7919 + spec["seed"])
 targets = [random.Random(spec["seed"] + i).uniform(-1, 1) for i in range(spec["size"])]
 x = [t * 0.5 for t in targets] if a.greedy == "true" else [0.0] * len(targets)
-cost = lambda v: sum((vi - ti) ** 2 for vi, ti in zip(v, targets))  # noqa: E731
+# Never zero: the baseline's cost is what every other cost is a percentage of.
+cost = lambda v: 100.0 + 100.0 * sum((vi - ti) ** 2 for vi, ti in zip(v, targets))  # noqa: E731
 current, temperature, deadline = cost(x), 1.0, time.perf_counter() + a.time_limit
 while time.perf_counter() < deadline:
     for _ in range(a.steps):

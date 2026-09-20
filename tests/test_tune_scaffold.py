@@ -48,8 +48,15 @@ def test_the_scaffold_runs_is_confirmed_and_exported_with_the_commands_it_prints
     main(["init", str(tmp_path), "--template", "tune"])
     config, run_dir = str(tmp_path / "evolvekit.yaml"), str(tmp_path / "runs" / "first")
     assert main(["run", "--config", config, "--run-dir", run_dir, "--generations", "2", "--quiet"]) == 0
+    # `run` exits 0 even when it aborts at the seed, so ask the run directory.
+    from evolvekit.status import build_status
+
+    document = build_status(run_dir)
+    assert document["health"]["state"] == "finished" and document["health"]["stop_reason"] == "generations exhausted"
+    assert document["progress"]["baseline"]["objective"] == pytest.approx(100.0)
+    capsys.readouterr()
     assert main(["confirm", "--config", config, "--run-dir", run_dir, "--seeds", "1001,1002"]) in (0, 1)
-    assert "against the baseline" in capsys.readouterr().out
+    assert "## `g00" in capsys.readouterr().out, "a comparison was printed, not an error"
     assert main(["export", "--run-dir", run_dir, "--format", "flags", "--config", config]) == 0
     assert "--steps" in capsys.readouterr().out
 
