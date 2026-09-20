@@ -855,6 +855,16 @@ searched a Phase A landscape. `extends` makes that impossible, and
 `tests/test_config.py` asserts the three shared sections parse identically
 either way.
 
+### One run directory, one problem
+
+A run directory remembers what it is a run *of*: the skeleton (or the declared parameters), the
+objective and its direction, and every stage's command, seeds, inputs and instances. Starting
+`run` against it with any of those changed is refused — before anything is bred or recorded —
+with a sentence that names the difference: its candidates were scored under the old definition,
+and `runs.jsonl` would otherwise rank scores against each other that do not mean the same thing.
+Search settings, the budget, `workers` and the like may change between sessions. Use a new
+`--run-dir`, or `--allow-changed-problem` if the change does not affect what a score means.
+
 ### Exit codes of `run`
 
 `0` the run ended as planned (generations exhausted, a stop rule, the budget — including
