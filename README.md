@@ -572,6 +572,7 @@ instances on the stage instead, and let the command solve **one**:
   pin_cpus: [2, 4, 6]              # one logical CPU per worker
   retries: 1                       # run a crashed or timed-out run once more
   normalize: baseline              # the default; `none` for the plain mean
+  race: {after: 4, margin_pct: 1}  # optional: stop a candidate that is clearly behind
 ```
 
 The stage is then run once per instance and seed, each run a process of its
@@ -613,6 +614,18 @@ own, and the framework knows what it could not know before:
   uses the same one): it is a weight, not a measurement, and a lucky baseline
   run shifts where 100 lies but never which of two candidates is ahead. The
   plain mean stays available as the KPI `<objective>_raw`.
+- **A candidate that is clearly behind stops costing** (`race`, off unless
+  configured). Every candidate is measured on the same instances in the same
+  order, so after `after` of them a candidate can be compared with the best so
+  far *on exactly those*. More than `margin_pct` percent behind, and it is
+  raced out: its remaining runs are never started, it keeps the score of the
+  stage before, and it does not compete — the standing of a candidate that was
+  not promoted, not of one that failed. With ten-minute runs, `after: 4` of ten
+  instances saves an hour of solver time per losing candidate. The margin is
+  the protection against noise: set it to a few times what two runs of one
+  configuration differ by. The baseline always finishes (it is the yardstick),
+  so does the first candidate through a stage, and the best so far is kept in
+  `work/incumbent.json` for a resumed run. `confirm` never races.
 - **A per-instance picture without a list KPI.** The dashboard's per-instance
   card, the noise estimate and the paired "is this more than the dice?" verdict
   are built from the runs themselves — paired by instance and seed, in percent,

@@ -143,6 +143,9 @@ class Candidate:
     declares `problem.parameters`. Validated by the static stage; what the
     stage commands were given; what `status`, the dashboard and the model-free
     operators read instead of parsing code."""
+    raced_out: str | None = None
+    """Why the final stage was not finished, when that was the stage's `race`
+    rule: the candidate was clearly behind after a few instances."""
     competes: bool = True
     """False when the candidate did not finish the final stage -- a failed
     evaluation, a proxy-only candidate, a final stage skipped by the daily cap,

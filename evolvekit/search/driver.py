@@ -330,6 +330,10 @@ class Driver:
                     "final": stage.id == final,
                     "instances": list(stage.instance_names()),
                     "normalize": stage.normalize if stage.fans_out else None,
+                    "race": (
+                        {"after": stage.race.after, "margin_pct": stage.race.margin_pct}
+                        if stage.race is not None else None
+                    ),
                     "workers": stage.workers,
                     "pin_cpus": list(stage.pin_cpus),
                     "retries": stage.retries,
@@ -1278,6 +1282,7 @@ class Driver:
             candidate.score = result.score
             candidate.params = result.params
             candidate.competes = result.competes
+            candidate.raced_out = result.raced_out
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis

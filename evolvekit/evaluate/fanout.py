@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from evolvekit.config import StageConfig
 from evolvekit.evaluate.cache import EvalCache
@@ -50,7 +50,7 @@ from evolvekit.evaluate.stages import (
 )
 from evolvekit.evaluate.types import StageOutcome
 
-__all__ = ["Job", "run_instance_stage", "per_instance_key"]
+__all__ = ["Job", "Race", "run_instance_stage", "per_instance_key"]
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,33 @@ class Job:
     candidate_path: Path
     configuration: Configuration | None = None
     observer: Observer | None = None
+
+
+@dataclass(frozen=True)
+class Race:
+    """A stage's `race` rule, with what it is raced against."""
+
+    objective: str
+    minimize: bool
+    incumbent: Mapping[str, float]
+    """The best candidate's objective so far, by instance name, at this stage."""
+    after: int
+    margin_pct: float
+    exempt: frozenset[str] = frozenset()
+    """Candidates that always finish: the baseline is a yardstick, not a contestant."""
+
+    def behind_pct(self, mine: Mapping[str, float]) -> tuple[int, float]:
+        """On the instances both have a value for: how many, and how many
+        percent worse `mine` is than the incumbent, averaged over them."""
+        ratios = [
+            mine[name] / self.incumbent[name]
+            for name in mine
+            if name in self.incumbent and self.incumbent[name] > 0
+        ]
+        if not ratios:
+            return 0, 0.0
+        relative = fmean(ratios) - 1.0
+        return len(ratios), 100.0 * (relative if self.minimize else -relative)
 
 
 def per_instance_key(kpi: str) -> str:
@@ -79,6 +106,7 @@ def run_instance_stage(
     cache: EvalCache | None = None,
     seeds: Sequence[int] | None = None,
     keep_going: bool = False,
+    race: Race | None = None,
 ) -> dict[str, StageOutcome]:
     """Run `stage` for every job, instance and seed; one outcome per candidate.
 
@@ -91,7 +119,7 @@ def run_instance_stage(
     names = stage.instance_names(private)
     seed_values = list(seeds) if seeds is not None else list(range(stage.seeds))
     cancel = threading.Event()
-    board = _Board(jobs, len(instances), seed_values)
+    board = _Board(jobs, len(instances), seed_values, race=race, names=names)
     cpus: queue.SimpleQueue[int] | None = None
     if stage.pin_cpus:
         cpus = queue.SimpleQueue()
@@ -127,7 +155,9 @@ def run_instance_stage(
                 board.ran(job.candidate_id, outcome)
                 if outcome.ok or cancel.is_set() or (board.failed(job.candidate_id) and not keep_going):
                     break
-            board.settle(job.candidate_id, index, seed, names[index], outcome)
+            verdict = board.settle(job.candidate_id, index, seed, names[index], outcome)
+            if verdict is not None and job.observer is not None:
+                job.observer("raced_out", reason=verdict, runs_done=board.runs_done(job.candidate_id))
         finally:
             if cpus is not None and cpu is not None:
                 cpus.put(cpu)
@@ -175,7 +205,17 @@ def _unit_path(
 class _Board:
     """What has come back so far, per candidate. Shared by the worker threads."""
 
-    def __init__(self, jobs: Sequence[Job], instances: int, seeds: Sequence[int]) -> None:
+    def __init__(
+        self,
+        jobs: Sequence[Job],
+        instances: int,
+        seeds: Sequence[int],
+        *,
+        race: Race | None = None,
+        names: Sequence[str] = (),
+    ) -> None:
+        self._race = race
+        self._names = list(names)
         self._lock = threading.Lock()
         self._instances = instances
         self._seed_values = list(seeds)
@@ -196,16 +236,45 @@ class _Board:
             self._runs[candidate_id] += 1
             self._spent[candidate_id] += outcome.duration_s
 
+    def runs_done(self, candidate_id: str) -> int:
+        with self._lock:
+            return len(self._done[candidate_id])
+
     def settle(
         self, candidate_id: str, index: int, seed: int, name: str, outcome: StageOutcome
-    ) -> None:
+    ) -> str | None:
+        """Record one run. Returns the reason when this run raced the candidate out."""
         with self._lock:
             if outcome.ok:
                 self._done[candidate_id][(index, seed)] = outcome
-            elif candidate_id not in self._failure:
+                return self._race_verdict(candidate_id, outcome.stage_id, outcome.private)
+            if candidate_id not in self._failure:
                 where = f"instance {name}" + (f", seed {seed}" if self._seeds > 1 else "")
                 outcome.failure = f"{outcome.failure} ({where})"
                 self._failure[candidate_id] = outcome
+        return None
+
+    def _race_verdict(self, candidate_id: str, stage_id: str, private: bool) -> str | None:
+        race = self._race
+        if race is None or candidate_id in race.exempt or candidate_id in self._failure:
+            return None
+        by_instance: dict[str, list[float]] = {}
+        for (index, _seed), done in self._done[candidate_id].items():
+            if race.objective in done.kpis:
+                by_instance.setdefault(self._names[index], []).append(done.kpis[race.objective])
+        compared, behind = race.behind_pct({name: fmean(values) for name, values in by_instance.items()})
+        if compared < race.after or compared >= self._instances or behind <= race.margin_pct:
+            return None
+        reason = (
+            f"raced out after {compared} of {self._instances} instances: {behind:.2f} % behind the best "
+            f"candidate so far on the same instances (margin {race.margin_pct:g} %)"
+        )
+        # Kept where a failure is kept, so that its remaining runs are never
+        # started -- but marked as what it is: nothing went wrong.
+        self._failure[candidate_id] = StageOutcome(
+            stage_id=stage_id, ok=False, skipped=True, private=private, failure=reason, raced_out=reason
+        )
+        return reason
 
     def outcome(
         self, candidate_id: str, stage: StageConfig, names: Sequence[str], private: bool
