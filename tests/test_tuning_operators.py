@@ -228,7 +228,7 @@ def test_a_model_free_run_uses_all_four_operators_and_none_of_them_needs_a_model
     operators = {r["operator"] for r in rows[1:]}
     assert operators >= {"param_lhs", "param_local", "param_tpe"}, operators
     assert summary.totals.get("calls", 0.0) == 0.0
-    assert summary.best.score > summary.seed_score + 40, "the defaults cost 1205; the search is well below 1165"
+    assert summary.best.score > summary.seed_score + 40, "the defaults cost 1225; the search is well below 1185"
     local = [r for r in rows[1:] if r["operator"] == "param_local" and r["parent_id"]]
     by_id = {r["id"]: r for r in rows}
     steps = [sum(1 for k, v in r["params"].items() if by_id[r["parent_id"]]["params"][k] != v) for r in local]

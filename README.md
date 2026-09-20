@@ -311,16 +311,18 @@ stage still says where not to look. Until there are eight observations it takes
 a local step instead, and the record says so.
 
 Which to use depends on how good the defaults already are. Measured at equal
-budget, five search seeds each, on two stand-in solvers: with defaults far from
-the optimum and 36 evaluations, `param_lhs` alone does as well as any mix
-(mean best 1031.6 vs 1034.3, defaults 1205, optimum 1000). With a *mature*
-solver — 25 parameters, defaults close to good, most random settings harmful,
-noisy, 78 evaluations — `param_lhs` alone returned the defaults in three runs
-of five (mean true cost of the reported best 102.20, defaults 102.57), while
-`param_local` alone reached 100.03 and
-`{param_lhs: 0.15, param_local: 0.45, param_tpe: 0.3, param_cross: 0.1}` reached
-99.99 of a possible 98.20. For a solver somebody has already tuned, lead with
-`param_local`.
+budget, five search seeds each, on two stand-in solvers
+(`python benchmarks/operator_mixes.py` reproduces it): with defaults far from
+the optimum and 36 evaluations, `param_lhs` alone does as well as any mix (mean
+best 1031.6 vs 1034.3; defaults 1225, optimum 1000) and `param_local` alone is
+clearly worse (1106.4). With a *mature* solver — 25 parameters, defaults close
+to good, most random settings harmful, noisy, 78 evaluations — `param_lhs`
+alone returned the defaults in three runs of five (mean true cost of the
+reported best 102.20, defaults 102.57), while `param_local` alone reached
+100.05 and `{param_lhs: 0.15, param_local: 0.45, param_tpe: 0.3, param_cross:
+0.1}` reached 100.30, of a possible 98.20. For a solver somebody has already
+tuned, lead with `param_local`; keep some `param_lhs` when you do not know which
+of the two cases you are in.
 
 **A run without any model.** When only model-free operators (`param_*`) have a share,
 nothing in the run calls a model, and nothing may: no big steps are planned
