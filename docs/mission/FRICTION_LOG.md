@@ -47,7 +47,7 @@ made a broken candidate the run's "best", and at no point could they tell from
 outside whether the run was alive.
 
 
-> **Status as of 2026-09-20** (PR numbers refer to github.com/meaurisch/evolvekit): 38 of 63 items fixed, 7 partly, 18 open. "Fixed" means: in an open pull request, with tests, merged into `integration/expensive-tuning` -- none is merged into `master`.
+> **Status as of 2026-09-20** (PR numbers refer to github.com/meaurisch/evolvekit): 39 of 63 items fixed, 7 partly, 17 open. "Fixed" means: in an open pull request, with tests, merged into `integration/expensive-tuning` -- none is merged into `master`.
 
 ## A. Observability
 
@@ -77,7 +77,7 @@ outside whether the run was alive.
 | ID | Sev | Hit by | What happened | Status |
 |---|---|--:|---|---|
 | R-01 | **blocker** | 3 | `budget.max_usd`, `max_tokens`, `max_full_evals_per_day` and `stop.patience` are **per invocation, not per run directory**. Re-running the same command on a budget-stopped run spent the "hard cap" again: $0.0524 against a $0.01 cap after three invocations. | **fixed** #16 |
-| R-02 | **blocker** | 1 | Re-using a run directory silently merges a different (or edited) problem into the ledger. A bin-packing child was bred from a circle-packing parent, exit 0, no warning. The default run dir is a fixed, cwd-relative `runs/latest`, so iterating on a config does this with pure defaults. | open -- a run directory still accepts a different problem (next in the queue) |
+| R-02 | **blocker** | 1 | Re-using a run directory silently merges a different (or edited) problem into the ledger. A bin-packing child was bred from a circle-packing parent, exit 0, no warning. The default run dir is a fixed, cwd-relative `runs/latest`, so iterating on a config does this with pure defaults. | **fixed** #39 -- the run directory records the problem's identity; a different one is refused before anything is bred or recorded |
 | R-03 | **blocker** | 1 | `max_full_evals_per_day` is not a stop: once reached, every promoted candidate is scored `failure_score` **and archived**, silently, for the rest of the run. | **fixed** #14 (never archived or ranked) and #37 (the run stops at the cap) |
 | R-04 | major | 1 | A run interrupted during generation 1 can never be resumed: the seed is re-evaluated, flagged a behavioural duplicate *of itself*, and the run ABORTs with "fix the harness". | **fixed** #17 |
 | R-05 | major | 3 | A stage timeout is not a wall-clock bound. It kills the direct child only; a grandchild holding stdout makes evolvekit block until the grandchild exits, and a hung solver survives as an orphan long after the run has finished. | **fixed** #15 -- the timeout bounds the whole process tree (Job Object + parent links on Windows, a session on POSIX) |
