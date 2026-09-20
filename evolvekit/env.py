@@ -41,7 +41,7 @@ def parse_env(text: str) -> dict[str, str]:
         name, value = match.group(1), match.group(2)
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        elif value[:1] in "\"'":
+        elif value and value[0] in "\"'":  # `"" in "..."` is true: an empty value must not get here
             # Quoted, with something after the closing quote: a trailing comment.
             closing = value.find(value[0], 1)
             if closing > 0:
