@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from evolvekit import __version__
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
+from evolvekit.env import load_env_files
 from evolvekit.leaderboard import (
     fitness_of,
     novelty_counts,
@@ -378,6 +380,8 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_preflight(args: argparse.Namespace) -> int:
     """0 clean, 1 warnings, 2 failures -- so a wrapper script can gate on it."""
+    for path, names in _ENV_LOADED:  # where a key came from is the first question when one is wrong
+        print(f"environment : {path} set {', '.join(names)}")
     return run_preflight(
         load_config(args.config),
         provider_check=args.provider_check,
@@ -635,8 +639,24 @@ _COMMANDS = {
 }
 
 
+_ENV_LOADED: list[tuple[Path, list[str]]] = []
+"""Which `.env` files set which variables in this process -- names, never values."""
+
+
+def _load_env(args: argparse.Namespace) -> None:
+    """The nearest `.env` above the config file and above the working directory
+    (`evolvekit/env.py`). `EVOLVEKIT_NO_DOTENV=1` switches it off: a test suite
+    must not read a developer's real keys."""
+    if os.environ.get("EVOLVEKIT_NO_DOTENV"):
+        return
+    config = getattr(args, "config", None)
+    starts = ([Path(config).resolve().parent] if config else []) + [Path.cwd()]
+    _ENV_LOADED[:] = load_env_files(starts)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _load_env(args)
     try:
         return _COMMANDS[args.command](args)
     except ConfigError as exc:
