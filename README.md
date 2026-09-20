@@ -918,6 +918,58 @@ note    : projected evaluator wall clock for the whole run: about 19.3s, excludi
 verdict : clean (0 failure(s), 0 warning(s))
 ```
 
+## After the run: is the improvement real? `confirm`, and `export`
+
+A search selects on noise. Whatever it reports as its best was, among other
+things, lucky on the seeds it was evaluated on — so the run's own "improvement"
+is optimistic by construction, and `status` says so next to the number.
+`confirm` is the measurement that is not:
+
+```
+python -m evolvekit confirm --config tuning.yaml --run-dir runs/x --seeds 1001,1002,1003
+python -m evolvekit confirm --config tuning.yaml --run-dir runs/x --seeds 1001,1002,1003 \
+    --instances "fresh/*.vrp" --label fresh          # instances the search never saw
+python -m evolvekit confirm ... --candidates top:3 --seeds 101,102 --label validation
+```
+
+It takes the run's baseline (its seed candidate: the defaults) and its best
+candidate — or `top:N`, or ids you name — and runs the final stage's command
+for each of them on every instance and every seed you give it. Needs a final
+stage that [runs once per instance](#one-run-per-instance-instances-workers-retries).
+
+- **Same conditions.** The stage's own `workers`, `pin_cpus`, `timeout` and
+  `retries`; and the runs are *interleaved* — the configurations' runs for one
+  (instance, seed) are queued next to each other — so whatever the machine does
+  over the hours happens to all of them alike.
+- **The instance is the unit.** Per instance, the difference to the baseline
+  in percent of the baseline's value, averaged over the seeds. Over instances:
+  the mean with a 95 % confidence interval (paired, Student's t), wins and
+  losses, and an exact Wilcoxon signed-rank test. The verdict is a sentence:
+  *better than the baseline*, *not distinguishable from it*, or *WORSE*.
+- **Exit code 0 only when every candidate's interval lies above zero**, so a
+  script can gate on it.
+- A failed run costs its pair, not the comparison. Finished runs are cached, so
+  an interrupted confirmation — or one extended by more seeds — pays only for
+  what is new.
+- Everything lands in `<run-dir>/confirm/<label>/`: `comparison.md`,
+  `comparison.json`, every run in `results.json`, all logs, and an event log
+  and heartbeat of its own, so `status --run-dir <run-dir>/confirm/<label>` and
+  the dashboard can watch a five-hour confirmation like any other run.
+
+Use seeds the search never saw (it uses `0 … seeds-1`). If you compare several
+candidates to *choose* one, spend other seeds on the choice than on the final
+claim — choosing is selecting on noise again.
+
+`export` hands the winner to whatever runs next:
+
+```
+python -m evolvekit export --run-dir runs/x                          # the best, as JSON
+python -m evolvekit export --run-dir runs/x --format yaml --out tuned.yaml
+python -m evolvekit export --run-dir runs/x --format flags --config tuning.yaml
+    --neighbours 36 --penalty 8761.42 --exhaustive false --init savings
+python -m evolvekit export --run-dir runs/x --candidate g004-c0025 --format code
+```
+
 ## Configuring a provider
 
 Secrets are read from environment variables only. Copy `.env.example` to `.env`

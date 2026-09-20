@@ -77,12 +77,21 @@ def run_instance_stage(
     private: bool = False,
     required_kpis: tuple[str, ...] = (),
     cache: EvalCache | None = None,
+    seeds: Sequence[int] | None = None,
+    keep_going: bool = False,
 ) -> dict[str, StageOutcome]:
-    """Run `stage` for every job, instance and seed; one outcome per candidate."""
+    """Run `stage` for every job, instance and seed; one outcome per candidate.
+
+    `seeds` replaces the stage's own `0 .. seeds-1` -- a comparison on seeds
+    the search never saw names them. `keep_going` runs a candidate's remaining
+    instances after one has failed: a search has no use for them, a comparison
+    does, because every pair that did finish still counts.
+    """
     instances = stage.private_instances if private else stage.instances
     names = stage.instance_names(private)
+    seed_values = list(seeds) if seeds is not None else list(range(stage.seeds))
     cancel = threading.Event()
-    board = _Board(jobs, len(instances), stage.seeds)
+    board = _Board(jobs, len(instances), seed_values)
     cpus: queue.SimpleQueue[int] | None = None
     if stage.pin_cpus:
         cpus = queue.SimpleQueue()
@@ -90,7 +99,7 @@ def run_instance_stage(
             cpus.put(cpu)
 
     def run(job: Job, index: int, seed: int) -> None:
-        if cancel.is_set() or board.failed(job.candidate_id):
+        if cancel.is_set() or (board.failed(job.candidate_id) and not keep_going):
             return  # a candidate that has already failed buys nothing further
         cpu = cpus.get() if cpus is not None else None
         try:
@@ -116,7 +125,7 @@ def run_instance_stage(
                     cache=cache,
                 )
                 board.ran(job.candidate_id, outcome)
-                if outcome.ok or cancel.is_set() or board.failed(job.candidate_id):
+                if outcome.ok or cancel.is_set() or (board.failed(job.candidate_id) and not keep_going):
                     break
             board.settle(job.candidate_id, index, seed, names[index], outcome)
         finally:
@@ -125,7 +134,7 @@ def run_instance_stage(
 
     units = [
         (job, index, seed)
-        for seed in range(stage.seeds)
+        for seed in seed_values
         for index in range(len(instances))
         for job in jobs
     ]
@@ -166,10 +175,11 @@ def _unit_path(
 class _Board:
     """What has come back so far, per candidate. Shared by the worker threads."""
 
-    def __init__(self, jobs: Sequence[Job], instances: int, seeds: int) -> None:
+    def __init__(self, jobs: Sequence[Job], instances: int, seeds: Sequence[int]) -> None:
         self._lock = threading.Lock()
         self._instances = instances
-        self._seeds = seeds
+        self._seed_values = list(seeds)
+        self._seeds = len(self._seed_values)
         self._done: dict[str, dict[tuple[int, int], StageOutcome]] = {
             job.candidate_id: {} for job in jobs
         }
@@ -213,7 +223,7 @@ class _Board:
         if failure is not None:
             failure.duration_s, failure.runs = spent, runs
             return failure
-        combined = _combine(stage, names, done, self._seeds, private)
+        combined = _combine(stage, names, done, self._seed_values, private)
         combined.duration_s, combined.runs = spent, runs
         return combined
 
@@ -222,7 +232,7 @@ def _combine(
     stage: StageConfig,
     names: Sequence[str],
     done: dict[tuple[int, int], StageOutcome],
-    seeds: int,
+    seeds: Sequence[int],
     private: bool,
 ) -> StageOutcome:
     """Seeds average within an instance, instances average into the stage.
@@ -237,18 +247,18 @@ def _combine(
     vectors: dict[str, list[float]] = {}
     for key in sorted(keys):
         by_instance = [
-            [done[(index, seed)].kpis[key] for seed in range(seeds)] for index in range(len(names))
+            [done[(index, seed)].kpis[key] for seed in seeds] for index in range(len(names))
         ]
         vectors[per_instance_key(key)] = [fmean(values) for values in by_instance]
         kpis[key] = fmean(vectors[per_instance_key(key)])
-        if seeds > 1:
+        if len(seeds) > 1:
             kpi_cv[key] = fmean(_cv(values) for values in by_instance)
     notes = []
     for index in range(len(names)):  # one note per instance: its seeds say the same thing
-        said = next((done[(index, s)].text_feedback for s in range(seeds) if done[(index, s)].text_feedback), "")
+        said = next((done[(index, s)].text_feedback for s in seeds if done[(index, s)].text_feedback), "")
         if said:
             notes.append(f"{names[index]}: {said}")
-    first = done[(0, 0)]
+    first = done[(0, seeds[0])]
     return StageOutcome(
         stage_id=stage.id,
         ok=True,
