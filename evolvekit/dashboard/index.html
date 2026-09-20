@@ -117,6 +117,7 @@ a { color: var(--accent-ink); }
 }
 .ghost:hover { color: var(--ink); border-color: var(--ink-3); }
 .offline { color: var(--critical); font-weight: 600; }
+.hostwarn { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; color: var(--ink); background: color-mix(in srgb, var(--warning-fill) 14%, transparent); border: 1px solid color-mix(in srgb, var(--warning-fill) 55%, transparent); }
 .nav { max-width: 1440px; margin: 0 auto; padding: 0 24px; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .nav::-webkit-scrollbar { display: none; }
 .nav a {
@@ -553,8 +554,14 @@ function renderHealth(doc) {
         h("div", { class: "u" }, num(l.used) + " of " + num(l.cap) + (l.unit ? " " + l.unit : "")),
         meter(ratio, l.name === "generations" ? "" : ratioClass(ratio)));
     })));
+  // Was the machine busy with something else? For a time-limited solver that is a worse score for no fault of the candidate.
+  const busy = (he.host?.stages || []).filter((s) => s.flagged || s.busier_throughout);
+  const host = busy.length ? h("div", { class: "hostwarn", role: "status", title: he.host.why || "" },
+    h("b", null, "⚠ The machine was not this run's alone. "),
+    busy.map((s) => `Stage ${s.id}: ${s.flagged} of ${s.n} runs shared it with something else (typically ${Math.round(s.typical * 100)} % of all CPUs busy; this run's workers explain ${Math.round(s.explained * 100)} %)` + (s.busier_throughout ? " — busier than explained throughout: a multi-threaded solver, or other work." : ".")).join(" "),
+    " A time-limited evaluation that shares the machine scores worse than it should.") : null;
   return [cardHead("health", "Health", "Is the run healthy, and how far along is it?"),
-          h("div", { class: "tiles" }, tiles), ribbon, h("div", { class: "strip" }, flight, limits)];
+          h("div", { class: "tiles" }, tiles), host, ribbon, h("div", { class: "strip" }, flight, limits)];
 }
 
 /* ---------------------------------------------------------------- progress */
@@ -927,7 +934,7 @@ function copyButton(text, label = "Copy") { const b = h("button", { class: "ghos
 function quote(argv) { return (argv || []).map((a) => /[\s"']/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a).join(" "); }
 function logLink(path, label) { return !path || EMBEDDED ? null : h("a", { href: "api/log?path=" + encodeURIComponent(path), target: "_blank", rel: "noopener" }, label); }
 function evaluationBlock(e) {
-  return h("div", null, h("dl", { class: "kv" }, h("dt", null, "run"), h("dd", null, `stage ${e.stage}` + (e.instance != null ? ` · ${e.instance}` : "") + ` · seed ${e.seed}` + (e.attempt ? ` · attempt ${e.attempt + 1}` : "") + (e.private ? " · hold-out" : "") + ` · ${dur(e.duration_s)} · `, h("span", { class: "chip " + (e.ok ? "ok" : "bad") }, e.ok ? "ok" : e.failure || "failed")),
+  return h("div", null, h("dl", { class: "kv" }, h("dt", null, "run"), h("dd", null, `stage ${e.stage}` + (e.instance != null ? ` · ${e.instance}` : "") + ` · seed ${e.seed}` + (e.attempt ? ` · attempt ${e.attempt + 1}` : "") + (e.private ? " · hold-out" : "") + (e.cached ? " · from the cache" : ` · ${dur(e.duration_s)}`) + (isNum(e.host_busy) ? ` · machine ${Math.round(e.host_busy * 100)} % busy` : "") + " · ", h("span", { class: "chip " + (e.ok ? "ok" : "bad") }, e.ok ? "ok" : e.failure || "failed")),
       e.ok ? [h("dt", null, "KPIs"), h("dd", { class: "mono", style: { fontSize: "12px" } }, Object.entries(e.kpis || {}).map(([k, v]) => `${k}=${num(v)}`).join("  "))] : null,
       h("dt", null, "logs"), h("dd", null, logLink(e.stderr_log, "stderr"), " ", logLink(e.stdout_log, "stdout"), EMBEDDED ? h("span", { class: "note" }, e.stderr_log || "") : null)),
     e.argv?.length ? h("div", { class: "cmd", style: { marginTop: "8px" } }, h("pre", { class: "code" }, quote(e.argv)), copyButton(quote(e.argv))) : null,

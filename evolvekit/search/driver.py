@@ -18,6 +18,7 @@ no-ops, and its winner improved the public set while losing on the hold-out.
 from __future__ import annotations
 
 import json
+import os
 import random
 import socket
 import time
@@ -231,6 +232,7 @@ class Driver:
         return {
             "version": __version__,
             "host": socket.gethostname(),
+            "cpus": os.cpu_count(),
             "config_path": str(config.source) if config.source else None,
             "objective": config.evaluate.score.objective,
             "direction": config.evaluate.score.direction,

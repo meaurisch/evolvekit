@@ -50,6 +50,10 @@ class StageOutcome:
     stdout_log: str = ""
     stderr_log: str = ""
     """Where the run's complete output was kept (`evaluate/process.py`)."""
+    host_busy: float | None = None
+    """The share of all logical CPUs that were busy -- with anything -- while
+    this run was going (`evaluate/hostload.py`). `None` for a lookup, and on a
+    platform that cannot say."""
     cached: bool = False
     """Looked up in `work/cache/` rather than run: the same candidate, stage,
     instance and seed had already been evaluated (`evaluate/cache.py`)."""

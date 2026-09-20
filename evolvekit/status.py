@@ -518,6 +518,7 @@ class _Run:
                 "failure_reasons": self._failure_reasons(finished),
             },
             "in_flight": in_flight,
+            "host": self._host_load(finished),
             "stage": stage_now,
             "eta": self._eta(last_planned, done_generations, live is not None, stage_now),
             "limits": self._limits(last_planned, done_generations),
@@ -592,6 +593,57 @@ class _Run:
             and _number(e.get("duration_s")) is not None
         ]
         return median(durations) if durations else None
+
+    def _host_load(self, finished: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """Was the machine busy with something else while evaluations ran?
+
+        Each run records the busy share of all logical CPUs over its lifetime.
+        What this run's own workers explain is `workers / cpus` (for a
+        single-threaded solver); a run that saw clearly more than both that and
+        its stage's typical value shared the machine with something. For a
+        time-limited solver that is a worse score for no fault of the candidate.
+        """
+        cpus = self.described.get("cpus")
+        measured = [
+            e for e in finished
+            if not e.get("cached") and _number(e.get("host_busy")) is not None
+        ]
+        if not isinstance(cpus, int) or cpus < 1 or not measured:
+            return {"available": False, "flagged": 0, "stages": []}
+        margin = max(0.08, 0.75 / cpus)  # about one more busy logical CPU
+        workers = {s.get("id"): int(s.get("workers") or 1) for s in self.described.get("stages") or []}
+        stages, flagged_total, examples = [], 0, []
+        for stage_id in dict.fromkeys(str(e.get("stage")) for e in measured):
+            values = [(e, float(e["host_busy"])) for e in measured if str(e.get("stage")) == stage_id]
+            explained = min(1.0, workers.get(stage_id, 1) / cpus)
+            typical = median(v for _, v in values)
+            threshold = max(explained, typical) + margin
+            flagged = [(e, v) for e, v in values if v > threshold]
+            flagged_total += len(flagged)
+            examples += [
+                {"candidate_id": e.get("candidate_id"), "stage": stage_id, "instance": e.get("instance"),
+                 "seed": e.get("seed"), "host_busy": v, "ts": e.get("ts")}
+                for e, v in flagged[-5:]
+            ]
+            stages.append({
+                "id": stage_id, "n": len(values), "explained": explained, "typical": typical,
+                "flagged": len(flagged),
+                "busier_throughout": typical > explained + margin,
+            })
+        return {
+            "available": True,
+            "cpus": cpus,
+            "margin": margin,
+            "flagged": flagged_total,
+            "measured": len(measured),
+            "stages": stages,
+            "examples": examples[-8:],
+            "why": (
+                "the share of all logical CPUs that were busy during each evaluator run, against "
+                "what this run's workers explain. For a time-limited solver, other work on the "
+                "machine is a worse score for no fault of the candidate"
+            ),
+        }
 
     @staticmethod
     def _failure_reasons(finished: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -1466,7 +1518,7 @@ def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] |
         {
             key: event.get(key)
             for key in (
-                "ts", "stage", "instance", "attempt", "seed", "private", "ok", "duration_s", "kpis", "failure",
+                "ts", "stage", "instance", "attempt", "seed", "private", "ok", "duration_s", "host_busy", "cached", "kpis", "failure",
                 "stderr_tail", "stdout_tail", "argv", "stdout_log", "stderr_log",
             )
         }
@@ -1580,6 +1632,15 @@ def render_text(document: Mapping[str, Any]) -> str:
         f"elapsed      : {_duration(health.get('elapsed_s'))}   eta: {_duration(eta.get('seconds'))}"
         + (f"  ({eta.get('basis')})" if eta.get("seconds") is None and eta.get("basis") else "")
     )
+    host = health.get("host") or {}
+    for entry in host.get("stages") or []:
+        if entry.get("flagged") or entry.get("busier_throughout"):
+            lines.append(
+                f"  host load  : stage {entry.get('id')}: {entry.get('flagged')} of {entry.get('n')} run(s) "
+                f"shared the machine with something else (typically {entry.get('typical'):.0%} of all CPUs busy; "
+                f"this run's workers explain {entry.get('explained'):.0%})"
+                + (" -- busier than explained throughout: a multi-threaded solver, or other work" if entry.get("busier_throughout") else "")
+            )
     stage = health.get("stage")
     if stage:
         lines.append(

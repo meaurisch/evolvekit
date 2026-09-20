@@ -80,7 +80,7 @@ live run is built from:
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
   | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
-  | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
+  | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed` and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
@@ -588,6 +588,14 @@ own, and the framework knows what it could not know before:
   finishes a candidate's last instance. `preflight` warns when there are more
   workers than physical cores. Measure, do not guess: run 1, 2, 3 … copies of
   your solver side by side and stay where the per-run throughput is still flat.
+  **And leave the machine alone while it runs.** Pinning keeps other work off
+  the solver's cores; it does not keep it from slowing them down — on a laptop
+  all cores share one power budget, and a test suite pinned to the one *free*
+  core cost three pinned solver runs 15–30 % of their iterations. Every
+  evaluator run therefore records `host_busy`, the share of all logical CPUs
+  that were busy with *anything* while it ran; `status` and the dashboard say
+  how many runs shared the machine with something the run's own workers do not
+  explain (Windows and Linux; elsewhere nothing is recorded or flagged).
 - **A failure with an address.** A crash is *this* instance, *this* seed, *this*
   attempt, with log files of its own (`work/stage_out/<id>.<stage>.<instance>.seed0[.try1].*`).
   With `retries: 1` it is run once more before the candidate's stage fails —
