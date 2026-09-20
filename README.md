@@ -855,6 +855,14 @@ searched a Phase A landscape. `extends` makes that impossible, and
 `tests/test_config.py` asserts the three shared sections parse identically
 either way.
 
+### Exit codes of `run`
+
+`0` the run ended as planned (generations exhausted, a stop rule, the budget). `1` an error.
+`2` a config error. `3` the run directory is locked by a live run. `4` **aborted**: the seed
+failed its own evaluation, or the model backend kept failing — nothing was searched, and a
+wrapper script, a CI step or an agent must not take that for a finished search. The reason
+is in the last lines of the output and in `status`.
+
 ### The run lock
 
 `run` takes `<run_dir>/.lock` and holds it for the duration. A second run

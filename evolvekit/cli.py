@@ -30,6 +30,10 @@ __all__ = ["main", "build_parser"]
 DEFAULT_CONFIG = "evolvekit.yaml"
 DEFAULT_RUN_DIR = "runs/latest"
 
+EXIT_ABORTED = 4
+"""`run`: 0 done, 1 an error, 2 a config error, 3 the run directory is locked,
+4 aborted -- the seed failed its own evaluation or the model backend kept failing."""
+
 _STARTER_CONFIG = """\
 # evolvekit configuration. See README.md and docs/new-experiment.md.
 
@@ -420,7 +424,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             "dashboard   : stopped with the run. To look again:\n"
             f"              python -m evolvekit dashboard --run-dir {driver.ledger.run_dir}"
         )
-    return 0
+    # 4: the run could not work (the seed failed, the backend died). A wrapper
+    # script must not mistake that for a finished search.
+    return EXIT_ABORTED if summary.aborted else 0
 
 
 def cmd_dashboard(args: argparse.Namespace) -> int:
