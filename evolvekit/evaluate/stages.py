@@ -18,6 +18,7 @@ import math
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,7 @@ __all__ = [
     "static_checks",
     "build_argv",
     "Configuration",
+    "UnitContext",
     "STDERR_LIMIT",
     "FEEDBACK_LIMIT",
 ]
@@ -174,6 +176,22 @@ def _import_check(candidate_path: Path, timeout: float) -> str | None:
 
 
 @dataclass(frozen=True)
+class UnitContext:
+    """What one run of a per-instance stage knows beyond its seed."""
+
+    instance: str
+    """As the command receives it in `{instance}`."""
+    name: str
+    """As people read it: `StageConfig.instance_names`."""
+    attempt: int = 0
+    cpus: tuple[int, ...] = ()
+    cancel: threading.Event | None = None
+
+    def labels(self) -> dict[str, Any]:
+        return {"instance": self.name, "attempt": self.attempt}
+
+
+@dataclass(frozen=True)
 class Configuration:
     """A candidate's validated parameters, in the two shapes a command can take
     them: `--flag value` arguments for `{params}`, a JSON file for
@@ -240,6 +258,7 @@ def build_argv(
     seed: int = 0,
     params_flags: list[str] | None = None,
     params_json: Path | None = None,
+    instance: str | None = None,
 ) -> list[str]:
     """Split the template first, substitute second.
 
@@ -260,6 +279,7 @@ def build_argv(
         "inputs": ",".join(inputs),
         "out": str(out),
         "seed": str(seed),
+        "instance": instance or "",
         "params": " ".join(flags),
         "params_json": str(params_json) if params_json is not None else "",
     }
@@ -414,14 +434,18 @@ def _run_once(
     required_kpis: tuple[str, ...] = (),
     observer: Observer | None = None,
     configuration: "Configuration | None" = None,
+    unit: "UnitContext | None" = None,
 ) -> StageOutcome:
     """One evaluator run, announced to `observer` before and after.
 
     The two events bracket the subprocess itself, so a reader of the event log
     can tell at any moment which run is in flight and for how long it has been.
+    `unit` is what a per-instance stage adds: which instance this run is for,
+    which attempt it is, where it is pinned and how it can be called off.
     """
+    labels = unit.labels() if unit is not None else {}
     if observer is not None:
-        observer("eval_started", seed=seed, timeout_s=stage.timeout)
+        observer("eval_started", seed=seed, timeout_s=stage.timeout, **labels)
     outcome = _execute_once(
         candidate_path,
         stage,
@@ -432,6 +456,7 @@ def _run_once(
         seed=seed,
         required_kpis=required_kpis,
         configuration=configuration,
+        unit=unit,
     )
     outcome.stdout_log = str(out_path.with_suffix(".stdout.log"))
     outcome.stderr_log = str(out_path.with_suffix(".stderr.log"))
@@ -443,6 +468,7 @@ def _run_once(
                 inputs=inputs,
                 out=out_path,
                 seed=seed,
+                instance=unit.instance if unit is not None else None,
                 **_substitutions(configuration),
             )
         )
@@ -468,6 +494,7 @@ def _run_once(
             argv=list(outcome.argv),
             stdout_log=outcome.stdout_log,
             stderr_log=outcome.stderr_log,
+            **labels,
             **failed,
         )
     return outcome
@@ -484,6 +511,7 @@ def _execute_once(
     seed: int = 0,
     required_kpis: tuple[str, ...] = (),
     configuration: "Configuration | None" = None,
+    unit: "UnitContext | None" = None,
 ) -> StageOutcome:
     """Run one external evaluator and read the KPI JSON it wrote to `{out}`."""
     started = time.perf_counter()
@@ -496,6 +524,7 @@ def _execute_once(
             inputs=inputs,
             out=out_path,
             seed=seed,
+            instance=unit.instance if unit is not None else None,
             **_substitutions(configuration),
         )
     except (ValueError, KeyError, IndexError) as exc:
@@ -516,8 +545,18 @@ def _execute_once(
         cwd=cwd,
         stdout_path=stdout_log,
         stderr_path=stderr_log,
+        cpus=unit.cpus if unit is not None else (),
+        cancel=unit.cancel if unit is not None else None,
     )
     duration = time.perf_counter() - started
+    if run.cancelled:
+        return StageOutcome(
+            stage_id=stage.id,
+            ok=False,
+            failure="called off: the run was interrupted",
+            duration_s=duration,
+            private=private,
+        )
     if run.error is not None:
         return StageOutcome(
             stage_id=stage.id,

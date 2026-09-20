@@ -16,12 +16,18 @@ from typing import Any
 
 __all__ = [
     "Candidate",
+    "SEED_OPERATOR",
     "BlockError",
     "extract_block",
     "splice_block",
     "complexity_of",
     "block_hash",
 ]
+
+
+SEED_OPERATOR = "human-seed"
+"""The `operator` of the candidate the run started from: the baseline every
+improvement is measured against."""
 
 
 class BlockError(ValueError):

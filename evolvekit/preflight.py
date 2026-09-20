@@ -25,6 +25,7 @@ wrapper script can gate on it.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ from typing import Callable
 
 from evolvekit.candidate import extract_block, splice_block
 from evolvekit.config import Config, ModelConfig, StageConfig
+from evolvekit.evaluate.fanout import Job, run_instance_stage
+from evolvekit.evaluate.process import can_pin
 from evolvekit.evaluate.stages import Configuration, run_command_stage, run_static_stage
 from evolvekit.evaluate.types import StageOutcome
 from evolvekit.ledger import price_completion
@@ -101,11 +104,22 @@ class StageReport:
     kpi_cv: dict[str, float] = field(default_factory=dict)
     feedback: str = ""
     failure: str | None = None
+    workers: int = 1
+    """How many of the stage's runs are in flight at once (a per-instance stage)."""
+    instances: int = 0
+    """How many instances the stage ran one by one; 0 for a classic stage."""
 
     @property
     def per_run_s(self) -> float:
         """The number the timeout is actually compared against."""
         return self.duration_s / max(1, self.runs)
+
+    @property
+    def wall_s(self) -> float:
+        """What the stage costs on the clock: its runs add up to `duration_s`,
+        but a per-instance stage has `workers` of them going at a time -- and
+        in a generation the pool never idles, so the division is fair."""
+        return self.duration_s / max(1, self.workers)
 
     @property
     def label(self) -> str:
@@ -146,12 +160,12 @@ class PreflightReport:
     @property
     def full_eval_s(self) -> float:
         """Wall clock for one candidate's *final* stage, hold-out included."""
-        return sum(s.duration_s for s in self.stages if s.stage_id == self._final_id)
+        return sum(s.wall_s for s in self.stages if s.stage_id == self._final_id)
 
     @property
     def cheap_s(self) -> float:
         """Wall clock for one candidate's stages before the final one."""
-        return sum(s.duration_s for s in self.stages if s.stage_id != self._final_id)
+        return sum(s.wall_s for s in self.stages if s.stage_id != self._final_id)
 
     _final_id: str = ""
 
@@ -191,6 +205,7 @@ def preflight(
         _run_stages(config, report, directory, candidate_path)
 
     _check_timeouts(config, report)
+    _check_workers(config, report)
     _check_budget(config, report)
     if provider_check:
         _check_providers(config, report, providers or {})
@@ -245,7 +260,7 @@ def _run_stages(
             report.failures.append(f"stage {stage.id}: {outcome.failure}")
             return
 
-        if stage.private_inputs:
+        if stage.private_inputs or stage.private_instances:
             private = _run_command(config, stage, candidate_path, configuration, work_dir, private=True)
             report.stages.append(_stage_report(stage, private))
             if not private.ok:
@@ -265,6 +280,12 @@ def _run_command(
     private: bool,
 ) -> StageOutcome:
     """The seed through one command stage, the way a run would put it through."""
+    if stage.fans_out:
+        job = Job("seed", candidate_path, configuration=configuration)
+        return run_instance_stage(
+            [job], stage, out_dir=work_dir, cwd=config.base_dir, private=private,
+            required_kpis=(config.evaluate.score.objective,),
+        )["seed"]
     return run_command_stage(
         candidate_path,
         stage,
@@ -279,6 +300,8 @@ def _run_command(
 
 def _stage_report(stage: StageConfig, outcome: StageOutcome) -> StageReport:
     return StageReport(
+        workers=stage.workers,
+        instances=len(outcome.instance_names),
         stage_id=stage.id,
         kind=stage.kind,
         ok=outcome.ok,
@@ -296,6 +319,34 @@ def _stage_report(stage: StageConfig, outcome: StageOutcome) -> StageReport:
 # --------------------------------------------------------------------------
 # checks
 # --------------------------------------------------------------------------
+
+
+def _check_workers(config: Config, report: PreflightReport) -> None:
+    """Parallel runs of a time-limited solver are a statement about the objective."""
+    cpus = os.cpu_count()
+    for stage in config.evaluate.stages:
+        if stage.workers <= 1:
+            continue
+        if cpus is not None and stage.workers > max(1, cpus // 2):
+            report.warnings.append(
+                f"stage {stage.id}: {stage.workers} workers on a machine with {cpus} logical "
+                "CPUs. With simultaneous multithreading that is more runs than physical cores: "
+                "two solvers sharing a core each get less done within their time limit than "
+                "one would alone, and the difference becomes the score. Measure the throughput "
+                "of 1, 2, ... workers on this machine and stay where it is still flat."
+            )
+        if not stage.pin_cpus:
+            report.notes.append(
+                f"stage {stage.id}: {stage.workers} workers and no `pin_cpus`. The operating "
+                "system will move the runs between cores as it likes; for a time-limited solver, "
+                "pinning one logical CPU per physical core (and leaving one core to everything "
+                "else) makes the runs comparable."
+            )
+        elif not can_pin():
+            report.warnings.append(
+                f"stage {stage.id}: `pin_cpus` is set, but this platform cannot pin a process "
+                "to a CPU; the runs will float."
+            )
 
 
 def _check_timeouts(config: Config, report: PreflightReport) -> None:
@@ -383,15 +434,25 @@ def _check_budget(config: Config, report: PreflightReport) -> None:
             f"{_duration(projected)}, excluding model latency."
         )
 
-    noisy = [s for s in report.stages if s.runs > 1]
+    noisy = [s for s in report.stages if s.kpi_cv]
     for stage in noisy:
         worst = max(stage.kpi_cv.values(), default=0.0)
+        seeds = stage.runs // stage.instances if stage.instances else stage.runs
         report.notes.append(
-            f"stage {stage.label} ran {stage.runs} seed(s); the noisiest KPI "
-            f"varied by {worst * 100:.2f}% across them. The behaviour signature "
-            f"uses {config.evaluate.signature_digits_stochastic} significant "
+            f"stage {stage.label} ran {seeds} seed(s)"
+            + (" per instance" if stage.instances else "")
+            + f"; the noisiest KPI varied by {worst * 100:.2f}% across them. The behaviour "
+            f"signature uses {config.evaluate.signature_digits_stochastic} significant "
             "digits on this stage."
         )
+    for stage_config in config.evaluate.stages:
+        if stage_config.fans_out and stage_config.normalize == "baseline":
+            report.notes.append(
+                f"stage {stage_config.id}: `normalize: baseline`. The "
+                f"{config.evaluate.score.objective} above is the plain mean over instances; in "
+                "a run the seed scores 100 by definition, and every candidate is a percentage "
+                "of it, instance by instance."
+            )
 
 
 def _breadth(config: Config) -> int:
@@ -538,7 +599,13 @@ def format_report(
     lines = [header, ""]
     for stage in report.stages:
         verdict = "ok" if stage.ok else "FAILED"
-        runs = f" x{stage.runs} seed(s)" if stage.runs > 1 else ""
+        if stage.instances:
+            runs = (
+                f" of solver time: {stage.runs} run(s) on {stage.instances} instance(s), "
+                f"{stage.workers} at a time, about {_duration(stage.wall_s)} on the clock"
+            )
+        else:
+            runs = f" x{stage.runs} seed(s)" if stage.runs > 1 else ""
         lines.append(
             f"stage {stage.label:<20} {verdict:<7} {_duration(stage.duration_s)}"
             f"{runs}  (timeout {stage.timeout:g}s per run)"

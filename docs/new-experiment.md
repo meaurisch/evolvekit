@@ -66,6 +66,8 @@ Any command. It receives placeholders (any order) and writes JSON to `{out}`:
 | `{out}` | path to write the KPI JSON | yes |
 | `{inputs}` | the stage's `inputs` / `private_inputs`, comma-joined | no |
 | `{seed}` | `0`, or `0…N-1` on a `seeds: N` stage | only when `seeds > 1` |
+| `{instance}` | one entry of the stage's `instances`; the command runs once per instance | when `instances` is set |
+| `{params}` / `{params_json}` | the configuration as flags / as a JSON file | with `problem.parameters` |
 
 ```json
 {
@@ -122,6 +124,18 @@ never otherwise optimised against. A stochastic evaluator gets `seeds: N`
 (KPIs averaged, per-KPI coefficient of variation recorded). No natural
 subset? Run two stages and lean on penalty KPIs — that is what
 `examples/circlepacking/` does.
+
+**A solver with a test set** gets `instances:` on the stage and `{instance}` in
+the command, which then solves one instance per run. That buys `workers` (runs
+side by side, `pin_cpus` so a time-limited run has a core to itself),
+`retries` for the occasional crash, failures that name their instance, a
+per-instance comparison on the dashboard, and `normalize: baseline` — each
+instance counts as a percentage of what the defaults reached on it, so the
+largest instance does not decide the search
+([README: one run per instance](../README.md#one-run-per-instance-instances-workers-retries)).
+For a slow solver the cheap stage is the same command with a shorter time
+limit and fewer instances, and `promote: {top_k_per_generation: 2}` decides who
+gets the full budget.
 
 ## 4. Score, archive, novelty
 

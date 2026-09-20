@@ -479,6 +479,9 @@ class _Run:
                 default=None,
             )
 
+        stage_now = (
+            self._stage_in_progress(last_items, in_flight) if closing is None and alive else None
+        )
         return {
             "state": state,
             "detail": detail,
@@ -507,9 +510,79 @@ class _Run:
                 "failure_reasons": self._failure_reasons(finished),
             },
             "in_flight": in_flight,
-            "eta": self._eta(last_planned, done_generations, live is not None),
+            "stage": stage_now,
+            "eta": self._eta(last_planned, done_generations, live is not None, stage_now),
             "limits": self._limits(last_planned, done_generations),
         }
+
+    def _stage_in_progress(
+        self, items: Sequence[Mapping[str, Any]], in_flight: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any] | None:
+        """The stage the live session is in the middle of: how many of its runs
+        are done, and how long the rest should take. A generation of a slow
+        solver is hours; without this it is a progress bar with no length."""
+        opened: Mapping[str, Any] | None = None
+        for event in items:
+            if event.get("type") == "stage_started":
+                opened = event
+            elif event.get("type") == "stage_finished":
+                opened = None
+        if opened is None:
+            return None
+        stage, private = opened.get("stage"), bool(opened.get("private"))
+        candidates = [str(c) for c in opened.get("candidates") or []]
+        per_candidate = int(opened.get("runs_per_candidate") or 1)
+        workers = max(1, int(opened.get("workers") or 1))
+        done: dict[str, set] = {c: set() for c in candidates}
+        out: set[str] = set()   # failed for good: their remaining runs are never started
+        failed_runs: dict[tuple, str] = {}
+        for event in items:
+            if (
+                event.get("type") != "eval_finished" or event.get("stage") != stage
+                or bool(event.get("private")) != private or int(event.get("seq") or 0) < int(opened.get("seq") or 0)
+            ):
+                continue
+            cid, run = str(event.get("candidate_id")), (event.get("instance"), event.get("seed"))
+            if cid not in done:
+                continue
+            if event.get("ok"):
+                done[cid].add(run)
+                failed_runs.pop((cid, run), None)
+            else:
+                failed_runs[(cid, run)] = cid
+        flying = {(str(f.get("candidate_id")), (f.get("instance"), f.get("seed"))) for f in in_flight}
+        out = {cid for key, cid in failed_runs.items() if key not in flying}
+        runs_done = sum(len(runs) for runs in done.values())
+        left = sum(per_candidate - len(runs) for cid, runs in done.items() if cid not in out)
+        typical = self._typical_run_s(stage)
+        remaining = None
+        if typical is not None:
+            in_progress = sum(max(0.0, typical - float(f.get("running_s") or 0.0)) for f in in_flight)
+            unstarted = max(0, left - len(in_flight))
+            remaining = (in_progress + unstarted * typical) / workers
+        return {
+            "id": stage,
+            "private": private,
+            "since": opened.get("ts"),
+            "candidates": len(candidates),
+            "candidates_out": len(out),
+            "runs_planned": per_candidate * len(candidates),
+            "runs_done": runs_done,
+            "runs_left": left,
+            "workers": workers,
+            "typical_run_s": typical,
+            "remaining_s": remaining,
+        }
+
+    def _typical_run_s(self, stage: Any) -> float | None:
+        """The median duration of this stage's successful runs so far. For a
+        time-limited solver that is the time limit, to within a second."""
+        durations = [
+            float(e["duration_s"]) for e in self.events
+            if e.get("type") == "eval_finished" and e.get("ok") and e.get("stage") == stage
+            and _number(e.get("duration_s")) is not None
+        ]
+        return median(durations) if durations else None
 
     @staticmethod
     def _failure_reasons(finished: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -528,7 +601,10 @@ class _Run:
     def _open_evaluations(self, items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         open_: dict[tuple, dict[str, Any]] = {}
         for event in items:
-            key = (event.get("candidate_id"), event.get("stage"), event.get("seed"), event.get("private"))
+            key = (
+                event.get("candidate_id"), event.get("stage"), event.get("seed"),
+                event.get("private"), event.get("instance"), event.get("attempt"),
+            )
             if event.get("type") == "eval_started":
                 open_[key] = dict(event)
             elif event.get("type") == "eval_finished":
@@ -543,6 +619,8 @@ class _Run:
                 {
                     "candidate_id": event.get("candidate_id"),
                     "stage": event.get("stage"),
+                    "instance": event.get("instance"),
+                    "attempt": event.get("attempt"),
                     "seed": event.get("seed"),
                     "private": bool(event.get("private")),
                     "since": event.get("ts"),
@@ -569,7 +647,13 @@ class _Run:
             and _number(e.get("duration_s")) is not None
         ]
 
-    def _eta(self, last_planned: int | None, done: Sequence[int], live: bool) -> dict[str, Any]:
+    def _eta(
+        self,
+        last_planned: int | None,
+        done: Sequence[int],
+        live: bool,
+        stage: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not live:
             return {"seconds": None, "at": None, "basis": "the run is not running"}
         if last_planned is None:
@@ -586,13 +670,28 @@ class _Run:
             }
         typical = median(durations)
         seconds = typical * remaining
+        basis = (
+            f"{remaining} generation(s) to go x the median of {len(durations)} finished "
+            f"({typical:.0f} s)"
+        )
+        started = [e for e in self.events if e.get("type") == "generation_started"]
+        current = started[-1] if started else None
+        if current is not None and int(current.get("generation") or 0) not in done:
+            # The generation in progress is not a whole one any more: what is
+            # left of it is the larger of "the median minus what it has used"
+            # and what its current stage still has to run.
+            began = _parse_ts(current.get("ts"))
+            used = (self.now - began).total_seconds() if began else 0.0
+            left = max(0.0, typical - used, float((stage or {}).get("remaining_s") or 0.0))
+            seconds = typical * (remaining - 1) + left
+            basis = (
+                f"{left:.0f} s left of the generation in progress, then {remaining - 1} more x the "
+                f"median of {len(durations)} finished ({typical:.0f} s)"
+            )
         return {
             "seconds": seconds,
             "at": datetime.fromtimestamp(self.now.timestamp() + seconds, timezone.utc).isoformat(timespec="seconds"),
-            "basis": (
-                f"{remaining} generation(s) to go x the median of {len(durations)} finished "
-                f"({typical:.0f} s). An upper bound on the plan: a stop rule can end it sooner"
-            ),
+            "basis": basis + ". An upper bound on the plan: a stop rule can end it sooner",
         }
 
     def _limits(self, last_planned: int | None, done: Sequence[int]) -> list[dict[str, Any]]:
@@ -610,12 +709,13 @@ class _Run:
         final = self._final_stage
         if final and _number(budget.get("max_full_evals_per_day")) is not None:
             today = self.now.date().isoformat()
-            used = sum(
-                1 for e in self.events
+            # The cap counts candidates admitted to the final stage, however many
+            # runs (seeds, instances, retries) that turns into.
+            used = len({
+                e.get("candidate_id") for e in self.events
                 if e.get("type") == "eval_started" and e.get("stage") == final
-                and not e.get("private") and int(e.get("seed") or 0) == 0
-                and str(e.get("ts", ""))[:10] == today
-            )
+                and not e.get("private") and str(e.get("ts", ""))[:10] == today
+            })
             limits.append({"name": "budget.max_full_evals_per_day", "used": used, "cap": budget["max_full_evals_per_day"], "unit": "today"})
         stop = self.described.get("stop") or {}
         if _number(stop.get("patience")) is not None:
@@ -630,12 +730,13 @@ class _Run:
 
     # -- progress ----------------------------------------------------------
 
-    def _objective_samples(self) -> dict[str, dict[int, float]]:
-        """`{candidate: {seed: objective}}` from the final stage's public runs:
-        the individual draws behind each mean, which is where the noise shows."""
+    def _objective_samples(self) -> dict[str, dict[Any, float]]:
+        """`{candidate: {run: objective}}` from the final stage's public runs:
+        the individual draws behind each mean, which is where the noise shows.
+        A run is a seed -- or, on a per-instance stage, an `(instance, seed)`."""
         if self._samples is not None:
             return self._samples
-        samples: dict[str, dict[int, float]] = {}
+        samples: dict[str, dict[Any, float]] = {}
         name, final = self._objective_name, self._final_stage
         for event in self.events:
             if event.get("type") != "eval_finished" or not event.get("ok") or event.get("private"):
@@ -645,15 +746,54 @@ class _Run:
             value = _number((event.get("kpis") or {}).get(name)) if name else None
             if value is None:
                 continue
-            samples.setdefault(str(event.get("candidate_id")), {})[int(event.get("seed") or 0)] = value
+            seed = int(event.get("seed") or 0)
+            run = (str(event["instance"]), seed) if event.get("instance") is not None else seed
+            samples.setdefault(str(event.get("candidate_id")), {})[run] = value
         self._samples = samples
         return samples
+
+    @property
+    def _per_instance_stage(self) -> Mapping[str, Any] | None:
+        """The final stage's description, when it runs once per instance."""
+        for stage in self.described.get("stages") or []:
+            if stage.get("final") and stage.get("instances"):
+                return stage
+        return None
+
+    def _draws(self, candidate_id: str) -> list[float] | None:
+        """The values whose spread is this candidate's uncertainty, in the
+        objective's own units -- or `None` when there is no honest one.
+
+        On a per-instance stage the runs are *different instances*; their raw
+        spread is the difference between instances, which is no noise at all.
+        With `normalize: baseline` the objective is a mean of per-instance
+        percentages, and those are the draws. Without it the objective is a
+        mean over scales, and nothing scale-free has the objective's units.
+        """
+        samples = self._objective_samples()
+        draws = samples.get(candidate_id, {})
+        stage = self._per_instance_stage
+        if stage is None:
+            return list(draws.values())
+        baseline = self._per_instance(str((self.seed or {}).get("id")))
+        if stage.get("normalize") != "baseline" or not baseline:
+            return None
+        by_instance: dict[str, list[float]] = {}
+        for (instance, _seed), value in draws.items():
+            by_instance.setdefault(instance, []).append(value)
+        return [
+            100.0 * fmean(values) / fmean(baseline[instance])
+            for instance, values in by_instance.items()
+            if baseline.get(instance) and fmean(baseline[instance]) > 0
+        ]
 
     def _measured(self, row: Mapping[str, Any] | None) -> dict[str, Any] | None:
         if row is None:
             return None
-        draws = self._objective_samples().get(str(row.get("id")), {})
-        spread = _spread(list(draws.values()))
+        draws = self._draws(str(row.get("id")))
+        spread = _spread(draws) if draws is not None else {
+            "n": len(self._objective_samples().get(str(row.get("id")), {})), "sd": None, "sem": None,
+        }
         return {
             "id": row.get("id"),
             "generation": row.get("generation"),
@@ -673,7 +813,9 @@ class _Run:
             return {"verdict": "none", "why": "the best candidate is the baseline"}
         samples = self._objective_samples()
         a, b = samples.get(str(baseline["id"]), {}), samples.get(str(best["id"]), {})
-        shared = sorted(set(a) & set(b))
+        shared = sorted(set(a) & set(b), key=str)
+        if self._per_instance_stage is not None and len(shared) >= 2:
+            return self._verdict_per_instance(a, b, shared)
         if len(shared) < 2:
             return {
                 "verdict": "unknown",
@@ -697,6 +839,36 @@ class _Run:
                 "result is optimistic until it is confirmed on seeds it never saw"
             ),
             "n": len(shared),
+            "mean_gain": mean,
+            "sd_gain": sd,
+            "t": t if math.isfinite(t) else None,
+        }
+
+    def _verdict_per_instance(
+        self, a: Mapping[Any, float], b: Mapping[Any, float], shared: Sequence[Any]
+    ) -> dict[str, Any]:
+        """Paired over `(instance, seed)` runs, each gain in percent of the
+        baseline's value on that same run -- so a large instance and a small
+        one count alike, and what the instance contributes cancels out."""
+        sign = 1.0 if self._direction == "minimize" else -1.0
+        gains = [100.0 * sign * (a[run] - b[run]) / abs(a[run]) for run in shared if a[run]]
+        if len(gains) < 2:
+            return {"verdict": "unknown", "why": "fewer than two comparable runs", "n": len(gains)}
+        mean, sd = fmean(gains), stdev(gains)
+        t = mean / (sd / math.sqrt(len(gains))) if sd > 0 else math.inf
+        clear = mean > 0 and t >= 2.0
+        instances = len({run[0] for run in shared})
+        return {
+            "verdict": "clear" if clear else "within noise",
+            "why": (
+                f"paired over {len(gains)} shared run(s) on {instances} instance(s): mean gain "
+                f"{mean:.3g} % per run, t = {t:.2f}"
+                + ("" if clear else " (below 2: not distinguishable from noise)")
+                + ". These are the instances and seeds the search selected on, so even a clear "
+                "result is optimistic until it is confirmed on seeds it never saw"
+            ),
+            "n": len(gains),
+            "unit": "percent of the baseline, per run",
             "mean_gain": mean,
             "sd_gain": sd,
             "t": t if math.isfinite(t) else None,
@@ -750,6 +922,27 @@ class _Run:
             },
             "series": per_generation,
             "generations": self._generation_ribbon(per_generation),
+            "spread": self._spread_basis(),
+        }
+
+    def _spread_basis(self) -> dict[str, Any]:
+        """What every `sd` and `sem` in this section is the spread *of*."""
+        stage = self._per_instance_stage
+        if stage is None:
+            return {"across": "seeds", "available": True}
+        if stage.get("normalize") == "baseline":
+            return {
+                "across": "instances",
+                "available": True,
+                "why": "each instance's value in percent of the baseline's, as the objective counts it",
+            }
+        return {
+            "across": "instances",
+            "available": False,
+            "why": (
+                "the objective is a plain mean over instances of different scale "
+                "(`normalize: none`), and the spread between instances is not noise"
+            ),
         }
 
     def _generation_ribbon(self, per_generation: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -1001,17 +1194,73 @@ class _Run:
         runs = [r for r in per_seed[name] if len(r) == len(per_seed[name][0])]
         return name, [fmean(column) for column in zip(*runs)]
 
+    def _per_instance(self, candidate_id: str) -> dict[str, list[float]]:
+        """The objective of every successful final-stage run of a per-instance
+        stage, by instance name: one value per seed."""
+        final, objective = self._final_stage, self._objective_name or ""
+        values: dict[str, dict[Any, float]] = {}
+        for event in self.events:
+            if (
+                event.get("type") != "eval_finished" or not event.get("ok") or event.get("private")
+                or event.get("instance") is None
+                or str(event.get("candidate_id")) != candidate_id
+                or (final is not None and event.get("stage") != final)
+            ):
+                continue
+            value = _number((event.get("kpis") or {}).get(objective))
+            if value is not None:  # keyed by seed: a retry replaces the attempt before it
+                values.setdefault(str(event["instance"]), {})[event.get("seed")] = value
+        return {name: list(by_seed.values()) for name, by_seed in values.items()}
+
+    def _instances_by_name(self) -> dict[str, Any] | None:
+        base = self._per_instance(str(self.seed.get("id")))
+        best = self._per_instance(str(self.best_row.get("id")))
+        shared = [name for name in base if name in best]
+        if not shared:
+            return None
+        # As the stage lists them, not in the order the runs happened to finish.
+        declared = list((self._per_instance_stage or {}).get("instances") or [])
+        shared.sort(key=lambda name: declared.index(name) if name in declared else len(declared))
+        rows, wins, losses = [], 0, 0
+        for index, name in enumerate(shared):
+            a, b = _spread(base[name]), _spread(best[name])
+            delta = _improvement_pct(a["mean"], b["mean"], self._direction)
+            wins += 1 if (delta or 0) > 0 else 0
+            losses += 1 if (delta or 0) < 0 else 0
+            rows.append(
+                {
+                    "instance": index, "name": name, "baseline": a["mean"], "best": b["mean"],
+                    "improvement_pct": delta, "baseline_runs": a["n"], "best_runs": b["n"],
+                    "baseline_sd": a["sd"], "best_sd": b["sd"],
+                }
+            )
+        return {
+            "available": True,
+            "kpi": self._objective_name,
+            "assumes": "one run per instance and seed; each value is the mean over that instance's seeds",
+            "best_id": self.best_row.get("id"),
+            "baseline_id": self.seed.get("id"),
+            "wins": wins,
+            "losses": losses,
+            "ties": len(rows) - wins - losses,
+            "rows": rows,
+        }
+
     def instances(self) -> dict[str, Any]:
         unavailable = {
             "available": False,
             "rows": [],
             "why": (
-                "the evaluator reports no per-instance list KPI at the final stage. Emit one "
-                "(e.g. `\"cost_per_instance\": [..]`) and the breakdown appears here"
+                "the final stage neither runs per instance (`instances:` on the stage) nor "
+                "reports a per-instance list KPI (e.g. `\"cost_per_instance\": [..]`). "
+                "With either, the breakdown appears here"
             ),
         }
         if not self.seed or not self.best_row:
             return unavailable
+        named = self._instances_by_name()
+        if named is not None:
+            return named
         base, best = self._vector(str(self.seed.get("id"))), self._vector(str(self.best_row.get("id")))
         if not base or not best or base[0] != best[0] or len(base[1]) != len(best[1]):
             return unavailable
@@ -1037,6 +1286,15 @@ class _Run:
     # -- failures ----------------------------------------------------------
 
     def failures(self) -> list[dict[str, Any]]:
+        def run_of(event: Mapping[str, Any]) -> tuple:
+            return (
+                event.get("candidate_id"), event.get("stage"), event.get("seed"),
+                bool(event.get("private")), event.get("instance"),
+            )
+
+        made_up_for = {
+            run_of(e) for e in self.events if e.get("type") == "eval_finished" and e.get("ok")
+        }
         found: list[dict[str, Any]] = []
         for event in self.events:
             if event.get("type") == "eval_finished" and not event.get("ok"):
@@ -1048,6 +1306,11 @@ class _Run:
                         "candidate_id": event.get("candidate_id"),
                         "generation": row.get("generation"),
                         "stage": event.get("stage"),
+                        "instance": event.get("instance"),
+                        "attempt": event.get("attempt"),
+                        # A retry of the same run went through: the candidate
+                        # lost time to this, not its evaluation.
+                        "recovered": run_of(event) in made_up_for,
                         "seed": event.get("seed"),
                         "holdout": bool(event.get("private")),
                         "failure": event.get("failure"),
@@ -1102,7 +1365,8 @@ class _Run:
         for row in self.rows:
             cid = str(row.get("id"))
             stages = row.get("stages_reached") or []
-            spread = _spread(list(samples.get(cid, {}).values()))
+            draws = self._draws(cid)
+            spread = _spread(draws) if draws is not None else {"n": len(samples.get(cid, {})), "sd": None}
             result.append(
                 {
                     "id": cid,
@@ -1193,7 +1457,7 @@ def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] |
         {
             key: event.get(key)
             for key in (
-                "ts", "stage", "seed", "private", "ok", "duration_s", "kpis", "failure",
+                "ts", "stage", "instance", "attempt", "seed", "private", "ok", "duration_s", "kpis", "failure",
                 "stderr_tail", "stdout_tail", "argv", "stdout_log", "stderr_log",
             )
         }
@@ -1305,9 +1569,21 @@ def render_text(document: Mapping[str, Any]) -> str:
         f"elapsed      : {_duration(health.get('elapsed_s'))}   eta: {_duration(eta.get('seconds'))}"
         + (f"  ({eta.get('basis')})" if eta.get("seconds") is None and eta.get("basis") else "")
     )
+    stage = health.get("stage")
+    if stage:
+        lines.append(
+            f"  stage      : {stage.get('id')}" + (" (hold-out)" if stage.get("private") else "")
+            + f" -- {stage.get('runs_done')} of {stage.get('runs_planned')} run(s) done"
+            + (f" for {stage.get('candidates')} candidates" if (stage.get("candidates") or 0) > 1 else "")
+            + (f", {stage.get('workers')} at a time" if (stage.get("workers") or 1) > 1 else "")
+            + (f", about {_duration(stage.get('remaining_s'))} left" if stage.get("remaining_s") is not None else "")
+        )
     for flight in health.get("in_flight") or []:
         lines.append(
-            f"  in flight  : {flight.get('candidate_id')} stage {flight.get('stage')} seed {flight.get('seed')}"
+            f"  in flight  : {flight.get('candidate_id')} stage {flight.get('stage')}"
+            + (f" instance {flight.get('instance')}" if flight.get("instance") is not None else "")
+            + f" seed {flight.get('seed')}"
+            + (f" (attempt {flight.get('attempt') + 1})" if flight.get("attempt") else "")
             + (" (hold-out)" if flight.get("private") else "")
             + f", {_duration(flight.get('running_s'))} of {_duration(flight.get('timeout_s'))}"
         )
@@ -1331,8 +1607,10 @@ def render_text(document: Mapping[str, Any]) -> str:
     for failure in failures[:5]:
         lines.append(
             f"  {failure.get('kind')}: {failure.get('candidate_id')} stage {failure.get('stage')}"
+            + (f" instance {failure.get('instance')}" if failure.get("instance") is not None else "")
             + (f" seed {failure.get('seed')}" if failure.get("seed") is not None else "")
             + f" -- {failure.get('failure')}"
+            + (" (a retry went through)" if failure.get("recovered") else "")
         )
     spend = document.get("spend") or {}
     lines.append(
