@@ -42,7 +42,7 @@ evaluate:
     # checked between iterations, so a solve overruns its budget slightly.
     - id: proxy
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed 42 --time-limit 120"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed 42 --time-limit 120"
       inputs: [metro3000]
       timeout: 300
       promote:
@@ -61,7 +61,7 @@ evaluate:
     # 'improvement' has to clear.
     - id: full
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed} --time-limit 900"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed} --time-limit 900"
       inputs: [metro3000]
       private_inputs: [metro3000b]
       timeout: 1400

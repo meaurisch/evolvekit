@@ -1147,6 +1147,7 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    | `{out}` | path the KPI JSON must be written to | yes — unless the stage reads the program's output instead (`kpis_from: stdout`, `kpi_patterns`) |
    | `{inputs}` | the stage's `inputs` (or `private_inputs`), comma-joined | no |
    | `{seed}` | `0`, or `0 … N-1` on a stage with `seeds: N` | only when `seeds > 1` |
+   | `{python}` | the interpreter evolvekit itself runs on. **Use it instead of a bare `python`**: that is whatever the operating system finds first, and inside a virtual environment on Windows it is the *base* interpreter beside the launcher — other packages, and silently another version of your solver | no |
    | `{instance}` | one entry of the stage's `instances`: the command is run once for each ([one run per instance](#one-run-per-instance-instances-workers-retries)) | when `instances` is set |
    | `{params}` / `{params_json}` | the configuration, as flags or as a JSON file ([tuning a command](#tuning-a-command-problemparameters)) — then `{candidate}` is optional | with `problem.parameters` |
 

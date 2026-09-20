@@ -138,7 +138,7 @@ evaluate:
     # this is where one that ignores it dies.
     - id: full
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [full]
       timeout: 30
       # One run. The evaluator seeds the module-level `random` generator from

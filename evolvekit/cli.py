@@ -69,7 +69,7 @@ evaluate:
       timeout: 30
     - id: proxy
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [proxy]
       timeout: 120           # per run, not per stage
       seeds: 1               # >1 needs {seed} in the command; KPIs are averaged
@@ -77,7 +77,7 @@ evaluate:
         top_k_per_generation: 2
     - id: full
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [full]
       private_inputs: [holdout]
       timeout: 600

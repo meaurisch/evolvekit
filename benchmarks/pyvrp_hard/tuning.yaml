@@ -1,0 +1,100 @@
+# Tuning PyVRP 0.14.0 on the pyvrp_hard benchmark: minimise the cost reached
+# within 10 minutes of wall clock per instance, over the ten tuning instances.
+#
+#   cd benchmarks/pyvrp_hard
+#   python -m evolvekit preflight --config tuning.smoke.yaml      # a minute
+#   python -m evolvekit run --config tuning.yaml --run-dir ../../runs/pyvrp-hard --dashboard
+#
+# `python` has to be the interpreter that has PyVRP 0.14.0 installed. The solver
+# is driven through its command line only -- flags in, one JSON object on
+# stdout -- exactly as a solver written in any other language would be.
+# TUNING_PLAN.md says why every number below is what it is.
+
+problem:
+  description: >
+    Configure PyVRP's iterated local search so that it reaches the lowest cost
+    within a fixed wall-clock limit on large, feature-rich vehicle routing
+    instances (1000-3000 clients). The defaults are PyVRP 0.14.0's own.
+  parameters:
+    # -- iterated local search
+    num_iters_no_improvement: {type: int, low: 1000, high: 1000000, default: 150000, log: true,
+                               help: iterations without improvement before restarting from the best solution}
+    history_length: {type: int, low: 10, high: 3000, default: 300, log: true, help: late-acceptance history length}
+    exhaustive_on_best: {type: bool, default: true, help: exhaustive local search on every new best solution}
+    # -- penalty management
+    solutions_between_updates: {type: int, low: 50, high: 5000, default: 500, log: true,
+                                help: registrations between penalty updates}
+    penalty_increase: {type: float, low: 1.05, high: 5.0, default: 1.5, log: true}
+    penalty_decrease: {type: float, low: 0.3, high: 0.99, default: 0.9}
+    target_feasible: {type: float, low: 0.2, high: 0.95, default: 0.65, help: target share of feasible solutions}
+    feas_tolerance: {type: float, low: 0.0, high: 0.2, default: 0.05}
+    min_penalty: {type: float, low: 0.01, high: 10.0, default: 0.1, log: true}
+    max_penalty: {type: float, low: 1.0e+3, high: 1.0e+7, default: 1.0e+5, log: true}
+    # -- granular neighbourhood
+    weight_wait_time: {type: float, low: 0.0, high: 2.0, default: 0.2}
+    num_neighbours: {type: int, low: 10, high: 150, default: 50, help: size of the granular neighbourhood}
+    symmetric_proximity: {type: bool, default: true}
+    # -- perturbation (the ranges do not overlap, so min <= max always holds)
+    min_perturbations: {type: int, low: 0, high: 10, default: 1}
+    max_perturbations: {type: int, low: 10, high: 100, default: 25}
+    # -- local-search operators the model does not depend on
+    use_relocate2: {type: bool, default: true}
+    use_relocate3: {type: bool, default: false}
+    use_swap11: {type: bool, default: true}
+    use_swap21: {type: bool, default: true}
+    use_swap22: {type: bool, default: true}
+    use_swap31: {type: bool, default: false}
+    use_swap32: {type: bool, default: false}
+    use_swap33: {type: bool, default: false}
+    use_swap_tails: {type: bool, default: true}
+    use_relocate_alternative: {type: bool, default: true}
+    use_replace_optional_client: {type: bool, default: true}
+    use_replace_optional_shipment: {type: bool, default: true}
+
+evaluate:
+  stages:
+    - {id: static, kind: builtin-static}
+
+    # A fifth of the budget on four instances that span the sizes: who is worth ten minutes?
+    - id: screen
+      kind: command
+      command: "{python} solve.py --instance {instance} --seed {seed} --time-limit 120 {params}"
+      kpis_from: stdout
+      instances:
+        - instances/t01-n1000-uniform-city-tight.json
+        - instances/t04-n1600-metro-mixed.json
+        - instances/t07-n2200-clustered-region-mixed.json
+        - instances/t10-n3000-corridor-mixed.json
+      timeout: 300
+      workers: 3
+      pin_cpus: [2, 4, 6]
+      retries: 1
+      promote: {top_k_per_generation: 2}
+
+    # The objective itself: every tuning instance, ten minutes each.
+    - id: full
+      kind: command
+      command: "{python} solve.py --instance {instance} --seed {seed} --time-limit 600 {params}"
+      kpis_from: stdout
+      instances: ["instances/t*.json"]
+      timeout: 900
+      workers: 3
+      pin_cpus: [2, 4, 6]
+      retries: 1
+
+  score: {objective: objective, direction: minimize}
+
+search:
+  # No model: the defaults of a mature solver are close to good, so lead with
+  # local steps (see the README's operator comparison).
+  operators: {param_local: 0.5, param_tpe: 0.25, param_cross: 0.1, param_lhs: 0.15}
+  children_per_generation: 8
+  generations: 12
+  seed: 20260920
+  novelty: {behavioural: "off"}     # a time-limited solver never fingerprints twice alike
+
+budget:
+  max_full_evals_per_day: 100       # the clock is the limit here, not this cap
+
+stop:
+  patience: 12                      # do not stop early: twelve generations are the plan
