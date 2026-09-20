@@ -68,6 +68,7 @@ Any command. It receives placeholders (any order) and writes JSON to `{out}`:
 | `{out}` | path to write the KPI JSON | yes |
 | `{inputs}` | the stage's `inputs` / `private_inputs`, comma-joined | no |
 | `{seed}` | `0`, or `0…N-1` on a `seeds: N` stage | only when `seeds > 1` |
+| `{python}` | the interpreter running evolvekit — not whatever a bare `python` resolves to | no |
 | `{instance}` | one entry of the stage's `instances`; the command runs once per instance | when `instances` is set |
 | `{params}` / `{params_json}` | the configuration as flags / as a JSON file | with `problem.parameters` |
 

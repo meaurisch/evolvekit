@@ -52,7 +52,7 @@ def test_a_broken_evaluator_aborts_at_the_seed_with_zero_spend(tmp_path, monkeyp
     cfg_path = work / "evolvekit.yaml"
     text = cfg_path.read_text(encoding="utf-8")
     broken, n = re.subn(
-        r'command: "python evaluate\.py[^"]*"',
+        r'command: "\{python\} evaluate\.py[^"]*"',
         'command: "python -c \\"import sys; sys.exit(1)\\" {candidate} {out}"',
         text,
         count=1,  # only the proxy stage; the full stage is never reached

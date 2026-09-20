@@ -403,14 +403,15 @@ older than 0.14.
 each candidate in a child `sys.executable`, which is whichever interpreter is
 running the loop, so that one has to have PyVRP.
 
-The *stage command* is a different problem, and the evaluator solves it
-itself. A config cannot carry a machine-specific interpreter path, so the
-command says `python` — and on Windows `subprocess` resolves a bare `python`
-to the **system** interpreter even when a virtual environment is active and
-first on `PATH`. Activating the venv does not help; this was measured, not
-assumed. So `evaluate.py` checks the interpreter it was started under, and if
-it has no PyVRP ≥ 0.14 it looks for `.venv-pyvrp` beside or above itself and
-re-runs the job there, passing on that run's exit status.
+The *stage command* says `{python}`, which evolvekit replaces with the
+interpreter it is itself running on. A bare `python` would not do: on Windows
+`subprocess` resolves it to the **system** interpreter even when a virtual
+environment is active and first on `PATH`. Activating the venv does not help;
+this was measured, not assumed. As a second line of defence — for a config that
+still says `python`, or a hand-started evaluator — `evaluate.py` checks the
+interpreter it was started under, and if it has no PyVRP ≥ 0.14 it looks for
+`.venv-pyvrp` beside or above itself and re-runs the job there, passing on that
+run's exit status.
 `EVOLVEKIT_PYVRP_RELAUNCHED` stops it doing that twice.
 
 ### Offline, free, about two minutes

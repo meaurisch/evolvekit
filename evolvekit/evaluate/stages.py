@@ -267,6 +267,12 @@ def build_argv(
     Splitting after substitution would let a Windows path's backslashes be eaten
     by POSIX shlex, and would let a filename with a space become two arguments.
 
+    `{python}` is the interpreter evolvekit itself is running on. A bare
+    `python` is whatever the operating system finds first -- inside a virtual
+    environment on Windows that is the *base* interpreter beside the launcher,
+    with another set of installed packages and, silently, another version of
+    the solver.
+
     `{params}` on its own expands to *several* arguments -- one `--flag value`
     pair per declared parameter -- which is the other reason substitution has
     to happen after the split. `{params_json}` is the path of a JSON file with
@@ -281,6 +287,7 @@ def build_argv(
         "inputs": ",".join(inputs),
         "out": str(out),
         "seed": str(seed),
+        "python": sys.executable,
         "instance": instance or "",
         "params": " ".join(flags),
         "params_json": str(params_json) if params_json is not None else "",

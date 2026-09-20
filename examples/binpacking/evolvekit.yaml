@@ -84,7 +84,7 @@ evaluate:
     # Stage 1: 5 small instances, a couple of seconds. Most candidates die here.
     - id: proxy
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [proxy]
       timeout: 120
       # `seeds: N` runs the command N times with {seed} = 0..N-1, averages the
@@ -100,7 +100,7 @@ evaluate:
     # separately so the public/private gap is recorded, never optimised.
     - id: full
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [full]
       private_inputs: [holdout]
       timeout: 300

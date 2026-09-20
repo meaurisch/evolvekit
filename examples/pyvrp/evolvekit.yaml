@@ -95,7 +95,7 @@ evaluate:
     # the only change this line needs.
     - id: full
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed 42 --time-limit 20"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed 42 --time-limit 20"
       inputs: [metro300]
       timeout: 90
 
