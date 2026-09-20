@@ -75,3 +75,22 @@ def test_a_broken_evaluator_aborts_at_the_seed_with_zero_spend(tmp_path, monkeyp
     assert not driver.ledger.usage_path.exists() or driver.ledger.usage_path.stat().st_size == 0
     rows = driver.ledger.runs()
     assert len(rows) == 1 and rows[0]["operator"] == "human-seed"
+
+
+def test_run_does_not_exit_0_when_it_aborted(tmp_path, monkeypatch, capsys):
+    """A wrapper script -- a cron job, a CI step, an agent -- reads the exit
+    code. "The seed failed, nothing was searched" must not look like success."""
+    from evolvekit.cli import EXIT_ABORTED, main
+
+    work = tmp_path / "binpacking"
+    shutil.copytree(EXAMPLE_DIR, work, ignore=shutil.ignore_patterns("__pycache__"))
+    cfg_path = work / "evolvekit.yaml"
+    assert main(["run", "--config", str(cfg_path), "--run-dir", str(tmp_path / "fine"), "--generations", "1", "--quiet"]) == 0
+
+    text = cfg_path.read_text(encoding="utf-8")
+    broken, n = re.subn(r'command: "\{python\} evaluate\.py[^"]*"', 'command: "{python} -c pass {candidate} {out}"', text, count=1)
+    assert n == 1
+    cfg_path.write_text(broken, encoding="utf-8")
+    capsys.readouterr()
+    assert main(["run", "--config", str(cfg_path), "--run-dir", str(tmp_path / "broken"), "--quiet"]) == EXIT_ABORTED == 4
+    assert "seed failed evaluation" in capsys.readouterr().out

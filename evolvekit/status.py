@@ -518,6 +518,7 @@ class _Run:
                 "failure_reasons": self._failure_reasons(finished),
             },
             "in_flight": in_flight,
+            "host": self._host_load(finished),
             "stage": stage_now,
             "eta": self._eta(last_planned, done_generations, live is not None, stage_now),
             "limits": self._limits(last_planned, done_generations),
@@ -592,6 +593,57 @@ class _Run:
             and _number(e.get("duration_s")) is not None
         ]
         return median(durations) if durations else None
+
+    def _host_load(self, finished: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """Was the machine busy with something else while evaluations ran?
+
+        Each run records the busy share of all logical CPUs over its lifetime.
+        What this run's own workers explain is `workers / cpus` (for a
+        single-threaded solver); a run that saw clearly more than both that and
+        its stage's typical value shared the machine with something. For a
+        time-limited solver that is a worse score for no fault of the candidate.
+        """
+        cpus = self.described.get("cpus")
+        measured = [
+            e for e in finished
+            if not e.get("cached") and _number(e.get("host_busy")) is not None
+        ]
+        if not isinstance(cpus, int) or cpus < 1 or not measured:
+            return {"available": False, "flagged": 0, "stages": []}
+        margin = max(0.08, 0.75 / cpus)  # about one more busy logical CPU
+        workers = {s.get("id"): int(s.get("workers") or 1) for s in self.described.get("stages") or []}
+        stages, flagged_total, examples = [], 0, []
+        for stage_id in dict.fromkeys(str(e.get("stage")) for e in measured):
+            values = [(e, float(e["host_busy"])) for e in measured if str(e.get("stage")) == stage_id]
+            explained = min(1.0, workers.get(stage_id, 1) / cpus)
+            typical = median(v for _, v in values)
+            threshold = max(explained, typical) + margin
+            flagged = [(e, v) for e, v in values if v > threshold]
+            flagged_total += len(flagged)
+            examples += [
+                {"candidate_id": e.get("candidate_id"), "stage": stage_id, "instance": e.get("instance"),
+                 "seed": e.get("seed"), "host_busy": v, "ts": e.get("ts")}
+                for e, v in flagged[-5:]
+            ]
+            stages.append({
+                "id": stage_id, "n": len(values), "explained": explained, "typical": typical,
+                "flagged": len(flagged),
+                "busier_throughout": typical > explained + margin,
+            })
+        return {
+            "available": True,
+            "cpus": cpus,
+            "margin": margin,
+            "flagged": flagged_total,
+            "measured": len(measured),
+            "stages": stages,
+            "examples": examples[-8:],
+            "why": (
+                "the share of all logical CPUs that were busy during each evaluator run, against "
+                "what this run's workers explain. For a time-limited solver, other work on the "
+                "machine is a worse score for no fault of the candidate"
+            ),
+        }
 
     @staticmethod
     def _failure_reasons(finished: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -672,10 +724,16 @@ class _Run:
         if remaining <= 0:
             return {"seconds": 0.0, "at": None, "basis": "the last planned generation has finished"}
         if not durations:
+            left = _number((stage or {}).get("remaining_s"))
             return {
                 "seconds": None,
                 "at": None,
-                "basis": f"{remaining} generation(s) to go; none has finished yet, so there is nothing to extrapolate from",
+                "stage_seconds": left,
+                "basis": (
+                    f"{remaining} generation(s) to go; none has finished yet, so there is nothing to "
+                    "extrapolate the run from"
+                    + (f". The stage in progress has about {left:.0f} s left" if left is not None else "")
+                ),
             }
         typical = median(durations)
         seconds = typical * remaining
@@ -899,6 +957,7 @@ class _Run:
             per_generation.append(
                 {
                     "generation": generation,
+                    "elapsed_s": self._elapsed_at_generation_end(generation),
                     "best_id": measured["id"] if measured else None,
                     "best_fitness": measured["fitness"] if measured else None,
                     "best_objective": measured["objective"] if measured else None,
@@ -932,6 +991,61 @@ class _Run:
             "series": per_generation,
             "generations": self._generation_ribbon(per_generation),
             "spread": self._spread_basis(),
+            "screening": self._screening_agreement(),
+        }
+
+    def _elapsed_at_generation_end(self, generation: int) -> float | None:
+        """Evaluation wall clock spent when `generation` finished: the sum of the
+        generations' own durations, so that a night between two sessions does
+        not count. What a slow run is paid in is hours, not generations."""
+        total, seen = 0.0, False
+        for event in self.events:
+            if event.get("type") != "generation_finished" or not isinstance(event.get("generation"), int):
+                continue
+            if event["generation"] <= generation and _number(event.get("duration_s")) is not None:
+                total += float(event["duration_s"])
+            seen = seen or event["generation"] == generation
+        return total if seen else None
+
+    def _screening_agreement(self) -> dict[str, Any]:
+        """Does a cheap stage predict the expensive one?
+
+        A cascade bets that it does: whoever a short screening run ranks first
+        gets the full budget. Every promoted candidate has a score at both
+        stages, so the bet can be checked -- by the rank correlation between
+        the two, stage pair by stage pair. Only promoted candidates can be
+        compared, and they are the best by the earlier stage: the range is
+        restricted, which pulls a correlation towards zero. Read a high value
+        as agreement, and a low one as "look", not as proof of disagreement.
+        """
+        stages = [s.get("id") for s in self.described.get("stages") or [] if s.get("kind") == "command"]
+        pairs = []
+        for earlier, later in zip(stages, stages[1:]):
+            points = []
+            for row in self.rows:
+                scores = row.get("stage_scores") or {}
+                a, b = _number(scores.get(earlier)), _number(scores.get(later))
+                if a is None or b is None or row.get("rejected") or row.get("last_failure"):
+                    continue
+                points.append({"id": row.get("id"), "earlier": a, "later": b, "is_seed": row.get("operator") == SEED_OPERATOR})
+            rho = _spearman([p["earlier"] for p in points], [p["later"] for p in points])
+            if rho is None:
+                verdict = "too few candidates have been through both stages to say"
+            elif rho >= 0.6:
+                verdict = "the earlier stage ranks candidates much as the later one does"
+            elif rho >= 0.2:
+                verdict = "the earlier stage agrees with the later one only loosely"
+            else:
+                verdict = "the earlier stage does not predict the later one: it may be promoting the wrong candidates"
+            pairs.append({"earlier": earlier, "later": later, "n": len(points), "spearman": rho, "verdict": verdict, "points": points})
+        return {
+            "available": bool(pairs),
+            "pairs": pairs,
+            "why": (
+                "rank correlation of the scores at two consecutive stages, over the candidates that reached "
+                "both. Those are the ones the earlier stage liked best, so the range is restricted and the "
+                "correlation understates the agreement"
+            ),
         }
 
     def _spread_basis(self) -> dict[str, Any]:
@@ -1266,7 +1380,16 @@ class _Run:
             ),
         }
         if not self.seed or not self.best_row:
-            return unavailable
+            # Not "this run cannot show it": nothing has been through the final
+            # stage yet. With a slow solver that is the first hour of every run.
+            return {
+                "available": False,
+                "rows": [],
+                "why": (
+                    "nothing has finished the final stage yet. The comparison appears with the "
+                    "first candidate that beats the baseline"
+                ),
+            }
         named = self._instances_by_name()
         if named is not None:
             return named
@@ -1466,7 +1589,7 @@ def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] |
         {
             key: event.get(key)
             for key in (
-                "ts", "stage", "instance", "attempt", "seed", "private", "ok", "duration_s", "kpis", "failure",
+                "ts", "stage", "instance", "attempt", "seed", "private", "ok", "duration_s", "host_busy", "cached", "kpis", "failure",
                 "stderr_tail", "stdout_tail", "argv", "stdout_log", "stderr_log",
             )
         }
@@ -1580,6 +1703,15 @@ def render_text(document: Mapping[str, Any]) -> str:
         f"elapsed      : {_duration(health.get('elapsed_s'))}   eta: {_duration(eta.get('seconds'))}"
         + (f"  ({eta.get('basis')})" if eta.get("seconds") is None and eta.get("basis") else "")
     )
+    host = health.get("host") or {}
+    for entry in host.get("stages") or []:
+        if entry.get("flagged") or entry.get("busier_throughout"):
+            lines.append(
+                f"  host load  : stage {entry.get('id')}: {entry.get('flagged')} of {entry.get('n')} run(s) "
+                f"shared the machine with something else (typically {entry.get('typical'):.0%} of all CPUs busy; "
+                f"this run's workers explain {entry.get('explained'):.0%})"
+                + (" -- busier than explained throughout: a multi-threaded solver, or other work" if entry.get("busier_throughout") else "")
+            )
     stage = health.get("stage")
     if stage:
         lines.append(

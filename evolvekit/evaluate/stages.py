@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 from evolvekit.config import ProblemConfig, StageConfig
 from evolvekit.evaluate.cache import EvalCache
+from evolvekit.evaluate.hostload import HostLoad
 from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
 
@@ -475,18 +476,23 @@ def _run_once(
         known = cache.load(key, stage.id, private)
         if known is not None and _missing_required(known.kpis, required_kpis) is not None:
             known = None  # kept under another objective: not an answer to this question
-    outcome = known or _execute_once(
-        candidate_path,
-        stage,
-        inputs=inputs,
-        out_path=out_path,
-        cwd=cwd,
-        private=private,
-        seed=seed,
-        required_kpis=required_kpis,
-        configuration=configuration,
-        unit=unit,
-    )
+    if known is not None:
+        outcome = known
+    else:
+        load = HostLoad().start()
+        outcome = _execute_once(
+            candidate_path,
+            stage,
+            inputs=inputs,
+            out_path=out_path,
+            cwd=cwd,
+            private=private,
+            seed=seed,
+            required_kpis=required_kpis,
+            configuration=configuration,
+            unit=unit,
+        )
+        outcome.host_busy = load.stop()
     if cache is not None and key is not None and not outcome.cached:
         # Before anything else can go wrong: a result that was paid for is kept.
         cache.store(key, outcome)
@@ -527,6 +533,7 @@ def _run_once(
             stdout_log=outcome.stdout_log,
             stderr_log=outcome.stderr_log,
             cached=outcome.cached,
+            host_busy=outcome.host_busy,
             **labels,
             **failed,
         )

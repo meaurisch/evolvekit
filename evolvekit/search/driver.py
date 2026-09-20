@@ -18,6 +18,7 @@ no-ops, and its winner improved the public set while losing on the hold-out.
 from __future__ import annotations
 
 import json
+import os
 import random
 import socket
 import time
@@ -81,6 +82,10 @@ def _random_stream(seed: int, recorded: int) -> random.Random:
 
 @dataclass
 class RunSummary:
+    aborted: bool = False
+    """The run stopped because it could not work -- the seed failed its own
+    evaluation, or the model backend kept failing -- rather than because it
+    was done. `stop_reason` says which; `run` exits 4."""
     generations: int = 0
     candidates: int = 0
     rejected: int = 0
@@ -231,6 +236,7 @@ class Driver:
         return {
             "version": __version__,
             "host": socket.gethostname(),
+            "cpus": os.cpu_count(),
             "config_path": str(config.source) if config.source else None,
             "objective": config.evaluate.score.objective,
             "direction": config.evaluate.score.direction,
@@ -470,6 +476,7 @@ class Driver:
                     "seed failed evaluation — fix the harness before spending: "
                     f"{first_line}"
                 )
+                summary.aborted = True
                 self.log(f"ABORT: {summary.stop_reason}")
                 return self._finalise(summary)
 
@@ -509,6 +516,7 @@ class Driver:
                     f"provider failing ({self._provider_failures} consecutive errors): "
                     f"{self._provider_halt}"
                 )
+                summary.aborted = True
                 self.log(f"ABORT: {summary.stop_reason}")
                 break
 

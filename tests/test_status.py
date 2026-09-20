@@ -518,3 +518,64 @@ def test_the_run_directory_is_reported_as_an_absolute_path(tmp_path, monkeypatch
     RunDir(tmp_path / "run").started(10)
     monkeypatch.chdir(tmp_path)
     assert build_status("run", now=NOW)["run_dir"] == str((tmp_path / "run").resolve())
+
+
+# -- what watching a real, slow run asked for ------------------------------
+
+
+def test_before_anything_is_recorded_the_per_instance_card_says_wait_not_cannot(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(100)
+    run.lock()
+    run.heartbeat(1)
+    instances = build_status(tmp_path, now=NOW)["instances"]
+    assert instances["available"] is False
+    assert instances["why"].startswith("nothing has finished the final stage yet")
+
+
+def test_the_first_generation_has_a_time_left_too_the_stage_knows(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(2000, planned=3)
+    run.lock()
+    run.heartbeat(1)
+    run.event("generation_started", 1500, generation=1)
+    run.event("stage_started", 1500, stage="full", private=False, workers=1,
+              candidates=["g001-c0002"], runs_per_candidate=3)
+    common = {"candidate_id": "g001-c0002", "stage": "full", "seed": 0, "private": False, "attempt": 0}
+    run.event("eval_started", 1500, instance="a", timeout_s=900, **common)
+    run.event("eval_finished", 900, instance="a", ok=True, duration_s=600.0, kpis={"cost": 95.0}, **common)
+    run.event("eval_started", 300, instance="b", timeout_s=900, **common)
+    eta = build_status(tmp_path, now=NOW)["health"]["eta"]
+    assert eta["seconds"] is None, "no generation has finished: the run as a whole cannot be extrapolated"
+    assert eta["stage_seconds"] == pytest.approx(300.0 + 600.0), "half of `b`, and all of `c`"
+    assert "The stage in progress has about 900 s left" in eta["basis"]
+
+
+def test_best_so_far_is_also_told_by_the_clock(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(10_000)
+    run.row("g000-c0001", 0, 100.0)
+    run.event("generation_finished", 9000, generation=0, duration_s=1000.0)
+    run.row("g001-c0002", 1, 98.0)
+    run.event("generation_finished", 4000, generation=1, duration_s=5000.0)
+    run.row("g002-c0003", 2, 99.0)  # generation 2 is still running
+    series = build_status(tmp_path, now=NOW)["progress"]["series"]
+    assert [(p["generation"], p["elapsed_s"]) for p in series] == [(0, 1000.0), (1, 6000.0), (2, None)]
+
+
+def test_whether_the_cheap_stage_predicts_the_expensive_one_can_be_read_off(tmp_path):
+    run = RunDir(tmp_path)
+    run.event("run_started", 5000, objective="cost", direction="minimize", first_generation=1, generations_planned=3,
+              stages=[{"id": "static", "kind": "builtin-static"}, {"id": "screen", "kind": "command"},
+                      {"id": "full", "kind": "command", "final": True}])
+    scores = {"g000-c0001": (-100.0, -100.0), "g001-c0002": (-99.0, -98.5), "g001-c0003": (-97.0, -97.2),
+              "g002-c0004": (-98.0, -99.1), "g002-c0005": (-103.0, None)}
+    for cid, (screen, full) in scores.items():
+        stage_scores = {"screen": screen, **({"full": full} if full is not None else {})}
+        run.row(cid, int(cid[1:4]), 100.0, stage_scores=stage_scores)
+    screening = build_status(tmp_path, now=NOW)["progress"]["screening"]
+    pair = screening["pairs"][0]
+    assert (pair["earlier"], pair["later"], pair["n"]) == ("screen", "full", 4), "the unpromoted one has nothing to compare"
+    assert pair["spearman"] == pytest.approx(0.8)
+    assert pair["verdict"].startswith("the earlier stage ranks candidates much as")
+    assert "range is restricted" in screening["why"]

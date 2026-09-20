@@ -117,6 +117,10 @@ a { color: var(--accent-ink); }
 }
 .ghost:hover { color: var(--ink); border-color: var(--ink-3); }
 .offline { color: var(--critical); font-weight: 600; }
+.screening { margin-top: 14px; display: grid; gap: 10px; }
+.screening-row { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 14px; align-items: center; font-size: 13px; }
+.screening-row .k { color: var(--ink-2); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.hostwarn { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; color: var(--ink); background: color-mix(in srgb, var(--warning-fill) 14%, transparent); border: 1px solid color-mix(in srgb, var(--warning-fill) 55%, transparent); }
 .nav { max-width: 1440px; margin: 0 auto; padding: 0 24px; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .nav::-webkit-scrollbar { display: none; }
 .nav a {
@@ -513,8 +517,8 @@ function renderHealth(doc) {
     h("div", { class: "tile" }, h("div", { class: "k" }, "Elapsed"),
       h("div", { class: "v" }, dur(he.elapsed_s)), h("div", { class: "s" }, he.started_at ? "since " + when(he.started_at) : "")),
     h("div", { class: "tile", title: eta.basis || "" }, h("div", { class: "k" }, "Time remaining"),
-      h("div", { class: "v" }, isNum(eta.seconds) ? dur(eta.seconds) : "–"),
-      h("div", { class: "s" }, eta.at ? "around " + when(eta.at) : (eta.basis || "").split(";")[0].slice(0, 60))),
+      h("div", { class: "v" }, isNum(eta.seconds) ? dur(eta.seconds) : isNum(eta.stage_seconds) ? "≥ " + dur(eta.stage_seconds) : "–"),
+      h("div", { class: "s" }, eta.at ? "around " + when(eta.at) : isNum(eta.stage_seconds) ? "this stage alone; no generation has finished yet" : (eta.basis || "").split(";")[0].slice(0, 60))),
     free  // a zero-LLM run costs compute, not dollars: lead with the one that is being spent
       ? h("div", { class: "tile" }, h("div", { class: "k" }, "Evaluator time"), h("div", { class: "v" }, dur(sp.evaluator_s)), h("div", { class: "s" }, "no LLM spend"))
       : h("div", { class: "tile" }, h("div", { class: "k" }, "Spend"), h("div", { class: "v" }, "$" + num(sp.usd, 4)),
@@ -553,8 +557,14 @@ function renderHealth(doc) {
         h("div", { class: "u" }, num(l.used) + " of " + num(l.cap) + (l.unit ? " " + l.unit : "")),
         meter(ratio, l.name === "generations" ? "" : ratioClass(ratio)));
     })));
+  // Was the machine busy with something else? For a time-limited solver that is a worse score for no fault of the candidate.
+  const busy = (he.host?.stages || []).filter((s) => s.flagged || s.busier_throughout);
+  const host = busy.length ? h("div", { class: "hostwarn", role: "status", title: he.host.why || "" },
+    h("b", null, "⚠ The machine was not this run's alone. "),
+    busy.map((s) => `Stage ${s.id}: ${s.flagged} of ${s.n} runs shared it with something else (typically ${Math.round(s.typical * 100)} % of all CPUs busy; this run's workers explain ${Math.round(s.explained * 100)} %)` + (s.busier_throughout ? " — busier than explained throughout: a multi-threaded solver, or other work." : ".")).join(" "),
+    " A time-limited evaluation that shares the machine scores worse than it should.") : null;
   return [cardHead("health", "Health", "Is the run healthy, and how far along is it?"),
-          h("div", { class: "tiles" }, tiles), ribbon, h("div", { class: "strip" }, flight, limits)];
+          h("div", { class: "tiles" }, tiles), host, ribbon, h("div", { class: "strip" }, flight, limits)];
 }
 
 /* ---------------------------------------------------------------- progress */
@@ -588,7 +598,10 @@ function drawProgress(doc, width) {
   let lo = aLo - span * (minimize ? 0.30 : 1.0), hi = aHi + span * (minimize ? 1.0 : 0.30);
   const inside = pts.map((p) => p.objective);
   lo = Math.max(lo, Math.min(...inside, aLo) - span * 0.15); hi = Math.min(hi, Math.max(...inside, aHi) + span * 0.15);
-  const X = (g) => m.l + (W - m.l - m.r) * (g / lastGen);
+  // By generation, or by the evaluation time each generation had cost when it landed: a slow run is paid in hours.
+  const tOf = {}; for (const p of pr.series || []) if (isNum(p.elapsed_s)) tOf[p.generation] = p.elapsed_s;
+  const byTime = ui.chartX === "time" && Object.keys(tOf).length > 1, tMax = Math.max(1, ...Object.values(tOf));
+  const X = byTime ? (g) => m.l + (W - m.l - m.r) * ((tOf[g] ?? tMax) / tMax) : (g) => m.l + (W - m.l - m.r) * (g / lastGen);
   const Y = (v) => m.t + (H - m.t - m.b) * (1 - (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo));
   const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img",
     "aria-label": `Best ${doc.objective?.name} per generation against the baseline` });
@@ -599,8 +612,9 @@ function drawProgress(doc, width) {
   }
   svg.append(s("text", { x: m.l, y: 11, class: "lbl" }, (doc.objective?.name || "objective") + (doc.objective?.unit ? " (" + doc.objective.unit + ")" : "") + (minimize ? "  ·  ↓ lower is better" : "  ·  ↑ higher is better")));
   const gStep = Math.max(1, Math.ceil(lastGen / Math.max(3, Math.floor((W - m.l - m.r) / 52))));
-  for (let g = 0; g <= lastGen; g += gStep) svg.append(s("text", { x: X(g), y: H - m.b + 16, "text-anchor": "middle" }, g));
-  svg.append(s("text", { x: W - m.r, y: H - m.b + 32, "text-anchor": "end" }, "generation →"),
+  if (byTime) for (const t of niceTicks(0, tMax, narrow ? 3 : 5)) { if (t >= 0 && t <= tMax) svg.append(s("text", { x: m.l + (W - m.l - m.r) * (t / tMax), y: H - m.b + 16, "text-anchor": "middle" }, dur(t))); }
+  else for (let g = 0; g <= lastGen; g += gStep) svg.append(s("text", { x: X(g), y: H - m.b + 16, "text-anchor": "middle" }, g));
+  svg.append(s("text", { x: W - m.r, y: H - m.b + 32, "text-anchor": "end" }, byTime ? "evaluation time →" : "generation →"),
              s("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: "var(--axis)" }));
   if (isNum(base)) {
     svg.append(s("line", { x1: m.l, x2: W - m.r, y1: Y(base), y2: Y(base), stroke: "var(--ink-3)", "stroke-width": 1 }));
@@ -670,6 +684,26 @@ function drawProgress(doc, width) {
    or simply was not promoted to the next stage. Only the first is a problem. */
 function isFailure(c) { return !!c.reason; }
 function improvement(base, value, dir) { if (!isNum(base) || !isNum(value) || base === 0) return null; return 100 * (dir === "minimize" ? base - value : value - base) / Math.abs(base); }
+/* Does the cheap stage predict the expensive one? One line per pair of stages, and the points behind it. */
+function screeningNote(sc) {
+  const pairs = (sc?.pairs || []).filter((p) => p.n >= 2);
+  if (!pairs.length) return null;
+  return h("div", { class: "screening", title: sc.why || "" }, pairs.map((p) => {
+    const W = 132, H = 92, pad = 8, xs = p.points.map((q) => q.earlier), ys = p.points.map((q) => q.later);
+    const lo = (v) => Math.min(...v), hi = (v) => Math.max(...v), sx = hi(xs) - lo(xs) || 1, sy = hi(ys) - lo(ys) || 1;
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": `score at stage ${p.earlier} against score at stage ${p.later}` });
+    svg.append(s("rect", { x: .5, y: .5, width: W - 1, height: H - 1, fill: "none", stroke: "var(--grid)", rx: 6 }));
+    for (const q of p.points) {
+      const c = s("circle", { cx: pad + (W - 2 * pad) * ((q.earlier - lo(xs)) / sx), cy: H - pad - (H - 2 * pad) * ((q.later - lo(ys)) / sy), r: 3, fill: q.is_seed ? "var(--ink)" : "var(--ink-3)", stroke: "var(--surface)", "stroke-width": 1.5, class: "hit" });
+      c.addEventListener("pointermove", (e) => showTip(e, h("b", null, q.id), h("div", { class: "m" }, `${p.earlier} ${num(q.earlier)} · ${p.later} ${num(q.later)}`)));
+      c.addEventListener("pointerleave", hideTip); c.addEventListener("click", () => openCandidate(q.id));
+      svg.append(c);
+    }
+    return h("div", { class: "screening-row" }, svg, h("div", null,
+      h("div", { class: "k" }, `Does stage “${p.earlier}” predict stage “${p.later}”?`),
+      h("div", null, isNum(p.spearman) ? h("b", null, "ρ = " + p.spearman.toFixed(2)) : h("b", null, "–"), ` over ${p.n} candidates that reached both`),
+      h("div", { class: "note" }, p.verdict + ". Each point: a candidate's score at the earlier stage (→) against the later one (↑)."))); }));
+}
 function renderProgress(doc) {
   const pr = doc.progress || {}, imp = pr.improvement || {}, ob = doc.objective || {};
   const v = imp.pct, sign = !isNum(v) || v === 0 ? "" : v > 0 ? "up" : "down";
@@ -686,8 +720,8 @@ function renderProgress(doc) {
       h("dt", null, "best is"), h("dd", null, pr.best ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); openCandidate(pr.best.id); } }, pr.best.id) : "–", pr.best ? " · generation " + pr.best.generation : "")));
   const holder = h("div", { class: "chart", id: "progress-chart" });
   const body = ui.chartTable ? h("div", { class: "scroll" }, h("table", null,
-      h("thead", null, h("tr", null, ["generation", "best so far", "± sem", "candidate", "vs baseline"].map((t, i) => h("th", { class: i && i !== 3 ? "num" : "" }, t)))),
-      h("tbody", null, (pr.series || []).map((p) => h("tr", null, h("td", null, p.generation), h("td", { class: "num" }, num(p.best_objective)),
+      h("thead", null, h("tr", null, ["generation", "after", "best so far", "± sem", "candidate", "vs baseline"].map((t, i) => h("th", { class: i && i !== 4 ? "num" : "" }, t)))),
+      h("tbody", null, (pr.series || []).map((p) => h("tr", null, h("td", null, p.generation), h("td", { class: "num" }, dur(p.elapsed_s)), h("td", { class: "num" }, num(p.best_objective)),
         h("td", { class: "num" }, isNum(p.sem) ? num(p.sem) : "–"), h("td", { class: "id" }, p.best_id || "–"), h("td", { class: "num" }, pct(p.improvement_pct)))))))
     : holder;
   const legend = h("div", { class: "legend" },
@@ -697,9 +731,12 @@ function renderProgress(doc) {
     h("span", null, h("i", { style: { width: "18px", height: "1px", background: "var(--ink-3)" } }), "baseline (the seed)"),
     h("span", null, "✕ failed · ○ not promoted: counted per generation, never plotted"));
   queueMicrotask(() => { const c = $("progress-chart"); if (c) c.replaceChildren(drawProgress(doc, c.clientWidth)); });
-  return [cardHead("progress", "Progress", "Is it improving, and is the improvement real?",
-            seg([[false, "Chart"], [true, "Table"]], ui.chartTable, (val) => { ui.chartTable = val; ui.signatures.progress = null; render(); })),
-          h("div", { class: "progress" }, hero, h("div", { style: { minWidth: 0 } }, body, ui.chartTable ? null : legend))];
+  const redraw = () => { ui.signatures.progress = null; render(); };
+  const controls = h("span", { style: { display: "inline-flex", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end" } },
+    ui.chartTable ? null : seg([["generation", "By generation"], ["time", "By time"]], ui.chartX || "generation", (val) => { ui.chartX = val; redraw(); }),
+    seg([[false, "Chart"], [true, "Table"]], ui.chartTable, (val) => { ui.chartTable = val; redraw(); }));
+  return [cardHead("progress", "Progress", "Is it improving, and is the improvement real?", controls),
+          h("div", { class: "progress" }, hero, h("div", { style: { minWidth: 0 } }, body, ui.chartTable ? null : legend, screeningNote(pr.screening)))];
 }
 
 /* -------------------------------------------------------------------- best */
@@ -927,7 +964,7 @@ function copyButton(text, label = "Copy") { const b = h("button", { class: "ghos
 function quote(argv) { return (argv || []).map((a) => /[\s"']/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a).join(" "); }
 function logLink(path, label) { return !path || EMBEDDED ? null : h("a", { href: "api/log?path=" + encodeURIComponent(path), target: "_blank", rel: "noopener" }, label); }
 function evaluationBlock(e) {
-  return h("div", null, h("dl", { class: "kv" }, h("dt", null, "run"), h("dd", null, `stage ${e.stage}` + (e.instance != null ? ` · ${e.instance}` : "") + ` · seed ${e.seed}` + (e.attempt ? ` · attempt ${e.attempt + 1}` : "") + (e.private ? " · hold-out" : "") + ` · ${dur(e.duration_s)} · `, h("span", { class: "chip " + (e.ok ? "ok" : "bad") }, e.ok ? "ok" : e.failure || "failed")),
+  return h("div", null, h("dl", { class: "kv" }, h("dt", null, "run"), h("dd", null, `stage ${e.stage}` + (e.instance != null ? ` · ${e.instance}` : "") + ` · seed ${e.seed}` + (e.attempt ? ` · attempt ${e.attempt + 1}` : "") + (e.private ? " · hold-out" : "") + (e.cached ? " · from the cache" : ` · ${dur(e.duration_s)}`) + (isNum(e.host_busy) ? ` · machine ${Math.round(e.host_busy * 100)} % busy` : "") + " · ", h("span", { class: "chip " + (e.ok ? "ok" : "bad") }, e.ok ? "ok" : e.failure || "failed")),
       e.ok ? [h("dt", null, "KPIs"), h("dd", { class: "mono", style: { fontSize: "12px" } }, Object.entries(e.kpis || {}).map(([k, v]) => `${k}=${num(v)}`).join("  "))] : null,
       h("dt", null, "logs"), h("dd", null, logLink(e.stderr_log, "stderr"), " ", logLink(e.stdout_log, "stdout"), EMBEDDED ? h("span", { class: "note" }, e.stderr_log || "") : null)),
     e.argv?.length ? h("div", { class: "cmd", style: { marginTop: "8px" } }, h("pre", { class: "code" }, quote(e.argv)), copyButton(quote(e.argv))) : null,
@@ -979,7 +1016,7 @@ function render() {
   if (empty) return;
   const he = doc.health || {};
   $("health").replaceChildren(...renderHealth(doc));                      // carries running clocks: always redrawn
-  replace("progress", [doc.progress, doc.objective, doc.candidates?.length, he.generation, ui.chartTable], () => renderProgress(doc));
+  replace("progress", [doc.progress, doc.objective, doc.candidates?.length, he.generation, ui.chartTable, ui.chartX], () => renderProgress(doc));
   replace("best", [doc.best, ui.bestTab], () => renderBest(doc));
   replace("parameters", [doc.parameters, ui.param, doc.best?.id], () => renderParameters(doc));
   replace("instances", [doc.instances, ui.instTable], () => renderInstances(doc));
