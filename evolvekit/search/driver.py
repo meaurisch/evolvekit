@@ -513,10 +513,19 @@ class Driver:
             return summary
 
     def _run(self, generations: int | None) -> RunSummary:
-        total = generations if generations is not None else self.config.search.generations
         summary = RunSummary()
 
         started_at = self.resume()
+        # `search.generations` is the plan for the run *directory*: a run that
+        # died in generation 9 of 12 is resumed to finish the 12, not to start
+        # another 12. An explicit count (`--generations K`) means "K more".
+        planned = self.config.search.generations
+        total = generations if generations is not None else max(0, planned - started_at)
+        if generations is None and started_at and total == 0:
+            summary.stop_reason = (
+                f"the run directory already holds its {planned} planned generation(s); "
+                "`--generations K` runs K more"
+            )
         self.events.emit(
             "run_started",
             **self._describe_run(first_generation=started_at + 1, planned=total),

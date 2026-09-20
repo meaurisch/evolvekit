@@ -41,7 +41,7 @@ def _run(tmp_path, raw, **driver):
     (tmp_path / "solver.py").write_text(SOLVER, encoding="utf-8")
     config = build_config(raw, base_dir=tmp_path)
     instance = Driver(config, run_dir=tmp_path / "run", log=lambda m: None, **driver)
-    return instance, instance.run()
+    return instance, instance.run(generations=1)  # one *more*, whatever the directory holds
 
 
 @pytest.mark.slow
