@@ -11,6 +11,7 @@ promoted is not a punishment; failing a stage is (`evaluate.failure_score`).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from statistics import quantiles
 from typing import Any, Callable, Iterable, Sequence
@@ -23,6 +24,7 @@ from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
 from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
     STDERR_LIMIT,
+    Configuration,
     run_command_stage,
     run_static_stage,
 )
@@ -137,6 +139,9 @@ class Cascade:
         # the seed is a perfectly good twin target, and so is a candidate from
         # six generations ago.
         self.signatures = signatures if signatures is not None else BehaviourIndex()
+        self._configurations: dict[str, Configuration] = {}
+        """Per candidate, the validated parameters as a command can take them.
+        Filled when the static stage resolves them (`problem.parameters`)."""
 
     # -- public ----------------------------------------------------------
 
@@ -163,6 +168,8 @@ class Cascade:
             for cid in alive:
                 outcome = self._run_stage(stage, by_id[cid], paths[cid])
                 self._absorb(results[cid], outcome, stage)
+                if outcome.params is not None:
+                    self._configure(cid, paths[cid], outcome.params)
                 if not outcome.ok:
                     continue
                 # A candidate that behaved exactly like one already evaluated
@@ -192,6 +199,18 @@ class Cascade:
 
     # -- internals -------------------------------------------------------
 
+    def _configure(self, candidate_id: str, path: Path, params: dict) -> None:
+        """Keep a validated configuration in the shapes a command can take it:
+        flags for `{params}`, and a JSON file beside the candidate for
+        `{params_json}`."""
+        space = self.config.problem.parameters
+        assert space is not None
+        json_path = path.with_suffix(".params.json")
+        json_path.write_text(json.dumps(params, indent=2) + "\n", encoding="utf-8", newline="\n")
+        self._configurations[candidate_id] = Configuration(
+            flags=tuple(space.render_flags(params)), json_path=json_path
+        )
+
     def _materialise(self, candidate: Candidate) -> Path:
         path = self.candidates_dir / f"{candidate.id}.py"
         path.write_text(candidate.source, encoding="utf-8", newline="\n")
@@ -217,6 +236,7 @@ class Cascade:
             cwd=self.config.base_dir,
             required_kpis=(self.config.evaluate.score.objective,),
             observer=self._observer(candidate.id, stage, private=False),
+            configuration=self._configurations.get(candidate.id),
         )
         if self._is_final(stage) and self.budget is not None:
             self.budget.record_full_eval()
@@ -316,6 +336,8 @@ class Cascade:
             return
 
         result.stages_reached.append(stage.id)
+        if outcome.params is not None:
+            result.params = dict(outcome.params)
         result.kpis.update(outcome.kpis)
         result.kpi_cv.update(outcome.kpi_cv)
         if outcome.text_feedback:
@@ -356,6 +378,7 @@ class Cascade:
                 private=True,
                 required_kpis=(self.config.evaluate.score.objective,),
                 observer=self._observer(cid, stage, private=True),
+                configuration=self._configurations.get(cid),
             )
             result = results[cid]
             result.outcomes.append(outcome)

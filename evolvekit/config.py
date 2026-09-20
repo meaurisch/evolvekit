@@ -14,6 +14,8 @@ from typing import Any
 
 import yaml
 
+from evolvekit.space import ParameterSpace, SpaceError
+
 __all__ = [
     "ConfigError",
     "DEFAULT_SIGNATURE_DIGITS",
@@ -193,7 +195,8 @@ class ProblemConfig:
     to your block" is not.
     """
 
-    skeleton: Path
+    skeleton: Path | None
+    """`None` when `parameters` is set: the skeleton is then generated."""
     language: str = "python"
     block_start: str = "# EVOLVE-BLOCK-START"
     block_end: str = "# EVOLVE-BLOCK-END"
@@ -209,6 +212,18 @@ class ProblemConfig:
     the framework's problem-agnostic "you re-expressed the same rule" note."""
     required_functions: tuple[str, ...] = ()
     forbidden_imports: tuple[str, ...] = DEFAULT_FORBIDDEN_IMPORTS
+    parameters: ParameterSpace | None = None
+    """A typed search space (`evolvekit/space.py`), for tuning the parameters of
+    an external command. It replaces `skeleton`: the one function a candidate
+    may change, `configure()`, is generated from it, its values are validated
+    in the static stage and handed to the stage command as `{params}`."""
+
+    def skeleton_source(self) -> str:
+        """The skeleton's text: the user's file, or the generated one."""
+        if self.parameters is not None:
+            return self.parameters.render_skeleton(self.block_start, self.block_end)
+        assert self.skeleton is not None  # `parse` guarantees one of the two
+        return self.skeleton.read_text(encoding="utf-8")
 
     @staticmethod
     def parse(raw: Any, base_dir: Path) -> "ProblemConfig":
@@ -224,13 +239,27 @@ class ProblemConfig:
             "what_counts_as_new",
             "required_functions",
             "forbidden_imports",
+            "parameters",
         }
         _reject_unknown(data, known, "problem")
-        skeleton = base_dir / _as_str(
-            _require(data, "skeleton", "problem"), "problem.skeleton"
-        )
-        if not skeleton.is_file():
-            raise ConfigError(f"problem.skeleton: no such file: {skeleton}")
+        parameters: ParameterSpace | None = None
+        skeleton: Path | None = None
+        if data.get("parameters") is not None:
+            if data.get("skeleton") is not None:
+                raise ConfigError(
+                    "problem: give either `skeleton` (a program with an evolve block) "
+                    "or `parameters` (a typed space; the skeleton is generated), not both"
+                )
+            try:
+                parameters = ParameterSpace.parse(data["parameters"])
+            except SpaceError as exc:
+                raise ConfigError(str(exc)) from None
+        else:
+            skeleton = base_dir / _as_str(
+                _require(data, "skeleton", "problem"), "problem.skeleton"
+            )
+            if not skeleton.is_file():
+                raise ConfigError(f"problem.skeleton: no such file: {skeleton}")
         language = data.get("language", "python")
         if language != "python":
             raise ConfigError(
@@ -258,7 +287,9 @@ class ProblemConfig:
                         data.get("required_functions"), "problem.required_functions"
                     )
                 )
-            ),
+            )
+            or (("configure",) if parameters is not None else ()),
+            parameters=parameters,
             forbidden_imports=(
                 DEFAULT_FORBIDDEN_IMPORTS
                 if forbidden is None
@@ -383,11 +414,12 @@ class StageConfig:
         if kind == "command":
             if not command.strip():
                 raise ConfigError(f"{path}.command: required when kind is 'command'")
-            for placeholder in ("{candidate}", "{out}"):
-                if placeholder not in command:
-                    raise ConfigError(
-                        f"{path}.command: must contain the {placeholder} placeholder"
-                    )
+            # `{candidate}` is required too, unless `problem.parameters` hands the
+            # configuration over as `{params}`: see `_check_parameter_placeholders`.
+            if "{out}" not in command:
+                raise ConfigError(
+                    f"{path}.command: must contain the {{out}} placeholder"
+                )
         max_per_day = data.get("max_per_day")
         seeds = _as_int(data.get("seeds", 1), f"{path}.seeds", minimum=1)
         if seeds > 1:
@@ -1222,7 +1254,40 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
         source=source,
     )
     _check_embedding_route(config)
+    _check_parameter_placeholders(config)
     return config
+
+
+PARAMETER_PLACEHOLDERS = ("{params}", "{params_json}")
+
+
+def _check_parameter_placeholders(config: Config) -> None:
+    """A stage command and `problem.parameters` have to know about each other.
+
+    Both halves are mistakes that would otherwise cost a run: a command with
+    `{params}` and no declared space has nothing to substitute, and a declared
+    space that no command mentions means every candidate runs the same solver
+    configuration and the search optimises noise.
+    """
+    declared = config.problem.parameters is not None
+    for index, stage in enumerate(config.evaluate.stages):
+        if stage.kind != "command":
+            continue
+        path = f"evaluate.stages[{index}].command"
+        uses = [p for p in PARAMETER_PLACEHOLDERS if p in stage.command]
+        if uses and not declared:
+            raise ConfigError(
+                f"{path}: uses {uses[0]} but `problem.parameters` declares no "
+                "parameters to substitute"
+            )
+        if not declared and "{candidate}" not in stage.command:
+            raise ConfigError(f"{path}: must contain the {{candidate}} placeholder")
+        if declared and not uses and "{candidate}" not in stage.command:
+            raise ConfigError(
+                f"{path}: never receives the configuration. Add {{params}} (expands to "
+                "`--flag value` pairs), {params_json} (the path of a JSON file with the "
+                "values) or {candidate} (the generated Python module)"
+            )
 
 
 def _parse_models(raw: Any, search: SearchConfig) -> ModelsConfig | None:

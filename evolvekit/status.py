@@ -175,6 +175,131 @@ def _spearman(xs: Sequence[float], ys: Sequence[float]) -> float | None:
     return num / den if den else None
 
 
+def _correlation_ratio(groups: Sequence[Any], ys: Sequence[float]) -> float | None:
+    """How much of the ranking a *categorical* value goes with: the square root
+    of the between-category share of the variance of the ranks.
+
+    For two categories that is exactly the absolute rank correlation, so a
+    choice and a number can share one importance axis. With more categories the
+    share is shrunk for their number first -- k categories "explain"
+    (k-1)/(n-1) of pure noise, and a ten-way choice must not look important
+    just for being ten-way.
+    """
+    keys = [json.dumps(g, sort_keys=True, default=str) for g in groups]
+    n, k = len(ys), len(set(keys))
+    if n < 3 or k < 2 or n <= k or len(set(ys)) < 2:
+        return None
+    ranks = _ranks(ys)
+    mean = fmean(ranks)
+    total = sum((r - mean) ** 2 for r in ranks)
+    if not total:
+        return None
+    by_category: dict[str, list[float]] = {}
+    for key, value in zip(keys, ranks):
+        by_category.setdefault(key, []).append(value)
+    share = sum(len(v) * (fmean(v) - mean) ** 2 for v in by_category.values()) / total
+    if k > 2:
+        share = 1.0 - (1.0 - share) * (n - 1) / (n - k)
+    return math.sqrt(min(1.0, max(0.0, share)))
+
+
+CATEGORICAL = ("bool", "choice")
+COVERAGE_BINS = 10
+
+
+class _Parameters:
+    """The parameters a run tunes, and how to read them off a recorded row.
+
+    A run declares them in one of two ways. With `problem.parameters` the typed
+    space is in `run_started` and each row carries its configuration as data
+    (`params`). Without it, numeric ranges sit on a `# PARAMS: {...}` line of
+    the seed block and the values are read back out of each candidate's code.
+    Everything downstream -- the diff against the default, the coverage, the
+    importance -- is the same code for both.
+    """
+
+    def __init__(self, described: Mapping[str, Any], seed: Mapping[str, Any] | None) -> None:
+        declared = [
+            dict(item)
+            for item in described.get("parameters") or []
+            if isinstance(item, Mapping) and item.get("name")
+        ]
+        self.typed = bool(declared)
+        if self.typed:
+            self.items = declared
+            self._defaults = {item["name"]: item.get("default") for item in declared}
+        else:
+            seed_block = str((seed or {}).get("block") or "")
+            ranges = declared_ranges(seed_block)
+            self._defaults = current_values(seed_block, set(ranges))
+            self.items = [
+                {
+                    "name": name, "type": "number", "low": low, "high": high, "log": False,
+                    "choices": [], "default": self._defaults.get(name), "help": None,
+                }
+                for name, (low, high) in sorted(ranges.items())
+            ]
+        self._names = {item["name"] for item in self.items}
+
+    def __bool__(self) -> bool:
+        return bool(self.items)
+
+    def values(self, row: Mapping[str, Any] | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        if self.typed:
+            params = row.get("params")
+            return dict(params) if isinstance(params, Mapping) else {}
+        return current_values(str(row.get("block") or ""), self._names)
+
+    @staticmethod
+    def categories(item: Mapping[str, Any]) -> list[Any]:
+        return [False, True] if item.get("type") == "bool" else list(item.get("choices") or [])
+
+    @classmethod
+    def position(cls, item: Mapping[str, Any], value: Any) -> float | None:
+        """Where `value` sits in the declared range, 0..1 -- along the scale the
+        search samples on, so a log-scale parameter is placed by its logarithm
+        and a category by its slot. Views draw this; none re-derives it."""
+        if value is None:
+            return None
+        if item.get("type") in CATEGORICAL:
+            categories = cls.categories(item)
+            if value not in categories:
+                return None
+            return (categories.index(value) + 0.5) / len(categories)
+        low, high = _number(item.get("low")), _number(item.get("high"))
+        number = _number(value)
+        if low is None or high is None or number is None or not high > low:
+            return None
+        if item.get("log") and low > 0 and number > 0:
+            fraction = (math.log(number) - math.log(low)) / (math.log(high) - math.log(low))
+        else:
+            fraction = (number - low) / (high - low)
+        return min(1.0, max(0.0, fraction))
+
+    def diff(self, row: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+        """Each parameter's value in `row` beside its default."""
+        values = self.values(row)
+        return [
+            {
+                "name": item["name"],
+                "type": item.get("type"),
+                "default": self._defaults.get(item["name"]),
+                "value": values.get(item["name"]),
+                "changed": item["name"] in values
+                and values.get(item["name"]) != self._defaults.get(item["name"]),
+                "low": item.get("low"),
+                "high": item.get("high"),
+                "log": bool(item.get("log")),
+                "choices": list(item.get("choices") or []),
+                "default_position": self.position(item, self._defaults.get(item["name"])),
+                "value_position": self.position(item, values.get(item["name"])),
+            }
+            for item in self.items
+        ]
+
+
 def _improvement_pct(baseline: float | None, value: float | None, direction: str) -> float | None:
     """Positive means better, whichever way the objective points."""
     if baseline is None or value is None or baseline == 0:
@@ -208,6 +333,7 @@ class _Run:
         self.started = [e for e in events if e.get("type") == "run_started"]
         self.described = self.started[-1] if self.started else {}
         self.seed = next((r for r in rows if r.get("operator") == SEED_OPERATOR), None)
+        self.space = _Parameters(self.described, self.seed)
         ranked = rank(rows, 1)
         self.best_row = ranked[0] if ranked else None
         self._samples: dict[str, dict[int, float]] | None = None
@@ -718,93 +844,139 @@ class _Run:
             "generalization_gap": _number(row.get("generalization_gap")),
             "block": block,
             "diff_vs_seed": diff,
-            "parameters": self._parameter_diff(seed_block, block),
+            "parameters": self.space.diff(row),
         }
-
-    def _parameter_diff(self, seed_block: str, block: str) -> list[dict[str, Any]]:
-        ranges = declared_ranges(seed_block)
-        if not ranges:
-            return []
-        defaults = current_values(seed_block, set(ranges))
-        values = current_values(block, set(ranges))
-        return [
-            {
-                "name": name,
-                "default": defaults.get(name),
-                "value": values.get(name),
-                "changed": name in values and values.get(name) != defaults.get(name),
-                "low": ranges[name][0],
-                "high": ranges[name][1],
-            }
-            for name in sorted(ranges)
-        ]
 
     # -- parameters --------------------------------------------------------
 
     def parameters(self) -> dict[str, Any]:
-        seed_block = str((self.seed or {}).get("block") or "")
-        ranges = declared_ranges(seed_block)
-        if not ranges:
+        if not self.space:
             return {
                 "available": False,
-                "why": "the seed block declares no `# PARAMS: {...}` line, so there are no named parameters to follow",
+                "why": (
+                    "the run declares no `problem.parameters` and its seed block has no "
+                    "`# PARAMS: {...}` line, so there are no named parameters to follow"
+                ),
                 "items": [],
             }
-        defaults = current_values(seed_block, set(ranges))
-        best_values = current_values(str((self.best_row or {}).get("block") or ""), set(ranges))
-        observed = []
-        for row in self.rows:
-            if row.get("rejected"):
-                continue
-            values = current_values(str(row.get("block") or ""), set(ranges))
-            if values:
-                observed.append((row, values))
-        items = []
-        for name in sorted(ranges):
-            low, high = ranges[name]
-            points = [
-                {
-                    "id": r.get("id"),
-                    "value": v[name],
-                    "fitness": fitness_of(r),
-                    "objective": self._objective_of(r),
-                    "competes": competes(r),
-                }
-                for r, v in observed
-                if name in v
-            ]
-            ranked = [p for p in points if p["competes"] and p["fitness"] is not None]
-            rho = _spearman([p["value"] for p in ranked], [p["fitness"] for p in ranked])
-            bins = [0] * 10
-            for point in points:
-                position = (float(point["value"]) - low) / (high - low) if high > low else 0.0
-                bins[min(9, max(0, int(position * 10)))] += 1
-            items.append(
-                {
-                    "name": name,
-                    "low": low,
-                    "high": high,
-                    "default": defaults.get(name),
-                    "best": best_values.get(name),
-                    "distinct_values": len({p["value"] for p in points}),
-                    "coverage": bins,
-                    "importance": {
-                        "method": "absolute Spearman rank correlation between the value and the ranking score, fully evaluated candidates only",
-                        "value": abs(rho) if rho is not None else None,
-                        "sign": (1 if rho > 0 else -1) if rho else 0,
-                        "n": len(ranked),
-                    },
-                    "points": points,
-                }
-            )
+        observed = [
+            (row, values)
+            for row in self.rows
+            if not row.get("rejected")
+            for values in [self.space.values(row)]
+            if values
+        ]
+        best_values = self.space.values(self.best_row)
+        items = [
+            self._parameter(item, observed, best_values.get(item["name"]))
+            for item in self.space.items
+        ]
         items.sort(key=lambda item: -(item["importance"]["value"] or 0.0))
         return {
             "available": True,
+            "typed": self.space.typed,
             "why": (
                 "a correlation over a few dozen evaluations says where to look, not what is true: "
                 "it misses interactions and non-monotone effects"
             ),
             "items": items,
+        }
+
+    def _parameter(
+        self,
+        item: Mapping[str, Any],
+        observed: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+        best: Any,
+    ) -> dict[str, Any]:
+        name, categorical = item["name"], item.get("type") in CATEGORICAL
+        categories = _Parameters.categories(item)
+        points = [
+            {
+                "id": row.get("id"),
+                "value": values[name],
+                "position": _Parameters.position(item, values[name]),
+                "fitness": fitness_of(row),
+                "objective": self._objective_of(row),
+                "competes": competes(row),
+            }
+            for row, values in observed
+            if name in values
+        ]
+        ranked = [
+            p
+            for p in points
+            if p["competes"] and p["fitness"] is not None
+            and not (categorical and p["position"] is None)  # a value the declaration no longer has
+        ]
+        fitnesses = [p["fitness"] for p in ranked]
+        if categorical and len(categories) > 2:
+            method = (
+                "rank correlation ratio: the share of the ranking's variance that lies between "
+                "the categories (square root, shrunk for their number), fully evaluated candidates only"
+            )
+            strength, sign = _correlation_ratio([p["value"] for p in ranked], fitnesses), 0
+        else:
+            method = (
+                "absolute Spearman rank correlation between the value and the ranking score, "
+                "fully evaluated candidates only"
+            )
+            # A two-way choice is ranked by its slot, so its sign reads "towards the second value".
+            xs = [categories.index(p["value"]) if categorical else p["value"] for p in ranked]
+            rho = _spearman(xs, fitnesses)
+            strength, sign = (abs(rho) if rho is not None else None), ((1 if rho > 0 else -1) if rho else 0)
+        labels = [str(c).lower() if isinstance(c, bool) else str(c) for c in categories] or None
+        low, high = _number(item.get("low")), _number(item.get("high"))
+        if item.get("type") == "int" and low is not None and high is not None and 0 <= high - low < COVERAGE_BINS:
+            # An integer with a handful of values gets a cell per value: ten
+            # cells over eight integers would show two holes nothing can fill.
+            labels = [str(v) for v in range(int(low), int(high) + 1)]
+            bins = [0] * len(labels)
+            for point in points:
+                slot = _number(point["value"])
+                if slot is not None and 0 <= int(slot - low) < len(bins):
+                    bins[int(slot - low)] += 1
+        else:
+            bins = [0] * (len(categories) if categorical else COVERAGE_BINS)
+            for point in points:
+                if point["position"] is not None:
+                    bins[min(len(bins) - 1, int(point["position"] * len(bins)))] += 1
+        levels = []
+        for category in categories:
+            members = [
+                p
+                for p in points
+                if p["value"] == category and isinstance(p["value"], bool) == isinstance(category, bool)
+            ]
+            scored = [p["objective"] for p in members if p["competes"] and p["objective"] is not None]
+            levels.append(
+                {
+                    "value": category,
+                    "n": len(members),
+                    "n_scored": len(scored),
+                    "mean_objective": fmean(scored) if scored else None,
+                    "best_objective": (
+                        (min(scored) if self._direction == "minimize" else max(scored)) if scored else None
+                    ),
+                }
+            )
+        return {
+            "name": name,
+            "type": item.get("type"),
+            "help": item.get("help"),
+            "low": item.get("low"),
+            "high": item.get("high"),
+            "log": bool(item.get("log")),
+            "choices": list(item.get("choices") or []),
+            "default": item.get("default"),
+            "default_position": _Parameters.position(item, item.get("default")),
+            "best": best,
+            "best_position": _Parameters.position(item, best),
+            "distinct_values": len({json.dumps(p["value"], sort_keys=True, default=str) for p in points}),
+            "coverage": bins,
+            "coverage_labels": labels,
+            "levels": levels if categorical else None,
+            "importance": {"method": method, "value": strength, "sign": sign, "n": len(ranked)},
+            "points": points,
         }
 
     # -- instances ---------------------------------------------------------
@@ -1016,6 +1188,7 @@ def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] |
     seed = next((r for r in rows.values() if r.get("operator") == SEED_OPERATOR), None)
     parent = rows.get(str(row.get("parent_id")))
     block = str(row.get("block") or "")
+    events = read_events(directory)
     evaluations = [
         {
             key: event.get(key)
@@ -1024,14 +1197,13 @@ def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] |
                 "stderr_tail", "stdout_tail", "argv", "stdout_log", "stderr_log",
             )
         }
-        for event in read_events(directory)
+        for event in events
         if event.get("type") == "eval_finished"
         and str(event.get("candidate_id")) == candidate_id
     ]
     seed_block = str((seed or {}).get("block") or "")
-    ranges = declared_ranges(seed_block)
-    defaults = current_values(seed_block, set(ranges))
-    values = current_values(block, set(ranges))
+    described = next((e for e in reversed(events) if e.get("type") == "run_started"), {})
+    space = _Parameters(described, seed)
     detail = {
         "id": candidate_id,
         "generation": row.get("generation"),
@@ -1065,15 +1237,7 @@ def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] |
             if seed and seed.get("id") != candidate_id
             else ""
         ),
-        "parameters": [
-            {
-                "name": name,
-                "default": defaults.get(name),
-                "value": values.get(name),
-                "changed": name in values and values.get(name) != defaults.get(name),
-            }
-            for name in sorted(ranges)
-        ],
+        "parameters": space.diff(row),
         "evaluations": evaluations,
     }
     return _jsonable(detail)

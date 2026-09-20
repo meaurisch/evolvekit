@@ -41,7 +41,13 @@ from evolvekit.providers import Provider, build_provider
 from evolvekit.search.archive import Archive
 from evolvekit.search.breadth import AdaptiveBreadth
 from evolvekit.search.novelty import NoveltyIndex, NoveltyVerdict, build_near_backend
-from evolvekit.search.operators import OPERATOR_ROLES, OperatorResult, param_lhs, run_operator
+from evolvekit.search.operators import (
+    OPERATOR_ROLES,
+    OperatorResult,
+    param_lhs,
+    param_lhs_typed,
+    run_operator,
+)
 from evolvekit.search.params import has_params
 from evolvekit.search.scratchpad import Scratchpad
 
@@ -158,7 +164,7 @@ class Driver:
         self._log_sink = log or (lambda _msg: None)
         self._providers = providers or {}
 
-        skeleton = config.problem.skeleton.read_text(encoding="utf-8")
+        skeleton = config.problem.skeleton_source()
         self.prefix, self.seed_block, self.suffix = extract_block(
             skeleton, config.problem.block_start, config.problem.block_end
         )
@@ -219,6 +225,9 @@ class Driver:
             "config_path": str(config.source) if config.source else None,
             "objective": config.evaluate.score.objective,
             "direction": config.evaluate.score.direction,
+            "parameters": (
+                config.problem.parameters.describe() if config.problem.parameters else None
+            ),
             "failure_score": config.evaluate.failure_score,
             "stages": [
                 {
@@ -645,7 +654,7 @@ class Driver:
         """One operator name per child. The big step, when due, takes slot 0."""
         count = self.children_per_generation
         weights = self.config.search.operators
-        sweepable = has_params(self.seed_block)
+        sweepable = self.config.problem.parameters is not None or has_params(self.seed_block)
         names = [
             n
             for n, w in sorted(weights.items())
@@ -916,7 +925,11 @@ class Driver:
         hint: str | None,
     ) -> OperatorResult:
         if operator == "param_lhs":
-            return param_lhs(parent, seed=self.rng.randrange(1 << 30))
+            seed = self.rng.randrange(1 << 30)
+            space = self.config.problem.parameters
+            if space is not None:
+                return param_lhs_typed(space, parent, seed=seed)
+            return param_lhs(parent, seed=seed)
         return run_operator(
             operator,
             config=self.config,
@@ -1033,6 +1046,7 @@ class Driver:
             result = results[candidate.id]
             self.results[candidate.id] = result
             candidate.score = result.score
+            candidate.params = result.params
             candidate.competes = result.competes
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason

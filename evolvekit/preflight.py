@@ -205,7 +205,7 @@ def _run_stages(
     if candidate is not None:
         source = candidate.read_text(encoding="utf-8")
     else:
-        skeleton = config.problem.skeleton.read_text(encoding="utf-8")
+        skeleton = config.problem.skeleton_source()
         _, block, _ = extract_block(
             skeleton, config.problem.block_start, config.problem.block_end
         )

@@ -135,6 +135,33 @@ def _prose_section(title: str, text: str) -> str:
     return f"\n## {title}\n{body}\n" if body else ""
 
 
+def _parameter_section(config: Config) -> str:
+    """The declared space, so that a model proposes values that will validate.
+
+    A configuration outside its declared range is rejected by the static stage
+    before it costs any solver time; saying the ranges here is cheaper still.
+    """
+    space = config.problem.parameters
+    if space is None:
+        return ""
+    lines = []
+    for p in space:
+        if p.numeric:
+            domain = f"{p.type} in [{p.low:g}, {p.high:g}]" + (", log scale" if p.log else "")
+        elif p.type == "bool":
+            domain = "bool"
+        else:
+            domain = "one of " + ", ".join(repr(c) for c in p.choices)
+        lines.append(f"- `{p.name}`: {domain}; default {p.default!r}" + (f" -- {p.help}" if p.help else ""))
+    return (
+        "\n## Parameters `configure()` returns\n"
+        + "\n".join(lines)
+        + "\nReturn a dict with these keys. A value outside its range, or an unknown key, "
+        "is rejected before it is evaluated. `configure()` may compute its values, but it "
+        "takes no arguments and must return plain numbers, booleans and strings.\n"
+    )
+
+
 def system_prompt(config: Config, skeleton_prefix: str, skeleton_suffix: str) -> str:
     """The cache-friendly half. Identical for every call in a run."""
     problem = config.problem
@@ -149,6 +176,7 @@ def system_prompt(config: Config, skeleton_prefix: str, skeleton_suffix: str) ->
     tools = _bullet_section("Tools your block may call and rely on", problem.tools)
     constraints = _bullet_section("Constraints", problem.constraints)
     novelty = _prose_section("What counts as a new candidate here", problem.what_counts_as_new)
+    parameters = _parameter_section(config)
     objective = config.evaluate.score
     direction = "higher is better" if objective.direction == "maximize" else "lower is better"
     penalties = (
@@ -163,7 +191,7 @@ You are an optimisation engineer evolving a single heuristic.
 
 ## Problem
 {description}
-{tools}{constraints}{novelty}
+{tools}{constraints}{novelty}{parameters}
 ## Scoring
 Objective KPI: `{objective.objective}` ({direction}). Reported score is always \
 maximised, so a larger reported score is always better.
