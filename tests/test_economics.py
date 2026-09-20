@@ -20,7 +20,7 @@ from evolvekit.config import (
     build_config,
     load_config,
 )
-from evolvekit.economics import DEFAULT_WINDOW, format_series, series
+from evolvekit.economics import format_series, series
 from evolvekit.leaderboard import economics_svg, render_economics, render_html, render_markdown
 from evolvekit.providers.fake import FakeProvider
 from evolvekit.search.driver import Driver
