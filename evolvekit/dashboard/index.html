@@ -673,7 +673,7 @@ function drawProgress(doc, width) {
       const node = s("g", { class: "hit" }, s("rect", { x: X(+g) - 13, y: H - 24, width: 26, height: 20, fill: "transparent" }),
         roomy ? s("text", { x: X(+g), y: H - 10, "text-anchor": "middle", fill: colour, style: "font-weight:600" }, (failed ? "✕" : "○") + list.length)
               : s("circle", { cx: X(+g), cy: H - 14, r: 2.5, fill: colour }));
-      node.addEventListener("pointermove", (e) => showTip(e, h("b", null, "generation " + g + ": " + list.length + " unfinished"), ...list.map((c) => h("div", { class: "m" }, c.id + " — " + (isFailure(c) ? c.reason : "not promoted past " + (c.deepest_stage || "?"))))));
+      node.addEventListener("pointermove", (e) => showTip(e, h("b", null, "generation " + g + ": " + list.length + " unfinished"), ...list.map((c) => h("div", { class: "m" }, c.id + " — " + (isFailure(c) ? c.reason : c.raced_out ? c.raced_out : "not promoted past " + (c.deepest_stage || "?"))))));
       node.addEventListener("pointerleave", hideTip);
       svg.append(node);
     }
@@ -898,7 +898,7 @@ function renderFailures(doc) {
 function status(c) {
   if (c.is_best) return ["star", "best"]; if (c.is_seed) return ["ok", "baseline"];
   if (c.rejected) return ["dim", c.novelty ? c.novelty.replace("_", "-") : "rejected"];
-  if (!c.competes) return isFailure(c) ? ["bad", "failed"] : ["dim", "not promoted"];
+  if (!c.competes) return isFailure(c) ? ["bad", "failed"] : c.raced_out ? ["dim", "raced out"] : ["dim", "not promoted"];
   return ["ok", "ranked"];
 }
 function renderCandidates(doc) {

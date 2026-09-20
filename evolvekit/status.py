@@ -561,6 +561,11 @@ class _Run:
                 failed_runs[(cid, run)] = cid
         flying = {(str(f.get("candidate_id")), (f.get("instance"), f.get("seed"))) for f in in_flight}
         out = {cid for key, cid in failed_runs.items() if key not in flying}
+        out |= {  # raced out: their remaining runs are never started either
+            str(e.get("candidate_id")) for e in items
+            if e.get("type") == "raced_out" and e.get("stage") == stage
+            and int(e.get("seq") or 0) >= int(opened.get("seq") or 0)
+        }
         runs_done = sum(len(runs) for runs in done.values())
         left = sum(per_candidate - len(runs) for cid, runs in done.items() if cid not in out)
         typical = self._typical_run_s(stage)
@@ -1514,6 +1519,7 @@ class _Run:
                     "rejected": bool(row.get("rejected")),
                     "novelty": row.get("novelty"),
                     "reason": row.get("reject_reason") or _first_line(row.get("last_failure")),
+                    "raced_out": row.get("raced_out"),
                     "deepest_stage": stages[-1] if stages else None,
                     "evaluation_s": durations.get(cid),
                     "usd": _number(row.get("usd")),

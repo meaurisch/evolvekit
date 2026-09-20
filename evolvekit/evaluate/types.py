@@ -50,6 +50,10 @@ class StageOutcome:
     stdout_log: str = ""
     stderr_log: str = ""
     """Where the run's complete output was kept (`evaluate/process.py`)."""
+    raced_out: str | None = None
+    """Set on a per-instance stage's outcome when the candidate was stopped by
+    the stage's `race` rule: how many instances it had finished and how far
+    behind it was. Not a failure -- nothing went wrong."""
     host_busy: float | None = None
     """The share of all logical CPUs that were busy -- with anything -- while
     this run was going (`evaluate/hostload.py`). `None` for a lookup, and on a
@@ -97,6 +101,9 @@ class EvalResult:
     record, but buys no further stages and never enters the archive."""
     params: dict[str, object] | None = None
     """The validated configuration (see `StageOutcome.params`), as data."""
+    raced_out: str | None = None
+    """Why the final stage was not finished, when that was the stage's `race`
+    rule and not a failure."""
     competes: bool = False
     """True once the candidate has finished the final stage -- hold-out
     included -- without a failure; see `cascade.finished_final_stage`. Only such

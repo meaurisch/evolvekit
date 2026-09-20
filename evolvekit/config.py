@@ -363,6 +363,38 @@ KPI_SOURCES = ("file", "stdout")
 
 
 @dataclass(frozen=True)
+class RaceRule:
+    """When a candidate stops being worth its remaining instances.
+
+    A stage that runs per instance measures every candidate on the same
+    instances in the same order. Once a candidate has finished `after` of them
+    and is, on exactly those, more than `margin_pct` percent behind the best
+    candidate so far, finishing the other instances would cost their full price
+    to confirm what is already known. It is *raced out*: its remaining runs are
+    never started, it keeps the score of the stage before, and it does not
+    compete -- the same standing as a candidate that was not promoted.
+
+    With ten-minute runs, `after: 4` of ten instances saves an hour of solver
+    time per losing candidate. The margin is the protection against noise: set
+    it to a few times what two runs of the same configuration differ by.
+    """
+
+    after: int
+    margin_pct: float = 1.0
+
+    @staticmethod
+    def parse(raw: Any, path: str) -> "RaceRule | None":
+        if raw is None:
+            return None
+        data = _as_mapping(raw, path)
+        _reject_unknown(data, {"after", "margin_pct"}, path)
+        margin = _as_float(data.get("margin_pct", 1.0), f"{path}.margin_pct")
+        if margin < 0:
+            raise ConfigError(f"{path}.margin_pct: must be >= 0, got {margin}")
+        return RaceRule(after=_as_int(_require(data, "after", path), f"{path}.after", minimum=1), margin_pct=margin)
+
+
+@dataclass(frozen=True)
 class StageConfig:
     """One rung of the evaluation cascade."""
 
@@ -410,6 +442,9 @@ class StageConfig:
     retries: int = 0
     """Run a failed instance run again, this many times, before the stage
     fails. For the solver that crashes once in a hundred runs."""
+    race: "RaceRule | None" = None
+    """Stop a candidate that is already clearly behind (`instances` only): see
+    `RaceRule`. Off unless configured."""
     kpis_from: str = "file"
     """Where the command reports. `file`: the JSON object it writes to `{out}`.
     `stdout`: the last line of its standard output that is a JSON object --
@@ -464,6 +499,7 @@ class StageConfig:
             "normalize",
             "kpis_from",
             "kpi_patterns",
+            "race",
         }
         _reject_unknown(data, known, path)
         stage_id = _as_str(_require(data, "id", path), f"{path}.id")
@@ -544,6 +580,7 @@ class StageConfig:
                     f"{path}.command: uses {{instance}} but the stage lists no `instances`"
                 )
             for key, given in (
+                ("race", data.get("race") is not None),
                 ("private_instances", bool(private_instances)),
                 ("workers", workers > 1),
                 ("pin_cpus", bool(pin_cpus)),
@@ -581,6 +618,7 @@ class StageConfig:
             normalize=normalize,
             kpis_from=kpis_from,
             kpi_patterns=kpi_patterns,
+            race=RaceRule.parse(data.get("race"), f"{path}.race"),
             inputs=tuple(
                 _as_str(v, f"{path}.inputs[{i}]")
                 for i, v in enumerate(_as_list(data.get("inputs"), f"{path}.inputs"))

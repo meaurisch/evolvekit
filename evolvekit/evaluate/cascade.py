@@ -22,7 +22,7 @@ from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
 from evolvekit.config import Config, PromoteRule, StageConfig
 from evolvekit.evaluate.cache import EvalCache
-from evolvekit.evaluate.fanout import Job, per_instance_key, run_instance_stage
+from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
 from evolvekit.evaluate.scoring import compute_score, ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
 from evolvekit.evaluate.stages import (
@@ -150,6 +150,9 @@ class Cascade:
         self.cache = EvalCache(self.work_dir / "cache") if config.evaluate.cache else None
         """Successful evaluator runs, kept so that an identical one is a lookup:
         what makes an interrupted generation cheap to finish."""
+        self.incumbent: dict[str, dict[str, Any]] = self._load_json(self.work_dir / "incumbent.json")
+        """Per stage, the best candidate so far and what it reached on each
+        instance: what a stage's `race` rule measures a candidate against."""
         self.reference: dict[str, dict[str, float]] = self._load_reference()
         """Per stage, what the baseline reached on each instance: the yardstick
         of `normalize: baseline`. Kept on disk, because a resumed run does not
@@ -337,13 +340,58 @@ class Cascade:
                 private=private,
                 required_kpis=(self.config.evaluate.score.objective,),
                 cache=self.cache,
+                race=self._race_for(stage, admitted, private=private),
             )
             if admitted
             else {}
         )
         for candidate in admitted:
             self._normalise(stage, candidate, outcomes[candidate.id], private=private)
+            if not private:
+                self._note_incumbent(stage, candidate, outcomes[candidate.id])
         return outcomes
+
+    # -- race ------------------------------------------------------------
+
+    @staticmethod
+    def _load_json(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _race_for(self, stage: StageConfig, candidates: Sequence[Candidate], *, private: bool) -> Race | None:
+        held = self.incumbent.get(stage.id)
+        if stage.race is None or private or not held:
+            return None  # nothing to race against yet: the first candidate through always finishes
+        return Race(
+            objective=self.config.evaluate.score.objective,
+            minimize=self.config.evaluate.score.direction == "minimize",
+            incumbent={str(k): float(v) for k, v in held["values"].items()},
+            after=stage.race.after,
+            margin_pct=stage.race.margin_pct,
+            exempt=frozenset(c.id for c in candidates if c.operator == SEED_OPERATOR),
+        )
+
+    def _note_incumbent(self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome) -> None:
+        """Remember the best candidate to have finished this stage, instance by instance."""
+        if stage.race is None or not outcome.ok:
+            return
+        objective = self.config.evaluate.score.objective
+        values = dict(zip(outcome.instance_names, outcome.vector_kpis.get(per_instance_key(objective), [])))
+        score = outcome.kpis.get(objective)
+        if not values or score is None:
+            return
+        held = self.incumbent.get(stage.id)
+        better = held is None or (
+            score < held["score"] if self.config.evaluate.score.direction == "minimize" else score > held["score"]
+        )
+        if better:
+            self.incumbent[stage.id] = {"id": candidate.id, "score": score, "values": values}
+            (self.work_dir / "incumbent.json").write_text(
+                json.dumps(self.incumbent, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+            )
 
     # -- normalize: baseline ---------------------------------------------
 
@@ -493,6 +541,11 @@ class Cascade:
         self, result: EvalResult, outcome: StageOutcome, stage: StageConfig
     ) -> None:
         result.outcomes.append(outcome)
+        if outcome.raced_out:
+            # Not a failure: the candidate keeps the score of the stage before,
+            # does not reach this one, and so does not compete.
+            result.raced_out = outcome.raced_out
+            return
         if not outcome.ok:
             result.last_failure = _artefact(outcome)
             if stage.kind == "builtin-static":
