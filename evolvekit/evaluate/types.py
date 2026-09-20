@@ -50,6 +50,9 @@ class StageOutcome:
     stdout_log: str = ""
     stderr_log: str = ""
     """Where the run's complete output was kept (`evaluate/process.py`)."""
+    cached: bool = False
+    """Looked up in `work/cache/` rather than run: the same candidate, stage,
+    instance and seed had already been evaluated (`evaluate/cache.py`)."""
     instance_names: tuple[str, ...] = ()
     """For a stage that runs per instance: the instances, in the order of every
     `<kpi>_per_instance` list in `vector_kpis`."""

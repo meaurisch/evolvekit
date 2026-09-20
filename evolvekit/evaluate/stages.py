@@ -27,6 +27,7 @@ from statistics import fmean, stdev
 from typing import Any, Callable
 
 from evolvekit.config import ProblemConfig, StageConfig
+from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
 
@@ -304,6 +305,7 @@ def run_command_stage(
     required_kpis: tuple[str, ...] = (),
     observer: Observer | None = None,
     configuration: "Configuration | None" = None,
+    cache: "EvalCache | None" = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -332,6 +334,7 @@ def run_command_stage(
             required_kpis=required_kpis,
             observer=observer,
             configuration=configuration,
+            cache=cache,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -346,6 +349,7 @@ def run_command_stage(
             required_kpis=required_kpis,
             observer=observer,
             configuration=configuration,
+            cache=cache,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -436,6 +440,7 @@ def _run_once(
     observer: Observer | None = None,
     configuration: "Configuration | None" = None,
     unit: "UnitContext | None" = None,
+    cache: "EvalCache | None" = None,
 ) -> StageOutcome:
     """One evaluator run, announced to `observer` before and after.
 
@@ -447,7 +452,23 @@ def _run_once(
     labels = unit.labels() if unit is not None else {}
     if observer is not None:
         observer("eval_started", seed=seed, timeout_s=stage.timeout, **labels)
-    outcome = _execute_once(
+    key = known = None
+    if cache is not None:
+        key = cache.key(
+            stage_id=stage.id,
+            command=stage.command,
+            reading=(stage.kpis_from, stage.kpi_patterns),
+            flags=configuration.flags if configuration is not None else (),
+            candidate_path=candidate_path,
+            inputs=inputs,
+            instance=unit.instance if unit is not None else None,
+            seed=seed,
+            private=private,
+        )
+        known = cache.load(key, stage.id, private)
+        if known is not None and _missing_required(known.kpis, required_kpis) is not None:
+            known = None  # kept under another objective: not an answer to this question
+    outcome = known or _execute_once(
         candidate_path,
         stage,
         inputs=inputs,
@@ -459,6 +480,9 @@ def _run_once(
         configuration=configuration,
         unit=unit,
     )
+    if cache is not None and key is not None and not outcome.cached:
+        # Before anything else can go wrong: a result that was paid for is kept.
+        cache.store(key, outcome)
     outcome.stdout_log = str(out_path.with_suffix(".stdout.log"))
     outcome.stderr_log = str(out_path.with_suffix(".stderr.log"))
     try:
@@ -495,6 +519,7 @@ def _run_once(
             argv=list(outcome.argv),
             stdout_log=outcome.stdout_log,
             stderr_log=outcome.stderr_log,
+            cached=outcome.cached,
             **labels,
             **failed,
         )

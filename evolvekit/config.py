@@ -603,6 +603,12 @@ class StageConfig:
         )
 
 
+def _as_flag(value: Any, path: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{path}: expected true or false, got {value!r}")
+    return value
+
+
 def _parse_kpi_patterns(raw: Any, path: str) -> tuple[tuple[str, str], ...]:
     if raw is None:
         return ()
@@ -720,6 +726,10 @@ class EvaluateConfig:
     signature_ignore: tuple[str, ...] = DEFAULT_SIGNATURE_IGNORE
     """The behaviour signature: which KPIs it is built from and how precisely.
     See `evolvekit/evaluate/signature.py`."""
+    cache: bool = True
+    """Keep every successful evaluator run under `work/cache/` and look an
+    identical one up instead of running it again (`evaluate/cache.py`). Off for
+    an evaluator whose answer to the same question is meant to change."""
 
     def digits_for(self, stage: StageConfig) -> int:
         """How precisely to fingerprint one stage's KPIs."""
@@ -743,6 +753,7 @@ class EvaluateConfig:
                 "signature_digits",
                 "signature_digits_stochastic",
                 "signature_ignore",
+                "cache",
             },
             "evaluate",
         )
@@ -803,6 +814,7 @@ class EvaluateConfig:
                 data.get("failure_score", -1000.0), "evaluate.failure_score"
             ),
             holdout_penalty=holdout_penalty,
+            cache=_as_flag(data.get("cache", True), "evaluate.cache"),
             signature_digits=_as_int(
                 data.get("signature_digits", DEFAULT_SIGNATURE_DIGITS),
                 "evaluate.signature_digits",

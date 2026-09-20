@@ -849,6 +849,29 @@ against the same directory refuses, naming the pid that owns it and exiting 3.
 A lock whose owner is no longer alive is reclaimed automatically, so a crashed
 run never needs manual cleanup.
 
+### A run that died mid-generation
+
+Run the same command again, against the same `--run-dir`. A generation is only
+recorded once its whole cascade has returned — hours, for a slow solver — so
+two things keep a power cut from costing those hours:
+
+- **Every successful evaluator run is kept** under `work/cache/`, keyed by what
+  was run: the candidate's source, the stage and its command, the instance,
+  the seed, public or hold-out. Running the same thing again is a lookup
+  (`eval_finished` with `cached: true` and no evaluator time; `status` counts
+  them). Failures are never kept — a crash may have been the machine's fault,
+  and a retry has to be a real one. The same configuration under a second
+  candidate id is the same run, too. The key cannot see the solver itself: a
+  run directory is one experiment, so swap the binary under a new `--run-dir`,
+  or set `evaluate.cache: false`.
+- **A generation's children are written down before they are evaluated**
+  (`pending.json`). The resumed run evaluates *those* children, under the same
+  ids — so their finished runs are in the cache and the model calls that bred
+  them were not wasted — instead of breeding new ones that start from nothing.
+  The event log says `generation_adopted`.
+
+What is lost is what was in flight when the run died.
+
 ## Before you spend anything: `preflight`
 
 ```

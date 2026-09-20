@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterable, Sequence
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
 from evolvekit.config import Config, PromoteRule, StageConfig
+from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, per_instance_key, run_instance_stage
 from evolvekit.evaluate.scoring import compute_score, ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
@@ -146,6 +147,9 @@ class Cascade:
         self._configurations: dict[str, Configuration] = {}
         """Per candidate, the validated parameters as a command can take them.
         Filled when the static stage resolves them (`problem.parameters`)."""
+        self.cache = EvalCache(self.work_dir / "cache") if config.evaluate.cache else None
+        """Successful evaluator runs, kept so that an identical one is a lookup:
+        what makes an interrupted generation cheap to finish."""
         self.reference: dict[str, dict[str, float]] = self._load_reference()
         """Per stage, what the baseline reached on each instance: the yardstick
         of `normalize: baseline`. Kept on disk, because a resumed run does not
@@ -258,6 +262,7 @@ class Cascade:
             required_kpis=(self.config.evaluate.score.objective,),
             observer=self._observer(candidate.id, stage, private=False),
             configuration=self._configurations.get(candidate.id),
+            cache=self.cache,
         )
         if self._is_final(stage) and self.budget is not None:
             self.budget.record_full_eval()
@@ -331,6 +336,7 @@ class Cascade:
                 cwd=self.config.base_dir,
                 private=private,
                 required_kpis=(self.config.evaluate.score.objective,),
+                cache=self.cache,
             )
             if admitted
             else {}
@@ -551,6 +557,7 @@ class Cascade:
                     required_kpis=(self.config.evaluate.score.objective,),
                     observer=self._observer(cid, stage, private=True),
                     configuration=self._configurations.get(cid),
+                    cache=self.cache,
                 )
             )
             result = results[cid]
