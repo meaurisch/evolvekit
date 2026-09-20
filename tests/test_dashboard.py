@@ -230,3 +230,13 @@ def test_the_archive_snapshot_is_refreshed_every_generation_not_only_at_the_end(
     Driver(config, run_dir=tmp_path / "run").run(generations=2)
     assert len(seen) >= 3, "one snapshot per generation (the seed's included)"
     assert seen[0] == 1 and seen[-1] > 1
+
+
+def test_css_custom_properties_reach_the_element():
+    """`Object.assign(node.style, {"--zero": ...})` drops a custom property
+    without a word -- the per-instance bars lost their zero line that way and
+    grew out of the page when every instance was a win -- so the element helper
+    has to route `--*` through `setProperty`."""
+    page = PAGE.read_text(encoding="utf-8")
+    assert 'style: { "--' in page, "no custom property is passed any more: this test can go"
+    assert "node.style.setProperty(" in page

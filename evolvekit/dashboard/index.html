@@ -402,7 +402,9 @@ function h(tag, attrs, ...kids) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (k === "__svg" || v === null || v === undefined || v === false) continue;
     if (k === "class") node.setAttribute("class", v);
-    else if (k === "style" && typeof v === "object") Object.assign(node.style, v);
+    else if (k === "style" && typeof v === "object") {   // assigning `--x` as a property is silently ignored: custom properties need setProperty
+      for (const [name, value] of Object.entries(v)) name.startsWith("--") ? node.style.setProperty(name, value) : (node.style[name] = value);
+    }
     else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
     else node.setAttribute(k, v === true ? "" : v);
   }
