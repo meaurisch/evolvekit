@@ -239,6 +239,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--generations", type=int, default=None)
     p_run.add_argument("--quiet", action="store_true")
     p_run.add_argument(
+        "--allow-changed-problem", action="store_true",
+        help="continue a run directory although the skeleton, the parameters, the objective or a "
+        "stage's command or inputs differ from what it was started with (refused otherwise: its "
+        "scores were measured under the old definition)",
+    )
+    p_run.add_argument(
         "--dashboard",
         action="store_true",
         help="serve the live dashboard for this run on localhost while it runs "
@@ -378,7 +384,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     log = (lambda _m: None) if args.quiet else print
-    driver = Driver(config, run_dir=args.run_dir, log=log)
+    driver = Driver(config, run_dir=args.run_dir, log=log, allow_changed_problem=args.allow_changed_problem)
     server = None
     if args.dashboard:
         from evolvekit.dashboard import DEFAULT_PORT, DashboardServer

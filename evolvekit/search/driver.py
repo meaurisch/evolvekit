@@ -17,6 +17,7 @@ no-ops, and its winner improved the public set while losing on the hold-out.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -41,7 +42,7 @@ from evolvekit.economics import GenerationPoint, series
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.types import EvalResult
-from evolvekit.events import EventLog, Heartbeat
+from evolvekit.events import EventLog, Heartbeat, read_events
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration
@@ -151,8 +152,10 @@ class Driver:
         run_dir: str | Path,
         providers: dict[str, Provider] | None = None,
         log: Callable[[str], None] | None = None,
+        allow_changed_problem: bool = False,
     ) -> None:
         self.config = config
+        self.allow_changed_problem = allow_changed_problem
         self.ledger = Ledger(run_dir)
         self.budget = BudgetGuard(config.budget)
         # `min_big_steps` holds a plateau open until the strong model has been
@@ -227,6 +230,77 @@ class Driver:
                 stage=fields.get("stage"),
             )
 
+    def _problem_identity(self) -> dict:
+        """What makes two runs runs of the *same problem*: what is evolved, what
+        it is scored on, and how. Not the search settings, the budget or the
+        number of workers -- those may change between sessions of one run."""
+        config = self.config
+        space = config.problem.parameters
+        return {
+            "skeleton_sha": hashlib.sha256(self.skeleton_source.encode("utf-8")).hexdigest()[:16],
+            "parameters": [
+                {"name": p.name, "type": p.type, "choices": list(p.choices)} for p in space
+            ] if space is not None else None,
+            "objective": config.evaluate.score.objective,
+            "direction": config.evaluate.score.direction,
+            "stages": [
+                {
+                    "id": stage.id, "command": stage.command, "seeds": stage.seeds,
+                    "inputs": list(stage.inputs), "private_inputs": list(stage.private_inputs),
+                    "instances": list(stage.instances), "private_instances": list(stage.private_instances),
+                    "normalize": stage.normalize if stage.fans_out else None,
+                }
+                for stage in config.evaluate.stages
+            ],
+        }
+
+    def _check_same_problem(self) -> None:
+        """Refuse to continue a run directory with a different problem.
+
+        `runs.jsonl` is append-only and the archive is rebuilt from it, so a
+        second problem pointed at the same directory breeds from the first
+        one's candidates and ranks scores that mean different things against
+        each other -- silently. The first session wrote down what the problem
+        was; every later one is compared with it.
+        """
+        if self.allow_changed_problem or not self.ledger.runs():
+            return
+        recorded = next(
+            (e.get("problem") for e in read_events(self.ledger.run_dir)
+             if e.get("type") == "run_started" and isinstance(e.get("problem"), dict)),
+            None,
+        )
+        if recorded is None:
+            return  # a run directory from before this was recorded
+        now = self._problem_identity()
+        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "stages")
+                   if recorded.get(key) != now[key]]
+        if not changed:
+            return
+        detail = []
+        if "stages" in changed:
+            before = {s.get("id"): s for s in recorded.get("stages") or []}
+            for stage in now["stages"]:
+                old = before.get(stage["id"])
+                if old is None:
+                    detail.append(f"stage {stage['id']!r} is new")
+                else:
+                    detail += [f"stage {stage['id']!r}: `{k}` changed" for k in stage if old.get(k) != stage[k]]
+            detail += [f"stage {sid!r} is gone" for sid in before if sid not in {s["id"] for s in now["stages"]}]
+        detail += [
+            {"skeleton_sha": "the skeleton (or the generated one) changed",
+             "parameters": "the declared parameters changed (names, types or choices)",
+             "objective": f"the objective is now {now['objective']!r}, was {recorded.get('objective')!r}",
+             "direction": f"the direction is now {now['direction']!r}"}[key]
+            for key in changed if key != "stages"
+        ]
+        raise ValueError(
+            f"{self.ledger.run_dir} holds a run of a different problem: " + "; ".join(detail)
+            + ". Its candidates were scored under the old definition, so continuing would rank "
+            "scores against each other that do not mean the same thing. Use a new --run-dir; or, "
+            "if the change really does not affect what a score means, pass --allow-changed-problem"
+        )
+
     def _describe_run(self, *, first_generation: int, planned: int) -> dict:
         """Everything a reader of the run directory needs in order to interpret
         it without the config file: what is optimised, through which stages,
@@ -236,6 +310,7 @@ class Driver:
         return {
             "version": __version__,
             "host": socket.gethostname(),
+            "problem": self._problem_identity(),
             "cpus": os.cpu_count(),
             "config_path": str(config.source) if config.source else None,
             "objective": config.evaluate.score.objective,
@@ -403,6 +478,9 @@ class Driver:
     def run(self, generations: int | None = None) -> RunSummary:
         """Take the run lock, then search. One writer per run directory."""
         with run_lock(self.ledger.run_dir) as lock:
+            # Before the first event of this session: a refusal must not leave a
+            # "crashed" session behind in a directory it declined to touch.
+            self._check_same_problem()
             self.heartbeat.start(phase="starting")
             try:
                 if lock.reclaimed_from:
