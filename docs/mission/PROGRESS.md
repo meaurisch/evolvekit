@@ -85,6 +85,9 @@ something you wanted to know, that is a dashboard requirement")
 * ~~what unit is an objective of 97.8?~~ `objective.unit` (#25)
 * ~~bool / choice / log-scale parameters were invisible~~ (#24)
 * does a short screening stage predict the full one? (proxy-vs-full agreement) -- open
+* **was the machine busy with something else during this evaluation?** -- open, and learnt the hard way (D20): my own pinned test runs cost generation 1's screening 15-30 % of its iterations, and nothing on the dashboard said so. Wanted: host CPU load per evaluation, flagged when it exceeds what the workers explain
+* the per-instance card gives a wrong reason while nothing is recorded yet ("the final stage neither runs per instance...") -- open
+* "Time remaining: -" for the whole first generation although the stage in progress knows what it has left -- open
 * no ETA at all until the first non-seed generation has finished -- open
 
 ## Machine notes
