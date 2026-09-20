@@ -27,7 +27,7 @@ from typing import Callable, Sequence
 from evolvekit import __version__
 from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
 from evolvekit.candidate import SEED_OPERATOR, Candidate, extract_block, splice_block
-from evolvekit.config import Config
+from evolvekit.config import TYPED_SPACE_OPERATORS, Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage
@@ -44,12 +44,16 @@ from evolvekit.search.novelty import NoveltyIndex, NoveltyVerdict, build_near_ba
 from evolvekit.search.operators import (
     OPERATOR_ROLES,
     OperatorResult,
+    param_cross,
     param_lhs,
     param_lhs_typed,
+    param_local,
+    param_tpe,
     run_operator,
 )
 from evolvekit.search.params import has_params
 from evolvekit.search.scratchpad import Scratchpad
+from evolvekit.search.tuning import Observation
 
 __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
 
@@ -682,6 +686,51 @@ class Driver:
             self.stop_policy.note_big_step()
         return plan
 
+    # -- tuning a declared space: who is worth starting from -------------
+
+    TUNING_ELITES = 4
+    """A local step starts from one of the best few, not always from the best:
+    on a noisy objective the single best is partly luck, and a search that only
+    ever looks around one lucky configuration has bet everything on it."""
+
+    def _tuning_elites(self) -> list[Candidate]:
+        ranked = sorted(
+            (c for c in self.archive if c.competes and c.params and c.fitness is not None),
+            key=lambda c: -c.fitness,
+        )
+        return ranked[: self.TUNING_ELITES]
+
+    def _tuning_parent(self, fallback: Candidate) -> Candidate:
+        elites = self._tuning_elites()
+        if not elites:
+            return fallback
+        weights = [0.5 ** rank for rank in range(len(elites))]  # 1, 1/2, 1/4, 1/8
+        return self.rng.choices(elites, weights=weights, k=1)[0]
+
+    def _mate_for(self, parent: Candidate) -> Candidate | None:
+        others = [c for c in self._tuning_elites() if c.id != parent.id and c.params != parent.params]
+        return self.rng.choice(others) if others else None
+
+    def _observations(self) -> list[Observation]:
+        """Every configuration that was evaluated, judged by the deepest stage
+        it finished. One that crashed or timed out is an observation too -- the
+        worst one: that is a region not to propose in again."""
+        scored = [
+            c for c in self.archive
+            if c.params and not c.rejected and not c.last_failure and c.stages_reached and c.score is not None
+        ]
+        floor = min((c.fitness if c.competes else c.score for c in scored), default=0.0)
+        observations = [
+            Observation(c.params, float(c.fitness if c.competes and c.fitness is not None else c.score))
+            for c in scored
+        ]
+        observations += [
+            Observation(c.params, float(floor) - 1.0)
+            for c in self.archive
+            if c.params and not c.rejected and c.last_failure
+        ]
+        return observations
+
     def _parent_pool(self, wanted: int) -> list[Candidate]:
         parents = self.grid.sample_parents(wanted, self.rng)
         if parents:
@@ -780,6 +829,8 @@ class Driver:
             # A big step is an escape from the *front* of the search, so it
             # starts from the best candidate rather than from a sampled cell.
             parent = (best or pool[0]) if operator == "big_step" else pool[slot % len(pool)]
+            if operator in TYPED_SPACE_OPERATORS:
+                parent = self._tuning_parent(parent)
             children.append(self._breed_one(generation, operator, parent))
         return children
 
@@ -933,6 +984,15 @@ class Driver:
             if space is not None:
                 return param_lhs_typed(space, parent, seed=seed)
             return param_lhs(parent, seed=seed)
+        if operator in TYPED_SPACE_OPERATORS:
+            seed = self.rng.randrange(1 << 30)
+            space = self.config.problem.parameters
+            assert space is not None  # `config._check_typed_operators`
+            if operator == "param_local":
+                return param_local(space, parent, seed=seed)
+            if operator == "param_cross":
+                return param_cross(space, parent, self._mate_for(parent), seed=seed)
+            return param_tpe(space, parent, self._observations(), seed=seed)
         return run_operator(
             operator,
             config=self.config,

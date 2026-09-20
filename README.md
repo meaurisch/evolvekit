@@ -273,6 +273,9 @@ candidates being lost.
 | `crossover` | small | the parent **and** one inspiration's block, both with score breakdowns |
 | `big_step` | strong | scheduled every `big_step_every` generations, or on plateau |
 | `param_lhs` | none | a Latin-hypercube variant of the block's own constants |
+| `param_local` | none | a good configuration; moves one to three of its parameters a little |
+| `param_cross` | none | two good configurations; each parameter from one of them |
+| `param_tpe` | none | every configuration evaluated so far, the failed ones included |
 
 Shares come from `search.operators`. Inspirations are drawn from cells other
 than the parent's and are shown as one-line delta summaries — a unified-diff
@@ -291,7 +294,37 @@ WIDTH = 128.0
 Blocks without that line are never routed to it, so listing it in
 `search.operators` against a skeleton that declares nothing is harmless.
 
-**A run without any model.** When `param_lhs` is the only operator with a share,
+`param_local`, `param_cross` and `param_tpe` work on a declared
+[`problem.parameters`](#tuning-a-command-problemparameters) space and are what
+makes a model-free run a *search* rather than a sweep. `param_lhs` fills the box
+evenly and never looks at a score — the right first move and the wrong tenth
+one. `param_local` starts from one of the best four configurations (the best
+most often, not always: on a noisy objective the single best is partly luck)
+and moves one parameter twice as often as two, two twice as often as three; an
+integer moves by at least one, a boolean flips. `param_cross` tries gains
+together that were found separately. `param_tpe` is a Tree-structured Parzen
+Estimator: it models, parameter by parameter, where good configurations are
+dense relative to bad ones and proposes where that ratio is highest — a
+candidate that crashed counts as the worst observation, so a region that kills
+the solver is not proposed again, and one that was only screened by a cheap
+stage still says where not to look. Until there are eight observations it takes
+a local step instead, and the record says so.
+
+Which to use depends on how good the defaults already are. Measured at equal
+budget, five search seeds each, on two stand-in solvers
+(`python benchmarks/operator_mixes.py` reproduces it): with defaults far from
+the optimum and 36 evaluations, `param_lhs` alone does as well as any mix (mean
+best 1031.6 vs 1034.3; defaults 1225, optimum 1000) and `param_local` alone is
+clearly worse (1106.4). With a *mature* solver — 25 parameters, defaults close
+to good, most random settings harmful, noisy, 78 evaluations — `param_lhs`
+alone returned the defaults in three runs of five (mean true cost of the
+reported best 102.20, defaults 102.57), while `param_local` alone reached
+100.05 and `{param_lhs: 0.15, param_local: 0.45, param_tpe: 0.3, param_cross:
+0.1}` reached 100.30, of a possible 98.20. For a solver somebody has already
+tuned, lead with `param_local`; keep some `param_lhs` when you do not know which
+of the two cases you are in.
+
+**A run without any model.** When only model-free operators (`param_*`) have a share,
 nothing in the run calls a model, and nothing may: no big steps are planned
 (scheduled or on a plateau), the scratchpad is not refreshed, `stop.patience`
 does not wait for `stop.min_big_steps`, and the `models` section can be left out
