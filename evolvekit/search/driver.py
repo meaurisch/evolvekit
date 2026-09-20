@@ -491,6 +491,16 @@ class Driver:
             if decision.stop:
                 summary.stop_reason = decision.reason or "stop policy"
                 break
+            capped = self.budget.check_full_eval()
+            if not capped.allowed:
+                # Breeding on would pay for children -- model calls, cheap
+                # stages -- none of which can reach the stage that counts.
+                summary.stop_reason = (
+                    f"{capped.reason}: no candidate can reach the final stage today. Run the same "
+                    "command again tomorrow, or raise the cap -- it counts candidates admitted to "
+                    "the final stage per calendar day"
+                )
+                break
 
             self._maybe_refresh_scratchpad(generation)
 
