@@ -505,7 +505,7 @@ function renderHealth(doc) {
       planned ? meter(done / planned) : null),
     h("div", { class: "tile" }, h("div", { class: "k" }, "Evaluations done"),
       h("div", { class: "v" }, num(ev.done ?? 0)),
-      h("div", { class: "s" }, (ev.in_flight || 0) + " in flight")),
+      h("div", { class: "s" }, (ev.in_flight || 0) + " in flight" + (ev.cached ? " · " + ev.cached + " from the cache" : ""))),
     h("div", { class: "tile" }, h("div", { class: "k" }, "Failed evaluations"),
       h("div", { class: "v" }, num(ev.failed ?? 0), total ? h("small", null, "  " + (100 * failRate).toFixed(0) + " %") : null),
       h("div", { class: "s" }, ev.abandoned ? h("span", { class: "bad" }, "✕ " + ev.abandoned + " abandoned by a dead session") :

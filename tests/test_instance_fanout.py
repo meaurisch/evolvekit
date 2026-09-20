@@ -343,7 +343,9 @@ def test_workers_run_side_by_side_but_never_more_than_asked_for(tmp_path):
     config = build_config(_raw(_instances(tmp_path, **specs), workers=3), base_dir=tmp_path)
     cascade = Cascade(config, work_dir=tmp_path / "work")
     started = time.perf_counter()
-    results = cascade.evaluate_generation([_candidate(config, "g000-c0001", seed=True), _candidate(config, "g001-c0002")])
+    results = cascade.evaluate_generation(
+        [_candidate(config, "g000-c0001", seed=True), _candidate(config, "g001-c0002", small=0.1)]
+    )
     elapsed = time.perf_counter() - started
     assert all(r.competes for r in results.values())
 
@@ -394,7 +396,8 @@ def test_the_daily_cap_is_applied_on_admission(tmp_path):
     config = build_config(raw, base_dir=tmp_path)
     cascade = Cascade(config, work_dir=tmp_path / "work", budget=BudgetGuard(config.budget))
     results = cascade.evaluate_generation(
-        [_candidate(config, "g000-c0001", seed=True), _candidate(config, "g001-c0002"), _candidate(config, "g001-c0003")]
+        [_candidate(config, "g000-c0001", seed=True), _candidate(config, "g001-c0002", small=0.1),
+         _candidate(config, "g001-c0003", small=0.2)]
     )
     assert [r.competes for r in results.values()] == [True, True, False]
     assert "daily full-evaluation cap reached" in results["g001-c0003"].last_failure

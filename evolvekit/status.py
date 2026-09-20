@@ -510,6 +510,7 @@ class _Run:
             },
             "evaluations": {
                 "done": sum(1 for e in finished if e.get("ok")),
+                "cached": sum(1 for e in finished if e.get("ok") and e.get("cached")),
                 "failed": sum(1 for e in finished if not e.get("ok")),
                 "in_flight": len(in_flight),
                 "abandoned": self._abandoned(sessions, live),
@@ -587,6 +588,7 @@ class _Run:
         durations = [
             float(e["duration_s"]) for e in self.events
             if e.get("type") == "eval_finished" and e.get("ok") and e.get("stage") == stage
+            and not e.get("cached")  # a lookup took no time and says nothing about a run
             and _number(e.get("duration_s")) is not None
         ]
         return median(durations) if durations else None
@@ -1568,7 +1570,9 @@ def render_text(document: Mapping[str, Any]) -> str:
         + f"   sessions: {health.get('sessions', 0)}"
     )
     lines.append(
-        f"evaluations  : {evaluations.get('done', 0)} done, {evaluations.get('in_flight', 0)} in flight, "
+        f"evaluations  : {evaluations.get('done', 0)} done"
+        + (f" ({evaluations['cached']} looked up in the cache)" if evaluations.get("cached") else "")
+        + f", {evaluations.get('in_flight', 0)} in flight, "
         f"{evaluations.get('failed', 0)} failed"
         + (f", {evaluations['abandoned']} abandoned by a session that died" if evaluations.get("abandoned") else "")
     )

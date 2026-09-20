@@ -17,6 +17,7 @@ no-ops, and its winner improved the public set while losing on the hold-out.
 
 from __future__ import annotations
 
+import json
 import random
 import socket
 import time
@@ -26,7 +27,13 @@ from typing import Callable, Sequence
 
 from evolvekit import __version__
 from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
-from evolvekit.candidate import SEED_OPERATOR, Candidate, extract_block, splice_block
+from evolvekit.candidate import (
+    SEED_OPERATOR,
+    BlockError,
+    Candidate,
+    extract_block,
+    splice_block,
+)
 from evolvekit.config import TYPED_SPACE_OPERATORS, Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
@@ -483,13 +490,17 @@ class Driver:
             began = self._generation_started(
                 generation, children=self.children_per_generation
             )
-            children = self._breed(generation, plateau=decision.plateau)
+            children = self._adopt_pending(generation)
+            if children is None:
+                children = self._breed(generation, plateau=decision.plateau)
+                self._write_pending(generation, children)
             summary.candidates += len(children)
             viable = [c for c in children if not c.rejected]
             self._evaluate_and_record(viable, generation=generation)
             for child in children:
                 if child.rejected and child.id not in self.results:
                     self._record(child)
+            self._pending_path.unlink(missing_ok=True)
             summary.generations = offset
             self._generation_finished(generation, began, children)
 
@@ -525,6 +536,57 @@ class Driver:
                 break
 
         return self._finalise(summary)
+
+    # -- a generation that was interrupted -------------------------------
+
+    @property
+    def _pending_path(self) -> Path:
+        return self.ledger.run_dir / "pending.json"
+
+    def _write_pending(self, generation: int, children: Sequence[Candidate]) -> None:
+        """Write a generation's children down before they cost anything to evaluate.
+
+        A generation is only recorded once its whole cascade has returned --
+        hours, for a slow solver. If the run dies in between, the children (and
+        the model calls that bred them) would be gone, and the resumed run would
+        breed different ones whose evaluations start from nothing. Written
+        down, they are evaluated again under the same ids, and every run that
+        had finished is found in the evaluation cache.
+        """
+        payload = {"generation": generation, "children": [c.to_record() for c in children]}
+        scratch = self._pending_path.with_suffix(".tmp")
+        scratch.write_text(json.dumps(payload), encoding="utf-8")
+        scratch.replace(self._pending_path)
+
+    def _adopt_pending(self, generation: int) -> list[Candidate] | None:
+        try:
+            payload = json.loads(self._pending_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if payload.get("generation") != generation:
+            self._pending_path.unlink(missing_ok=True)  # left by a generation that was recorded after all
+            return None
+        children: list[Candidate] = []
+        for record in payload.get("children") or []:
+            try:
+                child = Candidate.from_record(record)
+            except (BlockError, TypeError):
+                continue
+            if child.id in self.by_id:
+                continue  # recorded before the run died
+            child.source = self._make_source(child.block)
+            suffix = child.id.rsplit("c", 1)[-1]
+            if suffix.isdigit():
+                self._counter = max(self._counter, int(suffix))
+            children.append(child)
+        if not children:
+            return None
+        self.events.emit("generation_adopted", generation=generation, children=len(children))
+        self.log(
+            f"gen {generation:<2} picking up {len(children)} child(ren) bred before the run "
+            "was interrupted; their finished evaluations are looked up, not run again"
+        )
+        return children
 
     def _finalise(self, summary: RunSummary) -> RunSummary:
         summary.best = self.best

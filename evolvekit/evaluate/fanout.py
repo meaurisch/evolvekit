@@ -39,6 +39,7 @@ from statistics import fmean
 from typing import Sequence
 
 from evolvekit.config import StageConfig
+from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
     Configuration,
@@ -75,6 +76,7 @@ def run_instance_stage(
     cwd: Path,
     private: bool = False,
     required_kpis: tuple[str, ...] = (),
+    cache: EvalCache | None = None,
 ) -> dict[str, StageOutcome]:
     """Run `stage` for every job, instance and seed; one outcome per candidate."""
     instances = stage.private_instances if private else stage.instances
@@ -111,6 +113,7 @@ def run_instance_stage(
                         cpus=(cpu,) if cpu is not None else (),
                         cancel=cancel,
                     ),
+                    cache=cache,
                 )
                 board.ran(job.candidate_id, outcome)
                 if outcome.ok or cancel.is_set() or board.failed(job.candidate_id):
