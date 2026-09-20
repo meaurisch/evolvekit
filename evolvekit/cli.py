@@ -21,6 +21,7 @@ from evolvekit.leaderboard import (
 from evolvekit.ledger import Ledger
 from evolvekit.lock import RunLockError
 from evolvekit.preflight import run_preflight
+from evolvekit.scaffold import TUNE_FILES, TUNE_NEXT
 from evolvekit.search.driver import Driver
 from evolvekit.status import build_status, render_text
 
@@ -201,6 +202,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="scaffold evolvekit.yaml and .env.example")
     p_init.add_argument("directory", nargs="?", default=".", help="target directory")
     p_init.add_argument("--force", action="store_true", help="overwrite existing files")
+    p_init.add_argument(
+        "--template", choices=("program", "tune"), default="program",
+        help="program (default): a config for evolving a block of code, to be pointed at your "
+        "skeleton and evaluator. tune: a complete, runnable setup for tuning the parameters of "
+        "a command-line program -- a stand-in solver, three instances, no model needed",
+    )
 
     p_pre = sub.add_parser(
         "preflight",
@@ -329,20 +336,27 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_init(args: argparse.Namespace) -> int:
     target = Path(args.directory).resolve()
     target.mkdir(parents=True, exist_ok=True)
+    tune = args.template == "tune"
+    files = (
+        tuple(TUNE_FILES.items())
+        if tune
+        else ((DEFAULT_CONFIG, _STARTER_CONFIG), (".env.example", _ENV_EXAMPLE))
+    )
     written = []
-    for name, content in (
-        (DEFAULT_CONFIG, _STARTER_CONFIG),
-        (".env.example", _ENV_EXAMPLE),
-    ):
+    for name, content in files:
         path = target / name
         if path.exists() and not args.force:
             print(f"exists, not overwritten: {path}  (use --force)")
             continue
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
         written.append(path)
     for path in written:
         print(f"wrote {path}")
-    if written:
+    if written and tune:
+        shown = Path(args.directory) / DEFAULT_CONFIG
+        print(TUNE_NEXT.format(config=shown.as_posix(), run_dir=(Path(args.directory) / "runs" / "first").as_posix()))
+    elif written:
         print("\nNext: point problem.skeleton at your skeleton file, then")
         print("  python -m evolvekit run --config evolvekit.yaml")
     return 0
