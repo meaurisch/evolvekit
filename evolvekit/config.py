@@ -1171,9 +1171,13 @@ class NoveltyConfig:
         )
 
 
-KNOWN_OPERATORS = ("diff", "rewrite", "crossover", "param_lhs")
+KNOWN_OPERATORS = (
+    "diff", "rewrite", "crossover", "param_lhs", "param_local", "param_cross", "param_tpe",
+)
+TYPED_SPACE_OPERATORS = frozenset({"param_local", "param_cross", "param_tpe"})
+"""Operators that are arithmetic on a declared `problem.parameters` space."""
 
-MODEL_FREE_OPERATORS = frozenset({"param_lhs"})
+MODEL_FREE_OPERATORS = frozenset({"param_lhs"}) | TYPED_SPACE_OPERATORS
 """Operators that never call a model. A search made only of these needs no
 provider, no key and no `models` section -- and must never reach for one."""
 
@@ -1420,6 +1424,7 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
     )
     _check_embedding_route(config)
     _check_parameter_placeholders(config)
+    _check_typed_operators(config)
     return _expand_instance_patterns(config)
 
 
@@ -1467,6 +1472,18 @@ def _expand_instance_patterns(config: Config) -> Config:
 
 
 PARAMETER_PLACEHOLDERS = ("{params}", "{params_json}")
+
+
+def _check_typed_operators(config: Config) -> None:
+    if config.problem.parameters is not None:
+        return
+    for name in sorted(TYPED_SPACE_OPERATORS):
+        if config.search.operators.get(name, 0) > 0:
+            raise ConfigError(
+                f"search.operators.{name}: works on a declared parameter space, and this "
+                "config declares none. Add `problem.parameters` (name, type, range, default "
+                "of what may be tuned), or use `param_lhs` with a `# PARAMS:` line"
+            )
 
 
 def _check_parameter_placeholders(config: Config) -> None:

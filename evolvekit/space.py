@@ -317,31 +317,47 @@ class ParameterSpace:
         return [{name: column[i] for name, column in columns.items()} for i in range(count)]
 
     def perturb(
-        self, values: Mapping[str, Any], rng: random.Random, *, scale: float = 0.15
+        self,
+        values: Mapping[str, Any],
+        rng: random.Random,
+        *,
+        scale: float = 0.15,
+        moves: int = 3,
     ) -> dict[str, Any]:
-        """A neighbour of `values`: a few parameters moved a little.
+        """A neighbour of `values`: one to `moves` parameters moved a little.
 
-        Each parameter moves with probability `max(1/d, 0.25)`; a number takes a
-        Gaussian step of `scale` of its range on its own scale, a boolean flips,
-        a choice is redrawn. At least one parameter always changes, because a
-        child identical to its parent is a wasted evaluation.
+        How many is drawn first -- one twice as often as two, two twice as often
+        as three -- and never more than a quarter of the space (one, in a space
+        of seven or fewer). A step that moves eight of thirty parameters at once
+        is a jump, and says nothing about any one of them; a step that moves one
+        says exactly what that one is worth. A number takes a Gaussian step of
+        `scale` of its range on its own scale (an integer by at least one), a
+        boolean flips, a choice is redrawn. At least one parameter always
+        changes, because a child identical to its parent is a wasted evaluation.
         """
-        chance = max(1.0 / len(self.parameters), 0.25)
+        limit = max(1, min(int(moves), len(self.parameters) // 4))
         child = dict(values)
-        for _ in range(20):
-            for parameter in self.parameters:
-                if rng.random() >= chance:
-                    continue
-                current = child[parameter.name]
-                if parameter.numeric:
-                    unit = parameter.to_unit(current) + rng.gauss(0.0, scale)
-                    child[parameter.name] = parameter.from_unit(unit)
-                else:
-                    others = [c for c in parameter.categories if c != current]
-                    child[parameter.name] = rng.choice(others)
+        for _ in range(50):
+            count = rng.choices(range(1, limit + 1), weights=[0.5 ** i for i in range(limit)])[0]
+            for parameter in rng.sample(list(self.parameters), count):
+                child[parameter.name] = self._moved(parameter, child[parameter.name], rng, scale)
             if child != dict(values):
                 return child
         return child
+
+    @staticmethod
+    def _moved(parameter: Parameter, current: Any, rng: random.Random, scale: float) -> Any:
+        if not parameter.numeric:
+            return rng.choice([c for c in parameter.categories if c != current])
+        step = rng.gauss(0.0, scale)
+        moved = parameter.from_unit(parameter.to_unit(current) + step)
+        if moved == current and parameter.type == "int":
+            # The step rounded away. One whole unit in its direction, or the
+            # other way at the edge of the range.
+            for delta in ((1, -1) if step >= 0 else (-1, 1)):
+                if parameter.low <= current + delta <= parameter.high:  # type: ignore[operator]
+                    return current + delta
+        return moved
 
     def crossover(
         self, first: Mapping[str, Any], second: Mapping[str, Any], rng: random.Random
