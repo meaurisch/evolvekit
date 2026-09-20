@@ -797,7 +797,7 @@ function renderParameters(doc) {
     const imp = item.importance || {}, v = imp.value;
     return h("button", { class: "imp-row", type: "button", "aria-pressed": String(item.name === current.name),
         title: (imp.method || "rank correlation with the score") + " (n = " + imp.n + ")",
-        onclick: () => { ui.param = item.name; ui.signatures.parameters = null; render(); } },
+        onclick: () => { ui.param = item.name; ui.signatures.parameters = null; setHash("parameter=" + encodeURIComponent(item.name)); render(); } },
       h("span", { class: "nm" }, item.name), h("span", { class: "bar" }, h("i", { style: { width: (isNum(v) ? v : 0) * 100 + "%" } })),
       h("span", { class: "r" }, isNum(v) ? leaning(item) + v.toFixed(2) : "–"), h("span", { class: "n" }, "n=" + imp.n));
   }));
@@ -913,9 +913,10 @@ function openDrawer(title, chips, body) {
 function closeDrawer() { $("drawer").classList.remove("on"); $("scrim").classList.remove("on"); setTimeout(() => { $("drawer").hidden = true; }, 200); if (ui.drawer?.focus) ui.drawer.focus(); setHash(""); }
 function setHash(value) { try { history.replaceState(null, "", value ? "#" + value : location.pathname + location.search); } catch { /* file:// in some browsers */ } }
 function openFromHash() {
-  const m = /^#(candidate|failure)=(.+)$/.exec(decodeURIComponent(location.hash || ""));
+  const m = /^#(candidate|failure|parameter)=(.+)$/.exec(decodeURIComponent(location.hash || ""));
   if (!m || !ui.doc) return false;
-  if (m[1] === "candidate") openCandidate(m[2]); else if (ui.doc.failures?.[+m[2]]) openFailure(+m[2]);
+  if (m[1] === "parameter") { ui.param = m[2]; ui.signatures.parameters = null; render(); $("parameters")?.scrollIntoView(); }
+  else if (m[1] === "candidate") openCandidate(m[2]); else if (ui.doc.failures?.[+m[2]]) openFailure(+m[2]);
   return true;
 }
 function copyButton(text, label = "Copy") { const b = h("button", { class: "ghost", type: "button" }, label); b.onclick = async () => { try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch { b.textContent = "Select and copy"; } }; return b; }

@@ -146,8 +146,9 @@ the [status document](#watching-a-run-status-and-status---json), fetched from
 | **Where does it win and lose?** | a bar per instance, better or worse than the baseline, with wins / losses / ties |
 | **What went wrong?** | failures counted by reason, then one row each; one click opens the stage, seed, exit status, the **command line to reproduce it** (with a copy button), stderr and stdout tails, links to the full logs, and the configuration that was being evaluated |
 
-Every candidate and every failure has an address (`#candidate=g003-c0012`,
-`#failure=0`) that can be pasted into a ticket. `?theme=dark` forces a theme.
+Every candidate, every failure and every parameter's view has an address
+(`#candidate=g003-c0012`, `#failure=0`, `#parameter=penalty`) that can be pasted
+into a ticket. `?theme=dark` forces a theme.
 
 It is built to stay out of the way. The server is `http.server` from the
 standard library, bound to `127.0.0.1`, read-only, and can read nothing outside
@@ -368,6 +369,10 @@ What happens to a declaration:
   counts is the dict it returns — validated like any other.
 
 `parameters` and `skeleton` are alternatives: a config names one of them.
+
+| A three-way choice: a slot per value, its mean dashed | A log-scale range, decade by decade |
+|---|---|
+| ![A choice parameter on the dashboard](docs/img/dashboard/parameters-choice-light.png) | ![A log-scale parameter on the dashboard, dark](docs/img/dashboard/parameters-log-dark.png) |
 
 ### The problem description, in named sections
 
