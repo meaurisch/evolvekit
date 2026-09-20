@@ -132,9 +132,8 @@ improvement is real — including, if that is how it comes out, that it is not.
 before any fix was started. As of this draft: **40 fixed, 7 partly, 16 open**,
 each with the PR that did it. All six items rated *blocker* (R-01, R-02, R-03,
 Q-01, Q-02, Q-06) are among the fixed. The open ones are mostly documentation
-and small CLI items, plus
-R-10 (`generations` means "N more" on resume), R-12 (nothing stops a run in
-which every child fails) and R-07 (ids re-used after a partial record).
+and small CLI items, plus R-12 (nothing stops a run in which every child
+fails) and R-07 (ids re-used after a partial record).
 
 ## 6. What went wrong along the way (mine)
 
@@ -166,6 +165,6 @@ with no adapter (D18); nothing else on the machine during the run (D20).
 2. The observability stack #19 → #20 → #21, then #24 → #25 → #26 (the generic-user path), then #27, #28, #31, #33, #34, #36.
 3. Use racing (#41) in the next tuning run — it was written while this one was already going — and replace its fixed margin by a sequential test once there is data on how noisy paired differences are.
 4. Re-evaluate the incumbent on a second seed when it changes (intensification), so the search itself is less exposed to a lucky seed — today only `confirm` protects against that.
-5. R-10, R-12, R-07 and the documentation items in the friction log.
+5. R-12, R-07 and the documentation items in the friction log.
 6. One page that states the whole evaluator contract (G-10).
 7. With an LLM backend available: compare the model-free search with the LLM operators on the same benchmark; `configure()` is ordinary code, so conditional configurations ("fewer neighbours on large instances") are within reach of a model and out of reach of a parameter sweep.
