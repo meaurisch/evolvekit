@@ -371,6 +371,24 @@ What happens to a declaration:
 
 `parameters` and `skeleton` are alternatives: a config names one of them.
 
+**A solver that reports in its own way.** The result does not have to be
+written for evolvekit either. Three ways to read it, per stage:
+
+| The program … | Stage keys | What is read |
+|---|---|---|
+| writes a JSON file | `{out}` in the command (the default, `kpis_from: file`) | that file |
+| prints a JSON object | `kpis_from: stdout` — no `{out}` needed | the **last** line of stdout that is a JSON object; progress lines and other output before it are ignored |
+| prints text | `kpi_patterns: {cost: 'best cost: ([-+0-9.eE]+)'}` | per KPI, a regular expression with one capturing group; the **last** match counts, because a solver logs its progress before its result. Can be combined with either JSON source |
+
+The JSON object may be the solver's own. With an explicit `"kpis"` key every
+value has to be a number or a list of numbers, as before. Without one, the
+object is taken for what it is — a result with metadata in it: numbers are
+KPIs, booleans are KPIs (`"feasible": true` → `1.0`), lists of numbers are
+per-instance KPIs, and names, nested objects and lists with holes in them are
+left alone. `NaN`, a result with no number in it, a pattern that matched
+nothing, or a missing objective fail the run, with the tail of what the program
+did print in the failure report.
+
 | A three-way choice: a slot per value, its mean dashed | A log-scale range, decade by decade |
 |---|---|
 | ![A choice parameter on the dashboard](docs/img/dashboard/parameters-choice-light.png) | ![A log-scale parameter on the dashboard, dark](docs/img/dashboard/parameters-log-dark.png) |
@@ -1070,7 +1088,7 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    | Placeholder | What it is | Required |
    |---|---|---|
    | `{candidate}` | path to the spliced candidate module | yes |
-   | `{out}` | path the KPI JSON must be written to | yes |
+   | `{out}` | path the KPI JSON must be written to | yes — unless the stage reads the program's output instead (`kpis_from: stdout`, `kpi_patterns`) |
    | `{inputs}` | the stage's `inputs` (or `private_inputs`), comma-joined | no |
    | `{seed}` | `0`, or `0 … N-1` on a stage with `seeds: N` | only when `seeds > 1` |
    | `{instance}` | one entry of the stage's `instances`: the command is run once for each ([one run per instance](#one-run-per-instance-instances-workers-retries)) | when `instances` is set |

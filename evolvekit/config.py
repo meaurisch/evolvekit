@@ -9,6 +9,7 @@ exists to avoid.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -358,6 +359,7 @@ class PromoteRule:
 
 STAGE_KINDS = ("builtin-static", "command")
 NORMALIZE_MODES = ("baseline", "none")
+KPI_SOURCES = ("file", "stdout")
 
 
 @dataclass(frozen=True)
@@ -408,6 +410,16 @@ class StageConfig:
     retries: int = 0
     """Run a failed instance run again, this many times, before the stage
     fails. For the solver that crashes once in a hundred runs."""
+    kpis_from: str = "file"
+    """Where the command reports. `file`: the JSON object it writes to `{out}`.
+    `stdout`: the last line of its standard output that is a JSON object --
+    what a solver that was not written for evolvekit usually already does.
+    Either way the object may be the solver's own: its numbers and booleans
+    are the KPIs, its strings and nested objects are left alone."""
+    kpi_patterns: tuple[tuple[str, str], ...] = ()
+    """`(kpi, regular expression)`: numbers picked out of what the command
+    prints, for a program that reports in text. One capturing group; the last
+    match counts, because a solver logs its progress before its result."""
     normalize: str = "baseline"
     """How per-instance values of the objective combine (`instances` only).
     `baseline`: each instance counts as a percentage of what the seed candidate
@@ -450,6 +462,8 @@ class StageConfig:
             "pin_cpus",
             "retries",
             "normalize",
+            "kpis_from",
+            "kpi_patterns",
         }
         _reject_unknown(data, known, path)
         stage_id = _as_str(_require(data, "id", path), f"{path}.id")
@@ -459,14 +473,23 @@ class StageConfig:
                 f"{path}.kind: must be one of {list(STAGE_KINDS)}, got {kind!r}"
             )
         command = str(data.get("command", ""))
+        kpis_from = _as_str(data.get("kpis_from", "file"), f"{path}.kpis_from")
+        if kpis_from not in KPI_SOURCES:
+            raise ConfigError(
+                f"{path}.kpis_from: must be one of {list(KPI_SOURCES)}, got {kpis_from!r}"
+            )
+        kpi_patterns = _parse_kpi_patterns(data.get("kpi_patterns"), f"{path}.kpi_patterns")
         if kind == "command":
             if not command.strip():
                 raise ConfigError(f"{path}.command: required when kind is 'command'")
             # `{candidate}` is required too, unless `problem.parameters` hands the
             # configuration over as `{params}`: see `_check_parameter_placeholders`.
-            if "{out}" not in command:
+            if "{out}" not in command and kpis_from == "file" and not kpi_patterns:
                 raise ConfigError(
-                    f"{path}.command: must contain the {{out}} placeholder"
+                    f"{path}.command: must contain the {{out}} placeholder -- the path the "
+                    "command writes its result JSON to. A program that prints its result "
+                    "instead needs `kpis_from: stdout` (the last JSON object it prints) or "
+                    "`kpi_patterns` (numbers picked out of its text)"
                 )
         max_per_day = data.get("max_per_day")
         seeds = _as_int(data.get("seeds", 1), f"{path}.seeds", minimum=1)
@@ -556,6 +579,8 @@ class StageConfig:
             pin_cpus=pin_cpus,
             retries=retries,
             normalize=normalize,
+            kpis_from=kpis_from,
+            kpi_patterns=kpi_patterns,
             inputs=tuple(
                 _as_str(v, f"{path}.inputs[{i}]")
                 for i, v in enumerate(_as_list(data.get("inputs"), f"{path}.inputs"))
@@ -576,6 +601,28 @@ class StageConfig:
             ),
             seeds=seeds,
         )
+
+
+def _parse_kpi_patterns(raw: Any, path: str) -> tuple[tuple[str, str], ...]:
+    if raw is None:
+        return ()
+    data = _as_mapping(raw, path)
+    if not data:
+        raise ConfigError(f"{path}: expected a non-empty mapping of KPI name to regular expression")
+    patterns = []
+    for name, pattern in data.items():
+        text = _as_str(pattern, f"{path}.{name}")
+        try:
+            groups = re.compile(text).groups
+        except re.error as exc:
+            raise ConfigError(f"{path}.{name}: not a valid regular expression: {exc}") from None
+        if groups != 1:
+            raise ConfigError(
+                f"{path}.{name}: needs exactly one capturing group -- the number -- and has "
+                f"{groups}: {text!r}"
+            )
+        patterns.append((str(name), text))
+    return tuple(patterns)
 
 
 @dataclass(frozen=True)
