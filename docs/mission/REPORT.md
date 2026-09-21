@@ -207,7 +207,9 @@ be. Nine instances, not ten: see "t02".
 **t02.** On `t02-n1200-clustered-banded`, `pyvrp.solve` with a 600 s limit did
 not return within the 900 s stage timeout for some seeds — *for the defaults as
 well as for tuned configurations* (defaults: seeds 1001, 1002; `g012-c0096`:
-seeds 101, 102, 1001; seed 0 was fine for both). It is therefore not something
+seeds 101, 102, 1001; seed 0 was fine for both). During the search the same
+happened to seven candidates: five times on t02, twice on t03, once on t08,
+each time again on the retry. It is therefore not something
 tuning introduced, but it has two consequences. First, `confirm` drops a pair
 when either side fails (friction Q-12), so t02 is missing from the validation
 interval and enters the test with one pair of three; the intervals above are
