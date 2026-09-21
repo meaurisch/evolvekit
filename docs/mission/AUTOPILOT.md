@@ -64,3 +64,23 @@ Never start a second one next to a living one.
 4. `FRICTION_LOG.md` counts, `PROGRESS.md`, decision log, memory.
 5. The brief's checklist: every PR open and green, none merged, nothing pushed
    to `master`, no private reference anywhere.
+
+## Notes for the report, collected while it runs
+
+* **2026-09-21 08:40, validation of run 1:** both tuned configurations
+  (`g012-c0096`, `g006-c0046`) hit the 900 s stage timeout on
+  `t02-n1200-clustered-banded`, seed 101 -- twice each (the retry too), with
+  empty stdout, i.e. `pyvrp.solve` never came back from a 600 s limit. The
+  defaults finished that instance and seed. The search saw the same thing on
+  seed 0 for other candidates (16 timeouts on t02, t03, t08). `confirm` drops
+  such pairs (friction Q-12), so section 4 must (a) give the failure counts per
+  configuration next to every interval, (b) also give the result with a failed
+  candidate run counted as a loss (e.g. at the worst observed relative
+  difference, or as a sign-test loss), and (c) say plainly that a configuration
+  that does not answer on 1 of 20 runs is not one to ship. Once the machine is
+  free: reproduce (`solve.py --instance instances/t02-... --seed 101
+  --time-limit 600` with the finalist's flags), find which parameter does it
+  (the deadline is checked once per iteration, so one iteration runs > 5 min:
+  suspects are `exhaustive_on_best`, `min_perturbations: 0`, the penalty
+  bounds), and decide whether it is a solver defect to report upstream or a
+  range that the benchmark should not offer.
