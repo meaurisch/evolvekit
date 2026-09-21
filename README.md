@@ -998,6 +998,13 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   *better than the baseline*, *not distinguishable from it*, or *WORSE*.
 - **Exit code 0 only when every candidate's interval lies above zero**, so a
   script can gate on it.
+- **Two searches, one comparison.** `ID@OTHER_RUN_DIR` names a candidate of
+  another run of the same problem, and `--against` names what the candidates
+  are compared with instead of the seed — a different operator mix, a model
+  among the operators, last month's winner:
+  `confirm --run-dir runs/b --candidates g011-c0085 --against g012-c0096@runs/a --seeds 2001,2002,2003`.
+  The other run's candidate has to be valid under *this* config's
+  `problem.parameters`; it is checked before anything runs.
 - A failed run costs its pair, not the comparison. Finished runs are cached, so
   an interrupted confirmation — or one extended by more seeds — pays only for
   what is new.

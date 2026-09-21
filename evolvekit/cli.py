@@ -311,7 +311,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_confirm.add_argument(
         "--candidates", default="best",
-        help="`best` (default), `top:N`, or comma-separated candidate ids",
+        help="`best` (default), `top:N`, or comma-separated candidate ids; "
+        "`ID@OTHER_RUN_DIR` takes a candidate of another run of the same problem",
+    )
+    p_confirm.add_argument(
+        "--against", metavar="ID", default=None,
+        help="compare with this candidate instead of the run's seed (`ID` or `ID@OTHER_RUN_DIR`) "
+        "-- e.g. the winner of one search against the winner of another",
     )
     p_confirm.add_argument(
         "--instances", action="append", metavar="ENTRY",
@@ -569,7 +575,7 @@ def cmd_confirm(args: argparse.Namespace) -> int:
         raise ValueError(f"there is no run directory at {args.run_dir}")
     comparison = confirm(
         load_config(args.config), args.run_dir, seeds=seeds, candidates=args.candidates,
-        instances=args.instances, label=args.label,
+        instances=args.instances, label=args.label, against=args.against,
     )
     print(render_markdown(comparison))
     print(f"written to {Path(args.run_dir) / 'confirm' / args.label}")
