@@ -90,3 +90,20 @@ Never start a second one next to a living one.
   *both* tuned configurations, so the instance is missing from the interval
   altogether. On the search's seed 0 the same configurations finished t02.
   Finalist by the plan's rule: `g012-c0096`. The test step started at 10:27.
+* **2026-09-21 12:40, test of run 1, half way -- a correction to the first
+  note above:** the **defaults** time out on `t02` as well (seeds 1001 and
+  1002, the retry too), and so does the finalist on seed 1001. So this is not
+  something tuning introduced: on `t02-n1200-clustered-banded`, `pyvrp.solve`
+  does not come back from a 600 s limit within 900 s for some seeds, whatever
+  the configuration (seed 0 and the defaults' seeds 101/102 were fine). Q-12
+  stands as a property of `confirm`, but the sentence "a configuration that does
+  not answer is not one to ship" applies to the solver on this instance, not to
+  the tuned configuration. For the report: t02 has to be shown separately (how
+  many of its runs answered, per configuration), and the cause belongs to the
+  benchmark section -- reproduce with the defaults and seed 1001 once the
+  machine is free, find where the time goes (the deadline is only checked
+  between iterations), and either fix `solve.py`'s deadline handling or report
+  the hang upstream.
+* Papercut seen in passing: `status` on a running `confirm` said "about 9 min
+  left" with 30 of 60 runs done after 2.2 h -- the ETA of a confirmation is
+  wrong by an order of magnitude (to be reproduced and logged as an O item).
