@@ -1,0 +1,60 @@
+# The second tuning run of TUNING_PLAN.md's addendum: the same problem, stages,
+# time limits, workers and pinning as tuning.yaml, with a model among the
+# operators and racing on the full stage.
+#
+#   cd benchmarks/pyvrp_hard
+#   python -m evolvekit run --config tuning.llm.yaml --run-dir ../../runs/pyvrp-hard-llm --dashboard
+#
+# Needs OPENROUTER_API_KEY -- in the environment, or in a `.env` file here or in
+# any directory above. The model is an API, so its calls put no load on the
+# machine the solver is being timed on.
+extends: tuning.yaml
+
+models:
+  # What a child costs in tokens is small (one `configure()` of 27 values and
+  # the ranges); what it costs in solver time is up to two hours. Not the place
+  # to save on the model.
+  small: {provider: openrouter, model: anthropic/claude-sonnet-5, max_tokens: 4096,
+          price_in_per_mtok: 2.0, price_out_per_mtok: 10.0}
+  strong: {provider: openrouter, model: anthropic/claude-opus-5, max_tokens: 4096,
+           price_in_per_mtok: 5.0, price_out_per_mtok: 25.0}
+
+evaluate:
+  stages:
+    - {id: static, kind: builtin-static}
+
+    - id: screen
+      kind: command
+      command: "{python} solve.py --instance {instance} --seed {seed} --time-limit 120 {params}"
+      kpis_from: stdout
+      instances:
+        - instances/t01-n1000-uniform-city-tight.json
+        - instances/t04-n1600-metro-mixed.json
+        - instances/t07-n2200-clustered-region-mixed.json
+        - instances/t10-n3000-corridor-mixed.json
+      timeout: 300
+      workers: 3
+      pin_cpus: [2, 4, 6]
+      retries: 1
+      promote: {top_k_per_generation: 2}
+
+    - id: full
+      kind: command
+      command: "{python} solve.py --instance {instance} --seed {seed} --time-limit 600 {params}"
+      kpis_from: stdout
+      instances: ["instances/t*.json"]
+      timeout: 900
+      workers: 3
+      pin_cpus: [2, 4, 6]
+      retries: 1
+      # Four instances in and more than 1.5 % behind the best so far: the other
+      # six hours of solver time would confirm what is already known.
+      race: {after: 4, margin_pct: 1.5}
+
+search:
+  # `extends` merges mappings, so what tuning.yaml uses and this run does not is set to 0.
+  operators: {param_local: 0.35, rewrite: 0.35, param_tpe: 0.2, param_lhs: 0.1, param_cross: 0}
+
+budget:
+  max_usd: 5
+  max_full_evals_per_day: 100

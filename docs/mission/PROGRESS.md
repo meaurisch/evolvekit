@@ -36,6 +36,8 @@ each section.
 | [#39](https://github.com/meaurisch/evolvekit/pull/39) | `fix/run-dir-belongs-to-one-problem` (on #38) | a different problem is refused | R-02 |
 | [#40](https://github.com/meaurisch/evolvekit/pull/40) | `fix/resume-finishes-the-plan` (on #39) | `search.generations` is the plan for the directory | R-10 |
 | [#41](https://github.com/meaurisch/evolvekit/pull/41) | `feat/racing` (on #40) | `race: {after, margin_pct}` | tractability |
+| [#42](https://github.com/meaurisch/evolvekit/pull/42) | `feat/dotenv` (on #41) | `.env` is read, as the README said; values never printed | X (docs promised it) |
+| [#43](https://github.com/meaurisch/evolvekit/pull/43) | `feat/confirm-across-runs` (on #42) | `confirm`: `ID@RUN_DIR` and `--against` -- the winners of two runs in one interleaved comparison | result quality |
 
 Stack base for features: `c0bfd0d` = `origin/master` + the six fix branches.
 Every stacked PR names a compare link that shows its own diff.
