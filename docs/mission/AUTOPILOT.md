@@ -107,3 +107,10 @@ Never start a second one next to a living one.
 * Papercut seen in passing: `status` on a running `confirm` said "about 9 min
   left" with 30 of 60 runs done after 2.2 h -- the ETA of a confirmation is
   wrong by an order of magnitude (to be reproduced and logged as an O item).
+* **2026-09-21 14:08, test of run 1 finished** (seeds 1001-1003, never used
+  before): `g012-c0096` **+1.23 %, 95 % CI [+0.54, +1.92]**, 10 instances,
+  9 better / 1 worse (t01 -0.33 %), Wilcoxon p = 0.0059; 28 of 30 pairs, the
+  two missing pairs are t02 (defaults timed out on seeds 1001 and 1002, the
+  finalist on 1001). The search had claimed +2.29 %, validation +1.57 %: the
+  shrinkage the plan predicted. The gain grows with instance size (t07, t09,
+  t10: +2.0 to +2.5 %). The fresh-instance step started at 14:08.
