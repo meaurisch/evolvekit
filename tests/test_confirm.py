@@ -176,6 +176,58 @@ def test_what_cannot_be_compared_is_refused_with_the_reason(tmp_path, minimal_ra
         confirm(build_config(minimal_raw, base_dir=tmp_path), run_dir, seeds=[1], log=lambda m: None)
 
 
+# -- the winners of two runs -----------------------------------------------
+
+
+def _two_runs(tmp_path: Path, config_path: Path) -> tuple[Path, Path]:
+    """Two searches of the same problem: the first found x = -0.05, the second x = -0.10."""
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first = _write_run(tmp_path / "first", config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    second = _write_run(tmp_path / "second", config_path, {"g003-c0012": {"params": {"x": -0.10}, "score": -90.0}})
+    return first, second
+
+
+def test_a_candidate_of_another_run_is_compared_in_the_same_interleaved_comparison(tmp_path):
+    config_path = _write_config(tmp_path)
+    first, second = _two_runs(tmp_path, config_path)
+    comparison = confirm(load_config(config_path), second, seeds=[1001, 1003],
+                         candidates=f"g003-c0012,g003-c0012@{first}", label="both", log=lambda m: None)
+    # The same id in both runs: the other run's candidate carries its run directory's name.
+    assert comparison.candidates == ["g003-c0012", "g003-c0012@run"]
+    assert comparison.per_candidate["g003-c0012"]["summary"]["mean"] == pytest.approx(10.0, abs=0.8)
+    assert comparison.per_candidate["g003-c0012@run"]["summary"]["mean"] == pytest.approx(5.0, abs=0.8)
+    assert len(comparison.runs) == 3 * 3 * 2, "the baseline once, not once per run"
+
+
+def test_against_names_what_the_candidates_are_compared_with(tmp_path):
+    config_path = _write_config(tmp_path)
+    first, second = _two_runs(tmp_path, config_path)
+    comparison = confirm(load_config(config_path), second, seeds=[1001, 1003, 1004],
+                         candidates="g003-c0012", against=f"g003-c0012@{first}", label="duel", log=lambda m: None)
+    assert comparison.baseline_id == "g003-c0012@run"
+    summary = comparison.per_candidate["g003-c0012"]["summary"]
+    # 0.90 against 0.95: 5.26 % better than the other run's winner, not 10 % better than the seed.
+    assert summary["mean"] == pytest.approx(100 * 0.05 / 0.95, abs=0.8) and summary["ci95"][0] > 0
+    assert len(comparison.runs) == 2 * 3 * 3, "the seed is not run: it is not part of this comparison"
+    report = (second / "confirm" / "duel" / "comparison.md").read_text(encoding="utf-8")
+    assert "Baseline: `g003-c0012@run`" in report
+
+
+def test_a_candidate_that_is_not_there_is_refused_by_name(tmp_path):
+    config_path = _write_config(tmp_path)
+    config = load_config(config_path)
+    first, second = _two_runs(tmp_path, config_path)
+    with pytest.raises(ValueError, match="holds no run"):
+        confirm(config, second, seeds=[1], candidates=f"g003-c0012@{tmp_path / 'nowhere'}", log=lambda m: None)
+    with pytest.raises(ValueError, match="holds no candidate 'g009-c0099'"):
+        confirm(config, second, seeds=[1], candidates=f"g009-c0099@{first}", log=lambda m: None)
+    with pytest.raises(ValueError, match="--against: .* holds no candidate 'g009-c0099'"):
+        confirm(config, second, seeds=[1], against="g009-c0099", log=lambda m: None)
+    with pytest.raises(ValueError, match="compared with itself"):
+        confirm(config, second, seeds=[1], candidates="g003-c0012", against="g003-c0012", log=lambda m: None)
+
+
 # -- the command line ------------------------------------------------------
 
 
@@ -188,6 +240,19 @@ def test_the_exit_code_says_whether_the_improvement_is_real(tmp_path, capsys):
     (tmp_path / "run2").mkdir()
     lucky = _write_run(tmp_path / "run2", config_path, {"g002-c0007": {"params": {"mode": "deep"}, "score": -97.0}})
     assert main(["confirm", "--config", str(config_path), "--run-dir", str(lucky), "--seeds", "1001,1003"]) == 1
+
+
+def test_the_command_line_compares_the_winners_of_two_runs(tmp_path, capsys):
+    config_path = _write_config(tmp_path)
+    first, second = _two_runs(tmp_path, config_path)
+    arguments = ["confirm", "--config", str(config_path), "--seeds", "1001,1003,1004", "--label", "duel"]
+    # The second run's winner is the better one: exit 0 one way round, 1 the other.
+    assert main([*arguments, "--run-dir", str(second), "--candidates", "g003-c0012",
+                 "--against", f"g003-c0012@{first}"]) == 0
+    assert "Baseline: `g003-c0012@run`" in capsys.readouterr().out
+    assert main([*arguments, "--run-dir", str(first), "--candidates", "g003-c0012",
+                 "--against", f"g003-c0012@{second}"]) == 1
+    assert "Worse than the baseline" in capsys.readouterr().out
 
 
 def test_export_hands_over_the_winner(tmp_path, capsys):

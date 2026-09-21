@@ -21,6 +21,14 @@ gives a mean with a 95 % confidence interval (paired, Student's t) and an exact
 Wilcoxon signed-rank test. A confidence interval that includes zero is reported
 as what it is.
 
+Two searches of one problem -- another operator mix, a model among the
+operators, last month's run -- are compared the same way: `ID@OTHER_RUN_DIR`
+names a candidate of another run, and `--against` names what the candidates
+are compared with instead of the seed:
+
+    python -m evolvekit confirm --run-dir runs/b --seeds 2001,2002,2003 \\
+        --candidates g011-c0085 --against g012-c0096@runs/a
+
 Everything lands in `<run_dir>/confirm/<label>/`: every run's result
 (`results.json`), the comparison (`comparison.json`, `comparison.md`), the logs
 of every run, and an event log and heartbeat of its own -- so `status` and the
@@ -156,20 +164,39 @@ class Comparison:
         }
 
 
+def _find(rows: list[dict[str, Any]], spec: str, option: str) -> dict[str, Any]:
+    """One candidate by id: `ID` is of this run, `ID@RUN_DIR` of another run of
+    the same problem -- the winner of an earlier search, of a different operator
+    mix, of last month. It is named `ID@<that directory's name>` from here on,
+    because two runs number their candidates alike."""
+    cid, _, other = spec.partition("@")
+    if not other:
+        row = next((r for r in rows if str(r.get("id")) == cid), None)
+        if row is None:
+            raise ValueError(f"{option}: the run directory holds no candidate {cid!r}")
+        return row
+    other_dir = Path(other)
+    if not (other_dir / "runs.jsonl").is_file():
+        raise ValueError(f"{option}: {other_dir} holds no run (there is no runs.jsonl in it)")
+    row = next((r for r in read_jsonl(other_dir / "runs.jsonl") if str(r.get("id")) == cid), None)
+    if row is None:
+        raise ValueError(f"{option}: {other_dir} holds no candidate {cid!r}")
+    return {**row, "id": f"{cid}@{other_dir.resolve().name}"}
+
+
 def _select(rows: list[dict[str, Any]], wanted: str) -> list[dict[str, Any]]:
-    """`best`, `top:N`, or a comma-separated list of candidate ids."""
-    by_id = {str(r.get("id")): r for r in rows}
+    """`best`, `top:N`, or a comma-separated list of candidate ids (`_find`)."""
     if wanted == "best" or wanted.startswith("top:"):
         count = 1 if wanted == "best" else int(wanted.split(":", 1)[1])
         ranked = [r for r in rank(rows, len(rows)) if r.get("operator") != SEED_OPERATOR]
         if not ranked:
             raise ValueError("the run has no fully evaluated candidate besides its seed: nothing to confirm")
         return ranked[:count]
-    chosen = []
-    for cid in (c.strip() for c in wanted.split(",") if c.strip()):
-        if cid not in by_id:
-            raise ValueError(f"--candidates: the run directory holds no candidate {cid!r}")
-        chosen.append(by_id[cid])
+    chosen = [_find(rows, spec.strip(), "--candidates") for spec in wanted.split(",") if spec.strip()]
+    names = [str(r["id"]) for r in chosen]
+    twice = sorted({n for n in names if names.count(n) > 1})
+    if twice:
+        raise ValueError(f"--candidates: {twice} would be compared twice under one name")
     return chosen
 
 
@@ -181,12 +208,16 @@ def confirm(
     candidates: str = "best",
     instances: Sequence[str] | None = None,
     label: str = "confirm",
+    against: str | None = None,
     log: Callable[[str], None] = print,
 ) -> Comparison:
     """Run the comparison described in the module docstring; returns it."""
     run_dir = Path(run_dir)
     rows = list(read_jsonl(run_dir / "runs.jsonl"))
-    seed_row = next((r for r in rows if r.get("operator") == SEED_OPERATOR), None)
+    if against is not None:
+        seed_row = _find(rows, against.strip(), "--against")
+    else:
+        seed_row = next((r for r in rows if r.get("operator") == SEED_OPERATOR), None)
     if seed_row is None:
         raise ValueError(f"{run_dir} holds no seed candidate: there is no baseline to compare with")
     if not seeds:
@@ -207,6 +238,8 @@ def confirm(
         stage = _with_instances(config, stage, instances)
 
     chosen = _select(rows, candidates)
+    if any(str(r["id"]) == str(seed_row["id"]) for r in chosen):
+        raise ValueError(f"--against: {seed_row['id']} would be compared with itself")
     out_dir = run_dir / "confirm" / label
     work = out_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
