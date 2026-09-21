@@ -84,3 +84,9 @@ Never start a second one next to a living one.
   suspects are `exhaustive_on_best`, `min_perturbations: 0`, the penalty
   bounds), and decide whether it is a solver defect to report upstream or a
   range that the benchmark should not offer.
+* **2026-09-21 10:27, validation of run 1 finished:** `g012-c0096` +1.57 %
+  [+0.39, +2.74], `g006-c0046` +1.44 % [+0.41, +2.48] -- each over **9**
+  instances, 18 of 20 pairs: on `t02` *both* seeds (101 and 102) timed out for
+  *both* tuned configurations, so the instance is missing from the interval
+  altogether. On the search's seed 0 the same configurations finished t02.
+  Finalist by the plan's rule: `g012-c0096`. The test step started at 10:27.
