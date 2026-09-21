@@ -119,12 +119,121 @@ evaluation costs, how many fit, and what will count as evidence. In short:
 
 ## 4. Result
 
-**PENDING — the run is in progress. This section will contain:** the search's
-own trajectory; how well the 120 s screen predicted the 600 s stage; the
-validation table and the choice of finalist; the test table per instance and in
-aggregate, for the tuning instances and for the fresh ones, with intervals and
-p-values; the tuned configuration; and a plain statement of whether the
-improvement is real — including, if that is how it comes out, that it is not.
+**Status 2026-09-21 evening: the first (model-free) run and its three
+confirmations are finished and reported below. The second, LLM-mixed run is in
+progress; 4.2 and 4.3 are PENDING.** Every number below is read from a file in
+the run directory (`confirm/<label>/comparison.json`), not from memory.
+
+### 4.1 First run: model-free operators (`runs/pyvrp-hard-1`)
+
+**The search.** 12 generations of 8 children, 18.3 h of wall clock (51.5 h of
+solver time on three pinned workers), 608 evaluations, $0. Best configuration
+by generation, in percent of the defaults' cost on the search's own seed (lower
+is better): 100 → 99.12 (gen 1) → 98.78 (gen 2) → 98.53 (gen 4) → 98.05
+(gen 6) → flat for five generations → **97.71 (gen 12, `g012-c0096`)**. The
+search's own claim is therefore **+2.29 %** — optimistic by construction, as
+the status line says next to the number.
+
+* The 120 s screen on four instances predicted the 600 s stage on ten with a
+  Spearman correlation of **0.65** over the 18 configurations that finished both
+  (the defaults and 17 candidates):
+  good enough to choose 2 of 8, not good enough to skip the full stage.
+* Two candidates per generation were promoted to the full stage, 24 in all; **17**
+  finished it. The others lost an instance to the 900 s stage timeout (8 runs,
+  16 failed evaluations with their retries, on t02, t03 and t08) and were never
+  ranked — see "t02" below. That is more than a quarter of the full-stage
+  budget spent on candidates that could not compete.
+* The run was killed once with my agent session and resumed from its cache
+  (D22); generation 1's screening was disturbed by my own tests (D20). Neither
+  touches the confirmations below, which are separate, interleaved measurements.
+
+**Validation (seeds 101, 102 — choosing the finalist).**
+
+| configuration | mean improvement | 95 % CI | instances | better / worse | Wilcoxon p | pairs |
+|---|--:|--:|--:|--:|--:|--:|
+| `g012-c0096` | +1.57 % | [+0.39, +2.74] | 9 | 8 / 1 | 0.0078 | 18 of 20 |
+| `g006-c0046` | +1.44 % | [+0.41, +2.48] | 9 | 9 / 0 | 0.0039 | 18 of 20 |
+
+Finalist by the rule fixed in advance (the higher mean): **`g012-c0096`**. The
+two are not distinguishable from each other, and the rule did not need them to
+be. Nine instances, not ten: see "t02".
+
+**Test (seeds 1001–1003, never used before; finalist against the defaults, interleaved).**
+
+| instances | mean improvement | 95 % CI | better / worse | Wilcoxon p | pairs | verdict |
+|---|--:|--:|--:|--:|--:|---|
+| the 10 tuning instances | **+1.23 %** | **[+0.54, +1.92]** | 9 / 1 | 0.0059 | 28 of 30 | better than the defaults |
+| the 4 fresh instances | +1.40 % | [−0.54, +3.33] | 4 / 0 | 0.125 | 12 of 12 | **not distinguishable** |
+
+| instance | clients | improvement | pairs won |
+|---|--:|--:|--:|
+| t01 | 1000 | −0.33 % | 1 of 3 |
+| t02 | 1200 | +0.44 % | 1 of 1 |
+| t03 | 1400 | +0.94 % | 3 of 3 |
+| t04 | 1600 | +1.48 % | 3 of 3 |
+| t05 | 1800 | +0.80 % | 1 of 3 |
+| t06 | 2000 | +1.83 % | 3 of 3 |
+| t07 | 2200 | +2.34 % | 3 of 3 |
+| t08 | 2500 | +0.21 % | 2 of 3 |
+| t09 | 2800 | +2.55 % | 3 of 3 |
+| t10 | 3000 | +2.03 % | 3 of 3 |
+| f01 (fresh) | 1100 | +0.06 % | 2 of 3 |
+| f02 (fresh) | 1700 | +0.75 % | 2 of 3 |
+| f03 (fresh) | 2300 | +2.03 % | 3 of 3 |
+| f04 (fresh) | 2900 | +2.75 % | 3 of 3 |
+
+**Reading it.**
+
+* The improvement is **real and small**: +1.2 % on seeds the search never saw,
+  with an interval that excludes zero. It is about half of what the search
+  claimed (+2.29 % → +1.57 % on validation → +1.23 % on test). That shrinkage is
+  the winner's curse the plan predicted, and the reason `confirm` exists.
+* On the fresh instances the *estimate* is the same (+1.4 %, 4 of 4 better, the
+  same growth with size) but four instances cannot carry an interval: p = 0.125
+  is the smallest value a four-instance Wilcoxon test can produce. By the plan's
+  own definition this is "not distinguishable", and that is how it is reported.
+  The design lesson is mine: four fresh instances were too few to be able to
+  say yes.
+* The gain grows with instance size: below 1500 clients it is within noise
+  (−0.3 to +0.9 %), from 2000 clients on it is +1.8 to +2.8 % on six of seven
+  instances. With a fixed ten minutes, the larger instances are further from
+  converged, and what the tuned configuration buys is speed: a cheaper
+  neighbourhood (`swap21` off, `relocate3` on, `exhaustive_on_best` off), a
+  shorter acceptance history (214 instead of 300) and faster penalty updates
+  (every 288 registrations instead of 500).
+* What this is **not**: evidence that the configuration is better on another
+  machine, under another time limit, or on instances of another family.
+
+**t02.** On `t02-n1200-clustered-banded`, `pyvrp.solve` with a 600 s limit did
+not return within the 900 s stage timeout for some seeds — *for the defaults as
+well as for tuned configurations* (defaults: seeds 1001, 1002; `g012-c0096`:
+seeds 101, 102, 1001; seed 0 was fine for both). It is therefore not something
+tuning introduced, but it has two consequences. First, `confirm` drops a pair
+when either side fails (friction Q-12), so t02 is missing from the validation
+interval and enters the test with one pair of three; the intervals above are
+over the pairs that finished, and a user who needs an answer on *every* instance
+should read "28 of 30" as part of the result. Second, the cause is open: the
+deadline in `solve.py` is checked between iterations, so a single iteration ran
+for more than five minutes. Reproducing it needs the machine, which is busy
+with the second run; it is the first item of section 8.
+
+**The tuned configuration** (`g012-c0096`; defaults in brackets where changed):
+`num_neighbours` 59 (50), `history_length` 214 (300), `exhaustive_on_best`
+false (true), `solutions_between_updates` 288 (500), `penalty_increase` 1.66
+(1.5), `penalty_decrease` 0.920 (0.9), `min_penalty` 0.037 (0.1),
+`weight_wait_time` 0.65 (0.2), `min_perturbations` 0 (1), `max_perturbations`
+21 (25), `use_relocate3` true (false), `use_swap21` false (true);
+`num_iters_no_improvement`, `target_feasible`, `feas_tolerance` and
+`max_penalty` moved by less than 7 %; everything else is at its default.
+
+### 4.2 Second run: a model among the operators (`runs/pyvrp-hard-llm`)
+
+**PENDING** — started 2026-09-21 15:30 by the autopilot; same protocol.
+
+### 4.3 The two finalists against each other
+
+**PENDING** — seeds 2001–2003, all 14 instances, one interleaved `confirm`
+(`--against`, PR #43). "The LLM added nothing" = an interval that includes zero.
 
 ## 5. Friction log
 
