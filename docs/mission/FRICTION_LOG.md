@@ -108,6 +108,7 @@ outside whether the run was alive.
 | Q-08 | major | 2 | `{seed}` is always `0..N-1`. There is no way to evaluate on seeds the search never saw without editing the evaluator; `preflight --candidate` replays the tuning seeds. | **fixed** #31 -- `confirm --seeds`, `--instances` |
 | Q-09 | major | 1 | A wall-clock-bounded score swings 5 % between two evaluations of the identical configuration a minute apart, and a within-noise gain is reported as an improvement. | **fixed** #20 #25 #31 #34 -- paired verdicts, pinned workers, host load recorded, interleaved confirmation |
 | Q-10 | minor | 1 | No guidance or support for aggregating across instances of different scale: the example takes a raw mean; a gap to a per-instance baseline has to be hand-built. | **fixed** #25 -- `normalize: baseline` |
+| Q-11 | minor | 1 | With `problem.parameters` and a model operator, the structural near-duplicate gate (`search.novelty.near`, on by default) calls *every* child a repeat: every `configure()` is the same dict with other constants, which is exactly what the gate scores 1.0. Each child is re-prompted once ("you repeated yourself"), which is untrue and doubles the model spend: 10 calls and $0.21 for 6 children, against 6 calls and $0.08 with the gate off (measured 2026-09-21 with the real models and an instant fake solver). Worked around in `tuning.llm.yaml`; the framework should compare the *values* when a parameter space is declared. | open (worked around) |
 
 ## D. The generic user: interface, defaults, time to first run
 

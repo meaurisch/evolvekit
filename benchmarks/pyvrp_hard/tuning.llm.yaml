@@ -54,6 +54,10 @@ evaluate:
 search:
   # `extends` merges mappings, so what tuning.yaml uses and this run does not is set to 0.
   operators: {param_local: 0.35, rewrite: 0.35, param_tpe: 0.2, param_lhs: 0.1, param_cross: 0}
+  # Every `configure()` is the same dict with other constants, which is what the
+  # structural near-duplicate gate calls a repeat: it would re-prompt the model
+  # for every child. Identical *values* are still refused as duplicates.
+  novelty: {near: {method: "off"}}
 
 budget:
   max_usd: 5
