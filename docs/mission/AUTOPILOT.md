@@ -114,3 +114,14 @@ Never start a second one next to a living one.
   finalist on 1001). The search had claimed +2.29 %, validation +1.57 %: the
   shrinkage the plan predicted. The gain grows with instance size (t07, t09,
   t10: +2.0 to +2.5 %). The fresh-instance step started at 14:08.
+* **2026-09-21 15:28, fresh instances of run 1 finished** (f01-f04, never seen
+  by the search, seeds 1001-1003): `g012-c0096` **+1.40 %, 95 % CI
+  [-0.54, +3.33]**, 4 better / 0 worse, Wilcoxon p = 0.125 (the smallest p four
+  instances can give), 12 of 12 pairs, no failures. By the plan's own
+  definition this is **"not distinguishable"**: same size of effect as on the
+  tuning instances, same pattern (f03, f04 -- the large ones -- +2.0 and
+  +2.8 %; f01 +0.06 %), but four instances cannot carry an interval. Report it
+  as that, not as a confirmation.
+* **15:30:** the autopilot took over by itself and started the second run
+  (`runs/pyvrp-hard-llm`); at 16:38 it was in generation 1's full stage, 2 model
+  calls, $0.056, no failures.
