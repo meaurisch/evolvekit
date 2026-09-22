@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-run1",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "evolvekit", "dashboard", "--run-dir", "runs/pyvrp-hard-1", "--port", "8801", "--no-browser"],
+      "port": 8801
+    },
+    {
+      "name": "dashboard-run2",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "evolvekit", "dashboard", "--run-dir", "runs/pyvrp-hard-llm", "--port", "8802", "--no-browser"],
+      "port": 8802
+    }
+  ]
+}

@@ -47,7 +47,7 @@ made a broken candidate the run's "best", and at no point could they tell from
 outside whether the run was alive.
 
 
-> **Status as of 2026-09-20** (PR numbers refer to github.com/meaurisch/evolvekit): 40 of 63 items fixed, 7 partly, 16 open. "Fixed" means: in an open pull request, with tests, merged into `integration/expensive-tuning` -- none is merged into `master`.
+> **Status as of 2026-09-23** (PR numbers refer to github.com/meaurisch/evolvekit): 41 of 68 items fixed, 7 partly, 20 open -- 63 found before any fix was started, five (Q-11, Q-12, O-19, O-20, O-21) by the two real runs afterwards. "Fixed" means: in an open pull request, with tests, merged into `integration/expensive-tuning` -- none is merged into `master`.
 
 ## A. Observability
 
@@ -71,6 +71,9 @@ outside whether the run was alive.
 | O-16 | papercut | 2 | `preflight` truncates the KPI list and hid the only penalty KPI; its "noisiest KPI varied by 141 %" note was about a 0/1 crash counter, not the objective (CV 0.7 %). | **part** #26 #32 -- preflight's KPI line leads with the objective and a failed stage repeats the command's last words; the CV note on a 0/1 KPI is unchanged. open |
 | O-17 | papercut | 1 | The seed line prints the public score while `best=` prints the hold-out-penalised rank, so generation 1 looks like a regression; `improvement` and `d best` use different bases. | open |
 | O-18 | minor | 1 | Whether the machine was under load during an evaluation cannot be seen (iterations are recorded, never shown). Two evaluations of the *identical* seed configuration a minute apart differed by 5 %. | **fixed** #34 -- `host_busy` per evaluation, flagged in `status` and on the dashboard (learnt the hard way: decision D20) |
+| O-19 | minor | 1 | At phone width (390 px) the generation strip, the stopping-criteria values and the chart's controls overflow their card to the right; the tab bar clips. Seen on the screenshots of both real runs, after the page had been checked at 375 px on a *short* toy run -- a twelve-generation strip and five stopping criteria are wider than a three-generation one. | open |
+| O-20 | papercut | 1 | `status` on a running `confirm` says "about 9 min left" with 30 of 60 runs done after 2.2 h: the confirmation's ETA is wrong by an order of magnitude (its plan is not the run's plan). | open |
+| O-21 | minor | 1 | The word **null** rendered in the health card of a run whose machine had been its own: `h()` skips a null child, `replaceChildren` renders it as text. Found on the second real run's screenshot. | **fixed** #36 (follow-up commit, failing test first; both render paths go through one `fill()`) |
 
 ## B. Robustness and resume
 

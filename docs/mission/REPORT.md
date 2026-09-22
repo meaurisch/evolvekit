@@ -94,8 +94,20 @@ from the defaults; which parameters matter and where has the search looked;
 where does it win and lose, instance by instance; what went wrong, one click
 from the command line, the instance, the seed and the logs.
 
-**PENDING:** final screenshots of the PyVRP run itself (both themes, phone
-width), to be taken when the machine is free (see 6.).
+Screenshots of the two real runs, taken headless from the live dashboard
+once the machine was free (`docs/mission/img/`): run 1 in
+[light](img/run1-light.png), [dark](img/run1-dark.png) and at
+[phone width](img/run1-phone-light.png); run 2 in [light](img/run2-light.png),
+[dark](img/run2-dark.png) and at [phone width](img/run2-phone-dark.png).
+
+![Run 1, light](img/run1-light.png)
+
+Two things the real runs' screenshots found, both after the dashboard had been
+"verified": the word **"null"** rendered where the host-load warning would have
+been on a run whose machine was its own (`replaceChildren(null)` — fixed on
+#36's branch, failing test first, merged forward); and at phone width the
+generation strip, the stopping-criteria values and the chart controls overflow
+their card to the right (open, friction O-19). The lesson is in section 6.
 
 ## 3. The benchmark and the plan
 
@@ -119,10 +131,12 @@ evaluation costs, how many fit, and what will count as evidence. In short:
 
 ## 4. Result
 
-**Status 2026-09-21 evening: the first (model-free) run and its three
-confirmations are finished and reported below. The second, LLM-mixed run is in
-progress; 4.2 and 4.3 are PENDING.** Every number below is read from a file in
-the run directory (`confirm/<label>/comparison.json`), not from memory.
+Two tuning runs and seven confirmations, 2026-09-20 07:40 to 2026-09-22
+22:52, all on one laptop, every measurement started by a script rather than by
+hand once the first run was going (D23). Every number below is read from a file
+in the run directory (`confirm/<label>/comparison.json`, `runs.jsonl`,
+`events.jsonl`), not from memory; `docs/mission/img/plots.py` draws the two
+figures from the same files.
 
 ### 4.1 First run: model-free operators (`runs/pyvrp-hard-1`)
 
@@ -230,21 +244,128 @@ false (true), `solutions_between_updates` 288 (500), `penalty_increase` 1.66
 
 ### 4.2 Second run: a model among the operators (`runs/pyvrp-hard-llm`)
 
-**PENDING** — started 2026-09-21 15:30 by the autopilot; same protocol.
+Same instances, stages, time limits, workers and pinning; `rewrite` (Claude
+Sonnet 5 via OpenRouter, Opus 5 for the two scheduled big steps) at 0.35 next
+to `param_local` 0.35, `param_tpe` 0.2, `param_lhs` 0.1; racing on the full
+stage (`after: 4, margin_pct: 1.5`). Started by the autopilot 30 minutes after
+run 1's confirmations ended, on the same machine, otherwise idle.
+
+**The search.** 12 generations, 16.3 h, 540 evaluations, **$0.53 over 29 model
+calls** (97.6 k tokens) against a $5 cap. Best by generation: 100 → 99.44
+(gen 2) → 99.13 (gen 3) → flat → **98.98 (gen 9, `g009-c0073`)** → flat. The
+search's own claim is +1.02 % (t = 2.27) — against run 1's +2.29 %.
+
+* The model wrote 25 children; every one passed the static stage, none was
+  rejected as a duplicate. At the 120 s screen the model's children scored
+  96.8–98.6, i.e. no better than the arithmetic operators' — and it never
+  beat the run's best on its own. But **every ranked configuration of the run
+  descends from two consecutive model rewrites in generations 2–3**
+  (`g002-c0017` → `g003-c0018`, the 99.13 step); the local operator refined
+  from there. That is what the model contributed: the first move, not the last.
+* Racing fired 3 times in 97 candidates (one `rewrite`, two `param_tpe`),
+  saving about three hours of solver time. Little, because most losers never
+  got as far as the fourth instance.
+* The 900 s timeout (below) hit this run harder: **13 of the 25 configurations
+  that reached the full stage lost an instance to it** (run 1: 7), so only 9
+  were ranked. Seven of the thirteen were `param_tpe` children.
+* The screen predicted the full stage with ρ = 0.83 over the 9 that finished
+  both — but 9 is too few to read much into.
+
+**Validation, test, fresh (finalist `g011-c0087`, by the same rule).**
+
+| comparison | mean improvement | 95 % CI | instances | better / worse | Wilcoxon p | pairs | verdict |
+|---|--:|--:|--:|--:|--:|--:|---|
+| validation `g011-c0087` (seeds 101, 102) | +1.26 % | [+0.20, +2.33] | 9 | 8 / 1 | 0.027 | 18 of 20 | better |
+| validation `g009-c0073` (seeds 101, 102) | +0.93 % | [−0.53, +2.38] | 10 | 7 / 3 | 0.19 | 17 of 20 | not distinguishable |
+| **test, 10 tuning instances (1001–1003)** | **+0.83 %** | **[−0.05, +1.71]** | 9 | 7 / 2 | 0.098 | 27 of 30 | **not distinguishable** |
+| test, 4 fresh instances (1001–1003) | +1.05 % | [+0.10, +2.00] | 4 | 4 / 0 | 0.125 | 11 of 12 | better |
+
+The finalist's test interval misses zero by 0.05 points; by the rule fixed in
+advance it is *not distinguishable* from the defaults, where run 1's finalist
+(+1.23 % [+0.54, +1.92]) was. The fresh-instance verdicts come out the other way
+round (run 2 "better", run 1 not) — with four instances the verdict hangs on the
+spread, not the mean, and the two runs' fresh estimates lie inside each other's
+intervals. Neither fresh verdict should be read as more than "same size of
+effect, same growth with instance size". t02 is absent from the test entirely:
+the defaults timed out on two of its seeds and the finalist on the other two.
+
+**The configuration** (`g011-c0087`; defaults in brackets): `num_neighbours`
+36 (50), `history_length` 200 (300), `exhaustive_on_best` false (true),
+`solutions_between_updates` 300 (500), `penalty_increase` 1.4 (1.5),
+`penalty_decrease` 0.82 (0.9), `target_feasible` 0.72 (0.65),
+`num_iters_no_improvement` 220 000 (150 000), `max_penalty` 150 000
+(100 000), `feas_tolerance` 0.094 (0.05), `max_perturbations` 21 (25),
+`use_relocate2` **false** (true), `use_swap11` **false** (true),
+`use_relocate3` true (false). The round numbers are the model's; the two basic
+operators switched off are its idea too (from `g003-c0018`), and the local
+operator never switched them back on.
 
 ### 4.3 The two finalists against each other
 
-**PENDING** — seeds 2001–2003, all 14 instances, one interleaved `confirm`
-(`--against`, PR #43). "The LLM added nothing" = an interval that includes zero.
+One interleaved `confirm` (`--against`, PR #43): run 2's finalist against run
+1's, seeds 2001–2003, all 14 instances, 84 runs.
+
+| | mean | 95 % CI | instances | better / worse | Wilcoxon p | pairs |
+|---|--:|--:|--:|--:|--:|--:|
+| `g011-c0087` (run 2) against `g012-c0096` (run 1) | +0.13 % | [−0.45, +0.72] | 13 | 7 / 6 | 0.74 | 34 of 42 |
+
+**Not distinguishable.** Per instance the differences are within ±1 % except
+f01 (+2.2 %, over two pairs) — noise-sized, both ways. On the plan's own
+criterion, *the model added nothing measurable*: the two searches found
+configurations of the same quality, and run 1's holds up better on the test
+(its interval excludes zero) and fails less often (run 2's finalist timed out
+on 8 of its 42 runs here, run 1's on 1).
+
+What the second run cost and bought, in one line: **$0.53 and the same 16
+hours of solver time, for a configuration that is as good, not better, and less
+robust.** The honest version of the LLM story on this problem is the one in
+4.2: the model made the first useful move and the arithmetic did the rest —
+and a model-free search made an equally useful first move on its own.
+
+### 4.4 Reading it all
+
+![Best so far, both runs](img/best-so-far.svg)
+
+![Every confirmation on one axis](img/confirmations.svg)
+
+1. **Tuning PyVRP's defaults for ten minutes on this machine buys about 1 %,
+   and it is real.** Run 1: +1.23 % [+0.54, +1.92] on the tuning instances on
+   seeds it never saw; the same size on fresh instances, growing with instance
+   size (+2 to +2.8 % above 2000 clients). Half of what the search claimed.
+2. **The search's own number is not the result.** +2.29 % → +1.57 % → +1.23 %
+   (run 1); +1.02 % → +1.26 % → +0.83 % (run 2). `confirm` was the right thing
+   to build.
+3. **Four fresh instances are too few** to say yes or no; the two runs' fresh
+   verdicts flipped on the spread alone. Ten would have cost 7.5 more hours per
+   run and would have settled it.
+4. **A model in the loop neither helped nor hurt the quality**, cost half a
+   dollar, and produced a less robust configuration. On a 27-parameter box with
+   a mature solver's defaults as the seed, the arithmetic operators (#27) are
+   the workhorse; the model's value, if any, is in the first move.
+5. **The solver has a hang** on some instances (t02, t03, t08, f01, f02) for
+   some seeds and configurations, including the defaults: `pyvrp.solve` does
+   not return from a 600 s limit within 900 s, with empty stdout. It cost the
+   two searches 7 and 13 of their 25 full-stage configurations and the
+   confirmations 26 of their 372 runs. **One reproduction attempt alone on the
+   idle machine (defaults, t02, seed 1001 — a pair that timed out twice in the
+   test) finished in 602 s with 73 676 iterations**, so it is not a property of
+   (configuration, seed) alone; whether it is a timing-dependent solver state
+   or something in how three pinned processes share this laptop is open. Next
+   step in section 8. Until it is understood, "28 of 30 pairs" is part of every
+   result above.
 
 ## 5. Friction log
 
-`FRICTION_LOG.md`: 63 items found by six docs-only "new user" personas and by me
-before any fix was started. As of this draft: **40 fixed, 7 partly, 16 open**,
-each with the PR that did it. All six items rated *blocker* (R-01, R-02, R-03,
-Q-01, Q-02, Q-06) are among the fixed. The open ones are mostly documentation
-and small CLI items, plus R-12 (nothing stops a run in which every child
-fails) and R-07 (ids re-used after a partial record).
+`FRICTION_LOG.md`: 63 items found by six docs-only "new user" personas and by
+me before any fix was started, plus five found by the real runs afterwards
+(Q-11 the near-duplicate gate against typed parameters, Q-12 `confirm` and
+failed pairs, O-19 the phone-width overflow, O-20 the confirmation ETA, O-21
+"null" — the last fixed). Final count: **41 fixed, 7 partly, 20 open**, each
+with the PR that did it. All six items rated *blocker* (R-01, R-02, R-03, Q-01,
+Q-02, Q-06) are among the fixed. The open ones are mostly documentation and
+small CLI items, plus R-12 (nothing stops a run in which every child fails),
+R-07 (ids re-used after a partial record) and Q-12, which the result section
+had to work around by hand.
 
 ## 6. What went wrong along the way (mine)
 
@@ -265,17 +386,31 @@ fails) and R-07 (ids re-used after a partial record).
 
 ## 7. Decisions
 
-`DECISION_LOG.md`, D1–D20. The ones that shape the result: no LLM backend was
-available, so the search is model-free (D7); three pinned workers, measured
-(D12); percent-of-baseline as the default aggregate (D15); the solver wrapped
-with no adapter (D18); nothing else on the machine during the run (D20).
+`DECISION_LOG.md`, D1–D26. The ones that shape the result: no LLM backend was
+available at the start, so the first search is model-free (D7); three pinned
+workers, measured (D12); percent-of-baseline as the default aggregate (D15);
+the solver wrapped with no adapter (D18); nothing else on the machine during a
+run (D20); a second, LLM-mixed run under the same protocol once a key was
+offered, via an API so that model calls put no load on the machine (D21); the
+run resumed rather than restarted after it died with my session (D22);
+everything after the first run driven by one detached script with the
+finalist rule fixed in advance (D23); Sonnet 5 / Opus 5 with a $5 cap (D24);
+the head-to-head as a feature, not a script (D25); and the t02 hang reported
+as open rather than explained away (D26).
 
 ## 8. What to do next, in order
 
+0. **The solver hang** (4.4, item 5): make `solve.py` dump its Python stack to
+   stderr at 1.4× the time limit (`faulthandler.dump_traceback_later`), rerun
+   the head-to-head's timed-out pairs under the stage with three workers, and
+   read the stack. Until then every result carries "N of M pairs".
 1. Review and merge the fix PRs #13–#18, #22, #29, #32, #35, #37, #38, #39: small, independent in spirit, each with its failing test.
 2. The observability stack #19 → #20 → #21, then #24 → #25 → #26 (the generic-user path), then #27, #28, #31, #33, #34, #36.
 3. Use racing (#41) in the next tuning run — it was written while this one was already going — and replace its fixed margin by a sequential test once there is data on how noisy paired differences are.
 4. Re-evaluate the incumbent on a second seed when it changes (intensification), so the search itself is less exposed to a lucky seed — today only `confirm` protects against that.
 5. R-12, R-07 and the documentation items in the friction log.
 6. One page that states the whole evaluator contract (G-10).
-7. With an LLM backend available: compare the model-free search with the LLM operators on the same benchmark; `configure()` is ordinary code, so conditional configurations ("fewer neighbours on large instances") are within reach of a model and out of reach of a parameter sweep.
+7. Ten fresh instances, not four, next time (4.4, item 3) — 7.5 more hours per run.
+8. `confirm` should count a failed candidate run as a loss, or at least carry the count into the verdict (Q-12); and its ETA is wrong by an order of magnitude on a running confirmation (O-20).
+9. The near-duplicate gate should compare *values* when a parameter space is declared (Q-11); with it on, every model child was re-prompted once.
+10. A second LLM experiment worth running: `configure()` is ordinary code, so a configuration that depends on the instance ("fewer neighbours above 2000 clients") is within a model's reach and out of a parameter sweep's — but only if the harness passes the instance to `configure()`, which it does not today. That, not "a model among the operators", is where a model could do what arithmetic cannot.
