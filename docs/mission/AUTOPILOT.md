@@ -152,3 +152,12 @@ Never start a second one next to a living one.
   consecutive model rewrites in generations 2-3 (the 99.13 step), and the local
   operator refined from there. That is the honest description of what the
   model contributed: the first move, not the last.
+* **2026-09-22 15:42, test of run 2 finished** (finalist `g011-c0087` against
+  the defaults, seeds 1001-1003): **+0.83 %, 95 % CI [-0.05, +1.71]** over 9
+  instances, 7 better / 2 worse (t05 -0.59 %, t08 -0.98 %), Wilcoxon p = 0.098,
+  27 of 30 pairs: **not distinguishable** by the plan's rule -- the lower end
+  misses zero by 0.05 points. t02 is absent altogether (the defaults timed out
+  on 1001 and 1002, the finalist on 1001 and 1003: no pair). Same shape as run 1
+  (the large instances t07, t09, t10 gain +1.7 to +2.3 %) with a smaller mean
+  and two losses. `confirm` exited 1, as it should; the autopilot went on to
+  the fresh instances at 15:42 as designed.
