@@ -453,8 +453,10 @@ function replace(id, signature, build) {
   const key = JSON.stringify(signature);
   if (ui.signatures[id] === key) return;          // unchanged: keep hover, scroll and focus
   ui.signatures[id] = key;
-  $(id).replaceChildren(...[build()].flat());
+  fill(id, build());
 }
+// `h()` skips a null child; `replaceChildren` would render the word "null".
+function fill(id, kids) { $(id).replaceChildren(...[kids].flat().filter((kid) => kid != null && kid !== false)); }
 
 /* ----------------------------------------------------------------- tooltip */
 const tip = $("tip");
@@ -1015,7 +1017,7 @@ function render() {
   $("main").style.display = empty ? "none" : "";
   if (empty) return;
   const he = doc.health || {};
-  $("health").replaceChildren(...renderHealth(doc));                      // carries running clocks: always redrawn
+  fill("health", renderHealth(doc));                                     // carries running clocks: always redrawn
   replace("progress", [doc.progress, doc.objective, doc.candidates?.length, he.generation, ui.chartTable, ui.chartX], () => renderProgress(doc));
   replace("best", [doc.best, ui.bestTab], () => renderBest(doc));
   replace("parameters", [doc.parameters, ui.param, doc.best?.id], () => renderParameters(doc));
