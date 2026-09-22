@@ -49,3 +49,27 @@ def test_the_miniature_is_the_real_setup_with_smaller_numbers():
     real_stages = {s["id"]: s for s in real["evaluate"]["stages"]}
     assert "--time-limit 600" in real_stages["full"]["command"] and real_stages["full"]["instances"] == ["instances/t*.json"]
     assert real_stages["full"]["workers"] == 3 and real_stages["full"]["pin_cpus"] == [2, 4, 6]
+
+
+def test_the_second_run_is_the_first_with_a_model_among_the_operators_and_racing():
+    real = load_config(BENCH / "tuning.yaml")
+    second = load_config(BENCH / "tuning.llm.yaml")
+    assert second.problem.parameters.names == real.problem.parameters.names
+    assert [s.command for s in second.evaluate.stages] == [s.command for s in real.evaluate.stages]
+    assert second.search.uses_llm and second.search.operators["rewrite"] == 0.35
+    assert second.search.operators["param_cross"] == 0, "`extends` merges mappings: what the first run used and this one does not is set to 0"
+    assert second.models.small.provider == "openrouter" and second.models.strong.provider == "openrouter"
+    assert second.final_stage.race is not None and second.final_stage.race.after == 4
+    assert second.budget.max_usd == 5
+    assert second.search.novelty.near.method == "off", "the structural gate calls every configure() a repeat (friction Q-11)"
+
+
+def test_the_tuned_configurations_are_valid_points_of_the_space():
+    space = load_config(BENCH / "tuning.yaml").problem.parameters
+    for path in sorted((BENCH / "tuned").glob("*.yaml")):
+        values = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert list(values) == space.names, path.name
+        _, problems = space.validate(values)
+        assert problems == [], path.name
+        flags = (path.with_suffix(".flags")).read_text(encoding="utf-8").split()
+        assert flags == list(space.render_flags(values)), f"{path.name}: the .flags file is the .yaml rendered"

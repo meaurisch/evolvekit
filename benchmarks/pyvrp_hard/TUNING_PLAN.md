@@ -121,3 +121,22 @@ is **not** the result.
   found.
 * **Ten minutes on this CPU** is not ten minutes on another. The result is a
   statement about this budget on this machine.
+
+## Addendum, 2026-09-20 (written while the model-free run was in generation 1; nothing above is changed)
+
+A **second run with LLM operators** follows the first, because an LLM backend
+became available after the first run had started. Same instances, stages, time
+limits, workers and pinning; its own run directory; operators roughly
+`param_local` 0.35, `rewrite` 0.35, `param_tpe` 0.2, `param_lhs` 0.1, with
+scheduled big steps; `race: {after: 4, margin_pct: 1.5}` on the full stage
+(racing did not exist when the first run started, so the two runs differ in
+this as well as in the operators -- racing changes what is spent, not what a
+finished evaluation scores). The backend is an API, not a local CLI, so that
+model calls put no load on the machine.
+
+Evidence, fixed now: the same protocol as above, applied to the second run on
+its own -- validation on seeds 101/102, test on seeds 1001-1003 on the tuning
+and the fresh instances, interleaved against the defaults. In addition the two
+finalists are compared **with each other** in one interleaved `confirm` on
+seeds 2001-2003, all fourteen instances. What would count as "the LLM added
+nothing": an interval of that head-to-head comparison that includes zero.

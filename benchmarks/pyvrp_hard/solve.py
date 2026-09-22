@@ -59,6 +59,7 @@ Remove-/InsertOptionalShipment (prize collecting), ReplaceGroup (groups).
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import importlib.util
 import json
 import math
@@ -498,6 +499,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     clock["start"] = time.perf_counter()
+    # Some runs never came back from the limit (t02, t03, t08 in the tuning
+    # runs; the defaults too). If this one does not, say where it is: the
+    # Python stack on stderr at 1.4x the limit, before a stage timeout kills it.
+    faulthandler.dump_traceback_later(max(5.0, 1.4 * time_limit), repeat=False, file=sys.stderr)
     result = pyvrp.solve(
         data,
         stop=_Deadline(clock["start"] + time_limit),
