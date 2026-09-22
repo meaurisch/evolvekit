@@ -138,3 +138,17 @@ Never start a second one next to a living one.
   07:51 by itself. For section 4.2: per-operator share of the promoted/ranked
   candidates and of the best, and whether the `rewrite` children were the ones
   that timed out (the model may push parameters into the hang region).
+* **2026-09-22 11:51, validation of run 2 finished:** `g011-c0087` +1.26 %
+  [+0.20, +2.33] over 9 instances (18 of 20 pairs; t02 lost on both seeds),
+  `g009-c0073` +0.93 % [-0.53, +2.38] over 10 instances but 17 of 20 pairs
+  (timeouts on t02, t03 *and* t08 for seed 101) -- not distinguishable.
+  **Finalist of run 2: `g011-c0087`** (rule: the higher mean). Both finalists
+  of run 2 are `param_local` children -- the model wrote none of the two
+  directly; see lineage below for whether a `rewrite` is among the ancestors.
+  Test started 11:51.
+  Lineage: `g011-c0087` ← `g004-c0032` (param_local) ← **`g003-c0018` (rewrite,
+  sonnet-5)** ← `g002-c0017` (rewrite) ← seed; `g009-c0073` ← `g003-c0018` ←
+  `g002-c0017` ← seed. So *every* ranked improvement of run 2 descends from two
+  consecutive model rewrites in generations 2-3 (the 99.13 step), and the local
+  operator refined from there. That is the honest description of what the
+  model contributed: the first move, not the last.
