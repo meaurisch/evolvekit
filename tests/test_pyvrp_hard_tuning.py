@@ -51,7 +51,8 @@ def test_the_miniature_is_the_real_setup_with_smaller_numbers():
     assert real_stages["full"]["workers"] == 3 and real_stages["full"]["pin_cpus"] == [2, 4, 6]
 
 
-def test_the_second_run_is_the_first_with_a_model_among_the_operators_and_racing():
+def test_the_second_run_is_the_first_with_a_model_among_the_operators_and_racing(monkeypatch):
+    monkeypatch.setattr("os.cpu_count", lambda: 8)  # both pin CPUs 2, 4, 6: the benchmark machine's, not CI's
     real = load_config(BENCH / "tuning.yaml")
     second = load_config(BENCH / "tuning.llm.yaml")
     assert second.problem.parameters.names == real.problem.parameters.names
@@ -65,7 +66,7 @@ def test_the_second_run_is_the_first_with_a_model_among_the_operators_and_racing
 
 
 def test_the_tuned_configurations_are_valid_points_of_the_space():
-    space = load_config(BENCH / "tuning.yaml").problem.parameters
+    space = load_config(BENCH / "tuning.smoke.yaml").problem.parameters  # the same space, and it loads on any machine
     for path in sorted((BENCH / "tuned").glob("*.yaml")):
         values = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert list(values) == space.names, path.name
