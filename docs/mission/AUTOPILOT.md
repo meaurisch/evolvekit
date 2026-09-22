@@ -125,3 +125,16 @@ Never start a second one next to a living one.
 * **15:30:** the autopilot took over by itself and started the second run
   (`runs/pyvrp-hard-llm`); at 16:38 it was in generation 1's full stage, 2 model
   calls, $0.056, no failures.
+* **2026-09-22 07:51, the second run finished** (12/12 generations, 16.3 h,
+  540 evaluations, 32 failed, **$0.53 over 29 model calls**, 97.6 k tokens):
+  best `g009-c0073` at **98.98 %** of the defaults on the search's seed
+  (+1.02 %, t = 2.27) -- against run 1's 97.71 % (+2.29 %). Trajectory:
+  99.44 (gen 2) → 99.13 (gen 3) → flat five generations → 98.98 (gen 9) → flat.
+  Operators drawn: `param_local` 46, `rewrite` 23 (+2 big steps by opus-5),
+  `param_tpe` 19, `param_lhs` 6. Racing fired 3 times of 97. **All 32 failures
+  are 900 s timeouts: t02 ×20, t03 ×10, t08 ×2** (with retries) -- far more
+  than run 1's 16, so this run lost more full-stage candidates to the solver
+  hang than run 1 did; 88 of 97 candidates never ranked. Validation started
+  07:51 by itself. For section 4.2: per-operator share of the promoted/ranked
+  candidates and of the best, and whether the `rewrite` children were the ones
+  that timed out (the model may push parameters into the hang region).
