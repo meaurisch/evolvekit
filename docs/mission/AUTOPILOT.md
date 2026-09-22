@@ -1,5 +1,7 @@
 # Autopilot: what runs by itself after the first tuning run, and what is left for a session
 
+> **Done, 2026-09-22 22:52.** Every step below finished; the session work listed under "What is left" was done on 2026-09-23 and the result is in `REPORT.md` §4. This file is kept as the record of how the measurements were run.
+
 Written 2026-09-21. The measurements of `benchmarks/pyvrp_hard/TUNING_PLAN.md`
 take about two days of solver time on one laptop. None of them needs a person,
 so none of them waits for one.

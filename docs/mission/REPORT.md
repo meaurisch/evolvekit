@@ -1,10 +1,12 @@
 # Making evolvekit good at real, expensive tuning runs — report
 
-> **Status of this document: DRAFT.** Sections 1–3 and 5–8 describe work that is
-> done and verified as stated. Section 4 (the result) is **pending**: the tuning
-> run was started on 2026-09-20 07:40 and takes about 18 hours, followed by the
-> validation and the held-out test. No number in section 4 exists yet, and none
-> is anticipated here.
+> **Final, 2026-09-23.** Two tuning runs, seven confirmations, 32 open pull
+> requests (#13–#44), none merged. **The one-line result:** tuning PyVRP's
+> defaults for ten minutes per instance on this laptop buys **+1.2 % [+0.5,
+> +1.9]** on seeds the search never saw — real, small, half of what the search
+> itself claimed; a model among the operators cost $0.53 and changed nothing
+> measurable (+0.1 % [−0.5, +0.7] head-to-head). Section 4 has the tables and
+> the caveats, including a solver hang that is still open.
 
 The brief named three disappointments from a real tuning trial — not being able
 to see what a run is doing, runs that break or lose work, and results that did
@@ -18,7 +20,7 @@ working notes are next to this file.
 
 ## 1. What was built
 
-29 pull requests, #13–#41. Bug fixes started from a failing test; features are
+32 pull requests, #13–#44. Bug fixes started from a failing test; features are
 stacked, and each PR names a compare link that shows its own diff.
 
 ### Observability
@@ -53,7 +55,7 @@ stacked, and each PR names a compare link that shows its own diff.
 | #14 | only fully evaluated candidates compete (closes issue #6) |
 | #25 | `normalize: baseline` — every instance has the same say |
 | #27 | model-free operators that use what the run has learnt (`param_local`, `param_cross`, `param_tpe`), measured against `param_lhs` in two regimes, including the one where they do not help |
-| #20 #31 | the run's own improvement carries a noise verdict and says why it is optimistic; **`confirm`** makes the honest measurement: paired, interleaved, unseen seeds and instances, confidence interval, exact Wilcoxon test, exit code |
+| #20 #31 #43 | the run's own improvement carries a noise verdict and says why it is optimistic; **`confirm`** makes the honest measurement: paired, interleaved, unseen seeds and instances, confidence interval, exact Wilcoxon test, exit code; and (#43) the winners of two runs against each other in one interleaved comparison (`ID@RUN_DIR`, `--against`) |
 
 ### The generic user
 
@@ -66,11 +68,13 @@ stacked, and each PR names a compare link that shows its own diff.
 | #29 | `{python}` — a bare `python` silently ran another interpreter, and another version of the solver |
 | #31 | `export` (JSON, YAML, flags, code) |
 | #33 | `init --template tune` writes a setup that runs; `examples/cli-solver/` walks the whole path |
+| #42 | `.env` is read, as the README always said; values are never printed |
 
 ### The benchmark
 
 | PR | What |
 |---|---|
+| #44 | the second run's setup (`tuning.llm.yaml`), both tuned configurations (`tuned/`), the result; `solve.py` dumps its stack when the solver hangs |
 | #23 | `benchmarks/pyvrp_hard/`: a seeded, bit-reproducible generator; 10 tuning instances (1000–3000 clients), 4 fresh ones, 2 smoke instances; every modelling feature of PyVRP 0.14.0 in every instance (verified from the installed package, and all instances verified feasible with the defaults); `solve.py`, a command-line front end with 27 tunables as flags; manifest with SHA-256 |
 | #30 | the tuning setup (`tuning.yaml`, `tuning.smoke.yaml`) and the plan, committed before the run |
 

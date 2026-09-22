@@ -38,6 +38,7 @@ each section.
 | [#41](https://github.com/meaurisch/evolvekit/pull/41) | `feat/racing` (on #40) | `race: {after, margin_pct}` | tractability |
 | [#42](https://github.com/meaurisch/evolvekit/pull/42) | `feat/dotenv` (on #41) | `.env` is read, as the README said; values never printed | X (docs promised it) |
 | [#43](https://github.com/meaurisch/evolvekit/pull/43) | `feat/confirm-across-runs` (on #42) | `confirm`: `ID@RUN_DIR` and `--against` -- the winners of two runs in one interleaved comparison | result quality |
+| [#44](https://github.com/meaurisch/evolvekit/pull/44) | `bench/pyvrp-hard-second-run` (on #43 + #30) | the second (LLM-mixed) run's setup, both tuned configurations, the result; `solve.py` dumps its stack on a hang | benchmark |
 
 Stack base for features: `c0bfd0d` = `origin/master` + the six fix branches.
 Every stacked PR names a compare link that shows its own diff.
@@ -117,3 +118,7 @@ something you wanted to know, that is a dashboard requirement")
   layouts are verified with the browser pane's mobile emulation instead.
 * Screenshots for the public repo are taken from `dashboard --export` files
   with local paths replaced (`scratchpad/export_scrubbed.py`).
+
+## Done (2026-09-23 01:00)
+
+Both runs, seven confirmations and the report are finished; `docs/mission/REPORT.md` is the deliverable. 32 PRs (#13-#44) open, none merged, `master` untouched. Dashboards for the two runs: `.claude/launch.json` (`dashboard-run1`, `dashboard-run2`).
