@@ -1,0 +1,33 @@
+# The tuning setup in miniature: the same parameters, operators and stage
+# shapes as tuning.yaml, on the two smoke instances with seconds instead of
+# minutes. For checking that the whole path works on a new machine --
+# interpreter, PyVRP, the dashboard -- before committing a day to it. No
+# `pin_cpus` here, so that it loads on any machine; tuning.yaml pins.
+#
+#   python -m evolvekit run --config tuning.smoke.yaml --run-dir ../../runs/pyvrp-smoke --dashboard
+extends: tuning.yaml
+
+evaluate:
+  stages:
+    - {id: static, kind: builtin-static}
+    - id: screen
+      kind: command
+      command: "{python} solve.py --instance {instance} --seed {seed} --time-limit 3 {params}"
+      kpis_from: stdout
+      instances: [smoke/s01-n60-uniform-mixed.json]
+      timeout: 60
+      workers: 2
+      retries: 1
+      promote: {top_k_per_generation: 2}
+    - id: full
+      kind: command
+      command: "{python} solve.py --instance {instance} --seed {seed} --time-limit 8 {params}"
+      kpis_from: stdout
+      instances: ["smoke/*.json"]
+      timeout: 60
+      workers: 2
+      retries: 1
+
+search:
+  children_per_generation: 4
+  generations: 3
