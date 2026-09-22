@@ -240,3 +240,13 @@ def test_css_custom_properties_reach_the_element():
     page = PAGE.read_text(encoding="utf-8")
     assert 'style: { "--' in page, "no custom property is passed any more: this test can go"
     assert "node.style.setProperty(" in page
+
+
+def test_an_absent_block_is_not_the_word_null():
+    """`h()` skips a `null` child; `replaceChildren` does not -- it renders the
+    text "null". The health card returns `null` for the host-load warning when
+    the machine was the run's alone, and the second real run showed the word
+    where the warning would have been."""
+    page = PAGE.read_text(encoding="utf-8")
+    assert "function fill(id, kids) { $(id).replaceChildren(...[kids].flat().filter((kid) => kid != null && kid !== false)); }" in page
+    assert "$(\"health\").replaceChildren(" not in page, "the health card is redrawn every tick through its own call: it has to go through `fill` too"
