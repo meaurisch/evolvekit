@@ -161,3 +161,12 @@ Never start a second one next to a living one.
   (the large instances t07, t09, t10 gain +1.7 to +2.3 %) with a smaller mean
   and two losses. `confirm` exited 1, as it should; the autopilot went on to
   the fresh instances at 15:42 as designed.
+* **2026-09-22 17:12, fresh instances of run 2 finished:** `g011-c0087`
+  +1.05 %, 95 % CI [+0.10, +2.00], 4 of 4 better, p = 0.125, 11 of 12 pairs
+  (one f02 pair lost to a timeout -- the first timeout seen on a fresh
+  instance). The interval excludes zero, so by the plan's rule this one is
+  "better", where run 1's fresh result (+1.40 %, [-0.54, +3.33]) was not --
+  with four instances the verdict hangs on the spread, not the mean, and the
+  two runs' fresh estimates are within each other's intervals. Report both
+  fresh results side by side and say exactly that. **Head-to-head started
+  17:12** (84 runs, ≈ 4.7 h → ≈ 22:00).
