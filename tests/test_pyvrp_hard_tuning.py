@@ -51,10 +51,21 @@ def test_the_miniature_is_the_real_setup_with_smaller_numbers():
     assert real_stages["full"]["workers"] == 3 and real_stages["full"]["pin_cpus"] == [2, 4, 6]
 
 
-def test_the_second_run_is_the_first_with_a_model_among_the_operators_and_racing(monkeypatch):
-    monkeypatch.setattr("os.cpu_count", lambda: 8)  # both pin CPUs 2, 4, 6: the benchmark machine's, not CI's
-    real = load_config(BENCH / "tuning.yaml")
-    second = load_config(BENCH / "tuning.llm.yaml")
+def test_the_second_run_is_the_first_with_a_model_among_the_operators_and_racing(tmp_path, monkeypatch):
+    # The real configs pin CPUs 2, 4, 6 and list instances that are generated, not committed:
+    # load copies on a machine that has the CPUs and the files.
+    monkeypatch.setattr("os.cpu_count", lambda: 8)
+    (tmp_path / "instances").mkdir()
+    for name in ("t01", "t04", "t07", "t10"):
+        (tmp_path / "instances" / f"{name}.json").write_text("{}", encoding="utf-8")
+    for name in ("tuning.yaml", "tuning.llm.yaml"):
+        text = (BENCH / name).read_text(encoding="utf-8")
+        for old in ("instances/t01-n1000-uniform-city-tight.json", "instances/t04-n1600-metro-mixed.json",
+                    "instances/t07-n2200-clustered-region-mixed.json", "instances/t10-n3000-corridor-mixed.json"):
+            text = text.replace(old, "instances/" + old[10:13] + ".json")
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    real = load_config(tmp_path / "tuning.yaml")
+    second = load_config(tmp_path / "tuning.llm.yaml")
     assert second.problem.parameters.names == real.problem.parameters.names
     assert [s.command for s in second.evaluate.stages] == [s.command for s in real.evaluate.stages]
     assert second.search.uses_llm and second.search.operators["rewrite"] == 0.35
