@@ -72,7 +72,9 @@ def test_every_evaluator_run_reports_it(tmp_path):
 # -- what the status document makes of it ----------------------------------
 
 
-def _run_with_loads(tmp_path, loads: list[float], *, workers: int = 3, cpus: int | None = 8) -> RunDir:
+def _run_with_loads(
+    tmp_path, loads: list[float], *, workers: int = 3, cpus: int | None = 8, duration: float = 600.0
+) -> RunDir:
     run = RunDir(tmp_path)
     extra = {} if cpus is None else {"cpus": cpus}
     run.event(
@@ -83,7 +85,7 @@ def _run_with_loads(tmp_path, loads: list[float], *, workers: int = 3, cpus: int
     )
     for index, load in enumerate(loads):
         run.event("eval_finished", 900 - index, candidate_id=f"g001-c{index + 2:04d}", stage="full", seed=0,
-                  private=False, instance="a", attempt=0, ok=True, duration_s=600.0, kpis={"cost": 1.0},
+                  private=False, instance="a", attempt=0, ok=True, duration_s=duration, kpis={"cost": 1.0},
                   host_busy=load)
     return run
 
@@ -115,6 +117,19 @@ def test_a_machine_that_is_busier_than_explained_throughout_is_said_so_once(tmp_
     stage = document["health"]["host"]["stages"][0]
     assert stage["flagged"] == 0 and stage["busier_throughout"] is True
     assert "busier than explained throughout" in render_text(document)
+
+
+def test_short_runs_are_not_judged(tmp_path):
+    """Starting a process and the timer's granularity dominate a run of a
+    fraction of a second: on a quiet 8-CPU machine fifteen 0.15 s evaluations
+    measured busy shares from 0.125 to 0.406, and two were flagged as having
+    shared the machine. Only runs long enough to be measured count."""
+    _run_with_loads(tmp_path, [0.13, 0.41, 0.21, 0.40, 0.23, 0.22], workers=1, duration=0.15)
+    document = build_status(tmp_path, now=NOW)
+    host = document["health"]["host"]
+    assert host["flagged"] == 0
+    assert all(not s["busier_throughout"] for s in host["stages"])
+    assert "host load" not in render_text(document)
 
 
 def test_a_cached_result_and_an_old_run_directory_have_no_load_to_speak_of(tmp_path):

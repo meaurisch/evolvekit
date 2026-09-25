@@ -607,7 +607,9 @@ own, and the framework knows what it could not know before:
   evaluator run therefore records `host_busy`, the share of all logical CPUs
   that were busy with *anything* while it ran; `status` and the dashboard say
   how many runs shared the machine with something the run's own workers do not
-  explain (Windows and Linux; elsewhere nothing is recorded or flagged).
+  explain (Windows and Linux; elsewhere nothing is recorded or flagged). Runs
+  shorter than 5 s are not judged: over a fraction of a second, starting the
+  process says more than the machine does.
 - **A failure with an address.** A crash is *this* instance, *this* seed, *this*
   attempt, with log files of its own (`work/stage_out/<id>.<stage>.<instance>.seed0[.try1].*`;
   when two instance names would make the same file name, such as `a b` and `a_b`,

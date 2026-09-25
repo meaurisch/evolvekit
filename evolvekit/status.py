@@ -53,6 +53,11 @@ from evolvekit.search.params import current_values, declared_ranges
 __all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
 
 SCHEMA = 1
+
+HOST_LOAD_MIN_RUN_S = 5.0
+"""Evaluator runs shorter than this are not judged for host load: over a
+fraction of a second, starting the process and the timer's granularity say
+more than the machine does."""
 """Bumped when a key changes meaning or disappears. Adding keys does not."""
 
 STALL_AFTER_BEATS = 4
@@ -630,6 +635,9 @@ class _Run:
         measured = [
             e for e in finished
             if not e.get("cached") and _number(e.get("host_busy")) is not None
+            # Starting a process and the timer's granularity dominate a short
+            # run: fifteen 0.15 s runs on a quiet machine read 0.13 to 0.41.
+            and (_number(e.get("duration_s")) or 0.0) >= HOST_LOAD_MIN_RUN_S
         ]
         if not isinstance(cpus, int) or cpus < 1 or not measured:
             return {"available": False, "flagged": 0, "stages": []}
