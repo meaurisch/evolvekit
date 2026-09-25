@@ -105,13 +105,13 @@ evaluate:
       import_check: true
     - id: proxy            # seconds; a subset
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [small_set]
       timeout: 120
       promote: {top_k_per_generation: 2}
     - id: full             # the real thing, plus a private hold-out
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [full_set]
       private_inputs: [holdout_set]
       timeout: 300

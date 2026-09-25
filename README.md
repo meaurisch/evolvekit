@@ -525,7 +525,7 @@ placeholder in its command:
 ```yaml
 - id: full
   kind: command
-  command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+  command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
   inputs: [full]
   timeout: 9000     # per run, not per stage
   seeds: 3
