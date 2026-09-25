@@ -227,3 +227,13 @@ def test_a_sample_at_the_edge_of_a_range_is_rounded_into_it_not_out_of_it(log):
     for unit in (-0.5, 0.0, 1e-12, 0.5, 1.0 - 1e-12, 1.0, 1.5):
         value = parameter.from_unit(unit)
         assert parameter.problem_with(value) is None, (unit, value)
+
+
+def test_a_numeric_choice_is_the_value_that_was_declared():
+    # configure() is read back as JSON, and a model may well write 2.0 for the
+    # declared 2. `2.0 in (1, 2, 4)` is true, so the value passed validation --
+    # and went to the solver as `--threads 2.0`, which an integer option refuses.
+    space = ParameterSpace.parse({"threads": {"type": "choice", "choices": [1, 2, 4], "default": 1}})
+    resolved, problems = space.validate({"threads": 2.0})
+    assert problems == [] and resolved == {"threads": 2} and isinstance(resolved["threads"], int)
+    assert space.render_flags(resolved) == ["--threads", "2"]

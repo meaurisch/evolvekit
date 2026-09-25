@@ -207,6 +207,11 @@ class Parameter:
             return int(round(float(value)))
         if self.type == "float":
             return float(value)
+        if self.type == "choice":
+            # The declared value that matched, not the one that was given:
+            # `2.0 in (1, 2, 4)` is true, and a solver told `--threads 2.0`
+            # by a configure() that wrote 2.0 refuses an integer option.
+            return self.choices[self.choices.index(value)]
         return value
 
     def to_unit(self, value: Any) -> float:
