@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -104,6 +105,7 @@ class EventLog:
         self.session = session or uuid.uuid4().hex[:8]
         self._lock = threading.Lock()
         self._seq: int | None = None
+        self._warned = False
 
     def _open_sequence(self) -> int:
         """Pick the numbering up where the last session left it.
@@ -128,21 +130,38 @@ class EventLog:
         return last
 
     def emit(self, type: str, **fields: Any) -> dict[str, Any]:
-        """Append one event and return it as written."""
+        """Append one event and return it as written.
+
+        An event that cannot be written is lost, not raised: a sync client or a
+        virus scanner holding the file for a moment must not end a day-long
+        run, nor replace the exception a `run_crashed` event was reporting. The
+        numbering goes on regardless, so a gap in `seq` marks the loss; the
+        first one is reported on stderr, since the log itself cannot carry it.
+        """
         with self._lock:
-            if self._seq is None:
-                self._seq = self._open_sequence()
-            self._seq += 1
-            event = {
-                "seq": self._seq,
+            event: dict[str, Any] = {
+                "seq": None,
                 "ts": utc_now(),
                 "session": self.session,
                 "pid": os.getpid(),
                 "type": type,
                 **_jsonable(fields),
             }
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(event, allow_nan=False) + "\n")
+            try:
+                if self._seq is None:
+                    self._seq = self._open_sequence()
+                self._seq += 1
+                event["seq"] = self._seq
+                with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json.dumps(event, allow_nan=False) + "\n")
+            except OSError as exc:
+                if not self._warned:
+                    self._warned = True
+                    print(
+                        f"evolvekit: could not write {self.path} ({exc}); the run "
+                        "goes on, and events are lost until writing works again",
+                        file=sys.stderr,
+                    )
             return event
 
 

@@ -21,7 +21,13 @@ import pytest
 
 from evolvekit import events as events_module
 from evolvekit.config import load_config
-from evolvekit.events import EventLog, Heartbeat, read_events, read_heartbeat
+from evolvekit.events import (
+    EVENTS_FILE,
+    EventLog,
+    Heartbeat,
+    read_events,
+    read_heartbeat,
+)
 from evolvekit.providers.fake import FakeProvider
 from evolvekit.search.driver import Driver
 from tests.conftest import EXAMPLE_CONFIG
@@ -96,6 +102,42 @@ def test_values_json_cannot_hold_are_written_as_text_rather_than_lost(tmp_path):
 def test_reading_a_directory_that_has_no_log_is_empty_not_an_error(tmp_path):
     assert read_events(tmp_path / "nowhere") == []
     assert read_heartbeat(tmp_path / "nowhere") is None
+
+
+def _events_file_unwritable(monkeypatch, failures: int | None = None) -> dict:
+    """Make appending to `events.jsonl` fail: `failures` times, or for good.
+
+    What a sync client or a virus scanner holding the file does on Windows."""
+    real_open = Path.open
+    left = {"failures": failures}
+
+    def open_(self, mode="r", *args, **kwargs):
+        if self.name == EVENTS_FILE and "a" in mode and left["failures"] != 0:
+            if left["failures"] is not None:
+                left["failures"] -= 1
+            raise PermissionError(13, "sharing violation", str(self))
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_)
+    return left
+
+
+def test_an_event_that_cannot_be_written_is_lost_not_fatal(tmp_path, monkeypatch, capsys):
+    log = EventLog(tmp_path, session="s1")
+    log.emit("first")
+    _events_file_unwritable(monkeypatch, failures=2)
+
+    log.emit("lost")
+    log.emit("lost too")
+    log.emit("after")
+
+    events = read_events(tmp_path)
+    assert [e["type"] for e in events] == ["first", "after"]
+    # The numbering goes on, so the gap shows where events went missing.
+    assert [e["seq"] for e in events] == [1, 4]
+    warning = capsys.readouterr().err
+    assert warning.count("could not write") == 1, "warn once, not once per event"
+    assert EVENTS_FILE in warning and "sharing violation" in warning
 
 
 # -- the heartbeat ---------------------------------------------------------
@@ -341,3 +383,28 @@ def test_a_crash_inside_the_loop_is_recorded_before_it_propagates(tmp_path):
     assert last["type"] == "run_crashed"
     assert "RuntimeError: the unexpected" in last["error"]
     assert read_heartbeat(tmp_path / "run")["phase"] == "crashed"
+
+
+@pytest.mark.slow
+def test_a_crash_is_still_the_crash_when_the_event_log_cannot_be_written(
+    tmp_path, monkeypatch
+):
+    """The observer must not replace what it observes: with `events.jsonl`
+    unwritable throughout, the run still fails with its own error, and the
+    heartbeat still records how it ended."""
+    config = load_config(EXAMPLE_CONFIG)
+
+    class Exploding(FakeProvider):
+        def complete(self, *args, **kwargs):
+            raise RuntimeError("the unexpected")
+
+    provider = Exploding(["never reached"])
+    driver = Driver(
+        config, run_dir=tmp_path / "run", providers={"small": provider, "strong": provider}
+    )
+    _events_file_unwritable(monkeypatch)
+    with pytest.raises(RuntimeError, match="the unexpected"):
+        driver.run()
+    assert read_events(tmp_path / "run") == []
+    assert read_heartbeat(tmp_path / "run")["phase"] == "crashed"
+    assert not (tmp_path / "run" / ".lock").exists()
