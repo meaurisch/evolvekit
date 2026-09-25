@@ -14,17 +14,22 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import math
 import shlex
 import subprocess
 import sys
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, stdev
 from typing import Any, Callable
 
-from evolvekit.config import ProblemConfig, StageConfig
-from evolvekit.evaluate.process import read_tail, run_bounded
+from evolvekit.config import ProblemConfig, StageConfig, embedded_params
+from evolvekit.evaluate.cache import EvalCache
+from evolvekit.evaluate.hostload import HostLoad
+from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
 
 __all__ = [
@@ -32,6 +37,8 @@ __all__ = [
     "run_command_stage",
     "static_checks",
     "build_argv",
+    "Configuration",
+    "UnitContext",
     "STDERR_LIMIT",
     "FEEDBACK_LIMIT",
 ]
@@ -116,7 +123,20 @@ def run_static_stage(
     started = time.perf_counter()
     problems, kpis = static_checks(source, problem)
     stderr = ""
-    if not problems and stage.import_check:
+    params: dict[str, Any] | None = None
+    if not problems and problem.parameters is not None:
+        # The candidate has to be run to know what it configures, so the import
+        # check and the resolution are one child interpreter, not two.
+        values, crash = _resolve_parameters(candidate_path, stage.timeout)
+        if crash is not None:
+            problems.append(crash.splitlines()[-1][:200] if crash.strip() else "configure() failed")
+            stderr = crash
+        else:
+            params, invalid = problem.parameters.validate(values)
+            problems.extend(f"configure() returned an invalid configuration -- {p}" for p in invalid)
+            if invalid:
+                params = None
+    elif not problems and stage.import_check:
         crash = _import_check(candidate_path, stage.timeout)
         if crash is not None:
             problems.append(crash.splitlines()[-1][:200] if crash.strip() else "import failed")
@@ -125,6 +145,7 @@ def run_static_stage(
         stage_id=stage.id,
         ok=not problems,
         kpis=kpis,
+        params=params,
         failure="; ".join(problems) if problems else None,
         stderr=stderr[-STDERR_LIMIT:],
         duration_s=time.perf_counter() - started,
@@ -157,6 +178,80 @@ def _import_check(candidate_path: Path, timeout: float) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class UnitContext:
+    """What one run of a per-instance stage knows beyond its seed."""
+
+    instance: str
+    """As the command receives it in `{instance}`."""
+    name: str
+    """As people read it: `StageConfig.instance_names`."""
+    attempt: int = 0
+    cpus: tuple[int, ...] = ()
+    cancel: threading.Event | None = None
+
+    def labels(self) -> dict[str, Any]:
+        return {"instance": self.name, "attempt": self.attempt}
+
+
+@dataclass(frozen=True)
+class Configuration:
+    """A candidate's validated parameters, in the two shapes a command can take
+    them: `--flag value` arguments for `{params}`, a JSON file for
+    `{params_json}`."""
+
+    flags: tuple[str, ...] = ()
+    json_path: Path | None = None
+
+
+def _substitutions(configuration: "Configuration | None") -> dict[str, Any]:
+    if configuration is None:
+        return {}
+    return {"params_flags": list(configuration.flags), "params_json": configuration.json_path}
+
+
+_PARAMS_MARKER = "__EVOLVEKIT_PARAMS__"
+
+
+def _resolve_parameters(
+    candidate_path: Path, timeout: float
+) -> tuple[Any, str | None]:
+    """Import the candidate in a child interpreter and call `configure()`.
+
+    Returns `(values, None)` or `(None, what went wrong)`. The values come back
+    as JSON on a marked line, so anything the candidate prints is harmless.
+    """
+    snippet = (
+        "import importlib.util as u, json, sys;"
+        "spec = u.spec_from_file_location('evolvekit_candidate', sys.argv[1]);"
+        "mod = u.module_from_spec(spec);"
+        "spec.loader.exec_module(mod);"
+        f"print('\\n{_PARAMS_MARKER}' + json.dumps(mod.configure()))"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", snippet, str(candidate_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"configure() timed out after {timeout:g}s"
+    except OSError as exc:  # pragma: no cover - interpreter is always present
+        return None, f"could not start interpreter: {exc}"
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout or "configure() failed").strip()
+    for line in reversed((proc.stdout or "").splitlines()):
+        if line.startswith(_PARAMS_MARKER):
+            try:
+                return json.loads(line[len(_PARAMS_MARKER):]), None
+            except json.JSONDecodeError as exc:
+                return None, f"configure() returned something that is not JSON: {exc}"
+    return None, "configure() returned nothing"
+
+
 def build_argv(
     command: str,
     *,
@@ -164,22 +259,50 @@ def build_argv(
     inputs: tuple[str, ...] | list[str],
     out: Path,
     seed: int = 0,
+    params_flags: list[str] | None = None,
+    params_json: Path | None = None,
+    instance: str | None = None,
 ) -> list[str]:
     """Split the template first, substitute second.
 
     Splitting after substitution would let a Windows path's backslashes be eaten
     by POSIX shlex, and would let a filename with a space become two arguments.
+
+    `{python}` is the interpreter evolvekit itself is running on. A bare
+    `python` is whatever the operating system finds first -- inside a virtual
+    environment on Windows that is the *base* interpreter beside the launcher,
+    with another set of installed packages and, silently, another version of
+    the solver.
+
+    `{params}` on its own expands to *several* arguments -- one `--flag value`
+    pair per declared parameter -- which is the other reason substitution has
+    to happen after the split. `{params_json}` is the path of a JSON file with
+    the same values, for a solver that would rather read a file. Only as a
+    whole token, though: see `embedded_params`, which the config check shares.
     """
     tokens = shlex.split(command, posix=True)
     if not tokens:
         raise ValueError("stage command is empty")
+    embedded = embedded_params(command)
+    if embedded is not None:
+        raise ValueError(embedded)
+    flags = list(params_flags or [])
     mapping = {
         "candidate": str(candidate),
         "inputs": ",".join(inputs),
         "out": str(out),
         "seed": str(seed),
+        "python": sys.executable,
+        "instance": instance or "",
+        "params_json": str(params_json) if params_json is not None else "",
     }
-    return [token.format(**mapping) for token in tokens]
+    argv: list[str] = []
+    for token in tokens:
+        if token == "{params}":
+            argv.extend(flags)
+        else:
+            argv.append(token.format(**mapping))
+    return argv
 
 
 def run_command_stage(
@@ -192,6 +315,8 @@ def run_command_stage(
     private: bool = False,
     required_kpis: tuple[str, ...] = (),
     observer: Observer | None = None,
+    configuration: "Configuration | None" = None,
+    cache: "EvalCache | None" = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -219,6 +344,8 @@ def run_command_stage(
             seed=0,
             required_kpis=required_kpis,
             observer=observer,
+            configuration=configuration,
+            cache=cache,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -232,6 +359,8 @@ def run_command_stage(
             seed=seed,
             required_kpis=required_kpis,
             observer=observer,
+            configuration=configuration,
+            cache=cache,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -320,30 +449,69 @@ def _run_once(
     seed: int = 0,
     required_kpis: tuple[str, ...] = (),
     observer: Observer | None = None,
+    configuration: "Configuration | None" = None,
+    unit: "UnitContext | None" = None,
+    cache: "EvalCache | None" = None,
 ) -> StageOutcome:
     """One evaluator run, announced to `observer` before and after.
 
     The two events bracket the subprocess itself, so a reader of the event log
     can tell at any moment which run is in flight and for how long it has been.
+    `unit` is what a per-instance stage adds: which instance this run is for,
+    which attempt it is, where it is pinned and how it can be called off.
     """
+    labels = unit.labels() if unit is not None else {}
     if observer is not None:
-        observer("eval_started", seed=seed, timeout_s=stage.timeout)
-    outcome = _execute_once(
-        candidate_path,
-        stage,
-        inputs=inputs,
-        out_path=out_path,
-        cwd=cwd,
-        private=private,
-        seed=seed,
-        required_kpis=required_kpis,
-    )
+        observer("eval_started", seed=seed, timeout_s=stage.timeout, **labels)
+    key = known = None
+    if cache is not None:
+        key = cache.key(
+            stage_id=stage.id,
+            command=stage.command,
+            reading=(stage.kpis_from, stage.kpi_patterns),
+            flags=configuration.flags if configuration is not None else (),
+            candidate_path=candidate_path,
+            inputs=inputs,
+            instance=unit.instance if unit is not None else None,
+            seed=seed,
+            private=private,
+            cwd=cwd,
+        )
+        known = cache.load(key, stage.id, private, timeout=stage.timeout)
+        if known is not None and _missing_required(known.kpis, required_kpis) is not None:
+            known = None  # kept under another objective: not an answer to this question
+    if known is not None:
+        outcome = known
+    else:
+        load = HostLoad().start()
+        outcome = _execute_once(
+            candidate_path,
+            stage,
+            inputs=inputs,
+            out_path=out_path,
+            cwd=cwd,
+            private=private,
+            seed=seed,
+            required_kpis=required_kpis,
+            configuration=configuration,
+            unit=unit,
+        )
+        outcome.host_busy = load.stop()
+    if cache is not None and key is not None and not outcome.cached:
+        # Before anything else can go wrong: a result that was paid for is kept.
+        cache.store(key, outcome)
     outcome.stdout_log = str(out_path.with_suffix(".stdout.log"))
     outcome.stderr_log = str(out_path.with_suffix(".stderr.log"))
     try:
         outcome.argv = tuple(
             build_argv(
-                stage.command, candidate=candidate_path, inputs=inputs, out=out_path, seed=seed
+                stage.command,
+                candidate=candidate_path,
+                inputs=inputs,
+                out=out_path,
+                seed=seed,
+                instance=unit.instance if unit is not None else None,
+                **_substitutions(configuration),
             )
         )
     except (ValueError, KeyError, IndexError):
@@ -368,6 +536,9 @@ def _run_once(
             argv=list(outcome.argv),
             stdout_log=outcome.stdout_log,
             stderr_log=outcome.stderr_log,
+            cached=outcome.cached,
+            host_busy=outcome.host_busy,
+            **labels,
             **failed,
         )
     return outcome
@@ -383,6 +554,8 @@ def _execute_once(
     private: bool = False,
     seed: int = 0,
     required_kpis: tuple[str, ...] = (),
+    configuration: "Configuration | None" = None,
+    unit: "UnitContext | None" = None,
 ) -> StageOutcome:
     """Run one external evaluator and read the KPI JSON it wrote to `{out}`."""
     started = time.perf_counter()
@@ -395,6 +568,8 @@ def _execute_once(
             inputs=inputs,
             out=out_path,
             seed=seed,
+            instance=unit.instance if unit is not None else None,
+            **_substitutions(configuration),
         )
     except (ValueError, KeyError, IndexError) as exc:
         return StageOutcome(
@@ -414,8 +589,18 @@ def _execute_once(
         cwd=cwd,
         stdout_path=stdout_log,
         stderr_path=stderr_log,
+        cpus=unit.cpus if unit is not None else (),
+        cancel=unit.cancel if unit is not None else None,
     )
     duration = time.perf_counter() - started
+    if run.cancelled:
+        return StageOutcome(
+            stage_id=stage.id,
+            ok=False,
+            failure="called off: the run was interrupted",
+            duration_s=duration,
+            private=private,
+        )
     if run.error is not None:
         return StageOutcome(
             stage_id=stage.id,
@@ -447,7 +632,7 @@ def _execute_once(
             private=private,
         )
 
-    kpis, vectors, feedback, problem = _read_kpis(out_path)
+    kpis, vectors, feedback, problem = _collect_kpis(stage, out_path, stdout_log)
     if problem is None:
         problem = _missing_required(kpis, required_kpis)
     if problem is not None:
@@ -516,17 +701,82 @@ def _missing_required(
     )
 
 
-def _read_kpis(
-    out_path: Path,
-) -> tuple[dict[str, float], dict[str, list[float]], str, str | None]:
-    """Split the evaluator's output into scalars, vectors and prose.
+Kpis = tuple[dict[str, float], dict[str, list[float]], str, "str | None"]
+"""Scalars, vectors, the evaluator's note, and what was wrong (or `None`)."""
 
-    Scalars are the contract every consumer already relies on -- the score, the
-    penalties, the archive descriptors. A list value is accepted too and kept
-    aside: only the behaviour signature reads it, so an evaluator that emits
-    nothing but scalars behaves exactly as it did before. `text_feedback` sits
-    beside `kpis` rather than inside it, is optional, and is truncated here.
+
+def _collect_kpis(stage: StageConfig, out_path: Path, stdout_log: Path) -> Kpis:
+    """The run's KPIs from wherever the stage says the command reports them:
+    the `{out}` file, the last JSON object on stdout, patterns over its text."""
+    kpis: dict[str, float] = {}
+    vectors: dict[str, list[float]] = {}
+    note = ""
+    if stage.kpis_from == "stdout":
+        payload = _last_json_object(stdout_log)
+        if payload is None:
+            return {}, {}, "", "the program printed no JSON object on stdout"
+        kpis, vectors, note, problem = _parse_kpis(payload)
+        if problem is not None:
+            return {}, {}, "", problem
+    elif "{out}" in stage.command:
+        kpis, vectors, note, problem = _read_kpis(out_path)
+        if problem is not None:
+            return {}, {}, "", problem
+    if stage.kpi_patterns:
+        # The patterns see the last `TAIL_BYTES` of the log, not all of it: a
+        # regular expression over fifty megabytes of progress lines costs what
+        # it costs, and a text result is a short line at the end.
+        printed = read_tail(stdout_log, TAIL_BYTES)
+        for name, pattern in stage.kpi_patterns:
+            # MULTILINE: `^` and `$` are the start and end of a *line*. What a
+            # program prints is lines, and `^Cost: (\d+)` is how anybody writes
+            # "the line that reports the cost"; without the flag `^` meant the
+            # start of the whole output and such a pattern never matched.
+            found = re.findall(pattern, printed, re.MULTILINE)
+            if not found:
+                return {}, {}, "", (
+                    f"`kpi_patterns.{name}` matched nothing in what the program printed"
+                )
+            try:
+                value = float(found[-1])  # a solver logs its progress before its result
+            except ValueError:
+                return {}, {}, "", f"`kpi_patterns.{name}` captured {found[-1]!r}, which is not a number"
+            if not _is_finite(value):
+                return {}, {}, "", _non_finite(name, value)
+            kpis[name] = value
+    return kpis, vectors, note, None
+
+
+def _last_json_object(stdout_log: Path) -> dict[str, Any] | None:
+    """The last line of the log that is a JSON object, from anywhere in it.
+
+    Not from the log's tail: a solver that prints its solution along with its
+    cost prints one line of a few hundred kilobytes, and the last 64 KB of that
+    is the second half of a line -- the run was reported as having printed no
+    JSON object at all. So the whole log is read, a line at a time: memory is
+    bounded by the longest line, not by the log, and only a line that starts
+    with `{` and ends with `}` is handed to the JSON parser.
     """
+    found: dict[str, Any] | None = None
+    try:
+        with open(stdout_log, "rb") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not (line.startswith(b"{") and line.endswith(b"}")):
+                    continue
+                try:
+                    payload = json.loads(line.decode("utf-8", errors="replace"))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    found = payload
+    except OSError:
+        return None
+    return found
+
+
+def _read_kpis(out_path: Path) -> Kpis:
+    """The JSON object the command wrote to `{out}`."""
     if not out_path.is_file():
         return {}, {}, "", f"evaluator wrote no output file at {out_path.name}"
     try:
@@ -535,6 +785,24 @@ def _read_kpis(
         return {}, {}, "", f"evaluator output was not readable JSON: {exc}"
     if not isinstance(payload, dict):
         return {}, {}, "", "evaluator output must be a JSON object"
+    return _parse_kpis(payload)
+
+
+def _parse_kpis(payload: dict[str, Any]) -> Kpis:
+    """Split the evaluator's output into scalars, vectors and prose.
+
+    Scalars are the contract every consumer already relies on -- the score, the
+    penalties, the archive descriptors. A list value is accepted too and kept
+    aside: only the behaviour signature reads it, so an evaluator that emits
+    nothing but scalars behaves exactly as it did before. `text_feedback` sits
+    beside `kpis` rather than inside it, is optional, and is truncated here.
+
+    Two shapes. Under an explicit `"kpis"` key every value has to be a KPI --
+    whoever wrote that key knows the contract, and a string there is a mistake
+    worth hearing about. Without the key the object is the program's *own*
+    result (a solver's `{"cost": ..., "instance": "...", "params": {...}}`):
+    its numbers and booleans are the KPIs and the rest is metadata, left alone.
+    """
 
     feedback = payload.get("text_feedback")
     if feedback is not None and not isinstance(feedback, str):
@@ -547,7 +815,8 @@ def _read_kpis(
     note = (feedback or "").strip()[:FEEDBACK_LIMIT]
 
     raw = payload.get("kpis")
-    if raw is None:
+    foreign = raw is None
+    if foreign:
         # The flat shape: the whole document is the KPI mapping. `text_feedback`
         # is the framework's key, not a KPI, so it never counts as one.
         raw = {k: v for k, v in payload.items() if k != "text_feedback"}
@@ -556,6 +825,9 @@ def _read_kpis(
     kpis: dict[str, float] = {}
     vectors: dict[str, list[float]] = {}
     for key, value in raw.items():
+        if isinstance(value, bool):  # `"feasible": true` is a KPI worth having
+            kpis[str(key)] = 1.0 if value else 0.0
+            continue
         if _is_number(value):
             if not _is_finite(value):
                 return {}, {}, "", _non_finite(key, value)
@@ -566,6 +838,8 @@ def _read_kpis(
                 return {}, {}, "", _non_finite(key, value)
             vectors[str(key)] = [float(v) for v in value]
             continue
+        if foreign:
+            continue  # a name, a nested object, a list with a hole in it: not a KPI
         return (
             {},
             {},

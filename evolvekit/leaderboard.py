@@ -106,7 +106,7 @@ def unfinished_count(rows: Sequence[Mapping[str, Any]]) -> int:
 
 
 def _seed_private(rows: Sequence[dict[str, Any]]) -> float | None:
-    for row in rows:
+    for row in reversed(rows):  # the last seed row: an aborted seed is evaluated again
         if row.get("operator") == "human-seed" and row.get("private_score") is not None:
             return float(row["private_score"])
     return None

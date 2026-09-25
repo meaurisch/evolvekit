@@ -6,7 +6,6 @@ score. Everything else follows from that.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 

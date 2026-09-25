@@ -17,23 +17,34 @@ no-ops, and its winner improved the public set while losing on the hold-out.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import random
+import shlex
 import socket
+import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
 from evolvekit import __version__
 from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
-from evolvekit.candidate import Candidate, extract_block, splice_block
-from evolvekit.config import Config
+from evolvekit.candidate import (
+    SEED_OPERATOR,
+    BlockError,
+    Candidate,
+    extract_block,
+    splice_block,
+)
+from evolvekit.config import TYPED_SPACE_OPERATORS, Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
-from evolvekit.evaluate.cascade import Cascade, finished_final_stage
+from evolvekit.evaluate.cascade import Cascade, finished_final_stage, race_warnings
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.types import EvalResult
-from evolvekit.events import EventLog, Heartbeat
+from evolvekit.events import EventLog, Heartbeat, read_events
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration
@@ -41,13 +52,21 @@ from evolvekit.providers import Provider, build_provider
 from evolvekit.search.archive import Archive
 from evolvekit.search.breadth import AdaptiveBreadth
 from evolvekit.search.novelty import NoveltyIndex, NoveltyVerdict, build_near_backend
-from evolvekit.search.operators import OPERATOR_ROLES, OperatorResult, param_lhs, run_operator
+from evolvekit.search.operators import (
+    OPERATOR_ROLES,
+    OperatorResult,
+    param_cross,
+    param_lhs,
+    param_lhs_typed,
+    param_local,
+    param_tpe,
+    run_operator,
+)
 from evolvekit.search.params import has_params
 from evolvekit.search.scratchpad import Scratchpad
+from evolvekit.search.tuning import Observation
 
 __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
-
-SEED_OPERATOR = "human-seed"
 
 
 def _random_stream(seed: int, recorded: int) -> random.Random:
@@ -66,6 +85,10 @@ def _random_stream(seed: int, recorded: int) -> random.Random:
 
 @dataclass
 class RunSummary:
+    aborted: bool = False
+    """The run stopped because it could not work -- the seed failed its own
+    evaluation, or the model backend kept failing -- rather than because it
+    was done. `stop_reason` says which; `run` exits 4."""
     generations: int = 0
     candidates: int = 0
     rejected: int = 0
@@ -131,11 +154,20 @@ class Driver:
         run_dir: str | Path,
         providers: dict[str, Provider] | None = None,
         log: Callable[[str], None] | None = None,
+        allow_changed_problem: bool = False,
     ) -> None:
         self.config = config
+        self.allow_changed_problem = allow_changed_problem
         self.ledger = Ledger(run_dir)
         self.budget = BudgetGuard(config.budget)
-        self.stop_policy = StopPolicy(config.stop)
+        # `min_big_steps` holds a plateau open until the strong model has been
+        # tried. A run without a model has no big step to wait for, and would
+        # never be allowed to stop on patience.
+        self.stop_policy = StopPolicy(
+            config.stop
+            if config.search.takes_big_steps
+            else replace(config.stop, min_big_steps=0)
+        )
         self.behaviour = BehaviourIndex()
         self.events = EventLog(self.ledger.run_dir)
         self.heartbeat = Heartbeat(self.ledger.run_dir, session=self.events.session)
@@ -151,7 +183,7 @@ class Driver:
         self._log_sink = log or (lambda _msg: None)
         self._providers = providers or {}
 
-        skeleton = config.problem.skeleton.read_text(encoding="utf-8")
+        skeleton = config.problem.skeleton_source()
         self.prefix, self.seed_block, self.suffix = extract_block(
             skeleton, config.problem.block_start, config.problem.block_end
         )
@@ -200,6 +232,78 @@ class Driver:
                 stage=fields.get("stage"),
             )
 
+    def _problem_identity(self) -> dict:
+        """What makes two runs runs of the *same problem*: what is evolved, what
+        it is scored on, and how. Not the search settings, the budget or the
+        number of workers -- those may change between sessions of one run."""
+        config = self.config
+        space = config.problem.parameters
+        return {
+            "skeleton_sha": hashlib.sha256(self.skeleton_source.encode("utf-8")).hexdigest()[:16],
+            "parameters": [
+                {"name": p.name, "type": p.type, "choices": list(p.choices)} for p in space
+            ] if space is not None else None,
+            "objective": config.evaluate.score.objective,
+            "direction": config.evaluate.score.direction,
+            "stages": [
+                {
+                    "id": stage.id, "command": stage.command, "seeds": stage.seeds,
+                    "inputs": list(stage.inputs), "private_inputs": list(stage.private_inputs),
+                    "instances": list(stage.instances), "private_instances": list(stage.private_instances),
+                    "normalize": stage.normalize if stage.fans_out else None,
+                }
+                for stage in config.evaluate.stages
+            ],
+        }
+
+    def _check_same_problem(self) -> None:
+        """Refuse to continue a run directory with a different problem.
+
+        `runs.jsonl` is append-only and the archive is rebuilt from it, so a
+        second problem pointed at the same directory breeds from the first
+        one's candidates and ranks scores that mean different things against
+        each other -- silently. Every session writes down what the problem
+        was; the next one is compared with the *latest* of those, so a change
+        let through once with `--allow-changed-problem` is the problem from
+        then on rather than a refusal at every later session.
+        """
+        if self.allow_changed_problem or not self.ledger.runs():
+            return
+        recorded = None
+        for event in read_events(self.ledger.run_dir):
+            if event.get("type") == "run_started" and isinstance(event.get("problem"), dict):
+                recorded = _comparable(event["problem"])
+        if recorded is None:
+            return  # a run directory from before this was recorded
+        now = _comparable(self._problem_identity())
+        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "stages")
+                   if recorded.get(key) != now[key]]
+        if not changed:
+            return
+        detail = []
+        if "stages" in changed:
+            before = {s.get("id"): s for s in recorded.get("stages") or []}
+            for stage in now["stages"]:
+                old = before.get(stage["id"])
+                if old is None:
+                    detail.append(f"stage {stage['id']!r} is new")
+                else:
+                    detail += [f"stage {stage['id']!r}: `{k}` changed" for k in stage if old.get(k) != stage[k]]
+            detail += [f"stage {sid!r} is gone" for sid in before if sid not in {s["id"] for s in now["stages"]}]
+        detail += [
+            {"skeleton_sha": "the skeleton (or the generated one) changed",
+             "parameters": "the declared parameters changed (names, types or choices)",
+             "objective": f"the objective is now {now['objective']!r}, was {recorded.get('objective')!r}",
+             "direction": f"the direction is now {now['direction']!r}"}[key]
+            for key in changed if key != "stages"
+        ]
+        raise ValueError(
+            f"{self.ledger.run_dir} holds a run of a different problem: " + "; ".join(detail)
+            + ". Its candidates were scored under the old definition, so continuing would rank "
+            "scores against each other that do not mean the same thing. Use a new --run-dir; or, "
+            "if the change really does not affect what a score means, pass --allow-changed-problem"
+        )
+
     def _describe_run(self, *, first_generation: int, planned: int) -> dict:
         """Everything a reader of the run directory needs in order to interpret
         it without the config file: what is optimised, through which stages,
@@ -209,9 +313,14 @@ class Driver:
         return {
             "version": __version__,
             "host": socket.gethostname(),
+            "problem": self._problem_identity(),
+            "cpus": os.cpu_count(),
             "config_path": str(config.source) if config.source else None,
             "objective": config.evaluate.score.objective,
             "direction": config.evaluate.score.direction,
+            "parameters": (
+                config.problem.parameters.describe() if config.problem.parameters else None
+            ),
             "failure_score": config.evaluate.failure_score,
             "stages": [
                 {
@@ -220,8 +329,17 @@ class Driver:
                     "timeout_s": stage.timeout,
                     "seeds": stage.seeds,
                     "promote": stage.promote.describe(),
-                    "holdout": bool(stage.private_inputs),
+                    "holdout": bool(stage.private_inputs or stage.private_instances),
                     "final": stage.id == final,
+                    "instances": list(stage.instance_names()),
+                    "normalize": stage.normalize if stage.fans_out else None,
+                    "race": (
+                        {"after": stage.race.after, "margin_pct": stage.race.margin_pct}
+                        if stage.race is not None else None
+                    ),
+                    "workers": stage.workers,
+                    "pin_cpus": list(stage.pin_cpus),
+                    "retries": stage.retries,
                 }
                 for stage in config.evaluate.stages
             ],
@@ -367,6 +485,9 @@ class Driver:
     def run(self, generations: int | None = None) -> RunSummary:
         """Take the run lock, then search. One writer per run directory."""
         with run_lock(self.ledger.run_dir) as lock:
+            # Before the first event of this session: a refusal must not leave a
+            # "crashed" session behind in a directory it declined to touch.
+            self._check_same_problem()
             self.heartbeat.start(phase="starting")
             try:
                 if lock.reclaimed_from:
@@ -399,26 +520,53 @@ class Driver:
             return summary
 
     def _run(self, generations: int | None) -> RunSummary:
-        total = generations if generations is not None else self.config.search.generations
         summary = RunSummary()
 
         started_at = self.resume()
+        # `search.generations` is the plan for the run *directory*: a run that
+        # died in generation 9 of 12 is resumed to finish the 12, not to start
+        # another 12. An explicit count (`--generations K`) means "K more".
+        planned = self.config.search.generations
+        total = generations if generations is not None else max(0, planned - started_at)
+        if generations is None and started_at and total == 0:
+            summary.stop_reason = (
+                f"the run directory already holds its {planned} planned generation(s); "
+                "`--generations K` runs K more"
+            )
         self.events.emit(
             "run_started",
             **self._describe_run(first_generation=started_at + 1, planned=total),
         )
+        for warning in race_warnings(self.config):
+            self.log(f"warning: {warning}")
         # Not `if started_at`: a run stopped before generation 1 finished holds
         # only its seed, and the seed's generation is 0.
+        seed = None
         if self.archive:
             self.log(
                 f"resumed {len(self.archive)} candidate(s) from runs.jsonl "
                 f"({self.grid.occupancy()})"
             )
-            seed = next((c for c in self.archive if c.operator == SEED_OPERATOR), None)
-            summary.seed_score = seed.score if seed else None
             summary.candidates = len(self.archive)
+            recorded = self._recorded_seed()
+            if recorded is None or not self._seed_failed(recorded):
+                summary.seed_score = recorded.score if recorded else None
+            else:
+                # The last session aborted on this seed, or bred past a seed
+                # that never got through. Running the same command again is
+                # what a retrying wrapper does; it must not step over the abort
+                # and breed against a harness that may still be broken. The
+                # seed is evaluated again first -- the evaluator may have been
+                # fixed in between -- and judged exactly as a fresh run's is.
+                self._forget_behaviour(recorded.id)
+                seed = self._seed_candidate()
+                self.log(
+                    f"gen 0  the recorded seed {recorded.id} did not get through the cascade; "
+                    "evaluating it again before anything is bred"
+                )
         else:
             seed = self._seed_candidate()
+        if seed is not None:
             began = self._generation_started(0, children=0)
             self._evaluate_and_record([seed], generation=0)
             self._generation_finished(0, began, [seed])
@@ -429,17 +577,14 @@ class Driver:
             # A seed that cannot get through the cascade means the harness is
             # broken, not the heuristic. Stop here, before the first LLM call,
             # so a misconfigured evaluator never costs money.
-            if (
-                seed.rejected
-                or seed.last_failure
-                or seed.score == self.config.evaluate.failure_score
-            ):
+            if self._seed_failed(seed):
                 detail = (seed.reject_reason or seed.last_failure or "scored failure_score").strip()
                 first_line = detail.splitlines()[0] if detail else "unknown failure"
                 summary.stop_reason = (
                     "seed failed evaluation — fix the harness before spending: "
                     f"{first_line}"
                 )
+                summary.aborted = True
                 self.log(f"ABORT: {summary.stop_reason}")
                 return self._finalise(summary)
 
@@ -454,19 +599,33 @@ class Driver:
             if decision.stop:
                 summary.stop_reason = decision.reason or "stop policy"
                 break
+            capped = self.budget.check_full_eval()
+            if not capped.allowed:
+                # Breeding on would pay for children -- model calls, cheap
+                # stages -- none of which can reach the stage that counts.
+                summary.stop_reason = (
+                    f"{capped.reason}: no candidate can reach the final stage today. Run the same "
+                    "command again tomorrow, or raise the cap -- it counts candidates admitted to "
+                    "the final stage per calendar day"
+                )
+                break
 
             self._maybe_refresh_scratchpad(generation)
 
             began = self._generation_started(
                 generation, children=self.children_per_generation
             )
-            children = self._breed(generation, plateau=decision.plateau)
+            children = self._adopt_pending(generation)
+            if children is None:
+                children = self._breed(generation, plateau=decision.plateau)
+                self._write_pending(generation, children)
             summary.candidates += len(children)
             viable = [c for c in children if not c.rejected]
             self._evaluate_and_record(viable, generation=generation)
             for child in children:
                 if child.rejected and child.id not in self.results:
                     self._record(child)
+            self._pending_path.unlink(missing_ok=True)
             summary.generations = offset
             self._generation_finished(generation, began, children)
 
@@ -475,6 +634,7 @@ class Driver:
                     f"provider failing ({self._provider_failures} consecutive errors): "
                     f"{self._provider_halt}"
                 )
+                summary.aborted = True
                 self.log(f"ABORT: {summary.stop_reason}")
                 break
 
@@ -503,6 +663,76 @@ class Driver:
 
         return self._finalise(summary)
 
+    def _recorded_seed(self) -> Candidate | None:
+        """The seed as last evaluated: a seed evaluated again after an abort is
+        a second seed row, and the later one is the one that counts."""
+        return next((c for c in reversed(self.archive) if c.operator == SEED_OPERATOR), None)
+
+    def _seed_failed(self, seed: Candidate) -> bool:
+        return bool(
+            seed.rejected
+            or seed.last_failure
+            or seed.score == self.config.evaluate.failure_score
+        )
+
+    def _forget_behaviour(self, candidate_id: str) -> None:
+        """Drop a candidate's behaviour signatures, so that the seed evaluated
+        again is not stopped as a twin of its own failed first attempt."""
+        self.behaviour.by_key = {
+            key: owner for key, owner in self.behaviour.by_key.items() if owner != candidate_id
+        }
+
+    # -- a generation that was interrupted -------------------------------
+
+    @property
+    def _pending_path(self) -> Path:
+        return self.ledger.run_dir / "pending.json"
+
+    def _write_pending(self, generation: int, children: Sequence[Candidate]) -> None:
+        """Write a generation's children down before they cost anything to evaluate.
+
+        A generation is only recorded once its whole cascade has returned --
+        hours, for a slow solver. If the run dies in between, the children (and
+        the model calls that bred them) would be gone, and the resumed run would
+        breed different ones whose evaluations start from nothing. Written
+        down, they are evaluated again under the same ids, and every run that
+        had finished is found in the evaluation cache.
+        """
+        payload = {"generation": generation, "children": [c.to_record() for c in children]}
+        scratch = self._pending_path.with_suffix(".tmp")
+        scratch.write_text(json.dumps(payload), encoding="utf-8")
+        scratch.replace(self._pending_path)
+
+    def _adopt_pending(self, generation: int) -> list[Candidate] | None:
+        try:
+            payload = json.loads(self._pending_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if payload.get("generation") != generation:
+            self._pending_path.unlink(missing_ok=True)  # left by a generation that was recorded after all
+            return None
+        children: list[Candidate] = []
+        for record in payload.get("children") or []:
+            try:
+                child = Candidate.from_record(record)
+            except (BlockError, TypeError):
+                continue
+            if child.id in self.by_id:
+                continue  # recorded before the run died
+            child.source = self._make_source(child.block)
+            suffix = child.id.rsplit("c", 1)[-1]
+            if suffix.isdigit():
+                self._counter = max(self._counter, int(suffix))
+            children.append(child)
+        if not children:
+            return None
+        self.events.emit("generation_adopted", generation=generation, children=len(children))
+        self.log(
+            f"gen {generation:<2} picking up {len(children)} child(ren) bred before the run "
+            "was interrupted; their finished evaluations are looked up, not run again"
+        )
+        return children
+
     def _finalise(self, summary: RunSummary) -> RunSummary:
         summary.best = self.best
         summary.rejected = sum(1 for c in self.archive if c.rejected)
@@ -521,9 +751,7 @@ class Driver:
         summary.totals = self.ledger.totals()
         summary.economics = self._economics()
         summary.children_per_generation = self.children_per_generation
-        archive_payload = self.grid.to_dict()
-        archive_payload["economics_window"] = self.config.stop.economics_window
-        self.ledger.write_archive(archive_payload)
+        self._snapshot_archive()
         return summary
 
     # -- resume: what the run directory has already used up -------------
@@ -607,6 +835,20 @@ class Driver:
             best_fitness=best.fitness if best else None,
             spent_usd=self.budget.state.usd,
         )
+        self._snapshot_archive()
+
+    def _snapshot_archive(self) -> None:
+        """`archive.json`, refreshed. It used to be written once, when a session
+        ended: blank for the whole of a live run, and never written at all by a
+        run that was killed."""
+        payload = self.grid.to_dict()
+        payload["economics_window"] = self.config.stop.economics_window
+        try:
+            self.ledger.write_archive(payload)
+        except OSError as exc:
+            # A view of `runs.jsonl`, rebuilt from it on every resume: one that
+            # cannot be refreshed right now is not worth the run.
+            print(f"evolvekit: archive.json not refreshed ({exc}); the run goes on", file=sys.stderr)
 
     def _seed_candidate(self) -> Candidate:
         return Candidate(
@@ -631,7 +873,7 @@ class Driver:
         """One operator name per child. The big step, when due, takes slot 0."""
         count = self.children_per_generation
         weights = self.config.search.operators
-        sweepable = has_params(self.seed_block)
+        sweepable = self.config.problem.parameters is not None or has_params(self.seed_block)
         names = [
             n
             for n, w in sorted(weights.items())
@@ -639,14 +881,86 @@ class Driver:
         ]
         shares = [weights[n] for n in names]
         if not names:  # only param_lhs configured, against a param-less skeleton
+            if not self.config.search.uses_llm:
+                raise ValueError(
+                    "search.operators gives a share only to `param_lhs`, but the seed "
+                    "block declares no `# PARAMS: {...}` line, so there is nothing to "
+                    "sweep. Declare the block's tunable constants, or give an LLM "
+                    "operator a share (and configure `models`)"
+                )
             names, shares = ["rewrite"], [1.0]
 
         plan = [self.rng.choices(names, weights=shares, k=1)[0] for _ in range(count)]
-        scheduled = generation % self.config.search.big_step_every == 0
-        if scheduled or plateau:
+        every = self.config.search.big_step_every
+        scheduled = every > 0 and generation % every == 0
+        if self.config.search.takes_big_steps and (scheduled or plateau):
             plan[0] = "big_step"
             self.stop_policy.note_big_step()
         return plan
+
+    # -- tuning a declared space: who is worth starting from -------------
+
+    TUNING_ELITES = 4
+    """A local step starts from one of the best few, not always from the best:
+    on a noisy objective the single best is partly luck, and a search that only
+    ever looks around one lucky configuration has bet everything on it."""
+
+    def _tuning_elites(self) -> list[Candidate]:
+        ranked = sorted(
+            (c for c in self.archive if c.competes and c.params and c.fitness is not None),
+            key=lambda c: -c.fitness,
+        )
+        return ranked[: self.TUNING_ELITES]
+
+    def _tuning_parent(self, fallback: Candidate) -> Candidate:
+        elites = self._tuning_elites()
+        if not elites:
+            return fallback
+        weights = [0.5 ** rank for rank in range(len(elites))]  # 1, 1/2, 1/4, 1/8
+        return self.rng.choices(elites, weights=weights, k=1)[0]
+
+    def _mate_for(self, parent: Candidate) -> Candidate | None:
+        others = [c for c in self._tuning_elites() if c.id != parent.id and c.params != parent.params]
+        return self.rng.choice(others) if others else None
+
+    def _observations(self) -> list[Observation]:
+        """Every configuration that was evaluated, judged by the deepest stage
+        it finished. One that crashed or timed out is an observation too -- the
+        worst one: that is a region not to propose in again.
+
+        A raced-out candidate still carries the score of the stage before the
+        race -- a screening score that may beat every finished candidate's --
+        but the race has just shown it to be behind the best. It is recorded at
+        the floor, no better than the worst finished configuration, rather
+        than as the good configuration its screening score would make it.
+
+        A candidate that was screened out by a cheaper stage is judged by that
+        stage's score only when it is on the same scale as the final stage's:
+        when every command stage states the objective as a percentage of the
+        baseline (`normalize: baseline`). A plain mean over a proxy's few small
+        instances is a different number altogether, and would rank every
+        screened-out candidate above every finished one."""
+        commands = [stage for stage in self.config.evaluate.stages if stage.kind == "command"]
+        same_scale = all(stage.fans_out and stage.normalize == "baseline" for stage in commands)
+        scored: list[tuple[Candidate, float]] = []
+        behind: list[Candidate] = []
+        failed: list[Candidate] = []
+        for c in self.archive:
+            if not c.params or c.rejected:
+                continue
+            if c.last_failure:
+                failed.append(c)
+            elif c.raced_out:
+                behind.append(c)
+            elif c.competes and c.fitness is not None:
+                scored.append((c, float(c.fitness)))
+            elif same_scale and c.stages_reached and c.score is not None:
+                scored.append((c, float(c.score)))
+        floor = min((value for _, value in scored), default=0.0)
+        observations = [Observation(c.params, value) for c, value in scored]
+        observations += [Observation(c.params, floor) for c in behind]
+        observations += [Observation(c.params, floor - 1.0) for c in failed]
+        return observations
 
     def _parent_pool(self, wanted: int) -> list[Candidate]:
         parents = self.grid.sample_parents(wanted, self.rng)
@@ -746,6 +1060,8 @@ class Driver:
             # A big step is an escape from the *front* of the search, so it
             # starts from the best candidate rather than from a sampled cell.
             parent = (best or pool[0]) if operator == "big_step" else pool[slot % len(pool)]
+            if operator in TYPED_SPACE_OPERATORS:
+                parent = self._tuning_parent(parent)
             children.append(self._breed_one(generation, operator, parent))
         return children
 
@@ -894,7 +1210,20 @@ class Driver:
         hint: str | None,
     ) -> OperatorResult:
         if operator == "param_lhs":
-            return param_lhs(parent, seed=self.rng.randrange(1 << 30))
+            seed = self.rng.randrange(1 << 30)
+            space = self.config.problem.parameters
+            if space is not None:
+                return param_lhs_typed(space, parent, seed=seed)
+            return param_lhs(parent, seed=seed)
+        if operator in TYPED_SPACE_OPERATORS:
+            seed = self.rng.randrange(1 << 30)
+            space = self.config.problem.parameters
+            assert space is not None  # `config._check_typed_operators`
+            if operator == "param_local":
+                return param_local(space, parent, seed=seed)
+            if operator == "param_cross":
+                return param_cross(space, parent, self._mate_for(parent), seed=seed)
+            return param_tpe(space, parent, self._observations(), seed=seed)
         return run_operator(
             operator,
             config=self.config,
@@ -958,6 +1287,8 @@ class Driver:
     # -- the meta-scratchpad ---------------------------------------------
 
     def _maybe_refresh_scratchpad(self, generation: int) -> None:
+        if not self.config.search.uses_llm:
+            return  # the scratchpad is written by the small model
         if not self.scratchpad.due(generation) or not self.budget.check().allowed:
             return
         elites = self.grid.elites()[:8]
@@ -1009,7 +1340,9 @@ class Driver:
             result = results[candidate.id]
             self.results[candidate.id] = result
             candidate.score = result.score
+            candidate.params = result.params
             candidate.competes = result.competes
+            candidate.raced_out = result.raced_out
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis
@@ -1070,6 +1403,26 @@ class Driver:
 
 def _fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6g}"
+
+
+def _comparable(problem: dict) -> dict:
+    """A problem identity with each stage command as its tokens: a doubled
+    space or a trailing blank changes the string, not the command."""
+    stages = [
+        {**stage, "command": _command_tokens(stage.get("command"))} if isinstance(stage, dict) else stage
+        for stage in problem.get("stages") or []
+    ]
+    return {**problem, "stages": stages}
+
+
+def _command_tokens(command: object) -> list[str] | None:
+    if not isinstance(command, str):
+        return None
+    try:
+        # Not POSIX rules: a Windows command's backslashes are part of it.
+        return shlex.split(command, posix=False)
+    except ValueError:  # an unbalanced quote: the command is still its words
+        return command.split()
 
 
 def _competes(candidate: Candidate) -> bool:

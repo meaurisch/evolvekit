@@ -40,12 +40,30 @@ class StageOutcome:
     duration_s: float = 0.0
     skipped: bool = False
     private: bool = False
+    params: dict[str, object] | None = None
+    """The configuration a candidate resolved to, when the problem declares
+    `problem.parameters`: set by the static stage, which is where it is
+    validated -- before it can cost any solver time."""
     argv: tuple[str, ...] = ()
     """The command line that was run, for the failure report: "which instance,
     which seed, which flags" is the first question about a crashed solver."""
     stdout_log: str = ""
     stderr_log: str = ""
     """Where the run's complete output was kept (`evaluate/process.py`)."""
+    raced_out: str | None = None
+    """Set on a per-instance stage's outcome when the candidate was stopped by
+    the stage's `race` rule: how many instances it had finished and how far
+    behind it was. Not a failure -- nothing went wrong."""
+    host_busy: float | None = None
+    """The share of all logical CPUs that were busy -- with anything -- while
+    this run was going (`evaluate/hostload.py`). `None` for a lookup, and on a
+    platform that cannot say."""
+    cached: bool = False
+    """Looked up in `work/cache/` rather than run: the same candidate, stage,
+    instance and seed had already been evaluated (`evaluate/cache.py`)."""
+    instance_names: tuple[str, ...] = ()
+    """For a stage that runs per instance: the instances, in the order of every
+    `<kpi>_per_instance` list in `vector_kpis`."""
 
 
 @dataclass
@@ -81,6 +99,11 @@ class EvalResult:
     """The earlier candidate this one behaved identically to, if any. Set
     together with `rejected`: a twin keeps its KPIs and its score for the
     record, but buys no further stages and never enters the archive."""
+    params: dict[str, object] | None = None
+    """The validated configuration (see `StageOutcome.params`), as data."""
+    raced_out: str | None = None
+    """Why the final stage was not finished, when that was the stage's `race`
+    rule and not a failure."""
     competes: bool = False
     """True once the candidate has finished the final stage -- hold-out
     included -- without a failure; see `cascade.finished_final_stage`. Only such

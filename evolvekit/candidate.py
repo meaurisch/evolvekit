@@ -16,12 +16,18 @@ from typing import Any
 
 __all__ = [
     "Candidate",
+    "SEED_OPERATOR",
     "BlockError",
     "extract_block",
     "splice_block",
     "complexity_of",
     "block_hash",
 ]
+
+
+SEED_OPERATOR = "human-seed"
+"""The `operator` of the candidate the run started from: the baseline every
+improvement is measured against."""
 
 
 class BlockError(ValueError):
@@ -132,6 +138,14 @@ class Candidate:
     """The earlier candidate whose behaviour this one reproduced exactly."""
     behaviour_signatures: dict[str, str] = field(default_factory=dict)
     """One fingerprint per command stage reached, keyed by stage id."""
+    params: dict[str, Any] | None = None
+    """The configuration this candidate resolved to, as data, when the problem
+    declares `problem.parameters`. Validated by the static stage; what the
+    stage commands were given; what `status`, the dashboard and the model-free
+    operators read instead of parsing code."""
+    raced_out: str | None = None
+    """Why the final stage was not finished, when that was the stage's `race`
+    rule: the candidate was clearly behind after a few instances."""
     competes: bool = True
     """False when the candidate did not finish the final stage -- a failed
     evaluation, a proxy-only candidate, a final stage skipped by the daily cap,

@@ -43,18 +43,22 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-__all__ = ["BoundedRun", "run_bounded", "read_tail"]
+__all__ = ["BoundedRun", "run_bounded", "read_tail", "can_pin"]
 
 REAP_TIMEOUT_S = 10.0
 """How long to wait for a killed tree to be reaped before moving on. The kill
 is not a request, so this only ever runs out on a process stuck in the kernel."""
 
 TAIL_BYTES = 64 * 1024
+
+CANCEL_POLL_S = 0.2
+"""How often a run that can be called off looks whether it has been."""
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,11 @@ class BoundedRun:
     duration_s: float
     error: str | None = None
     """Why the command could not be started at all (`OSError`), else `None`."""
+    cancelled: bool = False
+    """Called off through `cancel` before it finished; its tree is gone."""
+    unpinned: str | None = None
+    """Why the run was *not* pinned to the `cpus` it was asked to be, or `None`
+    (pinned as asked, or not asked). The run still happens -- see `_unpinned`."""
 
 
 def run_bounded(
@@ -76,8 +85,16 @@ def run_bounded(
     cwd: str | Path,
     stdout_path: Path,
     stderr_path: Path,
+    cpus: Sequence[int] = (),
+    cancel: threading.Event | None = None,
 ) -> BoundedRun:
-    """Run `argv`; never take longer than `timeout` plus the time to kill it."""
+    """Run `argv`; never take longer than `timeout` plus the time to kill it.
+
+    `cpus` pins the whole tree to those logical CPUs -- for a time-limited
+    solver, the difference between a run that had a core and one that shared
+    it. `cancel`, once set, ends the run as a timeout would: several runs in
+    flight on worker threads have no Ctrl+C of their own to be reached by.
+    """
     started = time.perf_counter()
     deadline = started + timeout
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +102,7 @@ def run_bounded(
         try:
             tree = _spawn(
                 list(argv),
+                tuple(cpus),
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=err,
@@ -92,17 +110,26 @@ def run_bounded(
             )
         except OSError as exc:
             return BoundedRun(None, False, time.perf_counter() - started, str(exc))
+        if tree.unpinned is not None:
+            _warn_unpinned(tree.unpinned)
 
         returncode: int | None = None
         timed_out = False
+        cancelled = False
         try:
             while True:
                 remaining = deadline - time.perf_counter()
                 if remaining <= 0:
                     timed_out = True
                     break
+                if cancel is not None and cancel.is_set():
+                    cancelled = True
+                    break
+                patience = min(remaining, tree.watch_interval())
+                if cancel is not None:
+                    patience = min(patience, CANCEL_POLL_S)
                 try:
-                    returncode = tree.proc.wait(timeout=min(remaining, tree.watch_interval()))
+                    returncode = tree.proc.wait(timeout=patience)
                     break
                 except subprocess.TimeoutExpired:
                     tree.watch()
@@ -114,7 +141,42 @@ def run_bounded(
             except subprocess.TimeoutExpired:  # pragma: no cover - kernel-stuck
                 pass
             tree.close()
-    return BoundedRun(returncode, timed_out, time.perf_counter() - started)
+    return BoundedRun(
+        returncode,
+        timed_out,
+        time.perf_counter() - started,
+        cancelled=cancelled,
+        unpinned=tree.unpinned,
+    )
+
+
+_WARNED: set[str] = set()
+_WARNED_LOCK = threading.Lock()
+
+
+def _unpinned(cpus: Sequence[int], why: object) -> str:
+    return f"could not pin the run to CPU(s) {list(cpus)}: {why}"
+
+
+def _warn_unpinned(reason: str) -> None:
+    """Say on stderr, once per reason, that a run went unpinned.
+
+    A pin that fails does not stop the run -- refusing to evaluate at all would
+    be worse than an evaluation on a shared core -- but it must not be silent:
+    a time-limited solver that shares a core gets less done in its time than
+    one that has it, and that difference becomes its score. Once, because a
+    pin that fails fails for every run of the stage.
+    """
+    with _WARNED_LOCK:
+        if reason in _WARNED:
+            return
+        _WARNED.add(reason)
+    print(
+        f"evolvekit: warning: {reason}; the run went unpinned and may have shared a core. "
+        "Check the stage's pin_cpus against this machine.",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def read_tail(path: Path, limit: int) -> str:
@@ -135,11 +197,18 @@ def read_tail(path: Path, limit: int) -> str:
     return text[-limit:] if limit > 0 else ""
 
 
-def _spawn(argv: list[str], **popen_kwargs: Any) -> "_PosixTree | _WindowsTree":
+def _spawn(
+    argv: list[str], cpus: tuple[int, ...] = (), **popen_kwargs: Any
+) -> "_PosixTree | _WindowsTree":
     """Start `argv` as the root of a tree. Raises `OSError` exactly as `Popen`."""
     if sys.platform == "win32":
-        return _WindowsTree.spawn(argv, popen_kwargs)
-    return _PosixTree.spawn(argv, popen_kwargs)
+        return _WindowsTree.spawn(argv, popen_kwargs, cpus)
+    return _PosixTree.spawn(argv, popen_kwargs, cpus)
+
+
+def can_pin() -> bool:
+    """Whether this platform lets a process be pinned to CPUs at all."""
+    return sys.platform == "win32" or hasattr(os, "sched_setaffinity")
 
 
 # --------------------------------------------------------------------------
@@ -151,12 +220,38 @@ class _PosixTree:
     """The command in a session of its own, hence a process group of its own:
     `killpg` reaches every descendant that has not deliberately left it."""
 
-    def __init__(self, proc: subprocess.Popen) -> None:
+    def __init__(self, proc: subprocess.Popen, unpinned: str | None = None) -> None:
         self.proc = proc
+        self.unpinned = unpinned
 
     @classmethod
-    def spawn(cls, argv: list[str], popen_kwargs: dict[str, Any]) -> "_PosixTree":
-        return cls(subprocess.Popen(argv, start_new_session=True, **popen_kwargs))
+    def spawn(
+        cls, argv: list[str], popen_kwargs: dict[str, Any], cpus: tuple[int, ...] = ()
+    ) -> "_PosixTree":
+        if not cpus:
+            return cls(subprocess.Popen(argv, start_new_session=True, **popen_kwargs))
+        if not hasattr(os, "sched_setaffinity"):  # macOS has no such call
+            return cls(
+                subprocess.Popen(argv, start_new_session=True, **popen_kwargs),
+                unpinned=_unpinned(cpus, "this platform cannot pin a process to a CPU"),
+            )
+        # An affinity mask is per thread and inherited across fork, so the
+        # calling thread wears the child's mask for the length of the spawn.
+        # That pins the child from its first instruction -- setting it on the
+        # pid afterwards would miss any thread it had already started -- and
+        # needs no `preexec_fn`, which is not safe in a threaded parent.
+        before = os.sched_getaffinity(0)
+        try:
+            os.sched_setaffinity(0, set(cpus))
+        except OSError as exc:  # a CPU outside this process's cpuset: run unpinned, and say so
+            return cls(
+                subprocess.Popen(argv, start_new_session=True, **popen_kwargs),
+                unpinned=_unpinned(cpus, exc),
+            )
+        try:
+            return cls(subprocess.Popen(argv, start_new_session=True, **popen_kwargs))
+        finally:
+            os.sched_setaffinity(0, before)
 
     def watch_interval(self) -> float:
         return float("inf")  # nothing to watch: the group is the container
@@ -229,18 +324,24 @@ _SYNCHRONIZE = 0x00100000
 
 
 class _WindowsTree:  # pragma: no cover - exercised on Windows only
-    def __init__(self, proc: subprocess.Popen, job: Any | None) -> None:
+    def __init__(self, proc: subprocess.Popen, job: Any | None, unpinned: str | None = None) -> None:
         self.proc = proc
         self._job = job
+        self.unpinned = unpinned
         self._started = time.perf_counter()
         # pid -> (handle, creation time). The root's handle is `Popen`'s own.
         root = int(proc._handle)  # type: ignore[attr-defined]
         self._pinned: dict[int, tuple[int, int]] = {proc.pid: (root, _created(root))}
 
     @classmethod
-    def spawn(cls, argv: list[str], popen_kwargs: dict[str, Any]) -> "_WindowsTree":
+    def spawn(
+        cls, argv: list[str], popen_kwargs: dict[str, Any], cpus: tuple[int, ...] = ()
+    ) -> "_WindowsTree":
         proc = subprocess.Popen(argv, creationflags=_CREATE_SUSPENDED, **popen_kwargs)
         job = _open_job(proc)
+        # While it is still suspended: a process's mask is inherited by every
+        # process it starts, so the whole tree is pinned from its first instruction.
+        pinned = _pin(proc, cpus)
         if not _resume(proc):
             # A process that cannot be resumed can never finish. Start it the
             # plain way rather than make evaluation impossible; watching the
@@ -251,7 +352,11 @@ class _WindowsTree:  # pragma: no cover - exercised on Windows only
                 _close_handle(job)
             proc = subprocess.Popen(argv, **popen_kwargs)
             job = _open_job(proc)
-        tree = cls(proc, job)
+            pinned = _pin(proc, cpus)
+        unpinned = None
+        if cpus and not pinned:
+            unpinned = _unpinned(cpus, "no such CPU on this machine, or Windows refused the affinity mask")
+        tree = cls(proc, job, unpinned)
         tree.watch()
         return tree
 
@@ -322,6 +427,7 @@ def _kernel32() -> Any:  # pragma: no cover - Windows only
         "CloseHandle": (bool_, [handle]),
         "OpenProcess": (handle, [dword, bool_, dword]),
         "TerminateProcess": (bool_, [handle, wintypes.UINT]),
+        "SetProcessAffinityMask": (bool_, [handle, ctypes.c_size_t]),
         "GetProcessTimes": (bool_, [handle] + [wintypes.LPVOID] * 4),
         "CreateToolhelp32Snapshot": (handle, [dword, dword]),
         "Process32FirstW": (bool_, [handle, wintypes.LPVOID]),
@@ -385,6 +491,23 @@ def _open_job(proc: subprocess.Popen) -> Any | None:  # pragma: no cover
         return job
     except (OSError, AttributeError, ValueError):
         return None
+
+
+def _pin(proc: subprocess.Popen, cpus: tuple[int, ...]) -> bool:  # pragma: no cover - Windows only
+    """Restrict `proc` (and whatever it starts from now on) to `cpus`. Returns
+    whether that worked; `SetProcessAffinityMask` refuses a CPU the system does
+    not have."""
+    import ctypes
+
+    if not cpus or max(cpus) >= 8 * ctypes.sizeof(ctypes.c_size_t):
+        return False  # no pin asked for, or a CPU no affinity mask can name
+    mask = 0
+    for cpu in cpus:
+        mask |= 1 << cpu
+    try:
+        return bool(_kernel32().SetProcessAffinityMask(int(proc._handle), mask))  # type: ignore[attr-defined]
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def _resume(proc: subprocess.Popen) -> bool:  # pragma: no cover - Windows only

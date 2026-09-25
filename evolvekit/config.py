@@ -8,11 +8,16 @@ exists to avoid.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+import re
+import shlex
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from evolvekit.space import ParameterSpace, SpaceError
 
 __all__ = [
     "ConfigError",
@@ -193,7 +198,8 @@ class ProblemConfig:
     to your block" is not.
     """
 
-    skeleton: Path
+    skeleton: Path | None
+    """`None` when `parameters` is set: the skeleton is then generated."""
     language: str = "python"
     block_start: str = "# EVOLVE-BLOCK-START"
     block_end: str = "# EVOLVE-BLOCK-END"
@@ -209,6 +215,18 @@ class ProblemConfig:
     the framework's problem-agnostic "you re-expressed the same rule" note."""
     required_functions: tuple[str, ...] = ()
     forbidden_imports: tuple[str, ...] = DEFAULT_FORBIDDEN_IMPORTS
+    parameters: ParameterSpace | None = None
+    """A typed search space (`evolvekit/space.py`), for tuning the parameters of
+    an external command. It replaces `skeleton`: the one function a candidate
+    may change, `configure()`, is generated from it, its values are validated
+    in the static stage and handed to the stage command as `{params}`."""
+
+    def skeleton_source(self) -> str:
+        """The skeleton's text: the user's file, or the generated one."""
+        if self.parameters is not None:
+            return self.parameters.render_skeleton(self.block_start, self.block_end)
+        assert self.skeleton is not None  # `parse` guarantees one of the two
+        return self.skeleton.read_text(encoding="utf-8")
 
     @staticmethod
     def parse(raw: Any, base_dir: Path) -> "ProblemConfig":
@@ -224,13 +242,27 @@ class ProblemConfig:
             "what_counts_as_new",
             "required_functions",
             "forbidden_imports",
+            "parameters",
         }
         _reject_unknown(data, known, "problem")
-        skeleton = base_dir / _as_str(
-            _require(data, "skeleton", "problem"), "problem.skeleton"
-        )
-        if not skeleton.is_file():
-            raise ConfigError(f"problem.skeleton: no such file: {skeleton}")
+        parameters: ParameterSpace | None = None
+        skeleton: Path | None = None
+        if data.get("parameters") is not None:
+            if data.get("skeleton") is not None:
+                raise ConfigError(
+                    "problem: give either `skeleton` (a program with an evolve block) "
+                    "or `parameters` (a typed space; the skeleton is generated), not both"
+                )
+            try:
+                parameters = ParameterSpace.parse(data["parameters"])
+            except SpaceError as exc:
+                raise ConfigError(str(exc)) from None
+        else:
+            skeleton = base_dir / _as_str(
+                _require(data, "skeleton", "problem"), "problem.skeleton"
+            )
+            if not skeleton.is_file():
+                raise ConfigError(f"problem.skeleton: no such file: {skeleton}")
         language = data.get("language", "python")
         if language != "python":
             raise ConfigError(
@@ -258,7 +290,9 @@ class ProblemConfig:
                         data.get("required_functions"), "problem.required_functions"
                     )
                 )
-            ),
+            )
+            or (("configure",) if parameters is not None else ()),
+            parameters=parameters,
             forbidden_imports=(
                 DEFAULT_FORBIDDEN_IMPORTS
                 if forbidden is None
@@ -325,6 +359,40 @@ class PromoteRule:
 
 
 STAGE_KINDS = ("builtin-static", "command")
+NORMALIZE_MODES = ("baseline", "none")
+KPI_SOURCES = ("file", "stdout")
+
+
+@dataclass(frozen=True)
+class RaceRule:
+    """When a candidate stops being worth its remaining instances.
+
+    A stage that runs per instance measures every candidate on the same
+    instances in the same order. Once a candidate has finished `after` of them
+    and is, on exactly those, more than `margin_pct` percent behind the best
+    candidate so far, finishing the other instances would cost their full price
+    to confirm what is already known. It is *raced out*: its remaining runs are
+    never started, it keeps the score of the stage before, and it does not
+    compete -- the same standing as a candidate that was not promoted.
+
+    With ten-minute runs, `after: 4` of ten instances saves an hour of solver
+    time per losing candidate. The margin is the protection against noise: set
+    it to a few times what two runs of the same configuration differ by.
+    """
+
+    after: int
+    margin_pct: float = 1.0
+
+    @staticmethod
+    def parse(raw: Any, path: str) -> "RaceRule | None":
+        if raw is None:
+            return None
+        data = _as_mapping(raw, path)
+        _reject_unknown(data, {"after", "margin_pct"}, path)
+        margin = _as_float(data.get("margin_pct", 1.0), f"{path}.margin_pct")
+        if margin < 0:
+            raise ConfigError(f"{path}.margin_pct: must be >= 0, got {margin}")
+        return RaceRule(after=_as_int(_require(data, "after", path), f"{path}.after", minimum=1), margin_pct=margin)
 
 
 @dataclass(frozen=True)
@@ -351,10 +419,99 @@ class StageConfig:
     plus a per-KPI coefficient of variation, which is the difference between
     "this candidate is better" and "this candidate got a good roll".
     """
+    instances: tuple[str, ...] = ()
+    """Run the command once per instance (and per seed), `{instance}` set to
+    each in turn, instead of once for the whole set. The framework then knows
+    what the evaluator otherwise keeps to itself: which instance a failure
+    happened on, how every instance compares with the baseline, and that the
+    runs are independent -- so they can be spread over `workers`, retried one
+    at a time, and found again after a crash. A pattern (`data/*.vrp`) is
+    expanded relative to the config file; anything else is handed over as it
+    is written, so an instance does not have to be a file."""
+    private_instances: tuple[str, ...] = ()
+    """The hold-out counterpart of `instances`, as `private_inputs` is of `inputs`."""
+    workers: int = 1
+    """How many instance runs are in flight at once. For a time-limited solver
+    this is a statement about the *objective*: two runs sharing a core each get
+    less done in their time limit than they would alone. Never more than the
+    machine has physical cores to give; see `pin_cpus`."""
+    pin_cpus: tuple[int, ...] = ()
+    """Logical CPUs to pin the workers to, one each. With simultaneous
+    multithreading, naming one logical CPU per physical core (`[2, 4, 6]`)
+    keeps two runs from sharing a core, and leaving a core out keeps one free
+    for the operating system and for evolvekit itself. Checked against the
+    machine when the stage runs (`missing_cpus`), not when the config is read."""
+    retries: int = 0
+    """Run a failed instance run again, this many times, before the stage
+    fails. For the solver that crashes once in a hundred runs."""
+    race: "RaceRule | None" = None
+    """Stop a candidate that is already clearly behind (`instances` only): see
+    `RaceRule`. Off unless configured."""
+    kpis_from: str = "file"
+    """Where the command reports. `file`: the JSON object it writes to `{out}`.
+    `stdout`: the last line of its standard output that is a JSON object,
+    wherever it is in the log and however long it is --
+    what a solver that was not written for evolvekit usually already does.
+    Either way the object may be the solver's own: its numbers and booleans
+    are the KPIs, its strings and nested objects are left alone."""
+    kpi_patterns: tuple[tuple[str, str], ...] = ()
+    """`(kpi, regular expression)`: numbers picked out of what the command
+    prints, for a program that reports in text. One capturing group; the last
+    match counts, because a solver logs its progress before its result. Applied
+    line by line (`re.MULTILINE`): `^` and `$` are the start and end of a line."""
+    normalize: str = "baseline"
+    """How per-instance values of the objective combine (`instances` only).
+    `baseline`: each instance counts as a percentage of what the seed candidate
+    reached on it, so the seed scores 100 and an instance ten times the size of
+    the others does not decide the search on its own. `none`: the plain mean."""
 
     @property
     def stochastic(self) -> bool:
         return self.seeds > 1
+
+    @property
+    def fans_out(self) -> bool:
+        return bool(self.instances)
+
+    def missing_cpus(self) -> str | None:
+        """Why `pin_cpus` cannot be honoured on *this* machine, or `None`.
+
+        Not checked when the config is read: a config written for the 8-CPU
+        machine a benchmark runs on has to load on the 4-CPU laptop it is
+        edited, extended and tested on. It is checked where it matters -- by the
+        stage, before its first run -- because a run pinned to a CPU that is not
+        there runs unpinned, and a time-limited solver sharing a core scores
+        worse than one that has it.
+        """
+        if not self.pin_cpus:
+            return None
+        if hasattr(os, "sched_getaffinity"):
+            # Linux: the CPUs this process may use, which in a container or a
+            # cpuset is fewer than the machine has.
+            allowed = os.sched_getaffinity(0)
+            missing = sorted(set(self.pin_cpus) - allowed)
+            if missing:
+                return (
+                    f"stage {self.id!r}: pin_cpus: CPU {missing[0]} does not exist on this machine "
+                    f"or is not available to this process (it may use {sorted(allowed)}); "
+                    "change pin_cpus for this machine, or remove it"
+                )
+            return None
+        available = os.cpu_count()
+        if available is not None and max(self.pin_cpus) >= available:
+            return (
+                f"stage {self.id!r}: pin_cpus: CPU {max(self.pin_cpus)} does not exist on this "
+                f"machine (it has {available}, numbered from 0); change pin_cpus for this "
+                "machine, or remove it"
+            )
+        return None
+
+    def instance_names(self, private: bool = False) -> tuple[str, ...]:
+        """Short names for `instances`, for people: the file's stem when that
+        tells them apart, the entry as written when it does not."""
+        entries = self.private_instances if private else self.instances
+        stems = tuple(Path(entry.replace("\\", "/")).stem or entry for entry in entries)
+        return stems if len(set(stems)) == len(stems) else tuple(entries)
 
     @staticmethod
     def parse(raw: Any, index: int) -> "StageConfig":
@@ -371,6 +528,15 @@ class StageConfig:
             "import_check",
             "max_per_day",
             "seeds",
+            "instances",
+            "private_instances",
+            "workers",
+            "pin_cpus",
+            "retries",
+            "normalize",
+            "kpis_from",
+            "kpi_patterns",
+            "race",
         }
         _reject_unknown(data, known, path)
         stage_id = _as_str(_require(data, "id", path), f"{path}.id")
@@ -380,14 +546,24 @@ class StageConfig:
                 f"{path}.kind: must be one of {list(STAGE_KINDS)}, got {kind!r}"
             )
         command = str(data.get("command", ""))
+        kpis_from = _as_str(data.get("kpis_from", "file"), f"{path}.kpis_from")
+        if kpis_from not in KPI_SOURCES:
+            raise ConfigError(
+                f"{path}.kpis_from: must be one of {list(KPI_SOURCES)}, got {kpis_from!r}"
+            )
+        kpi_patterns = _parse_kpi_patterns(data.get("kpi_patterns"), f"{path}.kpi_patterns")
         if kind == "command":
             if not command.strip():
                 raise ConfigError(f"{path}.command: required when kind is 'command'")
-            for placeholder in ("{candidate}", "{out}"):
-                if placeholder not in command:
-                    raise ConfigError(
-                        f"{path}.command: must contain the {placeholder} placeholder"
-                    )
+            # `{candidate}` is required too, unless `problem.parameters` hands the
+            # configuration over as `{params}`: see `_check_parameter_placeholders`.
+            if "{out}" not in command and kpis_from == "file" and not kpi_patterns:
+                raise ConfigError(
+                    f"{path}.command: must contain the {{out}} placeholder -- the path the "
+                    "command writes its result JSON to. A program that prints its result "
+                    "instead needs `kpis_from: stdout` (the last JSON object it prints) or "
+                    "`kpi_patterns` (numbers picked out of its text)"
+                )
         max_per_day = data.get("max_per_day")
         seeds = _as_int(data.get("seeds", 1), f"{path}.seeds", minimum=1)
         if seeds > 1:
@@ -402,10 +578,80 @@ class StageConfig:
                     "has no {seed} placeholder, so every run would be identical; "
                     "add {seed} to the command or set seeds: 1"
                 )
+        instances = tuple(
+            _as_str(v, f"{path}.instances[{i}]")
+            for i, v in enumerate(_as_list(data.get("instances"), f"{path}.instances"))
+        )
+        private_instances = tuple(
+            _as_str(v, f"{path}.private_instances[{i}]")
+            for i, v in enumerate(
+                _as_list(data.get("private_instances"), f"{path}.private_instances")
+            )
+        )
+        workers = _as_int(data.get("workers", 1), f"{path}.workers", minimum=1)
+        retries = _as_int(data.get("retries", 0), f"{path}.retries", minimum=0)
+        pin_cpus = tuple(
+            _as_int(v, f"{path}.pin_cpus[{i}]", minimum=0)
+            for i, v in enumerate(_as_list(data.get("pin_cpus"), f"{path}.pin_cpus"))
+        )
+        normalize = _as_str(data.get("normalize", "baseline"), f"{path}.normalize")
+        if normalize not in NORMALIZE_MODES:
+            raise ConfigError(
+                f"{path}.normalize: must be one of {list(NORMALIZE_MODES)}, got {normalize!r}"
+            )
+        if instances:
+            if kind != "command":
+                raise ConfigError(
+                    f"{path}.instances: only a 'command' stage runs per instance; "
+                    f"stage {stage_id!r} is {kind!r}"
+                )
+            if "{instance}" not in command:
+                raise ConfigError(
+                    f"{path}.instances: {len(instances)} instance(s) are listed but the "
+                    "command has no {instance} placeholder, so every run would solve the "
+                    "same thing; add {instance} to the command"
+                )
+        else:
+            if "{instance}" in command:
+                raise ConfigError(
+                    f"{path}.command: uses {{instance}} but the stage lists no `instances`"
+                )
+            for key, given in (
+                ("race", data.get("race") is not None),
+                ("private_instances", bool(private_instances)),
+                ("workers", workers > 1),
+                ("pin_cpus", bool(pin_cpus)),
+                ("retries", retries > 0),
+            ):
+                if given:
+                    raise ConfigError(
+                        f"{path}.{key}: only applies to a stage that lists `instances` -- "
+                        "the runs of such a stage are independent, which is what makes "
+                        "them safe to spread, retry and hold out"
+                    )
+        if pin_cpus:
+            if len(set(pin_cpus)) != len(pin_cpus):
+                raise ConfigError(f"{path}.pin_cpus: lists a CPU twice: {list(pin_cpus)}")
+            if len(pin_cpus) < workers:
+                raise ConfigError(
+                    f"{path}.pin_cpus: {workers} workers cannot each have a CPU of their "
+                    f"own out of {len(pin_cpus)}; list at least {workers} or lower `workers`"
+                )
+            # Whether the CPUs exist is a question about the machine the stage
+            # runs on, not about the config: see `missing_cpus`.
         return StageConfig(
             id=stage_id,
             kind=kind,
             command=command,
+            instances=instances,
+            private_instances=private_instances,
+            workers=workers,
+            pin_cpus=pin_cpus,
+            retries=retries,
+            normalize=normalize,
+            kpis_from=kpis_from,
+            kpi_patterns=kpi_patterns,
+            race=RaceRule.parse(data.get("race"), f"{path}.race"),
             inputs=tuple(
                 _as_str(v, f"{path}.inputs[{i}]")
                 for i, v in enumerate(_as_list(data.get("inputs"), f"{path}.inputs"))
@@ -426,6 +672,34 @@ class StageConfig:
             ),
             seeds=seeds,
         )
+
+
+def _as_flag(value: Any, path: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{path}: expected true or false, got {value!r}")
+    return value
+
+
+def _parse_kpi_patterns(raw: Any, path: str) -> tuple[tuple[str, str], ...]:
+    if raw is None:
+        return ()
+    data = _as_mapping(raw, path)
+    if not data:
+        raise ConfigError(f"{path}: expected a non-empty mapping of KPI name to regular expression")
+    patterns = []
+    for name, pattern in data.items():
+        text = _as_str(pattern, f"{path}.{name}")
+        try:
+            groups = re.compile(text).groups
+        except re.error as exc:
+            raise ConfigError(f"{path}.{name}: not a valid regular expression: {exc}") from None
+        if groups != 1:
+            raise ConfigError(
+                f"{path}.{name}: needs exactly one capturing group -- the number -- and has "
+                f"{groups}: {text!r}"
+            )
+        patterns.append((str(name), text))
+    return tuple(patterns)
 
 
 @dataclass(frozen=True)
@@ -523,6 +797,10 @@ class EvaluateConfig:
     signature_ignore: tuple[str, ...] = DEFAULT_SIGNATURE_IGNORE
     """The behaviour signature: which KPIs it is built from and how precisely.
     See `evolvekit/evaluate/signature.py`."""
+    cache: bool = True
+    """Keep every successful evaluator run under `work/cache/` and look an
+    identical one up instead of running it again (`evaluate/cache.py`). Off for
+    an evaluator whose answer to the same question is meant to change."""
 
     def digits_for(self, stage: StageConfig) -> int:
         """How precisely to fingerprint one stage's KPIs."""
@@ -546,6 +824,7 @@ class EvaluateConfig:
                 "signature_digits",
                 "signature_digits_stochastic",
                 "signature_ignore",
+                "cache",
             },
             "evaluate",
         )
@@ -606,6 +885,7 @@ class EvaluateConfig:
                 data.get("failure_score", -1000.0), "evaluate.failure_score"
             ),
             holdout_penalty=holdout_penalty,
+            cache=_as_flag(data.get("cache", True), "evaluate.cache"),
             signature_digits=_as_int(
                 data.get("signature_digits", DEFAULT_SIGNATURE_DIGITS),
                 "evaluate.signature_digits",
@@ -974,7 +1254,15 @@ class NoveltyConfig:
         )
 
 
-KNOWN_OPERATORS = ("diff", "rewrite", "crossover", "param_lhs")
+KNOWN_OPERATORS = (
+    "diff", "rewrite", "crossover", "param_lhs", "param_local", "param_cross", "param_tpe",
+)
+TYPED_SPACE_OPERATORS = frozenset({"param_local", "param_cross", "param_tpe"})
+"""Operators that are arithmetic on a declared `problem.parameters` space."""
+
+MODEL_FREE_OPERATORS = frozenset({"param_lhs"}) | TYPED_SPACE_OPERATORS
+"""Operators that never call a model. A search made only of these needs no
+provider, no key and no `models` section -- and must never reach for one."""
 
 
 @dataclass(frozen=True)
@@ -1072,6 +1360,29 @@ class SearchConfig:
     novelty: NoveltyConfig = field(default_factory=NoveltyConfig)
     adaptive_children: AdaptiveChildrenConfig | None = None
 
+    @property
+    def llm_operators(self) -> list[str]:
+        """The operators with a share that call a model, by name."""
+        return sorted(
+            name
+            for name, share in self.operators.items()
+            if share > 0 and name not in MODEL_FREE_OPERATORS
+        )
+
+    @property
+    def uses_llm(self) -> bool:
+        """False for a run made only of model-free operators. Such a run plans
+        no big steps, refreshes no scratchpad and needs no `models`: all three
+        are model calls, whatever the operator shares say."""
+        return bool(self.llm_operators)
+
+    @property
+    def takes_big_steps(self) -> bool:
+        """A big step *is* a call to the strong model, so there are none in a
+        run without one, and none when `big_step_every` is 0 -- scheduled or on
+        a plateau. `stop.min_big_steps` is then not waited for either."""
+        return self.uses_llm and self.big_step_every > 0
+
     def parents_wanted(self, children: int) -> int:
         return self.parents_per_generation or children
 
@@ -1123,7 +1434,7 @@ class SearchConfig:
                 data.get("generations", 10), "search.generations", minimum=1
             ),
             big_step_every=_as_int(
-                data.get("big_step_every", 5), "search.big_step_every", minimum=1
+                data.get("big_step_every", 5), "search.big_step_every", minimum=0
             ),
             parent_top_k=_as_int(
                 data.get("parent_top_k", 5), "search.parent_top_k", minimum=1
@@ -1159,7 +1470,8 @@ class SearchConfig:
 class Config:
     problem: ProblemConfig
     evaluate: EvaluateConfig
-    models: ModelsConfig
+    models: ModelsConfig | None
+    """`None` only when `search.uses_llm` is false: see `_parse_models`."""
     budget: BudgetConfig
     stop: StopConfig
     search: SearchConfig
@@ -1182,18 +1494,150 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
         "<root>",
     )
     data = {k: v for k, v in data.items() if k != "extends"}
+    search = SearchConfig.parse(data.get("search"))
     config = Config(
         problem=ProblemConfig.parse(_require(data, "problem", "<root>"), base_dir),
         evaluate=EvaluateConfig.parse(_require(data, "evaluate", "<root>")),
-        models=ModelsConfig.parse(_require(data, "models", "<root>")),
+        models=_parse_models(data.get("models"), search),
         budget=BudgetConfig.parse(data.get("budget")),
         stop=StopConfig.parse(data.get("stop")),
-        search=SearchConfig.parse(data.get("search")),
+        search=search,
         base_dir=base_dir,
         source=source,
     )
     _check_embedding_route(config)
-    return config
+    _check_parameter_placeholders(config)
+    _check_typed_operators(config)
+    return _expand_instance_patterns(config)
+
+
+def _expand_instance_patterns(config: Config) -> Config:
+    """`data/*.vrp` means the files that are there; say so now if there are none.
+
+    Only an entry with a wildcard is looked up. Anything else is handed to the
+    command as written, because an instance need not be a file: a benchmark
+    name the solver resolves itself is as good.
+    """
+
+    def expand(entries: tuple[str, ...], path: str) -> tuple[str, ...]:
+        expanded: list[str] = []
+        for index, entry in enumerate(entries):
+            if not any(ch in entry for ch in "*?["):
+                expanded.append(entry)
+                continue
+            matches = sorted(
+                p.relative_to(config.base_dir).as_posix() for p in config.base_dir.glob(entry)
+            )
+            if not matches:
+                raise ConfigError(
+                    f"{path}[{index}]: the pattern {entry!r} matches no file under "
+                    f"{config.base_dir}"
+                )
+            expanded.extend(matches)
+        duplicates = sorted({e for e in expanded if expanded.count(e) > 1})
+        if duplicates:
+            raise ConfigError(f"{path}: lists {duplicates[0]!r} more than once")
+        return tuple(expanded)
+
+    stages = tuple(
+        replace(
+            stage,
+            instances=expand(stage.instances, f"evaluate.stages[{i}].instances"),
+            private_instances=expand(
+                stage.private_instances, f"evaluate.stages[{i}].private_instances"
+            ),
+        )
+        if stage.fans_out
+        else stage
+        for i, stage in enumerate(config.evaluate.stages)
+    )
+    return replace(config, evaluate=replace(config.evaluate, stages=stages))
+
+
+PARAMETER_PLACEHOLDERS = ("{params}", "{params_json}")
+
+
+def _check_typed_operators(config: Config) -> None:
+    if config.problem.parameters is not None:
+        return
+    for name in sorted(TYPED_SPACE_OPERATORS):
+        if config.search.operators.get(name, 0) > 0:
+            raise ConfigError(
+                f"search.operators.{name}: works on a declared parameter space, and this "
+                "config declares none. Add `problem.parameters` (name, type, range, default "
+                "of what may be tuned), or use `param_lhs` with a `# PARAMS:` line"
+            )
+
+
+def _check_parameter_placeholders(config: Config) -> None:
+    """A stage command and `problem.parameters` have to know about each other.
+
+    Both halves are mistakes that would otherwise cost a run: a command with
+    `{params}` and no declared space has nothing to substitute, and a declared
+    space that no command mentions means every candidate runs the same solver
+    configuration and the search optimises noise.
+    """
+    declared = config.problem.parameters is not None
+    for index, stage in enumerate(config.evaluate.stages):
+        if stage.kind != "command":
+            continue
+        path = f"evaluate.stages[{index}].command"
+        uses = [p for p in PARAMETER_PLACEHOLDERS if p in stage.command]
+        if uses and not declared:
+            raise ConfigError(
+                f"{path}: uses {uses[0]} but `problem.parameters` declares no "
+                "parameters to substitute"
+            )
+        if not declared and "{candidate}" not in stage.command:
+            raise ConfigError(f"{path}: must contain the {{candidate}} placeholder")
+        if declared and not uses and "{candidate}" not in stage.command:
+            raise ConfigError(
+                f"{path}: never receives the configuration. Add {{params}} (expands to "
+                "`--flag value` pairs), {params_json} (the path of a JSON file with the "
+                "values) or {candidate} (the generated Python module)"
+            )
+        embedded = embedded_params(stage.command)
+        if embedded is not None:
+            raise ConfigError(f"{path}: {embedded}")
+
+
+def embedded_params(command: str) -> str | None:
+    """What is wrong with a `{params}` that is part of a larger argument, or `None`.
+
+    `{params}` expands to *several* arguments, one `--flag value` pair per
+    parameter. Inside a larger one (`--opts={params}`, `"x {params}"`) it could
+    only be pasted in as one string with spaces in it, which no option parser
+    reads as the configuration. Shared with `build_argv`, so the command line
+    and the config check cannot disagree about what a token is.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None  # an unbalanced quote: `build_argv` says so on the first run
+    for token in tokens:
+        if "{params}" in token and token != "{params}":
+            return (
+                f"{{params}} must be an argument of its own, and here it is part of {token!r}. "
+                "It expands to several arguments (`--flag value` pairs) that cannot be pasted "
+                "into one; write it as a separate word, or use {params_json} -- the path of a "
+                "JSON file with the values -- for a program that takes its configuration as "
+                "one argument"
+            )
+    return None
+
+
+def _parse_models(raw: Any, search: SearchConfig) -> ModelsConfig | None:
+    """`models` is required exactly when something will call one."""
+    if raw is not None:
+        return ModelsConfig.parse(raw)
+    if not search.uses_llm:
+        return None
+    raise ConfigError(
+        f"<root>.models: required, because search.operators gives a share to "
+        f"{search.llm_operators}, which call a model. For a run that calls none, "
+        "give a share only to `param_lhs` (a share of 0 switches an inherited "
+        "operator off); such a run needs no `models` section at all"
+    )
 
 
 def _check_embedding_route(config: Config) -> None:
@@ -1202,10 +1646,21 @@ def _check_embedding_route(config: Config) -> None:
     Both failures here would otherwise surface as an exception from inside the
     search loop, after the seed had been evaluated and the first children paid
     for. A config error costs nothing.
+
+    A config without a `models` section at all -- a run of model-free
+    operators -- is the first case, not an exception to it: it used to be let
+    through and died in `Driver()` on `None.by_role`.
     """
     near = config.search.novelty.near
     if near.method != "embedding":
         return
+    if config.models is None:
+        raise ConfigError(
+            "search.novelty.near.method: 'embedding' calls an embedding model, and this "
+            "config has no `models` section. Add a models.embed slot naming a backend "
+            "with an embeddings API, or set the method to 'local' (costs nothing) or "
+            "'off'"
+        )
     slot = config.models.embed
     if slot is None:
         raise ConfigError(

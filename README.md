@@ -33,15 +33,17 @@ three children to four on the plateau and shrinks back to three once the search
 starts climbing again.
 
 ```
-python tasks.py test          # 548 offline tests, about two minutes
-python tasks.py check         # same as test; the CI gate
+python tasks.py test          # the offline tests except the slow ones
+python tasks.py lint          # ruff, mistake-only rules (F, E9)
+python tasks.py check         # lint, then every test; the CI gate
 
 python -m evolvekit init my-problem/                     # scaffold a config
 python -m evolvekit preflight --config examples/binpacking/evolvekit.yaml
 python -m evolvekit run --config examples/binpacking/evolvekit.yaml
 python -m evolvekit run --config examples/circlepacking/evolvekit.yaml \
     --run-dir runs/circles                               # the second example
-python -m evolvekit status --run-dir runs/demo
+python -m evolvekit status --run-dir runs/demo           # add --json for a script or an agent
+python -m evolvekit dashboard --run-dir runs/demo        # the live dashboard, in a browser
 python -m evolvekit leaderboard --run-dir runs/demo --html board.html
 ```
 
@@ -79,7 +81,8 @@ live run is built from:
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
   | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
-  | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s`; then `ok`, `duration_s`, `kpis`, `argv`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
+  | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
+  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
 
@@ -89,6 +92,85 @@ live run is built from:
   evaluated. A beat older than a few intervals while its pid is alive means the
   process is suspended or the machine slept — which, on a wall-clock-limited
   evaluator, also means the evaluation in flight at the time cannot be trusted.
+
+### Watching a run: `status` and `status --json`
+
+```
+python -m evolvekit status --run-dir runs/demo           # for a person
+python -m evolvekit status --run-dir runs/demo --json    # for a script or an agent
+```
+
+Both print the same thing, because there is only one thing to print:
+`evolvekit.status.build_status(run_dir)` reads the run directory and returns one
+JSON document, and every view — the text, `--json`, the dashboard — renders it.
+It reads only (a mistyped `--run-dir` is an error with exit code 1, and is not
+created), needs no config file, and works on a run that is live, finished,
+interrupted or dead.
+
+| Section | Answers |
+|---|---|
+| `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
+| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `within noise`, or `unknown` when each score is a single run. The verdict is a paired comparison over the seeds both candidates ran on, and says in words that those are the seeds the search selected on. |
+| `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
+| `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
+| `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
+| `failures` | Every failed evaluator run, newest first, with its stage, seed, hold-out flag, exit status, duration, **command line**, stderr tail and the path of the full log; plus responses that could not be applied and candidates the static stage refused. |
+| `candidates`, `archive`, `spend`, `log_tail` | One light row per candidate (no code), the grid snapshot, USD / tokens / evaluator seconds, and the run's last console lines. |
+
+`schema` is bumped when a key changes meaning or disappears; adding keys does not
+bump it. The document never contains `NaN` or `Infinity`. A view that fails is
+listed under `errors` and leaves the other sections intact.
+
+### The live dashboard
+
+```
+python -m evolvekit run --config ... --run-dir runs/x --dashboard    # while it runs
+python -m evolvekit dashboard --run-dir runs/x                       # any run: live, finished, killed
+python -m evolvekit dashboard --run-dir runs/x --export report.html  # one file, opens from disk
+```
+
+![The dashboard of a finished run](docs/img/dashboard/finished-light.png)
+
+`--dashboard` prints a localhost URL and serves the page for as long as the run
+lives; `evolvekit dashboard` is a separate, read-only process that can be
+pointed at any run directory at any time — including one whose run was killed
+an hour ago, which is when you most want to look. Both draw exactly one thing:
+the [status document](#watching-a-run-status-and-status---json), fetched from
+`/api/status`. There is no second implementation, so the page and
+`status --json` cannot disagree. From top to bottom it answers:
+
+| | |
+|---|---|
+| **Is the run healthy?** | `RUNNING` / `STALLED` / `FINISHED` / `INTERRUPTED` / `CRASHED` with the reason in a sentence; generation *k of N*; evaluations done, in flight and failed; elapsed and remaining time; one cell per generation showing which ones moved the best and where evaluations failed; what is in flight against its timeout; every stopping criterion against its cap |
+| **Is it improving?** | improvement over the baseline in percent of the baseline, with a verdict — *clear of the noise*, *within the noise*, or *noise unknown* — and its reasoning; best-so-far as a step line with a ± 1 standard-error band; every fully evaluated candidate with its seed-to-seed spread; failed and not-promoted candidates counted per generation but never plotted against a scale they were not measured on |
+| **What is the best, and how does it differ from the default?** | each declared parameter beside its default, placed within its declared range; the unified diff against the seed; the code; *Copy parameters as JSON* |
+| **Which parameters matter?** | importance (rank correlation with the score, with its sample size), and for the selected parameter every value tried against the objective plus a ten-cell strip of where in the range the search has and has not been |
+| **Where does it win and lose?** | a bar per instance, better or worse than the baseline, with wins / losses / ties |
+| **What went wrong?** | failures counted by reason, then one row each; one click opens the stage, seed, exit status, the **command line to reproduce it** (with a copy button), stderr and stdout tails, links to the full logs, and the configuration that was being evaluated |
+
+Every candidate, every failure and every parameter's view has an address
+(`#candidate=g003-c0012`, `#failure=0`, `#parameter=penalty`) that can be pasted
+into a ticket. `?theme=dark` forces a theme.
+
+It is built to stay out of the way. The server is `http.server` from the
+standard library, bound to `127.0.0.1`, read-only, and can read nothing outside
+the run directory — a requested path is judged as text before the filesystem
+sees it, so a network path cannot make Windows connect anywhere. Bound to this
+machine it answers only to `127.0.0.1`, `localhost` or `[::1]` in `Host` and
+refuses cross-site requests, so another web page open in the same browser can
+neither read the run nor make the server fetch anything. The page is **one HTML file with its styles and scripts
+inline**: no build step, no package manager, no CDN, so it renders on a machine
+that is offline. The document is rebuilt at most once a second and only while a
+page is open (about 12 ms for a run of 80 candidates and 150 evaluations). On
+the worst case for overhead — the five-second offline demo, polled every second
+— a run went from 5.35 s to 5.85 s, nearly all of it server start-up; against
+an evaluator that takes minutes it is not measurable. Candidate source and
+stderr are untrusted text: they reach the page through `textContent` only, and
+the exported file escapes every `<` in the data it embeds.
+
+| Killed mid-generation | At phone width, dark |
+|---|---|
+| ![A run that was killed](docs/img/dashboard/crashed-light.png) | ![Narrow, dark](docs/img/dashboard/narrow-dark.png) |
 
 ### How it works
 
@@ -196,6 +278,9 @@ candidates being lost.
 | `crossover` | small | the parent **and** one inspiration's block, both with score breakdowns |
 | `big_step` | strong | scheduled every `big_step_every` generations, or on plateau |
 | `param_lhs` | none | a Latin-hypercube variant of the block's own constants |
+| `param_local` | none | a good configuration; moves one to three of its parameters a little |
+| `param_cross` | none | two good configurations; each parameter from one of them |
+| `param_tpe` | none | every configuration evaluated so far, the failed ones included |
 
 Shares come from `search.operators`. Inspirations are drawn from cells other
 than the parent's and are shown as one-line delta summaries — a unified-diff
@@ -213,6 +298,151 @@ WIDTH = 128.0
 
 Blocks without that line are never routed to it, so listing it in
 `search.operators` against a skeleton that declares nothing is harmless.
+
+`param_local`, `param_cross` and `param_tpe` work on a declared
+[`problem.parameters`](#tuning-a-command-problemparameters) space and are what
+makes a model-free run a *search* rather than a sweep. `param_lhs` fills the box
+evenly and never looks at a score — the right first move and the wrong tenth
+one. `param_local` starts from one of the best four configurations (the best
+most often, not always: on a noisy objective the single best is partly luck)
+and moves one parameter twice as often as two, two twice as often as three; an
+integer moves by at least one, a boolean flips. `param_cross` tries gains
+together that were found separately. `param_tpe` is a Tree-structured Parzen
+Estimator: it models, parameter by parameter, where good configurations are
+dense relative to bad ones and proposes where that ratio is highest — a
+candidate that crashed counts as the worst observation, so a region that kills
+the solver is not proposed again, one that was raced out counts as no better
+than the worst finished one (whatever its screening score), and one that was
+only screened by a cheap stage still says where not to look — when every command
+stage lists `instances` with `normalize: baseline`, so that its score is on the final
+stage's scale; otherwise only finished candidates (and failures) are observations. Until there are eight observations it takes
+a local step instead, and the record says so.
+
+Which to use depends on how good the defaults already are. Measured at equal
+budget, five search seeds each, on two stand-in solvers
+(`python benchmarks/operator_mixes.py` reproduces it): with defaults far from
+the optimum and 36 evaluations, `param_lhs` alone does as well as any mix (mean
+best 1031.6 vs 1034.3; defaults 1225, optimum 1000) and `param_local` alone is
+clearly worse (1106.4). With a *mature* solver — 25 parameters, defaults close
+to good, most random settings harmful, noisy, 78 evaluations — `param_lhs`
+alone returned the defaults in three runs of five (mean true cost of the
+reported best 102.20, defaults 102.57), while `param_local` alone reached
+100.05 and `{param_lhs: 0.15, param_local: 0.45, param_tpe: 0.3, param_cross:
+0.1}` reached 100.30, of a possible 98.20. For a solver somebody has already
+tuned, lead with `param_local`; keep some `param_lhs` when you do not know which
+of the two cases you are in.
+
+**A run without any model.** When only model-free operators (`param_*`) have a share,
+nothing in the run calls a model, and nothing may: no big steps are planned
+(scheduled or on a plateau), the scratchpad is not refreshed, `stop.patience`
+does not wait for `stop.min_big_steps`, and the `models` section can be left out
+altogether — no provider, no key, no network:
+
+```yaml
+search:
+  operators: {param_lhs: 1.0}     # in an `extends` child: {diff: 0, rewrite: 0, crossover: 0, param_lhs: 1}
+```
+
+`extends` merges `search.operators` key by key, so a child config switches an
+inherited operator off by giving it a share of `0`. Independently of that,
+`search.big_step_every: 0` switches big steps off in a run that does use a
+model.
+
+### Tuning a command: `problem.parameters`
+
+When what you want tuned is the *configuration* of a program — a solver
+written in C++, Java, Rust, anything with a command line — there is no code to
+evolve and you should not have to write any. Declare the parameters instead of
+a skeleton, and say where they go on the command line:
+
+```yaml
+problem:
+  description: Minimise the mean cost over the test set within the time limit.
+  parameters:
+    neighbours: {type: int, low: 10, high: 120, default: 50, help: arcs kept per client}
+    penalty:    {type: float, low: 1.0e+2, high: 1.0e+6, default: 1.0e+4, log: true}
+    exhaustive: {type: bool, default: true}
+    init:       {type: choice, choices: [greedy, savings, sweep], default: greedy}
+
+evaluate:
+  stages:
+    - {id: static, kind: builtin-static}
+    - id: full
+      kind: command
+      command: ./solver --instance data/a.vrp --out {out} --seed {seed} {params}
+      timeout: 900
+  score: {objective: cost, direction: minimize}
+
+search:
+  operators: {param_lhs: 1.0}      # no `models` section: nothing here calls one
+```
+
+`1e4` works as well as `1.0e+4`: YAML reads the short form as a string, and a
+range or default that is a numeric string is taken as its number.
+
+| Placeholder | What the command receives |
+|---|---|
+| `{params}` | one `--name value` pair per parameter: `--neighbours 40 --penalty 5000.0 --exhaustive false --init savings`. An underscore in a name becomes a dash; a boolean is `true`/`false`; `flag: "-n"` on a declaration replaces the generated flag. It has to be an argument of its own: `--opts={params}` is refused, because several arguments cannot be pasted into one |
+| `{params_json}` | the path of a JSON file with the same values, for a program that would rather read a file |
+
+`{candidate}` is no longer required — there is no module the command would
+want — but a command that mentions neither of the two is refused, because it
+would never see what it is supposed to be tuned with.
+
+What happens to a declaration:
+
+- **The defaults are the baseline.** The seed candidate *is* the declared
+  defaults, so "improvement" always reads "against what the program does out of
+  the box".
+- **The static stage validates every configuration before it costs anything.**
+  An unknown name, a value outside its range, `"yes"` for a boolean: the
+  candidate is rejected with a sentence saying which, and the solver is never
+  started. A parameter a configuration leaves out takes its default.
+- **The configuration is recorded as data.** Each row of `runs.jsonl` carries
+  `params`; `status`, `status --json` and the dashboard read that — the best
+  configuration beside the defaults, the importance of each parameter, where in
+  each range (along a log scale where declared, per value for a boolean or a
+  choice) the search has been — and "Copy parameters as JSON" is the file you
+  hand to your program.
+- **`param_lhs` samples the declared space**: integers stay integers, a
+  log-scale range is covered decade by decade, booleans and choices are swept
+  rather than frozen.
+- **A model can still take part.** Behind the scenes the configuration is a
+  generated `configure()` function that returns a dict, so `diff`, `rewrite`
+  and `big_step` work on it like on any other block, and the prompt lists every
+  parameter with its type, range and `help`. Whatever a model writes, what
+  counts is the dict it returns — validated like any other.
+
+`parameters` and `skeleton` are alternatives: a config names one of them.
+
+`python -m evolvekit init my-tuning/ --template tune` writes such a setup, complete —
+a stand-in solver, three instances, a commented config — that runs as it is (into a
+directory that already holds an `evolvekit.yaml` it writes nothing and exits 1, unless
+`--force`);
+[`examples/cli-solver/`](examples/cli-solver/README.md) walks through the whole path:
+preflight, run and watch, `confirm` on seeds and instances the search never saw, `export`.
+
+**A solver that reports in its own way.** The result does not have to be
+written for evolvekit either. Three ways to read it, per stage:
+
+| The program … | Stage keys | What is read |
+|---|---|---|
+| writes a JSON file | `{out}` in the command (the default, `kpis_from: file`) | that file |
+| prints a JSON object | `kpis_from: stdout` — no `{out}` needed | the **last** line of stdout that is a JSON object, however long it is and wherever it is in the log; progress lines and other output around it are ignored |
+| prints text | `kpi_patterns: {cost: 'best cost: ([-+0-9.eE]+)'}` | per KPI, a regular expression with one capturing group; the **last** match counts, because a solver logs its progress before its result. `^` and `$` are the start and end of a *line* (`re.MULTILINE`), so `'^Cost: (\d+)$'` works. The patterns see the last 64 KB of what the program printed. Can be combined with either JSON source |
+
+The JSON object may be the solver's own. With an explicit `"kpis"` key every
+value has to be a number or a list of numbers, as before. Without one, the
+object is taken for what it is — a result with metadata in it: numbers are
+KPIs, booleans are KPIs (`"feasible": true` → `1.0`), lists of numbers are
+per-instance KPIs, and names, nested objects and lists with holes in them are
+left alone. `NaN`, a result with no number in it, a pattern that matched
+nothing, or a missing objective fail the run, with the tail of what the program
+did print in the failure report.
+
+| A three-way choice: a slot per value, its mean dashed | A log-scale range, decade by decade |
+|---|---|
+| ![A choice parameter on the dashboard](docs/img/dashboard/parameters-choice-light.png) | ![A log-scale parameter on the dashboard, dark](docs/img/dashboard/parameters-log-dark.png) |
 
 ### The problem description, in named sections
 
@@ -305,7 +535,7 @@ placeholder in its command:
 ```yaml
 - id: full
   kind: command
-  command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+  command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
   inputs: [full]
   timeout: 9000     # per run, not per stage
   seeds: 3
@@ -336,6 +566,102 @@ re-expression of its own seed, silently stops filtering. So on a stage with
 `evaluate.signature_digits_stochastic` (default `3`) instead. Three significant
 digits on a mean of N runs is a claim about the program; nine is a claim about
 the dice.
+
+### One run per instance: `instances`, `workers`, `retries`
+
+A classic stage hands the evaluator a whole input set and gets one JSON object
+back; what happened on which instance stays inside the evaluator. For a solver
+with a test set — and above all for a slow, time-limited one — list the
+instances on the stage instead, and let the command solve **one**:
+
+```yaml
+- id: full
+  kind: command
+  command: ./solver --instance {instance} --seed {seed} --time-limit 600 --out {out} {params}
+  instances: ["data/*.vrp"]        # a pattern, a list of files, or names the solver resolves itself
+  seeds: 1                         # runs per instance
+  timeout: 700                     # per run
+  workers: 3                       # runs in flight at once
+  pin_cpus: [2, 4, 6]              # one logical CPU per worker
+  retries: 1                       # run a crashed or timed-out run once more
+  normalize: baseline              # the default; `none` for the plain mean
+  race: {after: 4, margin_pct: 1}  # optional: stop a candidate that is clearly behind
+```
+
+The stage is then run once per instance and seed, each run a process of its
+own, and the framework knows what it could not know before:
+
+- **Parallelism that does not distort the objective.** For a time-limited
+  solver `workers` is a statement about the *score*: two runs sharing a core
+  each get less done in their time limit than one would alone. `pin_cpus` gives
+  every worker a logical CPU of its own (on a machine with simultaneous
+  multithreading, name one per *physical* core and leave a core to everything
+  else); the whole process tree of a run is pinned from its first instruction.
+  The CPUs are checked against the machine when the stage is about to run, not
+  when the config is read, so a config written for a bigger machine still loads
+  and fails only if you run it; a run that cannot be pinned all the same says
+  so on stderr instead of silently sharing a core.
+  The pool spans the generation, not one candidate — six candidates on ten
+  instances are sixty runs for three workers, and no worker idles while another
+  finishes a candidate's last instance. `preflight` warns when there are more
+  workers than physical cores. Measure, do not guess: run 1, 2, 3 … copies of
+  your solver side by side and stay where the per-run throughput is still flat.
+  **And leave the machine alone while it runs.** Pinning keeps other work off
+  the solver's cores; it does not keep it from slowing them down — on a laptop
+  all cores share one power budget, and a test suite pinned to the one *free*
+  core cost three pinned solver runs 15–30 % of their iterations. Every
+  evaluator run therefore records `host_busy`, the share of all logical CPUs
+  that were busy with *anything* while it ran; `status` and the dashboard say
+  how many runs shared the machine with something the run's own workers do not
+  explain (Windows and Linux; elsewhere nothing is recorded or flagged). Runs
+  shorter than 5 s are not judged: over a fraction of a second, starting the
+  process says more than the machine does.
+- **A failure with an address.** A crash is *this* instance, *this* seed, *this*
+  attempt, with log files of its own (`work/stage_out/<id>.<stage>.<instance>.seed0[.try1].*`;
+  when two instance names would make the same file name, such as `a b` and `a_b`,
+  every instance's position in the list is appended: `a_b-0`, `a_b-1`).
+  With `retries: 1` it is run once more before the candidate's stage fails —
+  the right setting for a solver that crashes once in a hundred runs — and a
+  candidate that has failed for good stops costing anything: its remaining
+  runs are never started. `status` and the dashboard list the failure with its
+  instance and say when a retry went through.
+- **Every instance has the same say.** The plain mean over instances is a mean
+  over *scales*: one instance with ten times the cost of the others decides the
+  search by itself. With `normalize: baseline` each instance counts as a
+  percentage of what the seed candidate — the defaults — reached on it. The seed
+  scores exactly 100, a candidate that is 2 % better on every instance scores
+  98, and the improvement the dashboard shows is that percentage. The divisor
+  is fixed for the whole run (kept in `work/reference.json`, so a resumed run
+  uses the same one): it is a weight, not a measurement, and a lucky baseline
+  run shifts where 100 lies but never which of two candidates is ahead. The
+  plain mean stays available as the KPI `<objective>_raw`.
+- **A candidate that is clearly behind stops costing** (`race`, off unless
+  configured). Every candidate is measured on the same instances in the same
+  order, so after `after` of them a candidate can be compared with the best so
+  far *on exactly those*. More than `margin_pct` percent behind, and it is
+  raced out: its remaining runs are never started, it keeps the score of the
+  stage before, and it does not compete — the standing of a candidate that was
+  not promoted, not of one that failed. With ten-minute runs, `after: 4` of ten
+  instances saves an hour of solver time per losing candidate. The margin is
+  the protection against noise: set it to a few times what two runs of one
+  configuration differ by. The baseline always finishes (it is the yardstick),
+  so does the first candidate through a stage, and the best so far is kept in
+  `work/incumbent.json` for a resumed run. `confirm` never races. `after` must be
+  below the stage's number of instances — a candidate with nothing left to run
+  cannot be raced out — and `preflight` and `run` warn when it is not.
+- **A per-instance picture without a list KPI.** The dashboard's per-instance
+  card, the noise estimate and the paired "is this more than the dice?" verdict
+  are built from the runs themselves — paired by instance and seed, in percent,
+  so a large instance and a small one count alike.
+
+| A generation in progress: runs done of planned, two retries in flight | Where the best wins and loses; every failure with its instance |
+|---|---|
+| ![A per-instance stage in progress](docs/img/dashboard/per-instance-live.png) | ![Per-instance comparison and failures, dark](docs/img/dashboard/per-instance-dark.png) |
+
+`private_instances` is the hold-out counterpart (`private_inputs` for a
+per-instance stage); its baseline is the seed's own hold-out run. Every other
+scalar KPI a run reports is averaged the same way (seeds within an instance,
+then instances), and reaches the behaviour signature as `<kpi>_per_instance`.
 
 ### The novelty filters — structural, near, and behavioural
 
@@ -565,12 +891,68 @@ searched a Phase A landscape. `extends` makes that impossible, and
 `tests/test_config.py` asserts the three shared sections parse identically
 either way.
 
+### One run directory, one problem
+
+A run directory remembers what it is a run *of*: the skeleton (or the declared parameters), the
+objective and its direction, and every stage's command, seeds, inputs and instances. Starting
+`run` against it with any of those changed is refused — before anything is bred or recorded —
+with a sentence that names the difference: its candidates were scored under the old definition,
+and `runs.jsonl` would otherwise rank scores against each other that do not mean the same thing.
+Search settings, the budget, `workers` and the like may change between sessions. Use a new
+`--run-dir`, or `--allow-changed-problem` if the change does not affect what a score means.
+Each session is compared with the one before it, so a change let through once is the problem
+from then on; commands are compared word by word, so spacing alone is no change.
+
+### Exit codes of `run`
+
+`0` the run ended as planned (generations exhausted, a stop rule, the budget — including
+`budget.max_full_evals_per_day`, which *stops* the run once no candidate can reach the final stage
+any more today; run the same command again tomorrow, or raise the cap). `1` an error.
+`2` a config error. `3` the run directory is locked by a live run. `4` **aborted**: the seed
+failed its own evaluation (nothing was searched), or the model backend kept failing (the search
+stopped wherever it was, possibly mid-run) — a wrapper script, a CI step or an agent must not
+take either for a finished search. The reason is in the last lines of the output and in
+`status`. Running the same command again after a seed failure evaluates the seed again before
+anything is bred — the evaluator may have been fixed in between — and aborts with `4` again if
+it still fails, so a wrapper that retries never breeds past a broken harness.
+
 ### The run lock
 
 `run` takes `<run_dir>/.lock` and holds it for the duration. A second run
 against the same directory refuses, naming the pid that owns it and exiting 3.
 A lock whose owner is no longer alive is reclaimed automatically, so a crashed
 run never needs manual cleanup.
+
+### A run that died mid-generation
+
+Run the same command again, against the same `--run-dir`. A generation is only
+recorded once its whole cascade has returned — hours, for a slow solver — so
+two things keep a power cut from costing those hours:
+
+- **Every successful evaluator run is kept** under `work/cache/`, keyed by what
+  was run: the candidate's source, the stage and its command, the instance,
+  the seed, public or hold-out — and the *contents* of every file among them
+  (the instance file, input files and directories, the solver script and
+  interpreter named in the command), so a regenerated instance or a fixed
+  `solve.py` is a new run, not an old result. Running the same thing again is a
+  lookup (`eval_finished` with `cached: true` and no evaluator time; `status`
+  counts them). A kept result that took longer than the stage's current
+  `timeout` is not reused. Failures are never kept — a crash may have been the
+  machine's fault, and a retry has to be a real one. The same configuration
+  under a second candidate id is the same run, too. The key cannot see a
+  program found on `PATH`, or files the solver opens by itself: swap those
+  under a new `--run-dir`, or set `evaluate.cache: false`.
+- **A generation's children are written down before they are evaluated**
+  (`pending.json`). The resumed run evaluates *those* children, under the same
+  ids — so their finished runs are in the cache and the model calls that bred
+  them were not wasted — instead of breeding new ones that start from nothing.
+  The event log says `generation_adopted`.
+
+What is lost is what was in flight when the run died.
+
+`search.generations` is the plan for the run *directory*, not for the session: a twelve-generation
+run that died in generation 9 is resumed to finish the twelve, and a run directory that already
+holds them says so and does nothing. `run --generations K` means K *more*, whatever the plan was.
 
 ## Before you spend anything: `preflight`
 
@@ -601,7 +983,8 @@ configured model role, `embed` included when a slot exists, with the prompt
 against a new key or a new deployment, not before every run.
 
 Exit codes are **0 clean / 1 warnings / 2 failures**, so a wrapper script can
-gate on it:
+gate on it. Output a console cannot encode (a solver's non-ASCII last words on
+a Windows pipe) is written as escapes, never an error that changes the code:
 
 ```
 stage static               ok      0.2s  (timeout 30s per run)
@@ -618,10 +1001,94 @@ note    : projected evaluator wall clock for the whole run: about 19.3s, excludi
 verdict : clean (0 failure(s), 0 warning(s))
 ```
 
+## After the run: is the improvement real? `confirm`, and `export`
+
+A search selects on noise. Whatever it reports as its best was, among other
+things, lucky on the seeds it was evaluated on — so the run's own "improvement"
+is optimistic by construction, and `status` says so next to the number.
+`confirm` is the measurement that is not:
+
+```
+python -m evolvekit confirm --config tuning.yaml --run-dir runs/x --seeds 1001,1002,1003
+python -m evolvekit confirm --config tuning.yaml --run-dir runs/x --seeds 1001,1002,1003 \
+    --instances "fresh/*.vrp" --label fresh          # instances the search never saw
+python -m evolvekit confirm ... --candidates top:3 --seeds 101,102 --label validation
+```
+
+It takes the run's baseline (its seed candidate: the defaults) and its best
+candidate — or `top:N`, or ids you name — and runs the final stage's command
+for each of them on every instance and every seed you give it. Needs a final
+stage that [runs once per instance](#one-run-per-instance-instances-workers-retries).
+
+- **Same conditions.** The stage's own `workers`, `pin_cpus`, `timeout` and
+  `retries`; and the runs are *interleaved* — the configurations' runs for one
+  (instance, seed) are queued next to each other — so whatever the machine does
+  over the hours happens to all of them alike.
+- **The instance is the unit.** Per instance, the difference to the baseline
+  in percent of the baseline's value, averaged over the seeds. Over instances:
+  the mean with a 95 % confidence interval (paired, Student's t), wins and
+  losses, and an exact Wilcoxon signed-rank test. The verdict is a sentence:
+  *better than the baseline*, *not distinguishable from it*, or *WORSE*.
+- **Exit code 0 only when every candidate's interval lies above zero**, so a
+  script can gate on it.
+- **Two searches, one comparison.** `ID@OTHER_RUN_DIR` names a candidate of
+  another run of the same problem, and `--against` names what the candidates
+  are compared with instead of the seed — a different operator mix, a model
+  among the operators, last month's winner:
+  `confirm --run-dir runs/b --candidates g011-c0085 --against g012-c0096@runs/a --seeds 2001,2002,2003`.
+  The other run's candidate has to be valid under *this* config's
+  `problem.parameters`; it is checked before anything runs. It is reported as
+  `ID@<its directory's name>`, with parent directories added when two
+  directories share a name (`ID@a/run`, `ID@b/run`).
+- **A failure is a result.** When only one side of an (instance, seed) pair
+  failed or timed out, that side lost the pair: it counts as a difference as
+  large as the largest one measured anywhere in the comparison — a loss when
+  the candidate failed, a win when the baseline did — so a configuration that
+  crashes or hangs often cannot be judged on its lucky runs, and a failure
+  never weighs less than a real result. A pair in which both failed, or whose
+  baseline is 0 (a percentage of 0 is no number), says nothing about either
+  and is left out. Every kind is counted per candidate and per instance
+  (`candidate_failed_pairs`, `baseline_failed_pairs`, `both_failed_pairs`,
+  `zero_baseline_pairs`) in `comparison.json` and `comparison.md`, the verdict
+  names them, and `finished_only` keeps what the comparison would say if
+  failures cost nothing. A
+  seed given twice in `--seeds` is refused. Finished runs are cached, so an
+  interrupted confirmation — or one extended by more seeds — pays only for
+  what is new.
+- Everything lands in `<run-dir>/confirm/<label>/`: `comparison.md`,
+  `comparison.json`, every run in `results.json`, all logs, and an event log
+  and heartbeat of its own, so `status --run-dir <run-dir>/confirm/<label>` and
+  the dashboard can watch a five-hour confirmation like any other run.
+
+Use seeds the search never saw (it uses `0 … seeds-1`). If you compare several
+candidates to *choose* one, spend other seeds on the choice than on the final
+claim — choosing is selecting on noise again.
+
+`export` hands the winner to whatever runs next:
+
+```
+python -m evolvekit export --run-dir runs/x                          # the best, as JSON
+python -m evolvekit export --run-dir runs/x --format yaml --out tuned.yaml
+python -m evolvekit export --run-dir runs/x --format flags --config tuning.yaml
+    --neighbours 36 --penalty 8761.42 --exhaustive false --init savings
+python -m evolvekit export --run-dir runs/x --candidate g004-c0025 --format code
+```
+
 ## Configuring a provider
 
 Secrets are read from environment variables only. Copy `.env.example` to `.env`
-(gitignored) and fill in what you need. Each `models.small` / `models.strong`
+(gitignored) and fill in what you need: every command loads the nearest `.env`
+going up from the config file's directory, and the nearest going up from the
+working directory — up to the project root (the first directory with `.git` or
+`pyproject.toml`) and never into your home directory from below; outside a
+project only the directory itself counts. Every evaluator inherits what is
+loaded, so a stray `.env` in a parent directory is not read, and a `.env` may
+not set variables that decide which program runs or what it loads first
+(`PATH`, `PYTHON*`, `LD_*`, `DYLD_*`, `NODE_OPTIONS`, …): those are refused
+and named on stderr. A variable that is already set in the environment is never
+overridden, an empty value sets nothing, and values are never printed —
+`preflight` and `run` name the file and the *variables* it set, which is the
+first thing to look at when a key is wrong. `EVOLVEKIT_NO_DOTENV=1` switches the loading off. Each `models.small` / `models.strong`
 slot names a backend, a model, and its prices, which is what the ledger uses to
 turn tokens into USD.
 
@@ -844,9 +1311,12 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    | Placeholder | What it is | Required |
    |---|---|---|
    | `{candidate}` | path to the spliced candidate module | yes |
-   | `{out}` | path the KPI JSON must be written to | yes |
+   | `{out}` | path the KPI JSON must be written to | yes — unless the stage reads the program's output instead (`kpis_from: stdout`, `kpi_patterns`) |
    | `{inputs}` | the stage's `inputs` (or `private_inputs`), comma-joined | no |
    | `{seed}` | `0`, or `0 … N-1` on a stage with `seeds: N` | only when `seeds > 1` |
+   | `{python}` | the interpreter evolvekit itself runs on. **Use it instead of a bare `python`**: that is whatever the operating system finds first, and inside a virtual environment on Windows it is the *base* interpreter beside the launcher — other packages, and silently another version of your solver | no |
+   | `{instance}` | one entry of the stage's `instances`: the command is run once for each ([one run per instance](#one-run-per-instance-instances-workers-retries)) | when `instances` is set |
+   | `{params}` / `{params_json}` | the configuration, as flags or as a JSON file ([tuning a command](#tuning-a-command-problemparameters)) — then `{candidate}` is optional | with `problem.parameters` |
 
    The document it writes:
 

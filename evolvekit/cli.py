@@ -1,14 +1,17 @@
-"""`python -m evolvekit init | preflight | run | status | leaderboard`."""
+"""`python -m evolvekit init | preflight | run | status | dashboard | leaderboard`."""
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
 from evolvekit import __version__
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
+from evolvekit.env import LoadedEnv, load_env_files
 from evolvekit.leaderboard import (
     fitness_of,
     novelty_counts,
@@ -20,12 +23,18 @@ from evolvekit.leaderboard import (
 from evolvekit.ledger import Ledger
 from evolvekit.lock import RunLockError
 from evolvekit.preflight import run_preflight
+from evolvekit.scaffold import TUNE_FILES, TUNE_NEXT
 from evolvekit.search.driver import Driver
+from evolvekit.status import build_status, render_text
 
 __all__ = ["main", "build_parser"]
 
 DEFAULT_CONFIG = "evolvekit.yaml"
 DEFAULT_RUN_DIR = "runs/latest"
+
+EXIT_ABORTED = 4
+"""`run`: 0 done, 1 an error, 2 a config error, 3 the run directory is locked,
+4 aborted -- the seed failed its own evaluation or the model backend kept failing."""
 
 _STARTER_CONFIG = """\
 # evolvekit configuration. See README.md and docs/new-experiment.md.
@@ -67,7 +76,7 @@ evaluate:
       timeout: 30
     - id: proxy
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [proxy]
       timeout: 120           # per run, not per stage
       seeds: 1               # >1 needs {seed} in the command; KPIs are averaged
@@ -75,7 +84,7 @@ evaluate:
         top_k_per_generation: 2
     - id: full
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [full]
       private_inputs: [holdout]
       timeout: 600
@@ -199,6 +208,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="scaffold evolvekit.yaml and .env.example")
     p_init.add_argument("directory", nargs="?", default=".", help="target directory")
     p_init.add_argument("--force", action="store_true", help="overwrite existing files")
+    p_init.add_argument(
+        "--template", choices=("program", "tune"), default="program",
+        help="program (default): a config for evolving a block of code, to be pointed at your "
+        "skeleton and evaluator. tune: a complete, runnable setup for tuning the parameters of "
+        "a command-line program -- a stand-in solver, three instances, no model needed",
+    )
 
     p_pre = sub.add_parser(
         "preflight",
@@ -223,11 +238,110 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="run the evolutionary loop")
     p_run.add_argument("--config", default=DEFAULT_CONFIG)
     p_run.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
-    p_run.add_argument("--generations", type=int, default=None)
+    p_run.add_argument(
+        "--generations", type=int, default=None,
+        help="run this many *more* generations. Without it the run directory is taken to "
+        "`search.generations` in total: a resumed run finishes its plan",
+    )
     p_run.add_argument("--quiet", action="store_true")
+    p_run.add_argument(
+        "--allow-changed-problem", action="store_true",
+        help="continue a run directory although the skeleton, the parameters, the objective or a "
+        "stage's command or inputs differ from what it was started with (refused otherwise: its "
+        "scores were measured under the old definition)",
+    )
+    p_run.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="serve the live dashboard for this run on localhost while it runs "
+        "(afterwards: `evolvekit dashboard --run-dir ...`)",
+    )
+    p_run.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="first port to try for --dashboard (default 8765; the next free one is used)",
+    )
 
-    p_status = sub.add_parser("status", help="spend and progress for a run directory")
-    p_status.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
+    p_status = sub.add_parser(
+        "status",
+        help="how a run is doing: alive or not, progress, best, failures, spend",
+    )
+    p_status.add_argument(
+        "--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}"
+    )
+    p_status.add_argument(
+        "--json",
+        action="store_true",
+        help="print the whole status document as JSON: the same document the "
+        "text view and the dashboard are rendered from",
+    )
+
+    p_dash = sub.add_parser(
+        "dashboard",
+        help="the live dashboard for a run directory: running, finished or dead",
+    )
+    p_dash.add_argument(
+        "--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}"
+    )
+    p_dash.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (this machine only)")
+    p_dash.add_argument(
+        "--port", type=int, default=None, help="first port to try (default 8765)"
+    )
+    p_dash.add_argument(
+        "--no-browser", action="store_true", help="print the URL; do not open a browser"
+    )
+    p_dash.add_argument(
+        "--export",
+        metavar="FILE",
+        help="write the dashboard as one self-contained HTML file and exit: "
+        "opens from disk, works offline, can be attached to a ticket",
+    )
+
+    p_confirm = sub.add_parser(
+        "confirm",
+        help="is the improvement real? the run's best against its baseline, paired, "
+        "on seeds (and instances) the search never saw",
+    )
+    p_confirm.add_argument("--config", default=DEFAULT_CONFIG)
+    p_confirm.add_argument("--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}")
+    p_confirm.add_argument(
+        "--seeds", required=True,
+        help="comma-separated seeds the search never used, e.g. 1001,1002,1003",
+    )
+    p_confirm.add_argument(
+        "--candidates", default="best",
+        help="`best` (default), `top:N`, or comma-separated candidate ids; "
+        "`ID@OTHER_RUN_DIR` takes a candidate of another run of the same problem",
+    )
+    p_confirm.add_argument(
+        "--against", metavar="ID", default=None,
+        help="compare with this candidate instead of the run's seed (`ID` or `ID@OTHER_RUN_DIR`) "
+        "-- e.g. the winner of one search against the winner of another",
+    )
+    p_confirm.add_argument(
+        "--instances", action="append", metavar="ENTRY",
+        help="compare on these instead of the final stage's own instances "
+        "(a file, a pattern or a name; repeatable) -- e.g. instances held back from the search",
+    )
+    p_confirm.add_argument(
+        "--label", default="confirm",
+        help="the comparison lands in <run-dir>/confirm/<label>/ (default: confirm)",
+    )
+
+    p_export = sub.add_parser(
+        "export",
+        help="the winning configuration in a form another program can use",
+    )
+    p_export.add_argument("--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}")
+    p_export.add_argument("--candidate", default="best", help="a candidate id (default: the run's best)")
+    p_export.add_argument(
+        "--format", choices=("json", "yaml", "flags", "code"), default="json",
+        help="json / yaml: the parameter values; flags: `--name value` as a stage command "
+        "receives them; code: the candidate's block",
+    )
+    p_export.add_argument("--config", default=None, help="needed for --format flags (per-parameter flag names)")
+    p_export.add_argument("--out", metavar="FILE", help="write here instead of stdout")
 
     p_board = sub.add_parser("leaderboard", help="render the leaderboard")
     p_board.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
@@ -244,20 +358,38 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_init(args: argparse.Namespace) -> int:
     target = Path(args.directory).resolve()
     target.mkdir(parents=True, exist_ok=True)
+    tune = args.template == "tune"
+    existing = target / DEFAULT_CONFIG
+    if tune and existing.exists() and not args.force:
+        # The scaffold is one piece: its solver and instances beside someone
+        # else's config would be neither, and "runs as it is" would point at a
+        # config that is not the scaffold's.
+        print(
+            f"error: {target} already holds {DEFAULT_CONFIG}; nothing written. Use another "
+            "directory, or --force to replace it (and solver.py, instances/) with the scaffold",
+            file=sys.stderr,
+        )
+        return 1
+    files = (
+        tuple(TUNE_FILES.items())
+        if tune
+        else ((DEFAULT_CONFIG, _STARTER_CONFIG), (".env.example", _ENV_EXAMPLE))
+    )
     written = []
-    for name, content in (
-        (DEFAULT_CONFIG, _STARTER_CONFIG),
-        (".env.example", _ENV_EXAMPLE),
-    ):
+    for name, content in files:
         path = target / name
         if path.exists() and not args.force:
             print(f"exists, not overwritten: {path}  (use --force)")
             continue
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
         written.append(path)
     for path in written:
         print(f"wrote {path}")
-    if written:
+    if written and tune:
+        shown = Path(args.directory) / DEFAULT_CONFIG
+        print(TUNE_NEXT.format(config=shown.as_posix(), run_dir=(Path(args.directory) / "runs" / "first").as_posix()))
+    elif written:
         print("\nNext: point problem.skeleton at your skeleton file, then")
         print("  python -m evolvekit run --config evolvekit.yaml")
     return 0
@@ -265,6 +397,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_preflight(args: argparse.Namespace) -> int:
     """0 clean, 1 warnings, 2 failures -- so a wrapper script can gate on it."""
+    for loaded in _ENV_LOADED:  # where a key came from is the first question when one is wrong
+        if loaded.names:
+            print(f"environment : {loaded.path} set {', '.join(loaded.names)}")
     return run_preflight(
         load_config(args.config),
         provider_check=args.provider_check,
@@ -275,8 +410,18 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     log = (lambda _m: None) if args.quiet else print
-    driver = Driver(config, run_dir=args.run_dir, log=log)
-    summary = driver.run(args.generations)
+    driver = Driver(config, run_dir=args.run_dir, log=log, allow_changed_problem=args.allow_changed_problem)
+    server = None
+    if args.dashboard:
+        from evolvekit.dashboard import DEFAULT_PORT, DashboardServer
+
+        server = DashboardServer(driver.ledger.run_dir, port=args.port or DEFAULT_PORT)
+        print(f"dashboard   : {server.start()}   (agents: {server.url}api/status)")
+    try:
+        summary = driver.run(args.generations)
+    finally:
+        if server is not None:
+            server.stop()
 
     print()
     print(
@@ -306,21 +451,73 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"{int(totals.get('total_tokens', 0))} token(s)"
     )
     print(f"run dir     : {driver.ledger.run_dir}")
+    if args.dashboard:
+        print(
+            "dashboard   : stopped with the run. To look again:\n"
+            f"              python -m evolvekit dashboard --run-dir {driver.ledger.run_dir}"
+        )
+    # 4: the run could not work (the seed failed, the backend died). A wrapper
+    # script must not mistake that for a finished search.
+    return EXIT_ABORTED if summary.aborted else 0
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Serve (or export) the dashboard for a run directory. Reads only."""
+    from evolvekit.dashboard import (
+        DEFAULT_PORT,
+        DashboardServer,
+        export_html,
+        open_in_browser,
+    )
+
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        print(f"error: there is no run directory at {run_dir.resolve()}", file=sys.stderr)
+        return 1
+    if args.export:
+        print(f"wrote {export_html(run_dir, args.export).resolve()}")
+        return 0
+    server = DashboardServer(run_dir, host=args.host, port=args.port or DEFAULT_PORT)
+    print(f"dashboard   : {server.url}")
+    print(f"for agents  : {server.url}api/status   (the same document as `status --json`)")
+    print("Ctrl+C to stop. The run, if there is one, is not affected.")
+    if not args.no_browser:
+        open_in_browser(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        server.stop()
     return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    """Exit 0 when there is a run to report on, 1 when there is none.
+
+    Reads only. It used to build a `Ledger`, which creates the directory it is
+    given -- so `status` on a mistyped path made the path exist and reported an
+    empty run with exit code 0.
+    """
+    document = build_status(args.run_dir)
+    state = (document.get("health") or {}).get("state")
+    if args.json:
+        print(json.dumps(document, indent=2, allow_nan=False))
+        return 1 if state == "missing" else 0
+    print(render_text(document))
+    if state in ("missing", "empty"):
+        return 1 if state == "missing" else 0
+
     ledger = Ledger(args.run_dir)
     rows = ledger.runs()
     if not rows:
-        print(f"no runs recorded in {ledger.run_dir}")
         return 0
+    print()
     totals = ledger.totals()
     ranked = rank(rows, 1)
     best = ranked[0] if ranked else None
     counts = novelty_counts(rows)
     archive = ledger.read_archive()
-    print(f"run dir      : {ledger.run_dir}")
     print(f"candidates   : {len(rows)} ({counts['rejected']} rejected)")
     print(
         f"novelty      : {counts['no_op']} no-op, {counts['duplicate']} duplicate "
@@ -377,17 +574,141 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_confirm(args: argparse.Namespace) -> int:
+    """Exit 0 when every candidate's 95 % interval lies above zero, 1 otherwise
+    -- so a script can gate on "the improvement is real"."""
+    from evolvekit.confirm import confirm, render_markdown
+
+    try:
+        seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    except ValueError:
+        raise ValueError(f"--seeds: expected comma-separated integers, got {args.seeds!r}") from None
+    if not Path(args.run_dir).is_dir():
+        raise ValueError(f"there is no run directory at {args.run_dir}")
+    comparison = confirm(
+        load_config(args.config), args.run_dir, seeds=seeds, candidates=args.candidates,
+        instances=args.instances, label=args.label, against=args.against,
+    )
+    print(render_markdown(comparison))
+    print(f"written to {Path(args.run_dir) / 'confirm' / args.label}")
+    confirmed = all(
+        (result["summary"].get("ci95") or [0.0])[0] > 0 for result in comparison.per_candidate.values()
+    )
+    return 0 if confirmed else 1
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from evolvekit.leaderboard import rank
+    from evolvekit.ledger import read_jsonl
+
+    if not Path(args.run_dir).is_dir():
+        raise ValueError(f"there is no run directory at {args.run_dir}")
+    rows = list(read_jsonl(Path(args.run_dir) / "runs.jsonl"))
+    if args.candidate == "best":
+        ranked = rank(rows, 1)
+        if not ranked:
+            raise ValueError("the run has no fully evaluated candidate yet")
+        row = ranked[0]
+    else:
+        row = next((r for r in rows if r.get("id") == args.candidate), None)
+        if row is None:
+            raise ValueError(f"the run directory holds no candidate {args.candidate!r}")
+    params = row.get("params")
+    if args.format == "code":
+        text = str(row.get("block") or "")
+    elif not isinstance(params, dict):
+        raise ValueError(
+            f"{row.get('id')} has no parameter values: the run declares no `problem.parameters`. "
+            "Use --format code for its block"
+        )
+    elif args.format == "json":
+        text = json.dumps(params, indent=2) + "\n"
+    elif args.format == "yaml":
+        import yaml
+
+        text = yaml.safe_dump(params, sort_keys=False)
+    else:
+        if not args.config:
+            raise ValueError("--format flags needs --config: a parameter may declare its own flag")
+        space = load_config(args.config).problem.parameters
+        if space is None:
+            raise ValueError(f"{args.config} declares no `problem.parameters`")
+        resolved, problems = space.validate(params)
+        if problems:
+            raise ValueError(f"{row.get('id')} does not fit {args.config}: {problems[0]}")
+        text = " ".join(space.render_flags(resolved)) + "\n"
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+        print(f"{row.get('id')} -> {args.out}", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 _COMMANDS = {
+    "confirm": cmd_confirm,
+    "export": cmd_export,
     "init": cmd_init,
     "preflight": cmd_preflight,
     "run": cmd_run,
     "status": cmd_status,
+    "dashboard": cmd_dashboard,
     "leaderboard": cmd_leaderboard,
 }
 
 
+_ENV_LOADED: list[LoadedEnv] = []
+"""Which `.env` files set which variables in this process -- names, never values."""
+
+
+def _load_env(args: argparse.Namespace) -> None:
+    """The nearest `.env` above the config file and above the working directory,
+    inside the project (`evolvekit/env.py`). `EVOLVEKIT_NO_DOTENV=1` switches it
+    off: a test suite must not read a developer's real keys.
+
+    A refused variable is reported by every command, on stderr so `--json`
+    output stays clean. `run` also says what it loaded: every evaluator it
+    starts inherits it, and a run is where a surprise costs most."""
+    if os.environ.get("EVOLVEKIT_NO_DOTENV"):
+        return
+    config = getattr(args, "config", None)
+    starts = ([Path(config).resolve().parent] if config else []) + [Path.cwd()]
+    _ENV_LOADED[:] = load_env_files(starts)
+    for loaded in _ENV_LOADED:
+        if loaded.names and args.command == "run":
+            print(f"environment : {loaded.path} set {', '.join(loaded.names)}", file=sys.stderr)
+        if loaded.refused:
+            print(
+                f"environment : {loaded.path} refused {', '.join(loaded.refused)} -- they decide "
+                "which program runs or what it loads, and every evaluator would inherit them; "
+                "set them in the shell if you mean it",
+                file=sys.stderr,
+            )
+
+
+def _tolerant_output() -> None:
+    """Never let a character the console cannot encode decide the exit code.
+
+    On Windows a piped or redirected stdout is encoded as cp1252. A failed
+    evaluator's last words -- an arrow, a byte that is no UTF-8 -- then raised
+    `UnicodeEncodeError` while being printed, a `ValueError` that `main` turns
+    into exit 1: `preflight` reported "warnings" for a broken harness, and a
+    wrapper that stops only on 2 went ahead. Unencodable characters are
+    written as escapes instead."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (ValueError, OSError):  # a stream that cannot be reconfigured is left alone
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_output()
     args = build_parser().parse_args(argv)
+    _load_env(args)
     try:
         return _COMMANDS[args.command](args)
     except ConfigError as exc:

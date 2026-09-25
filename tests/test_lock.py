@@ -74,6 +74,44 @@ def test_a_stale_lock_is_reclaimed_with_a_note(tmp_path):
     lock.release()
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("win32", "linux"), reason="process start times are read on Windows and Linux"
+)
+def test_a_lock_whose_pid_was_given_to_a_younger_process_is_reclaimed(tmp_path):
+    """A run killed with its lock left behind, and its pid since recycled --
+    quickly on Windows, always after a reboot. The process now holding that
+    pid started after the lock was written, so it is not the owner, and the
+    run must be resumable without deleting the lock by hand."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (run_dir / ".lock").write_text(
+            json.dumps({"pid": stranger.pid, "started": "2000-01-01T00:00:00+00:00"}), encoding="utf-8"
+        )
+        lock = RunLock(run_dir).acquire()
+        assert lock.reclaimed_from == stranger.pid
+        lock.release()
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_a_live_owner_that_started_before_its_lock_still_holds_it(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (run_dir / ".lock").write_text(
+            json.dumps({"pid": owner.pid, "started": "2999-01-01T00:00:00+00:00"}), encoding="utf-8"
+        )
+        with pytest.raises(RunLockError, match=f"pid {owner.pid}"):
+            RunLock(run_dir).acquire()
+    finally:
+        owner.kill()
+        owner.wait()
+
+
 def test_an_unreadable_lock_file_does_not_wedge_the_directory(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()

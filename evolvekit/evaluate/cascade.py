@@ -11,28 +11,36 @@ promoted is not a punishment; failing a stage is (`evaluate.failure_score`).
 
 from __future__ import annotations
 
+import json
+import math
+import time
 from pathlib import Path
-from statistics import quantiles
+from statistics import fmean, quantiles
 from typing import Any, Callable, Iterable, Sequence
 
 from evolvekit.budget import BudgetGuard
-from evolvekit.candidate import Candidate
+from evolvekit.candidate import SEED_OPERATOR, Candidate
 from evolvekit.config import Config, PromoteRule, StageConfig
+from evolvekit.evaluate.cache import EvalCache
+from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
 from evolvekit.evaluate.scoring import compute_score, ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
 from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
     STDERR_LIMIT,
+    Configuration,
     run_command_stage,
     run_static_stage,
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
+from evolvekit.ledger import _atomic_write
 
 __all__ = [
     "Cascade",
     "select_promoted",
     "archive_threshold",
     "finished_final_stage",
+    "race_warnings",
 ]
 
 
@@ -68,9 +76,29 @@ def finished_final_stage(
     final = config.final_stage
     if final.id not in stages_reached:
         return False
-    if final.kind == "command" and final.private_inputs and private_score is None:
+    held_out = final.private_inputs or final.private_instances
+    if final.kind == "command" and held_out and private_score is None:
         return False
     return True
+
+
+def race_warnings(config: Config) -> list[str]:
+    """A `race` rule that can never stop anyone, said in words.
+
+    A candidate is raced out once it has finished `after` instances and still
+    has at least one left. With `after` at or above the stage's number of
+    instances that moment never comes, and the rule does nothing -- a setting
+    the user believes is saving solver time, silently inert."""
+    warnings = []
+    for stage in config.evaluate.stages:
+        count = len(stage.instance_names())
+        if stage.race is not None and stage.race.after >= count:
+            warnings.append(
+                f"stage {stage.id}: race.after is {stage.race.after}, but the stage has {count} "
+                "instance(s): no candidate can ever be raced out. Set `after` below the number of "
+                "instances, or remove `race`"
+            )
+    return warnings
 
 
 def archive_threshold(scores: Sequence[float], percentile: float) -> float | None:
@@ -137,6 +165,19 @@ class Cascade:
         # the seed is a perfectly good twin target, and so is a candidate from
         # six generations ago.
         self.signatures = signatures if signatures is not None else BehaviourIndex()
+        self._configurations: dict[str, Configuration] = {}
+        """Per candidate, the validated parameters as a command can take them.
+        Filled when the static stage resolves them (`problem.parameters`)."""
+        self.cache = EvalCache(self.work_dir / "cache") if config.evaluate.cache else None
+        """Successful evaluator runs, kept so that an identical one is a lookup:
+        what makes an interrupted generation cheap to finish."""
+        self.incumbent: dict[str, dict[str, Any]] = self._load_json(self.work_dir / "incumbent.json")
+        """Per stage, the best candidate so far and what it reached on each
+        instance: what a stage's `race` rule measures a candidate against."""
+        self.reference: dict[str, dict[str, float]] = self._load_reference()
+        """Per stage, what the baseline reached on each instance: the yardstick
+        of `normalize: baseline`. Kept on disk, because a resumed run does not
+        evaluate its seed again."""
 
     # -- public ----------------------------------------------------------
 
@@ -160,9 +201,28 @@ class Cascade:
             if not alive:
                 break
             survivors: list[str] = []
+            began = self._stage_started(stage, alive, private=False)
+            outcomes = (
+                self._run_instances(stage, [by_id[cid] for cid in alive], paths)
+                if stage.fans_out
+                else None
+            )
+            failed = raced_out = 0
             for cid in alive:
-                outcome = self._run_stage(stage, by_id[cid], paths[cid])
+                outcome = (
+                    outcomes[cid]
+                    if outcomes is not None
+                    else self._run_stage(stage, by_id[cid], paths[cid])
+                )
+                # Raced out is not failed: nothing went wrong, the candidate
+                # was stopped because it was behind.
+                if outcome.raced_out:
+                    raced_out += 1
+                elif not outcome.ok:
+                    failed += 1
                 self._absorb(results[cid], outcome, stage)
+                if outcome.params is not None:
+                    self._configure(cid, paths[cid], outcome.params)
                 if not outcome.ok:
                     continue
                 # A candidate that behaved exactly like one already evaluated
@@ -172,6 +232,7 @@ class Cascade:
                     continue
                 survivors.append(cid)
 
+            self._stage_finished(stage, began, len(alive), failed, private=False, raced_out=raced_out)
             is_final = index == len(stages) - 1
             if is_final:
                 self._run_private(stage, by_id, paths, results, survivors)
@@ -191,6 +252,18 @@ class Cascade:
         return results
 
     # -- internals -------------------------------------------------------
+
+    def _configure(self, candidate_id: str, path: Path, params: dict) -> None:
+        """Keep a validated configuration in the shapes a command can take it:
+        flags for `{params}`, and a JSON file beside the candidate for
+        `{params_json}`."""
+        space = self.config.problem.parameters
+        assert space is not None
+        json_path = path.with_suffix(".params.json")
+        json_path.write_text(json.dumps(params, indent=2) + "\n", encoding="utf-8", newline="\n")
+        self._configurations[candidate_id] = Configuration(
+            flags=tuple(space.render_flags(params)), json_path=json_path
+        )
 
     def _materialise(self, candidate: Candidate) -> Path:
         path = self.candidates_dir / f"{candidate.id}.py"
@@ -217,10 +290,200 @@ class Cascade:
             cwd=self.config.base_dir,
             required_kpis=(self.config.evaluate.score.objective,),
             observer=self._observer(candidate.id, stage, private=False),
+            configuration=self._configurations.get(candidate.id),
+            cache=self.cache,
         )
         if self._is_final(stage) and self.budget is not None:
             self.budget.record_full_eval()
         return outcome
+
+    def _stage_started(self, stage: StageConfig, candidates: Sequence[str], *, private: bool) -> float:
+        """Tell the event log how much work a stage is about to be for this
+        generation -- a long stage is otherwise a progress bar with no length."""
+        if self.on_event is not None and stage.kind == "command":
+            instances = stage.private_instances if private else stage.instances
+            self.on_event(
+                "stage_started",
+                stage=stage.id,
+                private=private,
+                candidates=list(candidates),
+                runs_per_candidate=max(1, len(instances)) * stage.seeds,
+                workers=stage.workers,
+            )
+        return time.perf_counter()
+
+    def _stage_finished(
+        self, stage: StageConfig, began: float, candidates: int, failed: int, *, private: bool,
+        raced_out: int = 0,
+    ) -> None:
+        if self.on_event is not None and stage.kind == "command":
+            self.on_event(
+                "stage_finished",
+                stage=stage.id,
+                private=private,
+                candidates=candidates,
+                failed=failed,
+                raced_out=raced_out,
+                duration_s=round(time.perf_counter() - began, 3),
+            )
+
+    def _run_instances(
+        self,
+        stage: StageConfig,
+        candidates: Sequence[Candidate],
+        paths: dict[str, Path],
+        *,
+        private: bool = False,
+    ) -> dict[str, StageOutcome]:
+        """A per-instance stage, for every candidate still alive at once: the
+        worker pool spans the generation (`evaluate/fanout.py`)."""
+        outcomes: dict[str, StageOutcome] = {}
+        admitted: list[Candidate] = []
+        for candidate in candidates:
+            if not private and self._final_stage_blocked(stage):
+                outcomes[candidate.id] = StageOutcome(
+                    stage_id=stage.id,
+                    ok=False,
+                    skipped=True,
+                    failure="daily full-evaluation cap reached",
+                )
+                continue
+            if not private and self._is_final(stage) and self.budget is not None:
+                self.budget.record_full_eval()  # counted on admission: the cap is about starts
+            admitted.append(candidate)
+        outcomes.update(
+            run_instance_stage(
+                [
+                    Job(
+                        candidate_id=c.id,
+                        candidate_path=paths[c.id],
+                        configuration=self._configurations.get(c.id),
+                        observer=self._observer(c.id, stage, private=private),
+                    )
+                    for c in admitted
+                ],
+                stage,
+                out_dir=self.work_dir / "stage_out",
+                cwd=self.config.base_dir,
+                private=private,
+                required_kpis=(self.config.evaluate.score.objective,),
+                cache=self.cache,
+                race=self._race_for(stage, admitted, private=private),
+            )
+            if admitted
+            else {}
+        )
+        for candidate in admitted:
+            self._normalise(stage, candidate, outcomes[candidate.id], private=private)
+            if not private:
+                self._note_incumbent(stage, candidate, outcomes[candidate.id])
+        return outcomes
+
+    # -- race ------------------------------------------------------------
+
+    @staticmethod
+    def _load_json(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _race_for(self, stage: StageConfig, candidates: Sequence[Candidate], *, private: bool) -> Race | None:
+        held = self.incumbent.get(stage.id)
+        if stage.race is None or private or not held:
+            return None  # nothing to race against yet: the first candidate through always finishes
+        return Race(
+            objective=self.config.evaluate.score.objective,
+            minimize=self.config.evaluate.score.direction == "minimize",
+            incumbent={str(k): float(v) for k, v in held["values"].items()},
+            after=stage.race.after,
+            margin_pct=stage.race.margin_pct,
+            exempt=frozenset(c.id for c in candidates if c.operator == SEED_OPERATOR),
+        )
+
+    def _note_incumbent(self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome) -> None:
+        """Remember the best candidate to have finished this stage, instance by instance."""
+        if stage.race is None or not outcome.ok:
+            return
+        objective = self.config.evaluate.score.objective
+        values = dict(zip(outcome.instance_names, outcome.vector_kpis.get(per_instance_key(objective), [])))
+        score = outcome.kpis.get(objective)
+        if not values or score is None:
+            return
+        held = self.incumbent.get(stage.id)
+        better = held is None or (
+            score < held["score"] if self.config.evaluate.score.direction == "minimize" else score > held["score"]
+        )
+        if better:
+            self.incumbent[stage.id] = {"id": candidate.id, "score": score, "values": values}
+            # Atomically: half a file reads back as "nothing to race against",
+            # and a resumed run would quietly stop racing.
+            _atomic_write(self.work_dir / "incumbent.json", json.dumps(self.incumbent, indent=2, sort_keys=True) + "\n")
+
+    # -- normalize: baseline ---------------------------------------------
+
+    @property
+    def _reference_path(self) -> Path:
+        return self.work_dir / "reference.json"
+
+    def _load_reference(self) -> dict[str, dict[str, float]]:
+        try:
+            payload = json.loads(self._reference_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return {
+            str(stage): {str(name): float(value) for name, value in values.items()}
+            for stage, values in payload.items()
+            if isinstance(values, dict)
+        }
+
+    def _normalise(
+        self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome, *, private: bool
+    ) -> None:
+        """Restate the objective as a percentage of the baseline, instance by instance.
+
+        The plain mean over instances is a mean over *scales*: an instance with
+        ten times the cost of the others decides the search on its own, and a
+        two-percent gain everywhere else is rounding error. Dividing each
+        instance by what the baseline reached on it gives every instance the
+        same say. The divisor is fixed for the whole run -- it is a weight, not
+        a measurement -- so a lucky or unlucky baseline run shifts where 100
+        lies but never which of two candidates is ahead.
+
+        The baseline is the seed candidate; its values become the reference
+        the first time it passes the stage. The plain mean stays available as
+        `<objective>_raw`.
+        """
+        if stage.normalize != "baseline" or not outcome.ok:
+            return
+        objective = self.config.evaluate.score.objective
+        values = dict(zip(outcome.instance_names, outcome.vector_kpis[per_instance_key(objective)]))
+        key = f"{stage.id}/private" if private else stage.id
+        if candidate.operator == SEED_OPERATOR and key not in self.reference:
+            unusable = [name for name, value in values.items() if not (value > 0 and math.isfinite(value))]
+            if unusable:
+                outcome.ok = False
+                outcome.failure = (
+                    f"cannot normalise against the baseline: its {objective} on instance "
+                    f"{unusable[0]} is {values[unusable[0]]:g}, and a percentage of that means "
+                    f"nothing. Set `normalize: none` on stage {stage.id!r} to use the plain mean"
+                )
+                return
+            self.reference[key] = values
+            self._reference_path.write_text(
+                json.dumps(self.reference, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+        reference = self.reference.get(key, {})
+        shared = [name for name in outcome.instance_names if name in reference]
+        if not shared:
+            return  # no baseline has passed this stage (a cascade used on its own): the plain mean
+        relative = [100.0 * values[name] / reference[name] for name in shared]
+        outcome.kpis[f"{objective}_raw"] = outcome.kpis[objective]
+        outcome.kpis[objective] = fmean(relative)
+        outcome.vector_kpis[f"{objective}_pct_of_baseline"] = relative
 
     def _observer(
         self, candidate_id: str, stage: StageConfig, *, private: bool
@@ -306,6 +569,11 @@ class Cascade:
         self, result: EvalResult, outcome: StageOutcome, stage: StageConfig
     ) -> None:
         result.outcomes.append(outcome)
+        if outcome.raced_out:
+            # Not a failure: the candidate keeps the score of the stage before,
+            # does not reach this one, and so does not compete.
+            result.raced_out = outcome.raced_out
+            return
         if not outcome.ok:
             result.last_failure = _artefact(outcome)
             if stage.kind == "builtin-static":
@@ -316,6 +584,8 @@ class Cascade:
             return
 
         result.stages_reached.append(stage.id)
+        if outcome.params is not None:
+            result.params = dict(outcome.params)
         result.kpis.update(outcome.kpis)
         result.kpi_cv.update(outcome.kpi_cv)
         if outcome.text_feedback:
@@ -344,22 +614,37 @@ class Cascade:
         survivors: Sequence[str],
     ) -> None:
         """Score the hold-out and record the gap. Never feeds the search signal."""
-        if not stage.private_inputs or stage.kind != "command":
+        if stage.kind != "command" or not (stage.private_inputs or stage.private_instances):
             return
+        if not survivors:
+            return
+        began, failed = self._stage_started(stage, survivors, private=True), 0
+        held_out = (
+            self._run_instances(stage, [by_id[cid] for cid in survivors], paths, private=True)
+            if stage.private_instances
+            else None
+        )
         for cid in survivors:
-            outcome = run_command_stage(
-                paths[cid],
-                stage,
-                inputs=stage.private_inputs,
-                out_path=self.work_dir / "stage_out" / f"{cid}.{stage.id}.private.json",
-                cwd=self.config.base_dir,
-                private=True,
-                required_kpis=(self.config.evaluate.score.objective,),
-                observer=self._observer(cid, stage, private=True),
+            outcome = (
+                held_out[cid]
+                if held_out is not None
+                else run_command_stage(
+                    paths[cid],
+                    stage,
+                    inputs=stage.private_inputs,
+                    out_path=self.work_dir / "stage_out" / f"{cid}.{stage.id}.private.json",
+                    cwd=self.config.base_dir,
+                    private=True,
+                    required_kpis=(self.config.evaluate.score.objective,),
+                    observer=self._observer(cid, stage, private=True),
+                    configuration=self._configurations.get(cid),
+                    cache=self.cache,
+                )
             )
             result = results[cid]
             result.outcomes.append(outcome)
             if not outcome.ok:
+                failed += 1
                 result.last_failure = _artefact(outcome)
                 continue
             if outcome.text_feedback:
@@ -385,6 +670,7 @@ class Cascade:
                 private_score,
                 self.config.evaluate.holdout_penalty,
             )
+        self._stage_finished(stage, began, len(survivors), failed, private=True)
 
 
 def _merge_feedback(existing: str, addition: str) -> str:

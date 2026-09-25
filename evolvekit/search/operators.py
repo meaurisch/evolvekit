@@ -14,6 +14,7 @@ the `# PARAMS:` ranges the block declares (see `search/params.py`).
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 
 from evolvekit.candidate import Candidate
@@ -23,14 +24,28 @@ from evolvekit.evaluate.types import EvalResult
 from evolvekit.prompts import Inspiration, build_messages
 from evolvekit.providers.base import Completion, Provider, ProviderError
 from evolvekit.search.params import param_variant
+from evolvekit.search.tuning import Observation, propose_tpe
+from evolvekit.space import ParameterSpace
 
-__all__ = ["OperatorResult", "run_operator", "param_lhs", "OPERATOR_ROLES"]
+__all__ = [
+    "OperatorResult",
+    "run_operator",
+    "param_lhs",
+    "param_lhs_typed",
+    "param_local",
+    "param_cross",
+    "param_tpe",
+    "OPERATOR_ROLES",
+]
 
 OPERATOR_ROLES = {
     "diff": "small",
     "rewrite": "small",
     "crossover": "small",
     "param_lhs": "none",
+    "param_local": "none",
+    "param_cross": "none",
+    "param_tpe": "none",
     "big_step": "strong",
 }
 
@@ -138,3 +153,89 @@ def param_lhs(parent: Candidate, *, seed: int, n_variants: int = 6) -> OperatorR
         mode="param_lhs",
         meta={"params": values},
     )
+
+
+def param_lhs_typed(
+    space: ParameterSpace, parent: Candidate, *, seed: int, n_variants: int = 6
+) -> OperatorResult:
+    """The same sweep over a declared `problem.parameters` space.
+
+    Types and scales come from the declaration, so a boolean is flipped rather
+    than frozen, a choice is drawn from its values, and a log-scale parameter is
+    covered decade by decade. The child's block is *rendered* from the sampled
+    values, so it does not matter what shape the parent's code is in.
+    """
+    rng = random.Random(seed)
+    base = parent.params or space.defaults()
+    variants = [v for v in space.latin_hypercube(max(2, n_variants), rng) if v != base]
+    if not variants:  # a space of one point
+        return OperatorResult(
+            operator="param_lhs",
+            messages=[],
+            error="param_lhs found nothing to sweep: every sample equals the parent",
+        )
+    values = variants[seed % len(variants)]
+    return OperatorResult(
+        operator="param_lhs",
+        messages=[],
+        block=space.render_block(values),
+        mode="param_lhs",
+        meta={"params": values},
+    )
+
+
+def _rendered(space: ParameterSpace, values: dict, operator: str, **meta) -> OperatorResult:
+    return OperatorResult(
+        operator=operator,
+        messages=[],
+        block=space.render_block(values),
+        mode=operator,
+        meta={"params": values, **meta},
+    )
+
+
+def param_local(space: ParameterSpace, parent: Candidate, *, seed: int) -> OperatorResult:
+    """A neighbour of the parent's configuration: one to three parameters moved
+    a little (`ParameterSpace.perturb`). The exploiting half of a model-free
+    search -- most of what can be won from a mature solver's defaults is next
+    to them."""
+    base = dict(parent.params or space.defaults())
+    return _rendered(space, space.perturb(base, random.Random(seed)), "param_local")
+
+
+def param_cross(
+    space: ParameterSpace, parent: Candidate, mate: Candidate | None, *, seed: int
+) -> OperatorResult:
+    """Each parameter from the parent or from `mate`, so gains found separately
+    are tried together. Without a second configuration worth crossing with --
+    the first generations -- it is a local step instead, and says so."""
+    rng = random.Random(seed)
+    base = dict(parent.params or space.defaults())
+    other = dict(mate.params) if mate is not None and mate.params else {}
+    differing = [p.name for p in space if p.name in other and other[p.name] != base[p.name]]
+    if len(differing) < 2:  # any cross of these two is one of the two
+        return _rendered(space, space.perturb(base, rng), "param_local", fallback_of="param_cross")
+    taken = [name for name in differing if rng.random() < 0.5]
+    if not taken or len(taken) == len(differing):  # the coin fell the same way every time
+        taken = rng.sample(differing, k=rng.randint(1, len(differing) - 1))
+    child = {**base, **{name: other[name] for name in taken}}
+    return _rendered(space, child, "param_cross", mate_id=mate.id)
+
+
+def param_tpe(
+    space: ParameterSpace,
+    parent: Candidate,
+    observations: list[Observation],
+    *,
+    seed: int,
+) -> OperatorResult:
+    """The configuration a Tree-structured Parzen Estimator rates highest, given
+    every configuration evaluated so far (`search/tuning.py`). With too few
+    observations to estimate anything it is a local step instead."""
+    rng = random.Random(seed)
+    proposal = propose_tpe(space, observations, rng)
+    if proposal is None:
+        base = dict(parent.params or space.defaults())
+        return _rendered(space, space.perturb(base, rng), "param_local", fallback_of="param_tpe")
+    return _rendered(space, proposal, "param_tpe", observations=len(observations))
+

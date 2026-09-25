@@ -1,0 +1,7 @@
+# The tuning and fresh instances are 0.2-0.6 MB each and the generator is
+# deterministic: `manifest.json` records their SHA-256, regenerate them with
+#   python generate.py --set tuning --out instances/
+#   python generate.py --set fresh  --out instances/
+# The two smoke instances under smoke/ are small and ARE committed.
+instances/
+__pycache__/

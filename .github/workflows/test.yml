@@ -16,5 +16,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with: {python-version: "3.12"}
-      - run: pip install -e ".[dev]" 2>/dev/null || pip install pytest
-      - run: python tasks.py check
+      # No fallback: a dev install that fails must fail here, not later as a
+      # confusing "No module named ruff".
+      - run: pip install -e ".[dev]"
+      - run: python tasks.py check  # lint, then every test

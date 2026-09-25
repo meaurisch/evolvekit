@@ -1,10 +1,11 @@
-"""Uniform entry points: python tasks.py test|full|run|check.
+"""Uniform entry points: python tasks.py test|full|run|check|lint.
 
 `test` is the fast loop for local iteration: everything except tests marked
 `slow` (driver-level runs and a couple of timing-sensitive ones), which was
-~70-170s depending on load -- too slow to run after every edit. `full` and
-`check` run everything, unfiltered; `check` is what CI
-calls, so it must never lose coverage `test` skips.
+~70-170s depending on load -- too slow to run after every edit. `full` runs
+every test, unfiltered. `lint` runs ruff's mistake-only rules. `check` is
+`lint` and then `full`, and it is what CI calls, so it must never lose
+coverage `test` skips.
 
 `run` drives the bin-packing example for a few generations against the `fake`
 provider: no network, no keys, a few seconds, and a leaderboard at the end.
@@ -56,10 +57,24 @@ def run():
     )
 
 
+def lint():
+    """Undefined names, unused imports and variables, syntax errors: the rules
+    that only ever find mistakes. Style is not checked, on purpose -- adopting a
+    formatter is a decision for the whole repository, not for a drive-by."""
+    paths = [p for p in ("evolvekit", "tests", "examples", "benchmarks", "tasks.py") if (ROOT / p).exists()]
+    return subprocess.call(
+        [sys.executable, "-m", "ruff", "check", "--select", "F,E9", *paths], cwd=str(ROOT)
+    )
+
+
 def check():
-    return full()
+    """The CI gate: lint, then every test. The tests run even when lint fails,
+    so one push reports both; either failing fails the gate."""
+    linted = lint()
+    tested = full()
+    return linted or tested
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
-    sys.exit({"test": test, "full": full, "run": run, "check": check}[cmd]())
+    sys.exit({"test": test, "full": full, "run": run, "check": check, "lint": lint}[cmd]())

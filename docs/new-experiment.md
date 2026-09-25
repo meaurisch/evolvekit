@@ -13,7 +13,9 @@ version of everything below; `examples/pyvrp/` is the heavyweight version
 python -m evolvekit init my-problem/
 ```
 
-writes a commented starter `evolvekit.yaml` and a `.env.example`. Or copy the
+writes a commented starter `evolvekit.yaml` and a `.env.example`
+(`--template tune` instead writes a complete, runnable setup for tuning a
+command-line program: see `examples/cli-solver/`). Or copy the
 closest directory under `examples/` — that is usually faster, because the
 examples already have a working evaluator shape, a `fake_responses.yaml` and
 the three-config `extends` layout.
@@ -29,9 +31,20 @@ my-problem/
   fake_responses.yaml       # canned LLM responses for offline runs and tests
 ```
 
-## 1. The skeleton
+## 1. The skeleton — or, for a program you only want to configure, none
 
-A normal Python file with the evolvable part fenced:
+**Tuning the configuration of an existing program** (a solver with a command
+line, in any language)? Skip the skeleton and steps 1–2 altogether: declare
+`problem.parameters` — name, type, range, default — and put `{params}` or
+`{params_json}` in the stage command. The defaults are the baseline, every
+configuration is validated before the program is started, and with
+`search.operators: {param_lhs: 1.0}` the run needs no model and no key. The
+program reports however it already does: a JSON file at `{out}`, a JSON object
+on its last line of stdout (`kpis_from: stdout`), or text that `kpi_patterns`
+picks numbers out of. See
+[Tuning a command](../README.md#tuning-a-command-problemparameters).
+
+Otherwise: a normal Python file with the evolvable part fenced:
 
 ```python
 # EVOLVE-BLOCK-START
@@ -57,6 +70,9 @@ Any command. It receives placeholders (any order) and writes JSON to `{out}`:
 | `{out}` | path to write the KPI JSON | yes |
 | `{inputs}` | the stage's `inputs` / `private_inputs`, comma-joined | no |
 | `{seed}` | `0`, or `0…N-1` on a `seeds: N` stage | only when `seeds > 1` |
+| `{python}` | the interpreter running evolvekit — not whatever a bare `python` resolves to | no |
+| `{instance}` | one entry of the stage's `instances`; the command runs once per instance | when `instances` is set |
+| `{params}` / `{params_json}` | the configuration as flags / as a JSON file | with `problem.parameters` |
 
 ```json
 {
@@ -89,13 +105,13 @@ evaluate:
       import_check: true
     - id: proxy            # seconds; a subset
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [small_set]
       timeout: 120
       promote: {top_k_per_generation: 2}
     - id: full             # the real thing, plus a private hold-out
       kind: command
-      command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+      command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
       inputs: [full_set]
       private_inputs: [holdout_set]
       timeout: 300
@@ -113,6 +129,18 @@ never otherwise optimised against. A stochastic evaluator gets `seeds: N`
 (KPIs averaged, per-KPI coefficient of variation recorded). No natural
 subset? Run two stages and lean on penalty KPIs — that is what
 `examples/circlepacking/` does.
+
+**A solver with a test set** gets `instances:` on the stage and `{instance}` in
+the command, which then solves one instance per run. That buys `workers` (runs
+side by side, `pin_cpus` so a time-limited run has a core to itself),
+`retries` for the occasional crash, failures that name their instance, a
+per-instance comparison on the dashboard, and `normalize: baseline` — each
+instance counts as a percentage of what the defaults reached on it, so the
+largest instance does not decide the search
+([README: one run per instance](../README.md#one-run-per-instance-instances-workers-retries)).
+For a slow solver the cheap stage is the same command with a shorter time
+limit and fewer instances, and `promote: {top_k_per_generation: 2}` decides who
+gets the full budget.
 
 ## 4. Score, archive, novelty
 
@@ -173,8 +201,9 @@ KPIs/notes/duration, checks timeouts and projected wall clock, and
 clean, 1 warnings, 2 failures. Only then:
 
 ```
-python -m evolvekit run --config my-problem/evolvekit.real.yaml --run-dir runs/my-problem
+python -m evolvekit run --config my-problem/evolvekit.real.yaml --run-dir runs/my-problem --dashboard
 python -m evolvekit status --run-dir runs/my-problem
+python -m evolvekit status --run-dir runs/my-problem --json   # the same, for a script or an agent
 python -m evolvekit leaderboard --run-dir runs/my-problem --html board.html
 ```
 

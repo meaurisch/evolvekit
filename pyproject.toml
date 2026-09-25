@@ -15,7 +15,9 @@ dependencies = [
 # Keyless Entra ID auth against an Azure AI Foundry / Azure OpenAI resource
 # whose key auth is disabled. The core suite never imports it.
 entra = ["azure-identity>=1.17"]
-dev = ["pytest>=9.1.1"]
+# ruff is bounded: a new release may add findings to the checked rules, and
+# CI should not turn red without a code change. Raise the bound on purpose.
+dev = ["pytest>=9.1.1", "ruff>=0.6,<0.17"]
 # The PyVRP configuration-search example only. The core suite never imports
 # pyvrp: tests/test_pyvrp_example.py is skipped when it is absent.
 pyvrp = ["pyvrp>=0.14"]
@@ -26,7 +28,14 @@ evolvekit = "evolvekit.cli:main"
 [tool.setuptools.packages.find]
 include = ["evolvekit*"]
 
+[tool.setuptools.package-data]
+# The dashboard is one HTML file, served as it is: no build step.
+evolvekit = ["dashboard/*.html"]
+
 [tool.pytest.ini_options]
+# Without this, a bare `pytest` also collects whatever sits under `runs/` -- a
+# git worktree, a copied checkout -- and dies on "import file mismatch".
+testpaths = ["tests"]
 markers = [
     "slow: a driver-level or timing-sensitive test, excluded from the fast `python tasks.py test` default -- run it with `python tasks.py full` (and always in `check`, the CI gate).",
 ]
