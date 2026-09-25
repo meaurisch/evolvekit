@@ -132,6 +132,14 @@ class Candidate:
     """The earlier candidate whose behaviour this one reproduced exactly."""
     behaviour_signatures: dict[str, str] = field(default_factory=dict)
     """One fingerprint per command stage reached, keyed by stage id."""
+    competes: bool = True
+    """False when the candidate did not finish the final stage -- a failed
+    evaluation, a proxy-only candidate, a final stage skipped by the daily cap,
+    a hold-out run that failed. It keeps its finite `score` for the record, but
+    that score is not comparable with a full-stage one, so the candidate is
+    never ranked, archived or bred from. True by default because a row written
+    before this field existed says nothing either way; `Driver.resume` settles
+    those with `cascade.finished_final_stage`."""
 
     @property
     def complexity(self) -> int:
