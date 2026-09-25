@@ -46,6 +46,20 @@ __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
 SEED_OPERATOR = "human-seed"
 
 
+def _random_stream(seed: int, recorded: int) -> random.Random:
+    """The run's generator: reproducible, and never the same stream twice.
+
+    A fresh run is seeded with `search.seed`, as it always was. A resumed run
+    seeded the same way draws the same operators, parents and `param_lhs` sweep
+    seeds as its first generation did -- and `param_lhs` samples from that seed
+    alone, so the children it breeds are blocks the run already holds and the
+    novelty filter discards them. Folding in how much the directory already
+    holds gives a resumed run a stream of its own that is still a function of
+    the seed and the directory, so resuming stays reproducible too.
+    """
+    return random.Random(seed if recorded == 0 else f"{seed}/{recorded}")
+
+
 @dataclass
 class RunSummary:
     generations: int = 0
@@ -125,7 +139,7 @@ class Driver:
             budget=self.budget,
             signatures=self.behaviour,
         )
-        self.rng = random.Random(config.search.seed)
+        self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
         self.breadth = AdaptiveBreadth.from_config(config.search)
         self.log = log or (lambda _msg: None)
         self._providers = providers or {}
