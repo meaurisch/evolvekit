@@ -884,9 +884,12 @@ Search settings, the budget, `workers` and the like may change between sessions.
 `budget.max_full_evals_per_day`, which *stops* the run once no candidate can reach the final stage
 any more today; run the same command again tomorrow, or raise the cap). `1` an error.
 `2` a config error. `3` the run directory is locked by a live run. `4` **aborted**: the seed
-failed its own evaluation, or the model backend kept failing — nothing was searched, and a
-wrapper script, a CI step or an agent must not take that for a finished search. The reason
-is in the last lines of the output and in `status`.
+failed its own evaluation (nothing was searched), or the model backend kept failing (the search
+stopped wherever it was, possibly mid-run) — a wrapper script, a CI step or an agent must not
+take either for a finished search. The reason is in the last lines of the output and in
+`status`. Running the same command again after a seed failure evaluates the seed again before
+anything is bred — the evaluator may have been fixed in between — and aborts with `4` again if
+it still fails, so a wrapper that retries never breeds past a broken harness.
 
 ### The run lock
 

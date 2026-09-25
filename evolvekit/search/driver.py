@@ -536,16 +536,32 @@ class Driver:
         )
         # Not `if started_at`: a run stopped before generation 1 finished holds
         # only its seed, and the seed's generation is 0.
+        seed = None
         if self.archive:
             self.log(
                 f"resumed {len(self.archive)} candidate(s) from runs.jsonl "
                 f"({self.grid.occupancy()})"
             )
-            seed = next((c for c in self.archive if c.operator == SEED_OPERATOR), None)
-            summary.seed_score = seed.score if seed else None
             summary.candidates = len(self.archive)
+            recorded = self._recorded_seed()
+            if recorded is None or not self._seed_failed(recorded):
+                summary.seed_score = recorded.score if recorded else None
+            else:
+                # The last session aborted on this seed, or bred past a seed
+                # that never got through. Running the same command again is
+                # what a retrying wrapper does; it must not step over the abort
+                # and breed against a harness that may still be broken. The
+                # seed is evaluated again first -- the evaluator may have been
+                # fixed in between -- and judged exactly as a fresh run's is.
+                self._forget_behaviour(recorded.id)
+                seed = self._seed_candidate()
+                self.log(
+                    f"gen 0  the recorded seed {recorded.id} did not get through the cascade; "
+                    "evaluating it again before anything is bred"
+                )
         else:
             seed = self._seed_candidate()
+        if seed is not None:
             began = self._generation_started(0, children=0)
             self._evaluate_and_record([seed], generation=0)
             self._generation_finished(0, began, [seed])
@@ -556,11 +572,7 @@ class Driver:
             # A seed that cannot get through the cascade means the harness is
             # broken, not the heuristic. Stop here, before the first LLM call,
             # so a misconfigured evaluator never costs money.
-            if (
-                seed.rejected
-                or seed.last_failure
-                or seed.score == self.config.evaluate.failure_score
-            ):
+            if self._seed_failed(seed):
                 detail = (seed.reject_reason or seed.last_failure or "scored failure_score").strip()
                 first_line = detail.splitlines()[0] if detail else "unknown failure"
                 summary.stop_reason = (
@@ -645,6 +657,25 @@ class Driver:
                 break
 
         return self._finalise(summary)
+
+    def _recorded_seed(self) -> Candidate | None:
+        """The seed as last evaluated: a seed evaluated again after an abort is
+        a second seed row, and the later one is the one that counts."""
+        return next((c for c in reversed(self.archive) if c.operator == SEED_OPERATOR), None)
+
+    def _seed_failed(self, seed: Candidate) -> bool:
+        return bool(
+            seed.rejected
+            or seed.last_failure
+            or seed.score == self.config.evaluate.failure_score
+        )
+
+    def _forget_behaviour(self, candidate_id: str) -> None:
+        """Drop a candidate's behaviour signatures, so that the seed evaluated
+        again is not stopped as a twin of its own failed first attempt."""
+        self.behaviour.by_key = {
+            key: owner for key, owner in self.behaviour.by_key.items() if owner != candidate_id
+        }
 
     # -- a generation that was interrupted -------------------------------
 

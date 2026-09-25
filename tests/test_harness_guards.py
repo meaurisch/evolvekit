@@ -92,3 +92,57 @@ def test_run_does_not_exit_0_when_it_aborted(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["run", "--config", str(cfg_path), "--run-dir", str(tmp_path / "broken"), "--quiet"]) == EXIT_ABORTED == 4
     assert "seed failed evaluation" in capsys.readouterr().out
+
+
+FLAKY_SOLVER = (
+    "import argparse, json, pathlib, sys\n"
+    "p = argparse.ArgumentParser(); p.add_argument('--x', type=float)\n"
+    "a = p.parse_args()\n"
+    "if pathlib.Path('broken').exists(): sys.exit('the harness is broken')\n"
+    "print(json.dumps({'cost': 100 + abs(a.x - 0.3)}))\n"
+)
+FLAKY_RAW = {
+    "problem": {"parameters": {"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.9}}},
+    "evaluate": {
+        "stages": [
+            {"id": "static", "kind": "builtin-static"},
+            {"id": "full", "kind": "command", "kpis_from": "stdout", "command": "{python} solver.py {params}"},
+        ],
+        "score": {"objective": "cost", "direction": "minimize"},
+    },
+    "search": {"operators": {"param_lhs": 1.0}, "children_per_generation": 2, "generations": 2, "seed": 1},
+    "budget": {"max_full_evals_per_day": 100},
+}
+
+
+@pytest.mark.slow
+def test_running_an_aborted_run_again_does_not_breed_past_its_failed_seed(tmp_path):
+    """The abort is not a state a second invocation may step over.
+
+    A wrapper that retries on failure ran the same command again: the resume
+    found the failed seed in `runs.jsonl`, skipped the seed check, bred
+    against the broken harness and exited 0 -- with a model operator, paying
+    for it. The seed is evaluated again first (the evaluator may have been
+    fixed in between), and a seed that still fails aborts exactly as before.
+    """
+    import yaml
+
+    from evolvekit.cli import EXIT_ABORTED, main
+
+    (tmp_path / "solver.py").write_text(FLAKY_SOLVER, encoding="utf-8")
+    (tmp_path / "broken").write_text("", encoding="utf-8")
+    config_path = tmp_path / "evolvekit.yaml"
+    config_path.write_text(yaml.safe_dump(FLAKY_RAW, sort_keys=False), encoding="utf-8")
+    argv = ["run", "--config", str(config_path), "--run-dir", str(tmp_path / "run"), "--quiet"]
+
+    assert main(argv) == EXIT_ABORTED
+    assert main(argv) == EXIT_ABORTED, "the second invocation stepped over the failed seed"
+    rows = [r for r in Ledger(tmp_path / "run").runs()]
+    assert {r["operator"] for r in rows} == {"human-seed"}, "nothing was bred against a broken harness"
+
+    (tmp_path / "broken").unlink()  # the harness is fixed: the same command now searches
+    assert main(argv) == 0
+    rows = Ledger(tmp_path / "run").runs()
+    seeds = [r for r in rows if r["operator"] == "human-seed"]
+    assert seeds[-1]["competes"] and not any(s["competes"] for s in seeds[:-1])
+    assert max(int(r["generation"]) for r in rows) == 2

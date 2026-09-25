@@ -137,6 +137,21 @@ def test_a_failed_run_costs_its_pair_not_the_comparison(tmp_path):
     assert result["pairs"] == 5 and result["pairs_planned"] == 6 and result["failed_runs"] == 1
 
 
+def test_the_baseline_is_the_seed_as_last_evaluated(tmp_path):
+    """A run that aborted on its seed evaluates the seed again when it is run
+    again: the first seed row is the failed attempt, the last one counts."""
+    config_path = _write_config(tmp_path)
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    rows = (run_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+    seed = json.loads(rows[0])
+    failed = {**seed, "id": "g000-c0000", "competes": False, "score": -1000.0, "last_failure": "stage full: exit 1"}
+    retried = {**seed, "id": "g000-c0013"}
+    lines = [json.dumps(failed), *rows[1:], json.dumps(retried)]
+    (run_dir / "runs.jsonl").write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    comparison = confirm(load_config(config_path), run_dir, seeds=[1001], label="t", log=lambda m: None)
+    assert comparison.baseline_id == "g000-c0013"
+
+
 def test_top_n_and_instances_the_search_never_saw(tmp_path):
     config_path = _write_config(tmp_path)
     run_dir = _write_run(tmp_path, config_path, {

@@ -217,7 +217,9 @@ def confirm(
     if against is not None:
         seed_row = _find(rows, against.strip(), "--against")
     else:
-        seed_row = next((r for r in rows if r.get("operator") == SEED_OPERATOR), None)
+        # The last seed row: a run that aborted on its seed evaluates it again
+        # when it is run again, and the earlier row is the failed attempt.
+        seed_row = next((r for r in reversed(rows) if r.get("operator") == SEED_OPERATOR), None)
     if seed_row is None:
         raise ValueError(f"{run_dir} holds no seed candidate: there is no baseline to compare with")
     if not seeds:
