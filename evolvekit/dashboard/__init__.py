@@ -25,6 +25,7 @@ open.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import sys
 import threading
@@ -32,7 +33,7 @@ import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -74,10 +75,24 @@ class _Cache:
 
 def _safe_path(run_dir: Path, relative: str) -> Path | None:
     """`relative` resolved inside `run_dir`, or `None`. The run directory is the
-    whole of what this server may read."""
+    whole of what this server may read.
+
+    The path is judged as *text* before the filesystem sees it. Resolving
+    `\\\\host\\share\\x.log` on Windows opens an SMB connection to `host`, with the
+    user's credentials, before any containment check can refuse it -- and any
+    web page can make the browser request that URL from a local dashboard. So
+    anything absolute, anything with a drive or a root, and anything with a
+    `..` is refused here, and only a plain path below the run directory is
+    ever resolved (symbolic links inside the run are still checked after).
+    """
+    if not relative or "\x00" in relative:
+        return None
+    parts = PureWindowsPath(relative)  # accepts `/` and `\` alike, knows drives and UNC
+    if parts.drive or parts.root or relative.startswith(("/", "\\")) or ".." in parts.parts:
+        return None
     try:
         root = run_dir.resolve()
-        target = (root / relative).resolve()
+        target = root.joinpath(*parts.parts).resolve()
         target.relative_to(root)
     except (OSError, ValueError):
         return None
@@ -95,6 +110,13 @@ def _read_tail(path: Path) -> str:
     if size > LOG_BYTES:
         text = f"[... the first {size - LOG_BYTES:,} bytes are not shown ...]\n" + text
     return text
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
 
 
 def _handler(run_dir: Path, cache: _Cache) -> type[BaseHTTPRequestHandler]:
@@ -117,8 +139,32 @@ def _handler(run_dir: Path, cache: _Cache) -> type[BaseHTTPRequestHandler]:
             body = json.dumps(payload, allow_nan=False).encode("utf-8")
             self._send(body, "application/json; charset=utf-8", status)
 
+        def _refused(self) -> bool:
+            """Whether this request comes from somewhere other than the page.
+
+            Bound to this machine, the server answers only to its own name:
+            DNS rebinding lets a hostile page call 127.0.0.1 by *its* name and
+            read the run as same-origin, and then `Host` is that name. A browser
+            also says when a request is cross-site; the page never makes one.
+            A server bound elsewhere (`--host`) was opened on purpose and
+            answers to whatever name reaches it.
+            """
+            if self.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
+                return True
+            if not _is_loopback(self.server.server_address[0]):
+                return False
+            port = self.server.server_address[1]
+            allowed = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]")}
+            return self.headers.get("Host", "").lower() not in allowed
+
         def do_GET(self) -> None:  # noqa: N802 - the name http.server requires
             url = urlparse(self.path)
+            if self._refused():
+                try:
+                    self._json({"error": "refused: not a request from this dashboard"}, 403)
+                except OSError:
+                    pass
+                return
             try:
                 if url.path in ("/", "/index.html"):
                     self._send(PAGE.read_bytes(), "text/html; charset=utf-8")

@@ -122,6 +122,67 @@ def test_nothing_outside_the_run_directory_can_be_read(server, path):
     assert status == 404 and "not part of the run" not in body
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["\\\\10.255.255.1\\share\\x.log", "//10.255.255.1/share/x.log", "\\\\?\\C:\\Windows\\win.ini",
+     "C:win.ini", "C:\\Windows\\win.ini", "/etc/passwd", "../secret.log", "work\\..\\..\\secret.log"],
+)
+def test_a_path_outside_the_run_is_refused_before_the_filesystem_is_asked(run_dir, path, monkeypatch):
+    """Resolving `\\\\host\\share\\x.log` on Windows opens an SMB connection to
+    `host` -- with the user's credentials -- before any check can say no, and a
+    web page can make the browser request that URL from the local dashboard. So
+    the path is judged as text first, and only a path inside the run directory
+    is ever handed to the filesystem."""
+    from evolvekit import dashboard
+
+    root = run_dir.resolve()
+    touched: list[str] = []
+    real_resolve = Path.resolve
+
+    def resolve(self, *args, **kwargs):
+        touched.append(str(self))
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    assert dashboard._safe_path(run_dir, path) is None
+    outside = [p for p in touched if not p.startswith(str(root)) and p != str(run_dir)]
+    assert outside == [], f"asked the filesystem about {outside}"
+
+
+def _get_with_headers(server: DashboardServer, path: str, headers: dict) -> int:
+    import http.client
+
+    host, port = server._server.server_address[:2]
+    connection = http.client.HTTPConnection(host, port, timeout=10)
+    try:
+        connection.putrequest("GET", "/" + path, skip_host=True)
+        for name, value in headers.items():
+            connection.putheader(name, value)
+        connection.endheaders()
+        return connection.getresponse().status
+    finally:
+        connection.close()
+
+
+def test_a_page_on_another_site_cannot_read_the_dashboard(server):
+    """DNS rebinding: a hostile page points its own name at 127.0.0.1 and reads
+    `/api/status` -- the code, the command lines, the paths -- as same-origin.
+    The request then carries that name in `Host`, which a server bound to this
+    machine can refuse. A plain cross-site request says so in `Sec-Fetch-Site`."""
+    port = server._server.server_address[1]
+    assert _get_with_headers(server, "api/status", {"Host": f"127.0.0.1:{port}"}) == 200
+    assert _get_with_headers(server, "api/status", {"Host": f"localhost:{port}"}) == 200
+    assert _get_with_headers(server, "api/status", {"Host": f"attacker.example:{port}"}) == 403
+    assert _get_with_headers(server, "api/status", {}) == 403
+    assert _get_with_headers(
+        server, "api/log?path=runs.jsonl",
+        {"Host": f"127.0.0.1:{port}", "Sec-Fetch-Site": "cross-site"},
+    ) == 403
+    assert _get_with_headers(
+        server, "api/status", {"Host": f"127.0.0.1:{port}", "Sec-Fetch-Site": "same-origin"}
+    ) == 200
+
+
 def test_it_only_listens_on_this_machine_unless_told_otherwise(server):
     assert server.url.startswith("http://127.0.0.1:")
 

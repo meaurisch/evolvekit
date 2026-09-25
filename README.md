@@ -153,7 +153,11 @@ into a ticket. `?theme=dark` forces a theme.
 
 It is built to stay out of the way. The server is `http.server` from the
 standard library, bound to `127.0.0.1`, read-only, and can read nothing outside
-the run directory. The page is **one HTML file with its styles and scripts
+the run directory — a requested path is judged as text before the filesystem
+sees it, so a network path cannot make Windows connect anywhere. Bound to this
+machine it answers only to `127.0.0.1`, `localhost` or `[::1]` in `Host` and
+refuses cross-site requests, so another web page open in the same browser can
+neither read the run nor make the server fetch anything. The page is **one HTML file with its styles and scripts
 inline**: no build step, no package manager, no CDN, so it renders on a machine
 that is offline. The document is rebuilt at most once a second and only while a
 page is open (about 12 ms for a run of 80 candidates and 150 evaluations). On
