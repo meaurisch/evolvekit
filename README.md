@@ -415,8 +415,8 @@ written for evolvekit either. Three ways to read it, per stage:
 | The program … | Stage keys | What is read |
 |---|---|---|
 | writes a JSON file | `{out}` in the command (the default, `kpis_from: file`) | that file |
-| prints a JSON object | `kpis_from: stdout` — no `{out}` needed | the **last** line of stdout that is a JSON object; progress lines and other output before it are ignored |
-| prints text | `kpi_patterns: {cost: 'best cost: ([-+0-9.eE]+)'}` | per KPI, a regular expression with one capturing group; the **last** match counts, because a solver logs its progress before its result. `^` and `$` are the start and end of a *line* (`re.MULTILINE`), so `'^Cost: (\d+)$'` works. Can be combined with either JSON source |
+| prints a JSON object | `kpis_from: stdout` — no `{out}` needed | the **last** line of stdout that is a JSON object, however long it is and wherever it is in the log; progress lines and other output around it are ignored |
+| prints text | `kpi_patterns: {cost: 'best cost: ([-+0-9.eE]+)'}` | per KPI, a regular expression with one capturing group; the **last** match counts, because a solver logs its progress before its result. `^` and `$` are the start and end of a *line* (`re.MULTILINE`), so `'^Cost: (\d+)$'` works. The patterns see the last 64 KB of what the program printed. Can be combined with either JSON source |
 
 The JSON object may be the solver's own. With an explicit `"kpis"` key every
 value has to be a number or a list of numbers, as before. Without one, the

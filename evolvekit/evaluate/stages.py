@@ -708,7 +708,7 @@ def _collect_kpis(stage: StageConfig, out_path: Path, stdout_log: Path) -> Kpis:
     vectors: dict[str, list[float]] = {}
     note = ""
     if stage.kpis_from == "stdout":
-        payload = _last_json_object(read_tail(stdout_log, TAIL_BYTES))
+        payload = _last_json_object(stdout_log)
         if payload is None:
             return {}, {}, "", "the program printed no JSON object on stdout"
         kpis, vectors, note, problem = _parse_kpis(payload)
@@ -719,6 +719,9 @@ def _collect_kpis(stage: StageConfig, out_path: Path, stdout_log: Path) -> Kpis:
         if problem is not None:
             return {}, {}, "", problem
     if stage.kpi_patterns:
+        # The patterns see the last `TAIL_BYTES` of the log, not all of it: a
+        # regular expression over fifty megabytes of progress lines costs what
+        # it costs, and a text result is a short line at the end.
         printed = read_tail(stdout_log, TAIL_BYTES)
         for name, pattern in stage.kpi_patterns:
             # MULTILINE: `^` and `$` are the start and end of a *line*. What a
@@ -740,18 +743,32 @@ def _collect_kpis(stage: StageConfig, out_path: Path, stdout_log: Path) -> Kpis:
     return kpis, vectors, note, None
 
 
-def _last_json_object(printed: str) -> dict[str, Any] | None:
-    for line in reversed(printed.splitlines()):
-        line = line.strip()
-        if not (line.startswith("{") and line.endswith("}")):
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            return payload
-    return None
+def _last_json_object(stdout_log: Path) -> dict[str, Any] | None:
+    """The last line of the log that is a JSON object, from anywhere in it.
+
+    Not from the log's tail: a solver that prints its solution along with its
+    cost prints one line of a few hundred kilobytes, and the last 64 KB of that
+    is the second half of a line -- the run was reported as having printed no
+    JSON object at all. So the whole log is read, a line at a time: memory is
+    bounded by the longest line, not by the log, and only a line that starts
+    with `{` and ends with `}` is handed to the JSON parser.
+    """
+    found: dict[str, Any] | None = None
+    try:
+        with open(stdout_log, "rb") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not (line.startswith(b"{") and line.endswith(b"}")):
+                    continue
+                try:
+                    payload = json.loads(line.decode("utf-8", errors="replace"))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    found = payload
+    except OSError:
+        return None
+    return found
 
 
 def _read_kpis(out_path: Path) -> Kpis:

@@ -447,7 +447,8 @@ class StageConfig:
     `RaceRule`. Off unless configured."""
     kpis_from: str = "file"
     """Where the command reports. `file`: the JSON object it writes to `{out}`.
-    `stdout`: the last line of its standard output that is a JSON object --
+    `stdout`: the last line of its standard output that is a JSON object,
+    wherever it is in the log and however long it is --
     what a solver that was not written for evolvekit usually already does.
     Either way the object may be the solver's own: its numbers and booleans
     are the KPIs, its strings and nested objects are left alone."""
