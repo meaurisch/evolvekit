@@ -308,7 +308,9 @@ dense relative to bad ones and proposes where that ratio is highest — a
 candidate that crashed counts as the worst observation, so a region that kills
 the solver is not proposed again, one that was raced out counts as no better
 than the worst finished one (whatever its screening score), and one that was
-only screened by a cheap stage still says where not to look. Until there are eight observations it takes
+only screened by a cheap stage still says where not to look — when every command
+stage lists `instances` with `normalize: baseline`, so that its score is on the final
+stage's scale; otherwise only finished candidates (and failures) are observations. Until there are eight observations it takes
 a local step instead, and the record says so.
 
 Which to use depends on how good the defaults already are. Measured at equal

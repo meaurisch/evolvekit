@@ -924,7 +924,16 @@ class Driver:
         race -- a screening score that may beat every finished candidate's --
         but the race has just shown it to be behind the best. It is recorded at
         the floor, no better than the worst finished configuration, rather
-        than as the good configuration its screening score would make it."""
+        than as the good configuration its screening score would make it.
+
+        A candidate that was screened out by a cheaper stage is judged by that
+        stage's score only when it is on the same scale as the final stage's:
+        when every command stage states the objective as a percentage of the
+        baseline (`normalize: baseline`). A plain mean over a proxy's few small
+        instances is a different number altogether, and would rank every
+        screened-out candidate above every finished one."""
+        commands = [stage for stage in self.config.evaluate.stages if stage.kind == "command"]
+        same_scale = all(stage.fans_out and stage.normalize == "baseline" for stage in commands)
         scored: list[tuple[Candidate, float]] = []
         behind: list[Candidate] = []
         failed: list[Candidate] = []
@@ -935,8 +944,10 @@ class Driver:
                 failed.append(c)
             elif c.raced_out:
                 behind.append(c)
-            elif c.stages_reached and c.score is not None:
-                scored.append((c, float(c.fitness if c.competes and c.fitness is not None else c.score)))
+            elif c.competes and c.fitness is not None:
+                scored.append((c, float(c.fitness)))
+            elif same_scale and c.stages_reached and c.score is not None:
+                scored.append((c, float(c.score)))
         floor = min((value for _, value in scored), default=0.0)
         observations = [Observation(c.params, value) for c, value in scored]
         observations += [Observation(c.params, floor) for c in behind]
