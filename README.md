@@ -62,6 +62,34 @@ it wrote plus its **complete** stdout and stderr
 ever sees the last 2,000 characters; the files are for whoever has to debug
 the solver.
 
+### What a run says while it runs
+
+`runs.jsonl` gets a row when a generation's whole cascade has returned — with an
+hour-long evaluator, one write every few hours. Two more files in the run
+directory say what is happening in between, and they are what every view of a
+live run is built from:
+
+* **`events.jsonl`** — append-only, one JSON object per line, never rewritten.
+  Every event has `seq` (1, 2, 3 … across the whole directory), `ts` (UTC,
+  milliseconds), `session` (one id per process that ran against the directory),
+  `pid` and `type`:
+
+  | `type` | When | Carries |
+  |---|---|---|
+  | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
+  | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
+  | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s`; then `ok`, `duration_s`, `kpis`, `argv`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
+  | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
+  | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
+
+* **`heartbeat.json`** — rewritten every five seconds while the run is alive:
+  `ts`, `pid`, `phase` (`starting`, `breeding`, `evaluating`, then `finished`,
+  `interrupted` or `crashed`), `generation`, and the candidate and stage being
+  evaluated. A beat older than a few intervals while its pid is alive means the
+  process is suspended or the machine slept — which, on a wall-clock-limited
+  evaluator, also means the evaluation in flight at the time cannot be trusted.
+
 ### How it works
 
 ```

@@ -18,10 +18,13 @@ no-ops, and its winner improved the public set while losing on the hold-out.
 from __future__ import annotations
 
 import random
+import socket
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
+from evolvekit import __version__
 from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
 from evolvekit.candidate import Candidate, extract_block, splice_block
 from evolvekit.config import Config
@@ -30,6 +33,7 @@ from evolvekit.economics import GenerationPoint, series
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.types import EvalResult
+from evolvekit.events import EventLog, Heartbeat
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration
@@ -133,15 +137,18 @@ class Driver:
         self.budget = BudgetGuard(config.budget)
         self.stop_policy = StopPolicy(config.stop)
         self.behaviour = BehaviourIndex()
+        self.events = EventLog(self.ledger.run_dir)
+        self.heartbeat = Heartbeat(self.ledger.run_dir, session=self.events.session)
         self.cascade = Cascade(
             config,
             work_dir=self.ledger.run_dir / "work",
             budget=self.budget,
             signatures=self.behaviour,
+            on_event=self._on_evaluation,
         )
         self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
         self.breadth = AdaptiveBreadth.from_config(config.search)
-        self.log = log or (lambda _msg: None)
+        self._log_sink = log or (lambda _msg: None)
         self._providers = providers or {}
 
         skeleton = config.problem.skeleton.read_text(encoding="utf-8")
@@ -174,6 +181,67 @@ class Driver:
         parent's next prompt. The parent's children counter has already been
         incremented, so the archive has made it less attractive; this tells the
         model *why* the last attempt on it bought nothing."""
+
+    # -- what the run says about itself ----------------------------------
+
+    def log(self, message: str) -> None:
+        """A console line, kept. A run's stdout is gone with its terminal, or
+        still sitting in a pipe buffer when the process is killed; the event
+        log is what a second shell, a dashboard or a post-mortem can read."""
+        self.events.emit("log", message=message)
+        self._log_sink(message)
+
+    def _on_evaluation(self, type: str, **fields: object) -> None:
+        self.events.emit(type, **fields)
+        if type == "eval_started":
+            self.heartbeat.update(
+                phase="evaluating",
+                candidate_id=fields.get("candidate_id"),
+                stage=fields.get("stage"),
+            )
+
+    def _describe_run(self, *, first_generation: int, planned: int) -> dict:
+        """Everything a reader of the run directory needs in order to interpret
+        it without the config file: what is optimised, through which stages,
+        under which caps, and how far this session intends to go."""
+        config = self.config
+        final = config.final_stage.id
+        return {
+            "version": __version__,
+            "host": socket.gethostname(),
+            "config_path": str(config.source) if config.source else None,
+            "objective": config.evaluate.score.objective,
+            "direction": config.evaluate.score.direction,
+            "failure_score": config.evaluate.failure_score,
+            "stages": [
+                {
+                    "id": stage.id,
+                    "kind": stage.kind,
+                    "timeout_s": stage.timeout,
+                    "seeds": stage.seeds,
+                    "promote": stage.promote.describe(),
+                    "holdout": bool(stage.private_inputs),
+                    "final": stage.id == final,
+                }
+                for stage in config.evaluate.stages
+            ],
+            "first_generation": first_generation,
+            "generations_planned": planned,
+            "children_per_generation": self.children_per_generation,
+            "resumed": bool(self.archive),
+            "recorded_candidates": len(self.archive),
+            "budget": {
+                "max_usd": config.budget.max_usd,
+                "max_tokens": config.budget.max_tokens,
+                "max_full_evals_per_day": config.budget.max_full_evals_per_day,
+            },
+            "stop": {
+                "patience": config.stop.patience,
+                "epsilon": config.stop.epsilon,
+                "target": config.stop.target,
+                "max_usd_since_improvement": config.stop.max_usd_since_improvement,
+            },
+        }
 
     # -- providers -------------------------------------------------------
 
@@ -299,17 +367,46 @@ class Driver:
     def run(self, generations: int | None = None) -> RunSummary:
         """Take the run lock, then search. One writer per run directory."""
         with run_lock(self.ledger.run_dir) as lock:
-            if lock.reclaimed_from:
-                self.log(
-                    f"reclaimed a stale lock from dead pid {lock.reclaimed_from}"
-                )
-            return self._run(generations)
+            self.heartbeat.start(phase="starting")
+            try:
+                if lock.reclaimed_from:
+                    self.log(
+                        f"reclaimed a stale lock from dead pid {lock.reclaimed_from}"
+                    )
+                summary = self._run(generations)
+            except KeyboardInterrupt:
+                self.events.emit("run_interrupted")
+                self.heartbeat.stop(phase="interrupted")
+                raise
+            except BaseException as exc:
+                # Written before it propagates: the traceback goes to a terminal
+                # that may not exist; this goes where `status` can find it.
+                self.events.emit("run_crashed", error=f"{type(exc).__name__}: {exc}")
+                self.heartbeat.stop(phase="crashed")
+                raise
+            best = summary.best
+            self.events.emit(
+                "run_finished",
+                stop_reason=summary.stop_reason,
+                generations=summary.generations,
+                candidates=summary.candidates,
+                seed_score=summary.seed_score,
+                best_id=best.id if best else None,
+                best_score=best.score if best else None,
+                best_fitness=best.fitness if best else None,
+            )
+            self.heartbeat.stop(phase="finished")
+            return summary
 
     def _run(self, generations: int | None) -> RunSummary:
         total = generations if generations is not None else self.config.search.generations
         summary = RunSummary()
 
         started_at = self.resume()
+        self.events.emit(
+            "run_started",
+            **self._describe_run(first_generation=started_at + 1, planned=total),
+        )
         # Not `if started_at`: a run stopped before generation 1 finished holds
         # only its seed, and the seed's generation is 0.
         if self.archive:
@@ -322,7 +419,9 @@ class Driver:
             summary.candidates = len(self.archive)
         else:
             seed = self._seed_candidate()
+            began = self._generation_started(0, children=0)
             self._evaluate_and_record([seed], generation=0)
+            self._generation_finished(0, began, [seed])
             summary.seed_score = seed.score
             summary.candidates += 1
             self.log(f"gen 0  seed        score={_fmt(seed.score)}")
@@ -358,6 +457,9 @@ class Driver:
 
             self._maybe_refresh_scratchpad(generation)
 
+            began = self._generation_started(
+                generation, children=self.children_per_generation
+            )
             children = self._breed(generation, plateau=decision.plateau)
             summary.candidates += len(children)
             viable = [c for c in children if not c.rejected]
@@ -366,6 +468,7 @@ class Driver:
                 if child.rejected and child.id not in self.results:
                     self._record(child)
             summary.generations = offset
+            self._generation_finished(generation, began, children)
 
             if self._provider_is_dead():
                 summary.stop_reason = (
@@ -477,6 +580,33 @@ class Driver:
         return decision
 
     # -- generation internals -------------------------------------------
+
+    def _generation_started(self, generation: int, *, children: int) -> float:
+        self.events.emit(
+            "generation_started", generation=generation, children_planned=children
+        )
+        self.heartbeat.update(
+            phase="breeding" if children else "evaluating",
+            generation=generation,
+            candidate_id=None,
+            stage=None,
+        )
+        return time.perf_counter()
+
+    def _generation_finished(
+        self, generation: int, began: float, children: Sequence[Candidate]
+    ) -> None:
+        best = self.best
+        self.events.emit(
+            "generation_finished",
+            generation=generation,
+            duration_s=round(time.perf_counter() - began, 3),
+            children=len(children),
+            rejected=sum(1 for c in children if c.rejected),
+            best_id=best.id if best else None,
+            best_fitness=best.fitness if best else None,
+            spent_usd=self.budget.state.usd,
+        )
 
     def _seed_candidate(self) -> Candidate:
         return Candidate(
@@ -696,6 +826,17 @@ class Driver:
             child.operator = f"big_step/{child.operator}"
         elif operator == "crossover" and outcome.ok:
             child.operator = "crossover"
+        self.events.emit(
+            "candidate_bred",
+            candidate_id=child.id,
+            generation=generation,
+            operator=child.operator,
+            parent_id=parent.id,
+            attempts=attempts,
+            ok=not child.rejected,
+            novelty=child.novelty,
+            reason=child.reject_reason,
+        )
         return child
 
     def _propose(
