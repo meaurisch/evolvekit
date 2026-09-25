@@ -42,6 +42,9 @@ def test_the_defaults_are_a_valid_configuration_and_the_baseline(space):
         ("x", {"type": "int", "low": 1, "high": 9, "default": 30}, "above its maximum"),
         ("x", {"type": "float", "low": 0, "high": 9, "default": 3, "log": True}, "log scale needs low > 0"),
         ("x", {"type": "float", "low": 0, "default": 3}, "needs a finite number"),
+        ("x", {"type": "float", "low": "lots", "high": 9, "default": 3}, "needs a finite number"),
+        ("x", {"type": "float", "low": ".nan", "high": 9, "default": 3}, "needs a finite number"),
+        ("x", {"type": "float", "low": 0, "high": 9, "default": "three"}, "expected a finite float"),
         ("x", {"type": "bool", "default": "yes"}, "expected true or false"),
         ("x", {"type": "bool", "default": True, "low": 0}, "only int and float parameters have a range"),
         ("x", {"type": "choice", "choices": ["a"], "default": "a"}, "at least two distinct values"),
@@ -57,6 +60,27 @@ def test_a_mistake_in_a_declaration_is_reported_where_it_was_made(name, spec, fr
     assert fragment in str(error.value)
     assert "problem.parameters" in str(error.value), "the key path has to be in the message"
 
+
+
+def test_numbers_that_yaml_reads_as_strings_are_numbers():
+    # PyYAML follows YAML 1.1, where a float needs a dot and a signed exponent:
+    # `1e5` is the *string* "1e5". The example in `evolvekit.space`'s own
+    # docstring is written exactly that way, and was refused with "a float
+    # parameter needs a finite number".
+    import yaml
+
+    import evolvekit.space
+
+    example = evolvekit.space.__doc__.split("parameters:\n", 1)[1].split("\n\n", 1)[0]
+    raw = yaml.safe_load(example)
+    assert raw["max_penalty"]["low"] == "1e3", "the premise: YAML hands over a string"
+    space = ParameterSpace.parse(raw)
+    penalty = next(p for p in space if p.name == "max_penalty")
+    assert (penalty.low, penalty.high, penalty.default) == (1e3, 1e7, 1e5)
+    assert space.defaults()["max_penalty"] == 100000.0
+    counted = ParameterSpace.parse({"n": {"type": "int", "low": "1e1", "high": "1e3", "default": "5e1"}})
+    assert space.validate(space.defaults())[1] == [] and counted.defaults() == {"n": 50}
+    assert isinstance(counted.parameters[0].low, int)
 
 def test_an_empty_space_is_refused():
     with pytest.raises(SpaceError, match="non-empty mapping"):

@@ -17,8 +17,11 @@ choices; its user has no Python to fence, and should not have to write any. So
         exhaustive:  {type: bool,   default: true}
         init:        {type: choice, choices: [greedy, random, savings], default: greedy}
 
-and everything else follows from it: the skeleton is generated (a `configure()`
-that returns a dict, which an LLM operator may still rewrite), a candidate's
+(YAML reads `1e3` as a string -- a YAML 1.1 float needs a dot and a signed
+exponent -- so a numeric string is taken as its number for a range or a
+default; see `_yaml_number`.) Everything else follows from the declaration:
+the skeleton is generated (a `configure()` that returns a dict, which an LLM
+operator may still rewrite), a candidate's
 configuration is *resolved and validated in the static stage* -- before it can
 cost a second of solver time -- the values are substituted into the stage
 command as flags, recorded on the candidate as data rather than as code, and
@@ -53,6 +56,27 @@ def _is_number(value: Any) -> bool:
         and isinstance(value, (int, float))
         and math.isfinite(value)
     )
+
+
+def _yaml_number(value: Any, kind: str) -> Any:
+    """A bound or default that YAML handed over as a string, as the number it is.
+
+    PyYAML follows YAML 1.1, where a float needs a dot and a signed exponent:
+    `1e5` -- the way anybody writes a penalty range -- arrives as the *string*
+    "1e5", and was refused as "not a finite number". A string that `float()`
+    reads is taken as that number (a whole one as an `int` for an int
+    parameter); anything else is passed on unchanged, to be refused with the
+    message it always got.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    if not math.isfinite(number):
+        return value
+    return int(number) if kind == "int" and number.is_integer() else number
 
 
 @dataclass(frozen=True)
@@ -99,6 +123,8 @@ class Parameter:
                 f"{path}.default: required. The defaults are the baseline every "
                 "candidate is compared with, so each parameter needs one"
             )
+        if kind in ("int", "float"):
+            raw = {**raw, **{k: _yaml_number(raw[k], kind) for k in ("low", "high", "default") if k in raw}}
         flag = raw.get("flag", "--" + name.replace("_", "-"))
         if not isinstance(flag, str) or not flag:
             raise SpaceError(f"{path}.flag: must be a non-empty string, got {flag!r}")

@@ -369,6 +369,9 @@ search:
   operators: {param_lhs: 1.0}      # no `models` section: nothing here calls one
 ```
 
+`1e4` works as well as `1.0e+4`: YAML reads the short form as a string, and a
+range or default that is a numeric string is taken as its number.
+
 | Placeholder | What the command receives |
 |---|---|
 | `{params}` | one `--name value` pair per parameter: `--neighbours 40 --penalty 5000.0 --exhaustive false --init savings`. An underscore in a name becomes a dash; a boolean is `true`/`false`; `flag: "-n"` on a declaration replaces the generated flag |
