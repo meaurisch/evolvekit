@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -438,7 +439,8 @@ class StageConfig:
     """Logical CPUs to pin the workers to, one each. With simultaneous
     multithreading, naming one logical CPU per physical core (`[2, 4, 6]`)
     keeps two runs from sharing a core, and leaving a core out keeps one free
-    for the operating system and for evolvekit itself."""
+    for the operating system and for evolvekit itself. Checked against the
+    machine when the stage runs (`missing_cpus`), not when the config is read."""
     retries: int = 0
     """Run a failed instance run again, this many times, before the stage
     fails. For the solver that crashes once in a hundred runs."""
@@ -447,14 +449,16 @@ class StageConfig:
     `RaceRule`. Off unless configured."""
     kpis_from: str = "file"
     """Where the command reports. `file`: the JSON object it writes to `{out}`.
-    `stdout`: the last line of its standard output that is a JSON object --
+    `stdout`: the last line of its standard output that is a JSON object,
+    wherever it is in the log and however long it is --
     what a solver that was not written for evolvekit usually already does.
     Either way the object may be the solver's own: its numbers and booleans
     are the KPIs, its strings and nested objects are left alone."""
     kpi_patterns: tuple[tuple[str, str], ...] = ()
     """`(kpi, regular expression)`: numbers picked out of what the command
     prints, for a program that reports in text. One capturing group; the last
-    match counts, because a solver logs its progress before its result."""
+    match counts, because a solver logs its progress before its result. Applied
+    line by line (`re.MULTILINE`): `^` and `$` are the start and end of a line."""
     normalize: str = "baseline"
     """How per-instance values of the objective combine (`instances` only).
     `baseline`: each instance counts as a percentage of what the seed candidate
@@ -468,6 +472,39 @@ class StageConfig:
     @property
     def fans_out(self) -> bool:
         return bool(self.instances)
+
+    def missing_cpus(self) -> str | None:
+        """Why `pin_cpus` cannot be honoured on *this* machine, or `None`.
+
+        Not checked when the config is read: a config written for the 8-CPU
+        machine a benchmark runs on has to load on the 4-CPU laptop it is
+        edited, extended and tested on. It is checked where it matters -- by the
+        stage, before its first run -- because a run pinned to a CPU that is not
+        there runs unpinned, and a time-limited solver sharing a core scores
+        worse than one that has it.
+        """
+        if not self.pin_cpus:
+            return None
+        if hasattr(os, "sched_getaffinity"):
+            # Linux: the CPUs this process may use, which in a container or a
+            # cpuset is fewer than the machine has.
+            allowed = os.sched_getaffinity(0)
+            missing = sorted(set(self.pin_cpus) - allowed)
+            if missing:
+                return (
+                    f"stage {self.id!r}: pin_cpus: CPU {missing[0]} does not exist on this machine "
+                    f"or is not available to this process (it may use {sorted(allowed)}); "
+                    "change pin_cpus for this machine, or remove it"
+                )
+            return None
+        available = os.cpu_count()
+        if available is not None and max(self.pin_cpus) >= available:
+            return (
+                f"stage {self.id!r}: pin_cpus: CPU {max(self.pin_cpus)} does not exist on this "
+                f"machine (it has {available}, numbered from 0); change pin_cpus for this "
+                "machine, or remove it"
+            )
+        return None
 
     def instance_names(self, private: bool = False) -> tuple[str, ...]:
         """Short names for `instances`, for people: the file's stem when that
@@ -600,12 +637,8 @@ class StageConfig:
                     f"{path}.pin_cpus: {workers} workers cannot each have a CPU of their "
                     f"own out of {len(pin_cpus)}; list at least {workers} or lower `workers`"
                 )
-            available = os.cpu_count()
-            if available is not None and max(pin_cpus) >= available:
-                raise ConfigError(
-                    f"{path}.pin_cpus: CPU {max(pin_cpus)} does not exist on this machine "
-                    f"(it has {available}, numbered from 0)"
-                )
+            # Whether the CPUs exist is a question about the machine the stage
+            # runs on, not about the config: see `missing_cpus`.
         return StageConfig(
             id=stage_id,
             kind=kind,
@@ -1563,6 +1596,34 @@ def _check_parameter_placeholders(config: Config) -> None:
                 "`--flag value` pairs), {params_json} (the path of a JSON file with the "
                 "values) or {candidate} (the generated Python module)"
             )
+        embedded = embedded_params(stage.command)
+        if embedded is not None:
+            raise ConfigError(f"{path}: {embedded}")
+
+
+def embedded_params(command: str) -> str | None:
+    """What is wrong with a `{params}` that is part of a larger argument, or `None`.
+
+    `{params}` expands to *several* arguments, one `--flag value` pair per
+    parameter. Inside a larger one (`--opts={params}`, `"x {params}"`) it could
+    only be pasted in as one string with spaces in it, which no option parser
+    reads as the configuration. Shared with `build_argv`, so the command line
+    and the config check cannot disagree about what a token is.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None  # an unbalanced quote: `build_argv` says so on the first run
+    for token in tokens:
+        if "{params}" in token and token != "{params}":
+            return (
+                f"{{params}} must be an argument of its own, and here it is part of {token!r}. "
+                "It expands to several arguments (`--flag value` pairs) that cannot be pasted "
+                "into one; write it as a separate word, or use {params_json} -- the path of a "
+                "JSON file with the values -- for a program that takes its configuration as "
+                "one argument"
+            )
+    return None
 
 
 def _parse_models(raw: Any, search: SearchConfig) -> ModelsConfig | None:
@@ -1585,12 +1646,21 @@ def _check_embedding_route(config: Config) -> None:
     Both failures here would otherwise surface as an exception from inside the
     search loop, after the seed had been evaluated and the first children paid
     for. A config error costs nothing.
+
+    A config without a `models` section at all -- a run of model-free
+    operators -- is the first case, not an exception to it: it used to be let
+    through and died in `Driver()` on `None.by_role`.
     """
-    if config.models is None:
-        return
     near = config.search.novelty.near
     if near.method != "embedding":
         return
+    if config.models is None:
+        raise ConfigError(
+            "search.novelty.near.method: 'embedding' calls an embedding model, and this "
+            "config has no `models` section. Add a models.embed slot naming a backend "
+            "with an embeddings API, or set the method to 'local' (costs nothing) or "
+            "'off'"
+        )
     slot = config.models.embed
     if slot is None:
         raise ConfigError(

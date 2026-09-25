@@ -42,6 +42,9 @@ def test_the_defaults_are_a_valid_configuration_and_the_baseline(space):
         ("x", {"type": "int", "low": 1, "high": 9, "default": 30}, "above its maximum"),
         ("x", {"type": "float", "low": 0, "high": 9, "default": 3, "log": True}, "log scale needs low > 0"),
         ("x", {"type": "float", "low": 0, "default": 3}, "needs a finite number"),
+        ("x", {"type": "float", "low": "lots", "high": 9, "default": 3}, "needs a finite number"),
+        ("x", {"type": "float", "low": ".nan", "high": 9, "default": 3}, "needs a finite number"),
+        ("x", {"type": "float", "low": 0, "high": 9, "default": "three"}, "expected a finite float"),
         ("x", {"type": "bool", "default": "yes"}, "expected true or false"),
         ("x", {"type": "bool", "default": True, "low": 0}, "only int and float parameters have a range"),
         ("x", {"type": "choice", "choices": ["a"], "default": "a"}, "at least two distinct values"),
@@ -56,6 +59,27 @@ def test_a_mistake_in_a_declaration_is_reported_where_it_was_made(name, spec, fr
         ParameterSpace.parse({name: spec})
     assert fragment in str(error.value)
     assert "problem.parameters" in str(error.value), "the key path has to be in the message"
+
+
+def test_numbers_that_yaml_reads_as_strings_are_numbers():
+    # PyYAML follows YAML 1.1, where a float needs a dot and a signed exponent:
+    # `1e5` is the *string* "1e5". The example in `evolvekit.space`'s own
+    # docstring is written exactly that way, and was refused with "a float
+    # parameter needs a finite number".
+    import yaml
+
+    import evolvekit.space
+
+    example = evolvekit.space.__doc__.split("parameters:\n", 1)[1].split("\n\n", 1)[0]
+    raw = yaml.safe_load(example)
+    assert raw["max_penalty"]["low"] == "1e3", "the premise: YAML hands over a string"
+    space = ParameterSpace.parse(raw)
+    penalty = next(p for p in space if p.name == "max_penalty")
+    assert (penalty.low, penalty.high, penalty.default) == (1e3, 1e7, 1e5)
+    assert space.defaults()["max_penalty"] == 100000.0
+    counted = ParameterSpace.parse({"n": {"type": "int", "low": "1e1", "high": "1e3", "default": "5e1"}})
+    assert space.validate(space.defaults())[1] == [] and counted.defaults() == {"n": 50}
+    assert isinstance(counted.parameters[0].low, int)
 
 
 def test_an_empty_space_is_refused():
@@ -109,6 +133,19 @@ def test_the_block_is_python_that_returns_exactly_the_configuration(space):
     exec(compile(ast.parse(block), "<block>", "exec"), namespace)  # noqa: S102 - our own text
     assert namespace["configure"]() == values
     assert block.endswith("\n")
+
+
+def test_a_choice_with_quotes_in_it_is_still_python_and_still_itself():
+    # The block used to be rendered with repr() and then every ' replaced by ",
+    # which turned `it's` into "it"s" -- a syntax error in every candidate.
+    odd = ["it's", 'say "hi"', "back\\slash", "tab\there", "naïve"]
+    space = ParameterSpace.parse({"mode": {"type": "choice", "choices": odd, "default": "it's"}})
+    for value in odd:
+        block = space.render_block({"mode": value})
+        namespace: dict = {}
+        exec(compile(ast.parse(block), "<block>", "exec"), namespace)  # noqa: S102 - our own text
+        assert namespace["configure"]() == {"mode": value}
+    assert "\"mode\": \"it's\"," in space.render_block({"mode": "it's"}), "the house style: double quotes"
 
 
 def test_the_generated_skeleton_has_one_fence_around_the_defaults(space):
@@ -177,3 +214,26 @@ def test_the_unit_scale_is_the_parameters_own(space):
     flag = next(p for p in space if p.name == "exhaustive")
     assert (flag.from_unit(0.0), flag.from_unit(1.0)) == (False, True)
     assert isinstance(Parameter.parse("n", RAW["num_neighbours"], "p").from_unit(0.31), int)
+
+
+@pytest.mark.parametrize("log", [False, True])
+def test_a_sample_at_the_edge_of_a_range_is_rounded_into_it_not_out_of_it(log):
+    # Values are kept to six significant figures. Rounding *after* clamping put
+    # a sample at the low end of [0.12345649, 0.98765451] at 0.123456 -- below
+    # its own minimum -- and the child was then refused by validation.
+    parameter = Parameter.parse(
+        "rate", {"type": "float", "low": 0.12345649, "high": 0.98765451, "default": 0.5, "log": log}, "p"
+    )
+    for unit in (-0.5, 0.0, 1e-12, 0.5, 1.0 - 1e-12, 1.0, 1.5):
+        value = parameter.from_unit(unit)
+        assert parameter.problem_with(value) is None, (unit, value)
+
+
+def test_a_numeric_choice_is_the_value_that_was_declared():
+    # configure() is read back as JSON, and a model may well write 2.0 for the
+    # declared 2. `2.0 in (1, 2, 4)` is true, so the value passed validation --
+    # and went to the solver as `--threads 2.0`, which an integer option refuses.
+    space = ParameterSpace.parse({"threads": {"type": "choice", "choices": [1, 2, 4], "default": 1}})
+    resolved, problems = space.validate({"threads": 2.0})
+    assert problems == [] and resolved == {"threads": 2} and isinstance(resolved["threads"], int)
+    assert space.render_flags(resolved) == ["--threads", "2"]

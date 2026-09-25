@@ -373,9 +373,12 @@ search:
   operators: {param_lhs: 1.0}      # no `models` section: nothing here calls one
 ```
 
+`1e4` works as well as `1.0e+4`: YAML reads the short form as a string, and a
+range or default that is a numeric string is taken as its number.
+
 | Placeholder | What the command receives |
 |---|---|
-| `{params}` | one `--name value` pair per parameter: `--neighbours 40 --penalty 5000.0 --exhaustive false --init savings`. An underscore in a name becomes a dash; a boolean is `true`/`false`; `flag: "-n"` on a declaration replaces the generated flag |
+| `{params}` | one `--name value` pair per parameter: `--neighbours 40 --penalty 5000.0 --exhaustive false --init savings`. An underscore in a name becomes a dash; a boolean is `true`/`false`; `flag: "-n"` on a declaration replaces the generated flag. It has to be an argument of its own: `--opts={params}` is refused, because several arguments cannot be pasted into one |
 | `{params_json}` | the path of a JSON file with the same values, for a program that would rather read a file |
 
 `{candidate}` is no longer required — there is no module the command would
@@ -419,8 +422,8 @@ written for evolvekit either. Three ways to read it, per stage:
 | The program … | Stage keys | What is read |
 |---|---|---|
 | writes a JSON file | `{out}` in the command (the default, `kpis_from: file`) | that file |
-| prints a JSON object | `kpis_from: stdout` — no `{out}` needed | the **last** line of stdout that is a JSON object; progress lines and other output before it are ignored |
-| prints text | `kpi_patterns: {cost: 'best cost: ([-+0-9.eE]+)'}` | per KPI, a regular expression with one capturing group; the **last** match counts, because a solver logs its progress before its result. Can be combined with either JSON source |
+| prints a JSON object | `kpis_from: stdout` — no `{out}` needed | the **last** line of stdout that is a JSON object, however long it is and wherever it is in the log; progress lines and other output around it are ignored |
+| prints text | `kpi_patterns: {cost: 'best cost: ([-+0-9.eE]+)'}` | per KPI, a regular expression with one capturing group; the **last** match counts, because a solver logs its progress before its result. `^` and `$` are the start and end of a *line* (`re.MULTILINE`), so `'^Cost: (\d+)$'` works. The patterns see the last 64 KB of what the program printed. Can be combined with either JSON source |
 
 The JSON object may be the solver's own. With an explicit `"kpis"` key every
 value has to be a number or a list of numbers, as before. Without one, the
@@ -526,7 +529,7 @@ placeholder in its command:
 ```yaml
 - id: full
   kind: command
-  command: "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
+  command: "{python} evaluate.py --candidate {candidate} --inputs {inputs} --out {out} --seed {seed}"
   inputs: [full]
   timeout: 9000     # per run, not per stage
   seeds: 3
@@ -588,6 +591,10 @@ own, and the framework knows what it could not know before:
   every worker a logical CPU of its own (on a machine with simultaneous
   multithreading, name one per *physical* core and leave a core to everything
   else); the whole process tree of a run is pinned from its first instruction.
+  The CPUs are checked against the machine when the stage is about to run, not
+  when the config is read, so a config written for a bigger machine still loads
+  and fails only if you run it; a run that cannot be pinned all the same says
+  so on stderr instead of silently sharing a core.
   The pool spans the generation, not one candidate — six candidates on ten
   instances are sixty runs for three workers, and no worker idles while another
   finishes a candidate's last instance. `preflight` warns when there are more
@@ -602,7 +609,9 @@ own, and the framework knows what it could not know before:
   how many runs shared the machine with something the run's own workers do not
   explain (Windows and Linux; elsewhere nothing is recorded or flagged).
 - **A failure with an address.** A crash is *this* instance, *this* seed, *this*
-  attempt, with log files of its own (`work/stage_out/<id>.<stage>.<instance>.seed0[.try1].*`).
+  attempt, with log files of its own (`work/stage_out/<id>.<stage>.<instance>.seed0[.try1].*`;
+  when two instance names would make the same file name, such as `a b` and `a_b`,
+  every instance's position in the list is appended: `a_b-0`, `a_b-1`).
   With `retries: 1` it is run once more before the candidate's stage fails —
   the right setting for a solver that crashes once in a hundred runs — and a
   candidate that has failed for good stops costing anything: its remaining

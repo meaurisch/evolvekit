@@ -38,7 +38,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Mapping, Sequence
 
-from evolvekit.config import StageConfig
+from evolvekit.config import ConfigError, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
@@ -114,9 +114,17 @@ def run_instance_stage(
     the search never saw names them. `keep_going` runs a candidate's remaining
     instances after one has failed: a search has no use for them, a comparison
     does, because every pair that did finish still counts.
+
+    A `pin_cpus` this machine cannot honour is a `ConfigError` here, before
+    the first run: the config may have been written for another machine, and
+    runs that silently share cores would be scored as if they had not.
     """
+    missing = stage.missing_cpus()
+    if missing is not None:
+        raise ConfigError(missing)
     instances = stage.private_instances if private else stage.instances
     names = stage.instance_names(private)
+    files = _file_names(names)
     seed_values = list(seeds) if seeds is not None else list(range(stage.seeds))
     cancel = threading.Event()
     board = _Board(jobs, len(instances), seed_values, race=race, names=names)
@@ -136,7 +144,7 @@ def run_instance_stage(
                     job.candidate_path,
                     stage,
                     inputs=stage.private_inputs if private else stage.inputs,
-                    out_path=_unit_path(out_dir, job, stage, names[index], seed, attempt, private),
+                    out_path=_unit_path(out_dir, job, stage, files[index], seed, attempt, private),
                     cwd=cwd,
                     private=private,
                     seed=seed,
@@ -187,16 +195,33 @@ def run_instance_stage(
     return {job.candidate_id: board.outcome(job.candidate_id, stage, names, private) for job in jobs}
 
 
+def _file_names(names: Sequence[str]) -> tuple[str, ...]:
+    """What each instance is called in a file name: its name, made safe for one.
+
+    Making a name safe can make two of them the same -- `a b` and `a_b` both
+    become `a_b` -- and so can a file system that ignores case (`A` and `a` on
+    Windows). Two instances sharing a file name share their `{out}` and their
+    logs: the second run overwrites the first one's logs, and with two workers
+    one instance can read the other's result and report it as its own. So when
+    any two collide, every instance gets its position in the list appended
+    (`a_b-0`, `a_b-1`): unique, because the suffix is, and still readable.
+    Names that do not collide are left alone.
+    """
+    safe = [re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "instance" for name in names]
+    if len({name.lower() for name in safe}) == len(safe):
+        return tuple(safe)
+    return tuple(f"{name}-{index}" for index, name in enumerate(safe))
+
+
 def _unit_path(
-    out_dir: Path, job: Job, stage: StageConfig, name: str, seed: int, attempt: int, private: bool
+    out_dir: Path, job: Job, stage: StageConfig, file_name: str, seed: int, attempt: int, private: bool
 ) -> Path:
     """One file per run and per attempt: a retry must not overwrite the logs of
-    the failure that caused it."""
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "instance"
+    the failure that caused it. `file_name` comes from `_file_names`."""
     parts = [job.candidate_id, stage.id]
     if private:
         parts.append("private")
-    parts += [safe, f"seed{seed}"]
+    parts += [file_name, f"seed{seed}"]
     if attempt:
         parts.append(f"try{attempt}")
     return out_dir / (".".join(parts) + ".json")

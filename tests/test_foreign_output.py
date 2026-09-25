@@ -199,3 +199,45 @@ def test_a_pattern_that_captured_something_else_than_a_number_says_what(tmp_path
     outcome = _run(tmp_path, stage)
     assert not outcome.ok
     assert outcome.failure == "`kpi_patterns.cost` captured 'optimal', which is not a number"
+
+
+def test_a_pattern_anchored_at_the_start_of_a_line_matches_every_line(tmp_path):
+    # `^Cost:` is how anybody writes "the line that reports the cost". Without
+    # re.MULTILINE `^` means the start of the whole output, and the run failed
+    # with "matched nothing" although the line was right there.
+    program = "print('reading instance')\nprint('Cost: 1300')\nprint('Cost: 1250')\nprint('done')\n"
+    stage = _stage(tmp_path, program, kpi_patterns={"cost": r"^Cost: (\d+)$"})
+    outcome = _run(tmp_path, stage)
+    assert outcome.ok, outcome.failure
+    assert outcome.kpis == {"cost": 1250.0}
+
+
+def test_a_result_line_longer_than_the_log_tail_is_still_found(tmp_path):
+    # A solver that prints its whole solution with its cost -- one JSON line of
+    # a few hundred kilobytes -- was reported as having printed no JSON object,
+    # because only the last 64 KB of the log was looked at and that is the
+    # second half of a line.
+    program = (
+        "import json\n"
+        "print('solving ...')\n"
+        "print(json.dumps({'cost': 7.0, 'solution': 'r' * 200_000}))\n"
+        "print('done')\n"
+    )
+    stage = _stage(tmp_path, program, kpis_from="stdout")
+    outcome = _run(tmp_path, stage, required_kpis=("cost",))
+    assert outcome.ok, outcome.failure
+    assert outcome.kpis == {"cost": 7.0}
+
+
+def test_the_last_json_object_is_found_after_megabytes_of_other_output(tmp_path):
+    program = (
+        "import json\n"
+        "print(json.dumps({'cost': 1.0}))\n"
+        "for i in range(60_000):\n"
+        "    print('iteration', i, 'x' * 40)\n"
+        "print(json.dumps({'cost': 2.0}))\n"
+        "for i in range(3_000):\n"
+        "    print('cleanup', i, 'y' * 40)\n"
+    )
+    stage = _stage(tmp_path, program, kpis_from="stdout")
+    assert _run(tmp_path, stage).kpis == {"cost": 2.0}

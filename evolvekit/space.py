@@ -17,8 +17,11 @@ choices; its user has no Python to fence, and should not have to write any. So
         exhaustive:  {type: bool,   default: true}
         init:        {type: choice, choices: [greedy, random, savings], default: greedy}
 
-and everything else follows from it: the skeleton is generated (a `configure()`
-that returns a dict, which an LLM operator may still rewrite), a candidate's
+(YAML reads `1e3` as a string -- a YAML 1.1 float needs a dot and a signed
+exponent -- so a numeric string is taken as its number for a range or a
+default; see `_yaml_number`.) Everything else follows from the declaration:
+the skeleton is generated (a `configure()` that returns a dict, which an LLM
+operator may still rewrite), a candidate's
 configuration is *resolved and validated in the static stage* -- before it can
 cost a second of solver time -- the values are substituted into the stage
 command as flags, recorded on the candidate as data rather than as code, and
@@ -30,6 +33,7 @@ The defaults are the baseline: the seed candidate is exactly `defaults()`.
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import re
@@ -52,6 +56,27 @@ def _is_number(value: Any) -> bool:
         and isinstance(value, (int, float))
         and math.isfinite(value)
     )
+
+
+def _yaml_number(value: Any, kind: str) -> Any:
+    """A bound or default that YAML handed over as a string, as the number it is.
+
+    PyYAML follows YAML 1.1, where a float needs a dot and a signed exponent:
+    `1e5` -- the way anybody writes a penalty range -- arrives as the *string*
+    "1e5", and was refused as "not a finite number". A string that `float()`
+    reads is taken as that number (a whole one as an `int` for an int
+    parameter); anything else is passed on unchanged, to be refused with the
+    message it always got.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    if not math.isfinite(number):
+        return value
+    return int(number) if kind == "int" and number.is_integer() else number
 
 
 @dataclass(frozen=True)
@@ -98,6 +123,8 @@ class Parameter:
                 f"{path}.default: required. The defaults are the baseline every "
                 "candidate is compared with, so each parameter needs one"
             )
+        if kind in ("int", "float"):
+            raw = {**raw, **{k: _yaml_number(raw[k], kind) for k in ("low", "high", "default") if k in raw}}
         flag = raw.get("flag", "--" + name.replace("_", "-"))
         if not isinstance(flag, str) or not flag:
             raise SpaceError(f"{path}.flag: must be a non-empty string, got {flag!r}")
@@ -180,6 +207,11 @@ class Parameter:
             return int(round(float(value)))
         if self.type == "float":
             return float(value)
+        if self.type == "choice":
+            # The declared value that matched, not the one that was given:
+            # `2.0 in (1, 2, 4)` is true, and a solver told `--threads 2.0`
+            # by a configure() that wrote 2.0 refuses an integer option.
+            return self.choices[self.choices.index(value)]
         return value
 
     def to_unit(self, value: Any) -> float:
@@ -201,7 +233,11 @@ class Parameter:
         raw = math.exp(math.log(low) + unit * (math.log(high) - math.log(low))) if self.log else low + unit * (high - low)
         if self.type == "int":
             return int(min(high, max(low, round(raw))))
-        return float(f"{min(high, max(low, raw)):.6g}")
+        # Six significant figures keep a value readable in a prompt and a
+        # table -- but rounded *before* the clamp, not after it: rounding a
+        # clamped 0.12345649 gives 0.123456, below its own minimum, and the
+        # child is then refused by validation. The clamp has the last word.
+        return min(high, max(low, float(f"{raw:.6g}")))
 
     def render(self, value: Any) -> str:
         """The value as one command-line token."""
@@ -283,12 +319,15 @@ class ParameterSpace:
         """The evolve block for `values`: a `configure()` that returns a dict."""
         lines = [
             "def configure():",
-            '    """The solver\'s parameters. Change the values, keep the keys."""',
+            # Byte for byte what the old global quote replacement made of
+            # "solver's": a block's text is part of its evaluation cache key,
+            # and an unchanged configuration must stay a cache hit.
+            '    """The solver"s parameters. Change the values, keep the keys."""',
             "    return {",
         ]
-        lines += [f"        {p.name!r}: {values[p.name]!r}," for p in self.parameters]
+        lines += [f'        "{p.name}": {_literal(values[p.name])},' for p in self.parameters]
         lines += ["    }", ""]
-        return "\n".join(lines).replace("'", '"')
+        return "\n".join(lines)
 
     def render_skeleton(self, block_start: str, block_end: str) -> str:
         return (
@@ -376,6 +415,21 @@ class ParameterSpace:
             else:
                 total += 0.0 if a[parameter.name] == b[parameter.name] else 1.0
         return total / len(self.parameters)
+
+
+def _literal(value: Any) -> str:
+    """`value` as Python source, a string in double quotes.
+
+    Per value, not by replacing every `'` in the finished block with `"`:
+    that turned the choice `it's` into `"it"s"`, a syntax error in every
+    candidate that picked it. A JSON string is a valid Python string literal
+    (the same escapes, and `ensure_ascii=False` keeps a non-ASCII character
+    itself rather than splitting it into surrogates); numbers and booleans
+    are their `repr`. A parameter name needs no quoting: it is an identifier.
+    """
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    return repr(value)
 
 
 def _unused(_: Sequence[Any]) -> None:  # pragma: no cover - keeps the import honest

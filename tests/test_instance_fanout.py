@@ -146,9 +146,22 @@ def test_every_worker_needs_a_cpu_of_its_own(tmp_path):
         build_config(raw, base_dir=tmp_path)
 
 
-def test_a_cpu_the_machine_does_not_have_is_refused(tmp_path):
+def test_a_config_pinned_for_a_bigger_machine_loads_here_and_refuses_to_run_here(tmp_path):
+    # `pin_cpus` was checked against this machine when the config was *read*,
+    # so a config written for the 8-CPU benchmark machine could not even be
+    # loaded -- let alone inspected, extended or tested -- on a 4-CPU laptop.
     raw = _raw(_instances(tmp_path, s1={"scale": 100}), pin_cpus=[4096])
-    with pytest.raises(ConfigError, match="CPU 4096 does not exist on this machine"):
+    config = build_config(raw, base_dir=tmp_path)
+    assert config.evaluate.stages[1].pin_cpus == (4096,)
+    with pytest.raises(ConfigError, match=r"pin_cpus: CPU 4096 does not exist on this machine"):
+        Cascade(config, work_dir=tmp_path / "work").evaluate_generation([_candidate(config, "g000-c0001", seed=True)])
+    assert not (tmp_path / "calls").exists(), "nothing ran unpinned in the meantime"
+
+
+@pytest.mark.parametrize("cpus, fragment", [([1, 1], "lists a CPU twice"), ([-1], "must be >= 0")])
+def test_the_shape_of_pin_cpus_is_still_checked_when_the_config_is_read(tmp_path, cpus, fragment):
+    raw = _raw(_instances(tmp_path, s1={"scale": 100}), pin_cpus=cpus)
+    with pytest.raises(ConfigError, match=fragment):
         build_config(raw, base_dir=tmp_path)
 
 
@@ -211,6 +224,29 @@ def test_every_run_is_reported_under_its_instances_name(tmp_path):
     assert finished[0]["kpis"]["cost"] == 100.0, "the run's own value, not yet a percentage of anything"
     assert finished[0]["stdout_log"] == "work/stage_out/g000-c0001.full.s1.seed0.stdout.log"
     assert "data/s1.json" in finished[0]["argv"]
+
+
+def test_instances_whose_names_differ_only_in_punctuation_keep_files_of_their_own(tmp_path):
+    # `a b` and `a_b` were both written as `...full.a_b.seed0.*`: the second run
+    # overwrote the first one's logs, and with two workers one instance could
+    # read the other's `{out}` and report its result as its own.
+    instances = _instances(tmp_path, **{"a b": {"scale": 100, "sleep": 0.5}, "a_b": {"scale": 1000}})
+    config = build_config(_raw(instances, workers=2, normalize="none"), base_dir=tmp_path)
+    events: list[dict] = []
+    cascade = Cascade(config, work_dir=tmp_path / "run" / "work", on_event=lambda t, **f: events.append({"type": t, **f}))
+    result = cascade.evaluate_generation([_candidate(config, "g000-c0001", seed=True)])["g000-c0001"]
+    finished = {e["instance"]: e for e in events if e["type"] == "eval_finished"}
+    assert finished["a b"]["stdout_log"] != finished["a_b"]["stdout_log"]
+    assert finished["a b"]["kpis"]["cost"] == 100.0 and finished["a_b"]["kpis"]["cost"] == 1000.0
+    assert result.outcomes[-1].vector_kpis["cost_per_instance"] == [100.0, 1000.0]
+
+
+def test_file_names_are_unique_even_where_the_file_system_ignores_case():
+    from evolvekit.evaluate.fanout import _file_names
+
+    assert _file_names(["s1", "b1"]) == ("s1", "b1"), "names that do not collide are left as they are"
+    assert len({name.lower() for name in _file_names(["A", "a", "a-1"])}) == 3
+    assert len({name.lower() for name in _file_names(["x y", "x_y", "x.y"])}) == 3
 
 
 # -- a failure with an address ---------------------------------------------

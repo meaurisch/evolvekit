@@ -15,6 +15,7 @@ The tests that wait on the clock are `slow`; the rest are not.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,7 +24,7 @@ import pytest
 
 from evolvekit.config import StageConfig
 from evolvekit.evaluate import run_command_stage
-from evolvekit.evaluate.process import read_tail, run_bounded
+from evolvekit.evaluate.process import can_pin, read_tail, run_bounded
 from evolvekit.lock import pid_alive
 
 GRANDCHILD = "import time; time.sleep(60)"
@@ -156,3 +157,27 @@ def test_read_tail_is_bounded_and_survives_bytes_that_are_not_utf8(tmp_path):
     tail = read_tail(log, 40)
     assert len(tail) == 40 and tail.endswith("last line\n")
     assert read_tail(tmp_path / "missing.log", 40) == ""
+
+
+@pytest.mark.skipif(not can_pin() or (os.cpu_count() or 64) >= 64, reason="needs CPU pinning and fewer than 64 CPUs")
+def test_a_pin_that_fails_says_so_instead_of_running_unpinned_in_silence(tmp_path, capsys):
+    # On POSIX a CPU outside the process's cpuset ran the command unpinned; on
+    # Windows the affinity call's result was ignored. Either way a run that was
+    # meant to have a core to itself shared one, and nothing said so.
+    run = run_bounded(
+        [sys.executable, "-c", "pass"], timeout=60, cwd=tmp_path,
+        stdout_path=tmp_path / "o.log", stderr_path=tmp_path / "e.log", cpus=(63,),
+    )
+    assert run.returncode == 0, "the run itself still happens"
+    assert run.unpinned is not None and "63" in run.unpinned
+    warned = capsys.readouterr().err
+    assert "could not pin" in warned and "unpinned" in warned
+
+
+def test_a_run_that_was_pinned_or_never_asked_to_be_is_not_flagged(tmp_path):
+    run = run_bounded(
+        [sys.executable, "-c", "pass"], timeout=60, cwd=tmp_path,
+        stdout_path=tmp_path / "o.log", stderr_path=tmp_path / "e.log",
+        cpus=(0,) if can_pin() else (),
+    )
+    assert run.returncode == 0 and run.unpinned is None
