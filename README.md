@@ -1040,11 +1040,18 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   `problem.parameters`; it is checked before anything runs. It is reported as
   `ID@<its directory's name>`, with parent directories added when two
   directories share a name (`ID@a/run`, `ID@b/run`).
-- A failed run costs its pair, not the comparison — but it is counted: per
-  candidate and per instance, `failed_pairs` (a run failed or timed out) and
-  `zero_baseline_pairs` (the baseline reached 0, and a percentage of 0 is no
-  number) are in `comparison.json` and `comparison.md`, and whenever there are
-  any the verdict says "N of M pairs failed and are not in this interval". A
+- **A failure is a result.** When only one side of an (instance, seed) pair
+  failed or timed out, that side lost the pair: it counts as a difference as
+  large as the largest one measured anywhere in the comparison — a loss when
+  the candidate failed, a win when the baseline did — so a configuration that
+  crashes or hangs often cannot be judged on its lucky runs, and a failure
+  never weighs less than a real result. A pair in which both failed, or whose
+  baseline is 0 (a percentage of 0 is no number), says nothing about either
+  and is left out. Every kind is counted per candidate and per instance
+  (`candidate_failed_pairs`, `baseline_failed_pairs`, `both_failed_pairs`,
+  `zero_baseline_pairs`) in `comparison.json` and `comparison.md`, the verdict
+  names them, and `finished_only` keeps what the comparison would say if
+  failures cost nothing. A
   seed given twice in `--seeds` is refused. Finished runs are cached, so an
   interrupted confirmation — or one extended by more seeds — pays only for
   what is new.

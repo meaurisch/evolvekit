@@ -144,30 +144,65 @@ def test_a_failed_run_costs_its_pair_not_the_comparison(tmp_path):
     comparison = confirm(load_config(config_path), run_dir, seeds=[1001, 1002], log=lambda m: None)
     result = comparison.per_candidate["g003-c0012"]
     by_instance = {r["instance"]: r for r in result["per_instance"]}
-    assert by_instance["medium"]["pairs"] == 1, "seed 1002 crashed for the candidate on `medium`"
-    assert by_instance["small"]["pairs"] == 2 and by_instance["large"]["pairs"] == 2
-    assert result["pairs"] == 5 and result["pairs_planned"] == 6 and result["failed_runs"] == 1
+    assert by_instance["medium"]["finished_pairs"] == 1, "seed 1002 crashed for the candidate on `medium`"
+    assert by_instance["small"]["finished_pairs"] == 2 and by_instance["large"]["finished_pairs"] == 2
+    assert result["finished_pairs"] == 5 and result["pairs_planned"] == 6 and result["failed_runs"] == 1
 
 
-def test_a_failed_pair_is_counted_and_said_in_the_verdict(tmp_path):
-    """A failed or timed-out run drops its pair from the interval. The interval
-    is still computed without it -- what to make of that is policy -- but the
-    report must say how many pairs are missing, not leave it to a reader to
-    notice that five is less than six."""
+def test_a_pair_only_the_candidate_failed_counts_as_its_largest_loss(tmp_path):
+    """A candidate that crashes or hangs where the baseline finished has lost
+    that pair. Dropping the pair used to let a configuration that fails a lot
+    be judged on its lucky runs alone. The loss is as large as the largest
+    difference measured anywhere in the comparison, so a failure never weighs
+    less than a real result."""
     config_path = _write_config(tmp_path)
     run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
     comparison = confirm(load_config(config_path), run_dir, seeds=[1001, 1002, 1003], log=lambda m: None)
     result = comparison.per_candidate["g003-c0012"]
     by_instance = {r["instance"]: r for r in result["per_instance"]}
-    assert result["failed_pairs"] == 1 and result["zero_baseline_pairs"] == 0
-    assert by_instance["medium"]["failed_pairs"] == 1 and by_instance["small"]["failed_pairs"] == 0
-    assert "1 of 9 pairs failed and are not in this interval" in result["summary"]["verdict"]
+    medium = by_instance["medium"]
+    assert (medium["pairs"], medium["finished_pairs"], medium["candidate_failed_pairs"]) == (3, 2, 1)
+    assert result["candidate_failed_pairs"] == 1 and result["failed_pairs"] == 1 and result["pairs"] == 9
+    worst = result["failure_counted_as_pct"]
+    assert worst == pytest.approx(5.0, abs=1.0), "the largest difference measured: about 5 %"
+    # About (5 + 5 - 5) / 3 on `medium`, against about 5 on `small`.
+    assert medium["improvement_pct"] < by_instance["small"]["improvement_pct"] - 2.0
+    assert result["summary"]["mean"] < result["finished_only"]["mean"]
+    verdict = result["summary"]["verdict"]
+    assert "1 pair(s) in which only the candidate failed counted as a loss of" in verdict
     out = run_dir / "confirm" / "confirm"
     written = json.loads((out / "comparison.json").read_text(encoding="utf-8"))["per_candidate"]["g003-c0012"]
-    assert written["failed_pairs"] == 1 and written["per_instance"][1]["failed_pairs"] == 1
+    assert written["candidate_failed_pairs"] == 1 and written["finished_only"]["n"] == 3
     report = (out / "comparison.md").read_text(encoding="utf-8")
-    assert "1 of 9 pairs failed and are not in this interval" in report
-    assert "| medium |" in report and "1 failed" in report
+    assert "only the candidate failed counted as a loss" in report
+    assert "| medium |" in report and "1 candidate failed" in report
+    assert "Finished pairs only" in report
+
+
+def test_a_pair_only_the_baseline_failed_counts_for_the_candidate_and_both_failing_counts_for_nobody(tmp_path):
+    """The defaults hang too (PyVRP did, on the benchmark). The rule is the
+    same both ways, and a pair in which both failed says nothing about either."""
+    config_path = _write_config(tmp_path)
+    solver = (tmp_path / "solver.py").read_text(encoding="utf-8")
+    (tmp_path / "solver.py").write_text(
+        solver.replace(
+            "noise = random.Random",
+            "if (a.instance, a.seed) == ('large', 1003) and a.x == 0.0:\n    sys.exit(3)\n"
+            "if (a.instance, a.seed) == ('small', 1003):\n    sys.exit(4)\n"
+            "noise = random.Random",
+        ),
+        encoding="utf-8",
+    )
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    comparison = confirm(load_config(config_path), run_dir, seeds=[1001, 1003], log=lambda m: None)
+    result = comparison.per_candidate["g003-c0012"]
+    by_instance = {r["instance"]: r for r in result["per_instance"]}
+    assert by_instance["large"]["baseline_failed_pairs"] == 1 and by_instance["large"]["pairs"] == 2
+    assert by_instance["large"]["improvement_pct"] > 0
+    assert by_instance["small"]["both_failed_pairs"] == 1 and by_instance["small"]["pairs"] == 1
+    verdict = result["summary"]["verdict"]
+    assert "only the baseline failed counted as a win of" in verdict
+    assert "1 pair(s) in which both failed are not in this interval" in verdict
 
 
 def test_a_pair_with_a_baseline_of_zero_is_counted_too(tmp_path):
@@ -184,7 +219,7 @@ def test_a_pair_with_a_baseline_of_zero_is_counted_too(tmp_path):
     result = comparison.per_candidate["g003-c0012"]
     assert result["zero_baseline_pairs"] == 2 and result["failed_pairs"] == 0 and result["pairs"] == 4
     assert result["per_instance"][0]["zero_baseline_pairs"] == 2
-    assert "2 of 6 pairs had a baseline of 0 and are not in this interval" in result["summary"]["verdict"]
+    assert "2 pair(s) had a baseline of 0 and are not in this interval" in result["summary"]["verdict"]
 
 
 def test_a_seed_given_twice_is_refused(tmp_path):
