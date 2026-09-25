@@ -352,6 +352,25 @@ def test_a_per_instance_list_kpi_becomes_a_win_loss_breakdown(tmp_path):
     ]
 
 
+def test_an_instance_without_a_value_keeps_every_other_instance_in_its_place(tmp_path):
+    """An evaluator reports `null` for an instance it found nothing feasible
+    on. Dropping it moved every later value up one place: the card compared
+    instance 1's baseline with instance 2's best and showed a win that never
+    happened."""
+    run = RunDir(tmp_path)
+    run.started(1000)
+    run.row("g000-c0001", 0, 100.0)
+    run.row("g001-c0002", 1, 95.0, parent_id="g000-c0001")
+    run.evaluation("g000-c0001", 900, 100.0, vector_kpis={"cost_per_instance": [5.0, None, 7.0, 8.0]})
+    run.evaluation("g001-c0002", 500, 95.0, vector_kpis={"cost_per_instance": [5.0, 4.0, None, 8.0]})
+    instances = build_status(tmp_path, now=NOW)["instances"]
+    assert instances["available"] is True
+    rows = {r["instance"]: r for r in instances["rows"]}
+    assert (rows[1]["baseline"], rows[1]["best"], rows[1]["improvement_pct"]) == (None, 4.0, None)
+    assert (rows[2]["baseline"], rows[2]["best"], rows[2]["improvement_pct"]) == (7.0, None, None)
+    assert (instances["wins"], instances["losses"], instances["ties"]) == (0, 0, 2)
+
+
 def test_without_a_per_instance_kpi_the_breakdown_explains_how_to_get_one(tmp_path):
     run = RunDir(tmp_path)
     run.started(10)

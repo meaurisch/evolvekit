@@ -866,7 +866,8 @@ function renderInstances(doc) {
   const rows = [...ins.rows].sort((a, b) => (b.improvement_pct || 0) - (a.improvement_pct || 0));
   const values = rows.map((r) => r.improvement_pct || 0), most = Math.max(0, ...values), least = Math.min(0, ...values);
   const range = Math.max(1e-9, most - least), zero = (-least / range) * 100;      // all wins: the axis sits at the left edge
-  const mean = rows.reduce((a, r) => a + (r.improvement_pct || 0), 0) / (rows.length || 1);
+  const compared = rows.filter((r) => isNum(r.improvement_pct));  // an instance with a missing value has no delta, not a zero one
+  const mean = compared.reduce((a, r) => a + r.improvement_pct, 0) / (compared.length || 1);
   const summary = h("div", { class: "sum" }, h("span", null, h("b", { class: "up-t" }, ins.wins), " wins"), h("span", null, h("b", { class: "down-t" }, ins.losses), " losses"),
     h("span", null, h("b", null, ins.ties), " ties"), h("span", null, "mean ", h("b", null, pct(mean))),
     h("span", { class: "note" }, `${ins.best_id} against ${ins.baseline_id}, ` + (ins.rows.some((r) => r.name != null) ? `${ins.kpi}, one run per instance and seed` : `from the list KPI “${ins.kpi}”`)));

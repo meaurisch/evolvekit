@@ -1302,10 +1302,14 @@ class _Run:
 
     # -- instances ---------------------------------------------------------
 
-    def _vector(self, candidate_id: str) -> tuple[str, list[float]] | None:
-        """The per-instance list the evaluator reported for the final stage."""
+    def _vector(self, candidate_id: str) -> tuple[str, list[float | None]] | None:
+        """The per-instance list the evaluator reported for the final stage.
+
+        Position is identity: an instance the evaluator reported as `null` (or
+        `NaN`, which the event log writes as `null`) keeps its place as `None`,
+        so every later instance is still compared with itself."""
         final, objective = self._final_stage, self._objective_name or ""
-        per_seed: dict[str, list[list[float]]] = {}
+        per_seed: dict[str, list[list[float | None]]] = {}
         for event in self.events:
             if (
                 event.get("type") != "eval_finished" or not event.get("ok") or event.get("private")
@@ -1315,12 +1319,17 @@ class _Run:
                 continue
             for name, values in (event.get("vector_kpis") or {}).items():
                 if isinstance(values, list) and values:
-                    per_seed.setdefault(name, []).append([float(v) for v in values if _number(v) is not None])
+                    per_seed.setdefault(name, []).append([_number(v) for v in values])
         if not per_seed:
             return None
         name = next((n for n in per_seed if objective and objective in n), sorted(per_seed)[0])
         runs = [r for r in per_seed[name] if len(r) == len(per_seed[name][0])]
-        return name, [fmean(column) for column in zip(*runs)]
+
+        def mean(column: tuple[float | None, ...]) -> float | None:
+            known = [v for v in column if v is not None]
+            return fmean(known) if known else None
+
+        return name, [mean(column) for column in zip(*runs)]
 
     def _per_instance(self, candidate_id: str) -> dict[str, list[float]]:
         """The objective of every successful final-stage run of a per-instance
@@ -1402,11 +1411,15 @@ class _Run:
         if not base or not best or base[0] != best[0] or len(base[1]) != len(best[1]):
             return unavailable
         lower_is_better = self._direction == "minimize"
-        rows, wins, losses = [], 0, 0
+        rows, wins, losses, ties = [], 0, 0, 0
         for index, (a, b) in enumerate(zip(base[1], best[1])):
+            if a is None or b is None:  # nothing to compare on this instance
+                rows.append({"instance": index, "baseline": a, "best": b, "improvement_pct": None})
+                continue
             delta = _improvement_pct(a, b, "minimize" if lower_is_better else "maximize")
             wins += 1 if (delta or 0) > 0 else 0
             losses += 1 if (delta or 0) < 0 else 0
+            ties += 1 if not delta else 0
             rows.append({"instance": index, "baseline": a, "best": b, "improvement_pct": delta})
         return {
             "available": True,
@@ -1416,7 +1429,7 @@ class _Run:
             "baseline_id": self.seed.get("id"),
             "wins": wins,
             "losses": losses,
-            "ties": len(rows) - wins - losses,
+            "ties": ties,  # an instance with a value missing on either side is none of the three
             "rows": rows,
         }
 
