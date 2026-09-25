@@ -37,7 +37,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from evolvekit.status import build_status, candidate_detail
+from evolvekit.status import build_status, candidate_detail, candidate_details
 
 __all__ = ["DashboardServer", "export_html", "DEFAULT_PORT", "PAGE"]
 
@@ -255,10 +255,9 @@ def export_html(run_dir: str | Path, out_path: str | Path) -> Path:
     """The dashboard as one self-contained file, frozen at this moment."""
     directory = Path(run_dir)
     document = build_status(directory)
-    details = {
-        str(row["id"]): candidate_detail(directory, str(row["id"]))
-        for row in document.get("candidates") or []
-    }
+    details = candidate_details(
+        directory, [str(row["id"]) for row in document.get("candidates") or []]
+    )
     payload = json.dumps({"status": document, "candidates": details}, allow_nan=False)
     # Candidate source and stderr are untrusted, and an HTML parser reads a
     # script element before JavaScript does: `</script>` would end it and

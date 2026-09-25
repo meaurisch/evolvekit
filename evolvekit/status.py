@@ -38,6 +38,7 @@ import difflib
 import json
 import math
 from datetime import datetime, timezone
+from functools import cached_property
 from pathlib import Path
 from statistics import fmean, median, stdev
 from typing import Any, Callable, Mapping, Sequence
@@ -49,7 +50,7 @@ from evolvekit.ledger import read_jsonl
 from evolvekit.lock import pid_alive
 from evolvekit.search.params import current_values, declared_ranges
 
-__all__ = ["SCHEMA", "build_status", "candidate_detail", "render_text"]
+__all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
 
 SCHEMA = 1
 """Bumped when a key changes meaning or disappears. Adding keys does not."""
@@ -1022,14 +1023,35 @@ class _Run:
         """Evaluation wall clock spent when `generation` finished: the sum of the
         generations' own durations, so that a night between two sessions does
         not count. What a slow run is paid in is hours, not generations."""
-        total, seen = 0.0, False
+        durations = self._durations_by_generation
+        if generation not in durations:
+            return None
+        return sum(sum(values) for g, values in durations.items() if g <= generation)
+
+    @cached_property
+    def _durations_by_generation(self) -> dict[int, list[float]]:
+        """`generation -> [duration_s, ...]` from every `generation_finished`
+        event (a resumed generation can finish in two sessions). Read once per
+        document, not once per generation."""
+        durations: dict[int, list[float]] = {}
         for event in self.events:
             if event.get("type") != "generation_finished" or not isinstance(event.get("generation"), int):
                 continue
-            if event["generation"] <= generation and _number(event.get("duration_s")) is not None:
-                total += float(event["duration_s"])
-            seen = seen or event["generation"] == generation
-        return total if seen else None
+            value = _number(event.get("duration_s"))
+            durations.setdefault(event["generation"], []).extend([value] if value is not None else [])
+        return durations
+
+    @cached_property
+    def _finished_by_candidate(self) -> dict[str, list[Mapping[str, Any]]]:
+        """Every `eval_finished` event, by candidate id, read once. The views
+        that look at one candidate at a time used to scan the whole event log
+        per candidate: 33 s per document at 2,900 candidates, rebuilt about
+        once a second while a dashboard is open -- inside the run's process."""
+        index: dict[str, list[Mapping[str, Any]]] = {}
+        for event in self.events:
+            if event.get("type") == "eval_finished":
+                index.setdefault(str(event.get("candidate_id")), []).append(event)
+        return index
 
     def _screening_agreement(self) -> dict[str, Any]:
         """Does a cheap stage predict the expensive one?
@@ -1329,7 +1351,7 @@ class _Run:
         so every later instance is still compared with itself."""
         final, objective = self._final_stage, self._objective_name or ""
         per_seed: dict[str, list[list[float | None]]] = {}
-        for event in self.events:
+        for event in self._finished_by_candidate.get(candidate_id, ()):
             if (
                 event.get("type") != "eval_finished" or not event.get("ok") or event.get("private")
                 or str(event.get("candidate_id")) != candidate_id
@@ -1355,7 +1377,7 @@ class _Run:
         stage, by instance name: one value per seed."""
         final, objective = self._final_stage, self._objective_name or ""
         values: dict[str, dict[Any, float]] = {}
-        for event in self.events:
+        for event in self._finished_by_candidate.get(candidate_id, ()):
             if (
                 event.get("type") != "eval_finished" or not event.get("ok") or event.get("private")
                 or event.get("instance") is None
@@ -1614,15 +1636,44 @@ def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] |
 
     `None` when the run directory holds no such candidate.
     """
+    return candidate_details(run_dir, [candidate_id]).get(candidate_id)
+
+
+def candidate_details(
+    run_dir: str | Path, candidate_ids: Sequence[str] | None = None
+) -> dict[str, dict[str, Any]]:
+    """`candidate_detail` for many candidates (all of them by default) from one
+    read of the run's files. The export asks for every candidate; asking one at
+    a time re-read `runs.jsonl` and the event log per candidate, which grew
+    quadratically -- about 35 minutes for a run of 2,900 candidates."""
     directory = Path(run_dir)
     rows = {str(r.get("id")): r for r in read_jsonl(directory / "runs.jsonl")}
-    row = rows.get(candidate_id)
-    if row is None:
-        return None
     seed = next((r for r in rows.values() if r.get("operator") == SEED_OPERATOR), None)
+    events = read_events(directory)
+    finished: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        if event.get("type") == "eval_finished":
+            finished.setdefault(str(event.get("candidate_id")), []).append(event)
+    described = next((e for e in reversed(events) if e.get("type") == "run_started"), {})
+    space = _Parameters(described, seed)
+    wanted = list(rows) if candidate_ids is None else candidate_ids
+    return {
+        cid: _candidate_detail(cid, rows, seed, space, finished.get(cid, []))
+        for cid in wanted
+        if cid in rows
+    }
+
+
+def _candidate_detail(
+    candidate_id: str,
+    rows: Mapping[str, dict[str, Any]],
+    seed: Mapping[str, Any] | None,
+    space: "_Parameters",
+    finished: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    row = rows[candidate_id]
     parent = rows.get(str(row.get("parent_id")))
     block = str(row.get("block") or "")
-    events = read_events(directory)
     evaluations = [
         {
             key: event.get(key)
@@ -1631,13 +1682,9 @@ def candidate_detail(run_dir: str | Path, candidate_id: str) -> dict[str, Any] |
                 "stderr_tail", "stdout_tail", "argv", "stdout_log", "stderr_log",
             )
         }
-        for event in events
-        if event.get("type") == "eval_finished"
-        and str(event.get("candidate_id")) == candidate_id
+        for event in finished
     ]
     seed_block = str((seed or {}).get("block") or "")
-    described = next((e for e in reversed(events) if e.get("type") == "run_started"), {})
-    space = _Parameters(described, seed)
     detail = {
         "id": candidate_id,
         "generation": row.get("generation"),

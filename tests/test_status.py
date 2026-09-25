@@ -393,6 +393,57 @@ def test_an_instance_without_a_value_keeps_every_other_instance_in_its_place(tmp
     assert (instances["wins"], instances["losses"], instances["ties"]) == (0, 0, 2)
 
 
+class _CountingEvents(list):
+    """The event log, counting how often it is read from end to end."""
+
+    scans = 0
+
+    def __iter__(self):
+        _CountingEvents.scans += 1
+        return super().__iter__()
+
+
+def _per_instance_run(path: Path, candidates: int) -> None:
+    run = RunDir(path)
+    stages = [STAGES[0], {**STAGES[1], "instances": ["a", "b", "c"], "normalize": "baseline"}]
+    run.event("run_started", 1000, objective="cost", direction="minimize", stages=stages,
+              first_generation=1, generations_planned=5, budget={}, stop={})
+    for index in range(candidates):
+        cid = f"g{min(index, 1):03d}-c{index + 1:04d}"
+        run.row(cid, min(index, 1), 100.0 - index * 0.01)
+        for instance in ("a", "b", "c"):
+            run.event("eval_finished", 900, candidate_id=cid, stage="full", seed=0, private=False,
+                      instance=instance, ok=True, duration_s=1.0, kpis={"cost": 100.0 - index * 0.01})
+
+
+def test_the_status_document_reads_the_event_log_a_fixed_number_of_times(tmp_path, monkeypatch):
+    """Views that look at one candidate at a time used to scan the whole log
+    per candidate: 33 s per document at 2,900 candidates, rebuilt about once a
+    second inside the run's own process while a dashboard was open."""
+    from evolvekit import status as status_module
+
+    real = status_module.read_events
+    monkeypatch.setattr(status_module, "read_events", lambda d: _CountingEvents(real(d)))
+    scans = {}
+    for candidates in (10, 40):
+        _per_instance_run(tmp_path / str(candidates), candidates)
+        _CountingEvents.scans = 0
+        build_status(tmp_path / str(candidates), now=NOW)
+        scans[candidates] = _CountingEvents.scans
+    assert scans[40] == scans[10], f"scans grow with the number of candidates: {scans}"
+
+
+def test_the_export_reads_the_run_once_not_once_per_candidate(tmp_path, monkeypatch):
+    from evolvekit import status as status_module
+    from evolvekit.dashboard import export_html
+
+    _per_instance_run(tmp_path / "run", 30)
+    real, calls = status_module.read_events, []
+    monkeypatch.setattr(status_module, "read_events", lambda d: calls.append(d) or real(d))
+    export_html(tmp_path / "run", tmp_path / "report.html")
+    assert len(calls) <= 2, f"{len(calls)} reads of the event log for 30 candidates"
+
+
 def test_without_a_per_instance_kpi_the_breakdown_explains_how_to_get_one(tmp_path):
     run = RunDir(tmp_path)
     run.started(10)
