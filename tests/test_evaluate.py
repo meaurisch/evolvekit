@@ -492,3 +492,110 @@ def test_cascade_promotes_only_the_top_k(tmp_path):
     assert results["poor"].stages_reached == ["static", "proxy"]
     # Not being promoted keeps the proxy score; it is not a punishment.
     assert results["poor"].score == pytest.approx(-9.0)
+
+
+# -- an objective the evaluator never reported, or reported as NaN ----------
+#
+# Under `direction: minimize` a healthy cost of 40 scores -40. A missing or
+# non-finite objective used to be coerced to 0.0, which scores -0.0 -- the best
+# score in the run. One crashed solver printing `nan` was enough to make a
+# broken candidate the run's best and every later generation's parent.
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity", "1" + "0" * 400])
+def test_command_stage_rejects_a_non_finite_kpi(tmp_path, token):
+    script = tmp_path / "nonfinite.py"
+    script.write_text(
+        "import sys\n"
+        f"open(sys.argv[2], 'w').write('{{\"kpis\": {{\"excess\": {token}}}}}')\n",
+        encoding="utf-8",
+    )
+    outcome = run_command_stage(
+        tmp_path / "cand.py",
+        _command_stage(script),
+        inputs=[],
+        out_path=tmp_path / "out.json",
+        cwd=tmp_path,
+    )
+    assert outcome.ok is False
+    assert "'excess'" in (outcome.failure or "")
+    assert "finite" in (outcome.failure or "")
+
+
+def test_command_stage_rejects_a_non_finite_entry_in_a_list_kpi(tmp_path):
+    script = tmp_path / "nonfinite_list.py"
+    script.write_text(
+        "import sys\n"
+        "open(sys.argv[2], 'w').write("
+        "'{\"kpis\": {\"excess\": 4.0, \"per_instance\": [1.0, NaN]}}')\n",
+        encoding="utf-8",
+    )
+    outcome = run_command_stage(
+        tmp_path / "cand.py",
+        _command_stage(script),
+        inputs=[],
+        out_path=tmp_path / "out.json",
+        cwd=tmp_path,
+    )
+    assert outcome.ok is False
+    assert "'per_instance'" in (outcome.failure or "")
+    assert "finite" in (outcome.failure or "")
+
+
+def test_command_stage_fails_when_a_required_kpi_is_not_reported(tmp_path):
+    script = tmp_path / "other_kpis.py"
+    script.write_text(
+        "import json, sys\n"
+        "open(sys.argv[2], 'w').write(json.dumps({'kpis': {'loss': 10, 'a': 0}}))\n",
+        encoding="utf-8",
+    )
+    outcome = run_command_stage(
+        tmp_path / "cand.py",
+        _command_stage(script),
+        inputs=[],
+        out_path=tmp_path / "out.json",
+        cwd=tmp_path,
+        required_kpis=("excess",),
+    )
+    assert outcome.ok is False
+    # Actionable: names the KPI that was wanted and the ones that arrived.
+    assert "'excess'" in (outcome.failure or "")
+    assert "a, loss" in (outcome.failure or "")
+
+
+def test_cascade_scores_a_missing_objective_as_a_failure(tmp_path):
+    config = _cascade_config(tmp_path, _echo_script(tmp_path))
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    healthy = '# KPIS {"excess": 40.0}\ndef priority(item, bins):\n    return []\n'
+    broken = '# KPIS {"loss": 1.0}\ndef priority(item, bins):\n    return [0]\n'
+    results = cascade.evaluate_generation(
+        [_candidate("healthy", healthy), _candidate("broken", broken)]
+    )
+    assert results["healthy"].score == pytest.approx(-40.0)
+    assert results["broken"].score == -999.0  # evaluate.failure_score
+    assert results["broken"].score < results["healthy"].score
+    assert results["broken"].stages_reached == ["static"]
+    assert "'excess'" in (results["broken"].last_failure or "")
+
+
+def test_cascade_scores_a_nan_objective_as_a_failure(tmp_path):
+    script = tmp_path / "nan_for_broken.py"
+    script.write_text(
+        "import sys\n"
+        "src = open(sys.argv[1], encoding='utf-8').read()\n"
+        "value = 'NaN' if 'BROKEN' in src else '40.0'\n"
+        "open(sys.argv[2], 'w').write('{\"kpis\": {\"excess\": ' + value + '}}')\n",
+        encoding="utf-8",
+    )
+    config = _cascade_config(tmp_path, script)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    healthy = "def priority(item, bins):\n    return []\n"
+    broken = "# BROKEN\ndef priority(item, bins):\n    return [0]\n"
+    results = cascade.evaluate_generation(
+        [_candidate("healthy", healthy), _candidate("broken", broken)]
+    )
+    assert results["healthy"].score == pytest.approx(-40.0)
+    assert results["broken"].score == -999.0
+    assert results["broken"].score < results["healthy"].score
+    assert results["broken"].stages_reached == ["static"]
+    assert "finite" in (results["broken"].last_failure or "")

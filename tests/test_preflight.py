@@ -379,6 +379,28 @@ def test_a_seed_that_fails_a_stage_is_a_failure_and_stops_the_cascade(
     assert [s.stage_id for s in report.stages] == ["static", "proxy"]
 
 
+def test_a_seed_whose_evaluator_never_reports_the_objective_is_a_failure(
+    minimal_raw, tmp_path
+):
+    """The `init` scaffold names an objective its user's evaluator does not
+    emit, and preflight used to call that "clean": every candidate then scored
+    0, which under `direction: minimize` is the best score there is."""
+    minimal_raw["evaluate"]["stages"] = [
+        {"id": "static", "kind": "builtin-static", "import_check": False},
+        {
+            "id": "full",
+            "kind": "command",
+            "command": _sleeper(tmp_path, 0.0),  # reports `value`, and only that
+            "timeout": 60,
+        },
+    ]
+    minimal_raw["evaluate"]["score"] = {"objective": "cost", "direction": "minimize"}
+    config = build_config(minimal_raw, base_dir=tmp_path)
+    report = preflight(config)
+    assert report.exit_code == 2
+    assert any("'cost'" in f and "value" in f for f in report.failures)
+
+
 def test_a_seed_that_fails_the_static_stage_is_named_as_such(minimal_raw, tmp_path):
     skeleton = tmp_path / "skeleton.py"
     skeleton.write_text(
