@@ -287,6 +287,27 @@ def test_against_names_what_the_candidates_are_compared_with(tmp_path):
     assert "Baseline: `g003-c0012@run`" in report
 
 
+def test_two_run_directories_with_the_same_name_are_told_apart(tmp_path):
+    """Candidates of other runs were named `ID@<directory name>`: `a/run` and
+    `b/run` both became `ID@run`, and two different configurations were
+    refused as "compared with itself". The name grows by parent directories
+    until it is unique."""
+    config_path = _write_config(tmp_path)
+    first, second = _two_runs(tmp_path, config_path)
+    (tmp_path / "third").mkdir()
+    third = _write_run(tmp_path / "third", config_path, {"g003-c0012": {"params": {"x": -0.02}, "score": -98.0}})
+    comparison = confirm(load_config(config_path), second, seeds=[1001, 1003], candidates=f"g003-c0012@{first}",
+                         against=f"g003-c0012@{third}", label="same-name", log=lambda m: None)
+    assert comparison.baseline_id == "g003-c0012@third/run"
+    assert comparison.candidates == ["g003-c0012@first/run"]
+    both = confirm(load_config(config_path), second, seeds=[1001], candidates=f"g003-c0012@{first},g003-c0012@{third}",
+                   label="both-named", log=lambda m: None)
+    assert both.candidates == ["g003-c0012@first/run", "g003-c0012@third/run"]
+    with pytest.raises(ValueError, match="compared twice under one name"):
+        confirm(load_config(config_path), second, seeds=[1], candidates=f"g003-c0012@{first},g003-c0012@{first}",
+                log=lambda m: None)
+
+
 def test_a_candidate_that_is_not_there_is_refused_by_name(tmp_path):
     config_path = _write_config(tmp_path)
     config = load_config(config_path)

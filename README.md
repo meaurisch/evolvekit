@@ -1014,7 +1014,9 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   among the operators, last month's winner:
   `confirm --run-dir runs/b --candidates g011-c0085 --against g012-c0096@runs/a --seeds 2001,2002,2003`.
   The other run's candidate has to be valid under *this* config's
-  `problem.parameters`; it is checked before anything runs.
+  `problem.parameters`; it is checked before anything runs. It is reported as
+  `ID@<its directory's name>`, with parent directories added when two
+  directories share a name (`ID@a/run`, `ID@b/run`).
 - A failed run costs its pair, not the comparison — but it is counted: per
   candidate and per instance, `failed_pairs` (a run failed or timed out) and
   `zero_baseline_pairs` (the baseline reached 0, and a percentage of 0 is no

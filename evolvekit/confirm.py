@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import fmean, stdev
@@ -188,7 +189,8 @@ def _find(rows: list[dict[str, Any]], spec: str, option: str) -> dict[str, Any]:
     """One candidate by id: `ID` is of this run, `ID@RUN_DIR` of another run of
     the same problem -- the winner of an earlier search, of a different operator
     mix, of last month. It is named `ID@<that directory's name>` from here on,
-    because two runs number their candidates alike."""
+    because two runs number their candidates alike -- with parent directories
+    added where two directories share a name (`_disambiguate`)."""
     cid, _, other = spec.partition("@")
     if not other:
         row = next((r for r in rows if str(r.get("id")) == cid), None)
@@ -201,7 +203,39 @@ def _find(rows: list[dict[str, Any]], spec: str, option: str) -> dict[str, Any]:
     row = next((r for r in read_jsonl(other_dir / "runs.jsonl") if str(r.get("id")) == cid), None)
     if row is None:
         raise ValueError(f"{option}: {other_dir} holds no candidate {cid!r}")
-    return {**row, "id": f"{cid}@{other_dir.resolve().name}"}
+    return {**row, "id": f"{cid}@{other_dir.resolve().name}", "_id": cid, "_run_dir": str(other_dir.resolve())}
+
+
+def _disambiguate(rows: Sequence[dict[str, Any]]) -> None:
+    """Rename candidates of other runs whose directories share a name.
+
+    `runs/a/run` and `runs/b/run` both give `ID@run`: two configurations under
+    one name, which the comparison then refuses as "compared with itself" or
+    "compared twice". Each clashing name grows by parent directories --
+    `ID@a/run`, `ID@b/run` -- until the directories are told apart. The same
+    candidate of the same directory named twice keeps one name, and is still
+    refused as the duplicate it is."""
+    others = [row for row in rows if row.get("_run_dir")]
+    depth = {id(row): 1 for row in others}
+
+    def name(row: dict[str, Any]) -> str:
+        parts = Path(row["_run_dir"]).parts
+        return f"{row['_id']}@{Path(*parts[-depth[id(row)]:]).as_posix()}"
+
+    while True:
+        by_name: dict[str, list[dict[str, Any]]] = {}
+        for row in others:
+            by_name.setdefault(name(row), []).append(row)
+        clashing = [
+            row for group in by_name.values() if len({r["_run_dir"] for r in group}) > 1 for row in group
+            if depth[id(row)] < len(Path(row["_run_dir"]).parts)
+        ]
+        if not clashing:
+            break
+        for row in clashing:
+            depth[id(row)] += 1
+    for row in others:
+        row["id"] = name(row)
 
 
 def _select(rows: list[dict[str, Any]], wanted: str) -> list[dict[str, Any]]:
@@ -212,12 +246,7 @@ def _select(rows: list[dict[str, Any]], wanted: str) -> list[dict[str, Any]]:
         if not ranked:
             raise ValueError("the run has no fully evaluated candidate besides its seed: nothing to confirm")
         return ranked[:count]
-    chosen = [_find(rows, spec.strip(), "--candidates") for spec in wanted.split(",") if spec.strip()]
-    names = [str(r["id"]) for r in chosen]
-    twice = sorted({n for n in names if names.count(n) > 1})
-    if twice:
-        raise ValueError(f"--candidates: {twice} would be compared twice under one name")
-    return chosen
+    return [_find(rows, spec.strip(), "--candidates") for spec in wanted.split(",") if spec.strip()]
 
 
 def confirm(
@@ -265,6 +294,11 @@ def confirm(
         stage = _with_instances(config, stage, instances)
 
     chosen = _select(rows, candidates)
+    _disambiguate([seed_row, *chosen])
+    names = [str(r["id"]) for r in chosen]
+    twice = sorted({n for n in names if names.count(n) > 1})
+    if twice:
+        raise ValueError(f"--candidates: {twice} would be compared twice under one name")
     if any(str(r["id"]) == str(seed_row["id"]) for r in chosen):
         raise ValueError(f"--against: {seed_row['id']} would be compared with itself")
     out_dir = run_dir / "confirm" / label
@@ -290,9 +324,14 @@ def confirm(
         return observe
 
     jobs = []
-    for name, row in [(BASELINE, seed_row), *[(str(r["id"]), r) for r in chosen]]:
-        path, configuration = _materialise(config, row, work, name)
-        jobs.append(Job(name, path, configuration=configuration, observer=observer_for(name)))
+    for index, (name, row) in enumerate([(BASELINE, seed_row), *[(str(r["id"]), r) for r in chosen]]):
+        # A name like `ID@a/run` is for people; files are named by one that is
+        # safe as a file name (and unique, whatever it folded together).
+        safe = re.sub(r"[^A-Za-z0-9@._-]+", "_", name)
+        if any(job.candidate_id == safe for job in jobs):
+            safe = f"{safe}.{index}"
+        path, configuration = _materialise(config, row, work, safe)
+        jobs.append(Job(safe, path, configuration=configuration, observer=observer_for(name)))
 
     planned = len(jobs) * len(stage.instances) * len(seeds)
     log(
@@ -311,7 +350,7 @@ def confirm(
     with run_lock(out_dir):
         heartbeat.start(phase="evaluating")
         try:
-            events.emit("stage_started", stage=stage.id, private=False, candidates=[j.candidate_id for j in jobs],
+            events.emit("stage_started", stage=stage.id, private=False, candidates=[BASELINE, *comparison.candidates],
                         runs_per_candidate=len(stage.instances) * len(seeds), workers=stage.workers)
             run_instance_stage(
                 jobs, stage, out_dir=work / "stage_out", cwd=config.base_dir,
