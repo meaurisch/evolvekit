@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -231,6 +232,13 @@ class Ledger:
         }
 
 
+REPLACE_ATTEMPTS = 20
+REPLACE_PAUSE_S = 0.05
+"""On Windows `os.replace` fails with a sharing violation while any reader --
+the dashboard, `status`, an editor -- has the target open; a reader lets go
+within milliseconds, so the replacement is tried again for up to a second."""
+
+
 def _atomic_write(path: Path, text: str) -> None:
     """Write via a temp file in the same directory so readers never see a partial."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +246,14 @@ def _atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
-        os.replace(tmp, path)
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(REPLACE_PAUSE_S)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

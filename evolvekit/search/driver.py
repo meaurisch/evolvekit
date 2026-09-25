@@ -22,6 +22,7 @@ import json
 import os
 import random
 import socket
+import sys
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -807,7 +808,12 @@ class Driver:
         run that was killed."""
         payload = self.grid.to_dict()
         payload["economics_window"] = self.config.stop.economics_window
-        self.ledger.write_archive(payload)
+        try:
+            self.ledger.write_archive(payload)
+        except OSError as exc:
+            # A view of `runs.jsonl`, rebuilt from it on every resume: one that
+            # cannot be refreshed right now is not worth the run.
+            print(f"evolvekit: archive.json not refreshed ({exc}); the run goes on", file=sys.stderr)
 
     def _seed_candidate(self) -> Candidate:
         return Candidate(

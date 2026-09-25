@@ -293,6 +293,49 @@ def test_the_archive_snapshot_is_refreshed_every_generation_not_only_at_the_end(
     assert seen[0] == 1 and seen[-1] > 1
 
 
+def test_a_file_a_reader_holds_for_a_moment_is_still_written(tmp_path, monkeypatch):
+    """On Windows `os.replace` fails while any reader has the target open, and
+    the dashboard reads `archive.json` every second. Measured in a tight loop:
+    245 of 300 replacements failed. A reader lets go within milliseconds."""
+    from evolvekit import ledger
+
+    real = ledger.os.replace
+    left = {"failures": 3}
+
+    def busy(src, dst):
+        if left["failures"]:
+            left["failures"] -= 1
+            raise PermissionError(13, "The process cannot access the file", str(dst))
+        return real(src, dst)
+
+    monkeypatch.setattr(ledger.os, "replace", busy)
+    target = tmp_path / "archive.json"
+    ledger._atomic_write(target, '{"ok": true}')
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+    assert [p.name for p in tmp_path.iterdir()] == ["archive.json"], "no scratch file left behind"
+
+
+def test_an_archive_snapshot_that_cannot_be_written_does_not_end_the_run(tmp_path, monkeypatch, capsys):
+    """`archive.json` is a view, rebuilt from `runs.jsonl` on every resume. A
+    view that cannot be refreshed is not worth a run."""
+    from dataclasses import replace
+
+    from evolvekit.config import load_config
+    from evolvekit.ledger import Ledger
+    from evolvekit.search.driver import Driver
+    from tests.conftest import EXAMPLE_CONFIG
+
+    def locked(self, payload):
+        raise PermissionError(13, "The process cannot access the file", "archive.json")
+
+    monkeypatch.setattr(Ledger, "write_archive", locked)
+    config = load_config(EXAMPLE_CONFIG)
+    config = replace(config, search=replace(config.search, scratchpad_every=0))
+    summary = Driver(config, run_dir=tmp_path / "run").run(generations=1)
+    assert summary.generations == 1
+    assert "archive.json" in capsys.readouterr().err
+
+
 def test_css_custom_properties_reach_the_element():
     """`Object.assign(node.style, {"--zero": ...})` drops a custom property
     without a word -- the per-instance bars lost their zero line that way and
