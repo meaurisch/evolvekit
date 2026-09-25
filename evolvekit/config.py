@@ -1646,12 +1646,21 @@ def _check_embedding_route(config: Config) -> None:
     Both failures here would otherwise surface as an exception from inside the
     search loop, after the seed had been evaluated and the first children paid
     for. A config error costs nothing.
+
+    A config without a `models` section at all -- a run of model-free
+    operators -- is the first case, not an exception to it: it used to be let
+    through and died in `Driver()` on `None.by_role`.
     """
-    if config.models is None:
-        return
     near = config.search.novelty.near
     if near.method != "embedding":
         return
+    if config.models is None:
+        raise ConfigError(
+            "search.novelty.near.method: 'embedding' calls an embedding model, and this "
+            "config has no `models` section. Add a models.embed slot naming a backend "
+            "with an embeddings API, or set the method to 'local' (costs nothing) or "
+            "'off'"
+        )
     slot = config.models.embed
     if slot is None:
         raise ConfigError(

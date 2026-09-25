@@ -60,6 +60,18 @@ def test_leaving_models_out_while_an_llm_operator_has_a_share_is_explained(raw, 
     assert "param_lhs" in message, "the message has to say how to run without a model"
 
 
+
+def test_an_embedding_gate_without_any_models_is_explained_before_the_run(raw, tmp_path):
+    # With no `models` section the embedding check returned early, the config
+    # was accepted, and the run died in Driver() with "'NoneType' object has no
+    # attribute 'by_role'" -- a traceback instead of a sentence.
+    raw["search"]["novelty"] = {"near": {"method": "embedding"}}
+    with pytest.raises(ConfigError) as error:
+        build_config(raw, base_dir=tmp_path)
+    message = str(error.value)
+    assert "search.novelty.near.method" in message and "models.embed" in message
+    assert "'local'" in message and "'off'" in message, "the message has to say how to run without a model"
+
 def test_big_step_every_zero_means_never(raw, tmp_path):
     raw["search"]["big_step_every"] = 0
     assert build_config(raw, base_dir=tmp_path).search.big_step_every == 0
