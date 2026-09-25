@@ -1036,10 +1036,16 @@ python -m evolvekit export --run-dir runs/x --candidate g004-c0025 --format code
 Secrets are read from environment variables only. Copy `.env.example` to `.env`
 (gitignored) and fill in what you need: every command loads the nearest `.env`
 going up from the config file's directory, and the nearest going up from the
-working directory. A variable that is already set in the environment is never
+working directory — up to the project root (the first directory with `.git` or
+`pyproject.toml`) and never into your home directory from below; outside a
+project only the directory itself counts. Every evaluator inherits what is
+loaded, so a stray `.env` in a parent directory is not read, and a `.env` may
+not set variables that decide which program runs or what it loads first
+(`PATH`, `PYTHON*`, `LD_*`, `DYLD_*`, `NODE_OPTIONS`, …): those are refused
+and named on stderr. A variable that is already set in the environment is never
 overridden, an empty value sets nothing, and values are never printed —
-`preflight` names the file and the *variables* it set, which is the first thing
-to look at when a key is wrong. `EVOLVEKIT_NO_DOTENV=1` switches the loading off. Each `models.small` / `models.strong`
+`preflight` and `run` name the file and the *variables* it set, which is the
+first thing to look at when a key is wrong. `EVOLVEKIT_NO_DOTENV=1` switches the loading off. Each `models.small` / `models.strong`
 slot names a backend, a model, and its prices, which is what the ledger uses to
 turn tokens into USD.
 

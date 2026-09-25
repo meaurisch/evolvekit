@@ -6,7 +6,7 @@
 #   python -m evolvekit run --config tuning.llm.yaml --run-dir ../../runs/pyvrp-hard-llm --dashboard
 #
 # Needs OPENROUTER_API_KEY -- in the environment, or in a `.env` file here or in
-# any directory above. The model is an API, so its calls put no load on the
+# any directory above it up to the repository root. The model is an API, so its calls put no load on the
 # machine the solver is being timed on.
 extends: tuning.yaml
 

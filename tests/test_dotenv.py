@@ -19,7 +19,8 @@ SECRET = "sk-or-THIS-MUST-NEVER-BE-PRINTED"
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
-    for name in ("EK_TEST_KEY", "EK_TEST_OTHER", "EK_TEST_QUOTED", "OPENROUTER_API_KEY", "EVOLVEKIT_NO_DOTENV"):
+    for name in ("EK_TEST_KEY", "EK_TEST_OTHER", "EK_TEST_QUOTED", "OPENROUTER_API_KEY", "EVOLVEKIT_NO_DOTENV",
+                 "PYTHONEKTEST", "LD_EKTEST", "DYLD_EKTEST", "NODE_OPTIONS"):
         # Set, then delete: the loader writes to `os.environ` directly, and only a
         # name monkeypatch has *recorded* is put back the way it was afterwards.
         monkeypatch.setenv(name, "placeholder")
@@ -48,6 +49,7 @@ def test_the_nearest_file_above_the_config_is_loaded_and_the_environment_wins(tm
     project = tmp_path / "project"
     deep = project / "benchmarks" / "solver"
     deep.mkdir(parents=True)
+    (project / ".git").mkdir()  # what makes it a project: the search stops here
     (tmp_path / ".env").write_text("EK_TEST_KEY=from-far-away\n", encoding="utf-8")
     (project / ".env").write_text("EK_TEST_KEY=from-the-project\nEK_TEST_OTHER=file\n", encoding="utf-8")
     monkeypatch.setenv("EK_TEST_OTHER", "already-set")
@@ -55,7 +57,50 @@ def test_the_nearest_file_above_the_config_is_loaded_and_the_environment_wins(tm
     loaded = load_env_files([deep])
     assert os.environ["EK_TEST_KEY"] == "from-the-project", "the nearest .env going up from the config"
     assert os.environ["EK_TEST_OTHER"] == "already-set", "a real environment variable is never overridden"
-    assert loaded == [((project / ".env").resolve(), ["EK_TEST_KEY"])], "names only, and only what was actually set"
+    assert loaded == [((project / ".env").resolve(), ["EK_TEST_KEY"], [])], "names only, and only what was actually set"
+
+
+def test_a_stray_env_above_the_project_is_never_read(tmp_path):
+    """Every evaluator inherits what is loaded. A `.env` left in a parent
+    directory -- the home directory, a shared drive -- must not be able to set
+    a base URL for the user's real key, or a variable that changes what runs."""
+    project = tmp_path / "project"
+    (project / "configs").mkdir(parents=True)
+    (project / "pyproject.toml").write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text("EK_TEST_KEY=stray\n", encoding="utf-8")
+    assert load_env_files([project / "configs"]) == []
+    assert "EK_TEST_KEY" not in os.environ
+
+
+def test_outside_any_project_only_the_directory_itself_is_read(tmp_path):
+    (tmp_path / ".env").write_text("EK_TEST_KEY=stray\n", encoding="utf-8")
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    assert load_env_files([tmp_path / "a" / "b"]) == []
+    (tmp_path / "a" / "b" / ".env").write_text("EK_TEST_OTHER=here\n", encoding="utf-8")
+    assert load_env_files([tmp_path / "a" / "b"])[0].names == ["EK_TEST_OTHER"]
+
+
+def test_variables_that_change_what_runs_are_refused_by_name(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".env").write_text(
+        "PYTHONEKTEST=x\nLD_EKTEST=y\nDYLD_EKTEST=z\nNODE_OPTIONS=--require=evil\nEK_TEST_KEY=1\n",
+        encoding="utf-8",
+    )
+    (loaded,) = load_env_files([tmp_path])
+    assert loaded.names == ["EK_TEST_KEY"] and os.environ["EK_TEST_KEY"] == "1"
+    assert sorted(loaded.refused) == ["DYLD_EKTEST", "LD_EKTEST", "NODE_OPTIONS", "PYTHONEKTEST"]
+    for name in loaded.refused:
+        assert name not in os.environ
+
+
+def test_run_says_which_names_it_loaded_and_which_it_refused(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".env").write_text(f"OPENROUTER_API_KEY={SECRET}\nPYTHONEKTEST=x\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    main(["run", "--config", str(tmp_path / "missing.yaml")])
+    err = capsys.readouterr().err
+    assert "OPENROUTER_API_KEY" in err and str((tmp_path / ".env").resolve()) in err
+    assert "PYTHONEKTEST" in err and "refused" in err
+    assert SECRET not in err
 
 
 def test_an_empty_value_does_not_set_anything(tmp_path):
