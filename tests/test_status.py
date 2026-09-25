@@ -287,6 +287,28 @@ def test_a_gain_smaller_than_the_seed_to_seed_swing_is_within_noise(tmp_path):
     assert improvement["pct"] == pytest.approx(0.5)  # a number that looks like progress
 
 
+def test_gains_that_do_not_vary_are_judged_in_the_direction_of_their_mean(tmp_path):
+    """The best losing by exactly 1 on every shared seed has no spread, and the
+    verdict used to read "mean gain -1, t = inf ... within noise"."""
+    run = RunDir(tmp_path)
+    run.started(1000)
+    # Ranked best (its recorded score says so, e.g. through the hold-out-aware
+    # ranking), yet behind the baseline on every seed both were run on.
+    run.row("g000-c0001", 0, 200.0)
+    run.row("g001-c0002", 1, 190.0, parent_id="g000-c0001")
+    for seed, (base, best) in enumerate([(200.0, 201.0), (210.0, 211.0), (190.0, 191.0)]):
+        run.evaluation("g000-c0001", 900 - seed, base, seed=seed)
+        run.evaluation("g001-c0002", 500 - seed, best, seed=seed)
+    improvement = build_status(tmp_path, now=NOW)["progress"]["improvement"]
+    assert improvement["verdict"] == "worse"
+    assert "t = -inf" in improvement["why"] and "within noise" not in improvement["why"]
+
+
+def test_gains_that_do_not_vary_and_help_are_clear(tmp_path):
+    improvement = _two_candidates(tmp_path, [200.0, 210.0, 190.0], [199.0, 209.0, 189.0])["improvement"]
+    assert improvement["verdict"] == "clear" and "t = inf" in improvement["why"]
+
+
 # -- what is the best, and how does it differ? ------------------------------
 
 PARAM_BLOCK = '# PARAMS: {{"ALPHA": [0.0, 10.0], "STEPS": [1, 9]}}\nALPHA = {alpha}\nSTEPS = {steps}\n'

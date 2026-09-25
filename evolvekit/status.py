@@ -136,6 +136,23 @@ def _number(value: Any) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
+def _paired_t(mean: float, sd: float, n: int) -> float:
+    """The paired t statistic. Gains that do not vary at all are as clear as a
+    result gets -- in the direction of their mean: a candidate that loses by
+    exactly 1 on every seed is not "t = inf, within noise"."""
+    if sd > 0:
+        return mean / (sd / math.sqrt(n))
+    return math.copysign(math.inf, mean) if mean else 0.0
+
+
+def _noise_note(clear: bool, worse: bool) -> str:
+    if clear:
+        return ""
+    if worse:
+        return " (at most -2: the best is behind the baseline on these seeds, beyond the noise)"
+    return " (between -2 and 2: not distinguishable from noise)"
+
+
 def _spread(values: Sequence[float]) -> dict[str, Any]:
     """n, mean, sd and standard error. `sd` needs two samples; one sample is a
     number with no error bar, and the document says so rather than printing 0."""
@@ -900,13 +917,14 @@ class _Run:
         sign = 1.0 if self._direction == "minimize" else -1.0
         gains = [sign * (a[s] - b[s]) for s in shared]
         mean, sd = fmean(gains), stdev(gains)
-        t = mean / (sd / math.sqrt(len(gains))) if sd > 0 else math.inf
+        t = _paired_t(mean, sd, len(gains))
         clear = mean > 0 and t >= 2.0
+        worse = mean < 0 and t <= -2.0
         return {
-            "verdict": "clear" if clear else "within noise",
+            "verdict": "clear" if clear else "worse" if worse else "within noise",
             "why": (
                 f"paired over {len(shared)} shared seed(s): mean gain {mean:.6g}, "
-                f"t = {t:.2f}" + ("" if clear else " (below 2: not distinguishable from noise)")
+                f"t = {t:.2f}" + (_noise_note(clear, worse))
                 + ". These are the seeds the search selected on, so even a clear "
                 "result is optimistic until it is confirmed on seeds it never saw"
             ),
@@ -927,15 +945,16 @@ class _Run:
         if len(gains) < 2:
             return {"verdict": "unknown", "why": "fewer than two comparable runs", "n": len(gains)}
         mean, sd = fmean(gains), stdev(gains)
-        t = mean / (sd / math.sqrt(len(gains))) if sd > 0 else math.inf
+        t = _paired_t(mean, sd, len(gains))
         clear = mean > 0 and t >= 2.0
+        worse = mean < 0 and t <= -2.0
         instances = len({run[0] for run in shared})
         return {
-            "verdict": "clear" if clear else "within noise",
+            "verdict": "clear" if clear else "worse" if worse else "within noise",
             "why": (
                 f"paired over {len(gains)} shared run(s) on {instances} instance(s): mean gain "
                 f"{mean:.3g} % per run, t = {t:.2f}"
-                + ("" if clear else " (below 2: not distinguishable from noise)")
+                + (_noise_note(clear, worse))
                 + ". These are the instances and seeds the search selected on, so even a clear "
                 "result is optimistic until it is confirmed on seeds it never saw"
             ),
