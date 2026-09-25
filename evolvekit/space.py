@@ -30,6 +30,7 @@ The defaults are the baseline: the seed candidate is exactly `defaults()`.
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import re
@@ -283,12 +284,15 @@ class ParameterSpace:
         """The evolve block for `values`: a `configure()` that returns a dict."""
         lines = [
             "def configure():",
-            '    """The solver\'s parameters. Change the values, keep the keys."""',
+            # Byte for byte what the old global quote replacement made of
+            # "solver's": a block's text is part of its evaluation cache key,
+            # and an unchanged configuration must stay a cache hit.
+            '    """The solver"s parameters. Change the values, keep the keys."""',
             "    return {",
         ]
-        lines += [f"        {p.name!r}: {values[p.name]!r}," for p in self.parameters]
+        lines += [f'        "{p.name}": {_literal(values[p.name])},' for p in self.parameters]
         lines += ["    }", ""]
-        return "\n".join(lines).replace("'", '"')
+        return "\n".join(lines)
 
     def render_skeleton(self, block_start: str, block_end: str) -> str:
         return (
@@ -376,6 +380,21 @@ class ParameterSpace:
             else:
                 total += 0.0 if a[parameter.name] == b[parameter.name] else 1.0
         return total / len(self.parameters)
+
+
+def _literal(value: Any) -> str:
+    """`value` as Python source, a string in double quotes.
+
+    Per value, not by replacing every `'` in the finished block with `"`:
+    that turned the choice `it's` into `"it"s"`, a syntax error in every
+    candidate that picked it. A JSON string is a valid Python string literal
+    (the same escapes, and `ensure_ascii=False` keeps a non-ASCII character
+    itself rather than splitting it into surrogates); numbers and booleans
+    are their `repr`. A parameter name needs no quoting: it is an identifier.
+    """
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    return repr(value)
 
 
 def _unused(_: Sequence[Any]) -> None:  # pragma: no cover - keeps the import honest

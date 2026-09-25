@@ -111,6 +111,19 @@ def test_the_block_is_python_that_returns_exactly_the_configuration(space):
     assert block.endswith("\n")
 
 
+
+def test_a_choice_with_quotes_in_it_is_still_python_and_still_itself():
+    # The block used to be rendered with repr() and then every ' replaced by ",
+    # which turned `it's` into "it"s" -- a syntax error in every candidate.
+    odd = ["it's", 'say "hi"', "back\\slash", "tab\there", "naïve"]
+    space = ParameterSpace.parse({"mode": {"type": "choice", "choices": odd, "default": "it's"}})
+    for value in odd:
+        block = space.render_block({"mode": value})
+        namespace: dict = {}
+        exec(compile(ast.parse(block), "<block>", "exec"), namespace)  # noqa: S102 - our own text
+        assert namespace["configure"]() == {"mode": value}
+    assert "\"mode\": \"it's\"," in space.render_block({"mode": "it's"}), "the house style: double quotes"
+
 def test_the_generated_skeleton_has_one_fence_around_the_defaults(space):
     skeleton = space.render_skeleton("# EVOLVE-BLOCK-START", "# EVOLVE-BLOCK-END")
     assert skeleton.count("# EVOLVE-BLOCK-START") == 1 and skeleton.count("# EVOLVE-BLOCK-END") == 1
