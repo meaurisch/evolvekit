@@ -47,7 +47,7 @@ from evolvekit.economics import DEFAULT_WINDOW, series
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
 from evolvekit.leaderboard import competes, fitness_of, rank
 from evolvekit.ledger import read_jsonl
-from evolvekit.lock import pid_alive
+from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
 
 __all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
@@ -431,7 +431,9 @@ class _Run:
         # when the old pid has since been handed to an unrelated process.
         lock = _read_json(self.directory / ".lock") or {}
         lock_pid = int(lock.get("pid") or 0)
-        alive = bool(lock_pid) and pid_alive(lock_pid)
+        alive = bool(lock_pid) and lock_owner_alive(lock)
+        # The pid exists but started after the lock was written: recycled.
+        pid_reused = bool(lock_pid) and not alive and pid_alive(lock_pid)
         pid = lock_pid or int(heartbeat.get("pid") or self.described.get("pid") or 0)
 
         beat_at = _parse_ts(heartbeat.get("ts"))
@@ -466,7 +468,11 @@ class _Run:
         elif not alive:
             state = "crashed"
             detail = (
-                f"process {pid or '?'} is gone and left no closing event: it was killed, "
+                f"process {pid} is gone and left no closing event -- its pid now belongs to "
+                "another process, started after the run's lock. It was killed, or the "
+                "machine went down. Run the same command to resume"
+                if pid_reused
+                else f"process {pid or '?'} is gone and left no closing event: it was killed, "
                 "or the machine went down. Run the same command to resume"
             )
         elif beat_age is not None and beat_age > max(

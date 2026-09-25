@@ -139,6 +139,25 @@ def test_a_live_process_whose_heartbeat_went_quiet_is_stalled(tmp_path):
     assert "1800 s old" in health["detail"] and "slept" in health["detail"]
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("win32", "linux"), reason="process start times are read on Windows and Linux"
+)
+def test_a_pid_handed_to_a_process_younger_than_the_lock_is_not_the_owner(tmp_path):
+    """A run killed with its `.lock` left behind, whose pid Windows (or a
+    reboot) has since given to an unrelated process: that process started after
+    the lock was written, so it cannot be the run -- which crashed, and did not
+    merely stall."""
+    run = RunDir(tmp_path)
+    run.started(4000)
+    (tmp_path / ".lock").write_text(
+        json.dumps({"pid": os.getpid(), "started": "2000-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+    run.heartbeat(1800, phase="evaluating")
+    health = build_status(tmp_path, now=NOW)["health"]
+    assert health["state"] == "crashed" and health["pid_alive"] is False
+    assert "another process" in health["detail"]
+
+
 def test_an_evaluation_far_past_its_timeout_is_a_stall_too(tmp_path):
     run = RunDir(tmp_path)
     run.started(2000)

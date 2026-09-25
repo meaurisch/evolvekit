@@ -19,11 +19,11 @@ import os
 import socket
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-__all__ = ["RunLock", "RunLockError", "pid_alive", "run_lock"]
+__all__ = ["RunLock", "RunLockError", "lock_owner_alive", "pid_alive", "pid_started_at", "run_lock"]
 
 
 class RunLockError(RuntimeError):
@@ -68,6 +68,72 @@ def _pid_alive_windows(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def pid_started_at(pid: int) -> datetime | None:
+    """When the process now holding `pid` started, in UTC -- or `None` where
+    that cannot be read (macOS, a process we may not query, no such pid).
+
+    Pids are recycled, quickly on Windows and always across a reboot. A
+    process that started after a lock was written cannot be that lock's owner,
+    whatever its pid."""
+    try:
+        if sys.platform == "win32":
+            return _started_windows(pid)
+        if sys.platform.startswith("linux"):
+            return _started_linux(pid)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return None
+
+
+def _started_windows(pid: int) -> datetime | None:
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        created, other = ctypes.c_ulonglong(0), ctypes.c_ulonglong(0)
+        ok = kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(other), ctypes.byref(other), ctypes.byref(other)
+        )
+        if not ok or not created.value:
+            return None
+        # FILETIME: 100 ns ticks since 1601-01-01 UTC.
+        return datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=created.value // 10)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _started_linux(pid: int) -> datetime | None:
+    stat = Path(f"/proc/{pid}/stat").read_text()
+    ticks = int(stat.rsplit(")", 1)[1].split()[19])  # field 22, counted after the command name
+    boot = next(
+        int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines() if line.startswith("btime ")
+    )
+    return datetime.fromtimestamp(boot + ticks / os.sysconf("SC_CLK_TCK"), tz=timezone.utc)
+
+
+def lock_owner_alive(lock: dict[str, Any]) -> bool:
+    """Whether the process named by a `.lock` payload is still its owner:
+    alive, and -- where its start time can be read -- not younger than the lock."""
+    pid = int(lock.get("pid") or 0)
+    if not pid_alive(pid):
+        return False
+    started = lock.get("started")
+    if not isinstance(started, str):
+        return True
+    try:
+        locked_at = datetime.fromisoformat(started)
+    except ValueError:
+        return True
+    if locked_at.tzinfo is None:
+        locked_at = locked_at.replace(tzinfo=timezone.utc)
+    born = pid_started_at(pid)
+    # The owner started before it wrote the lock; `started` has whole seconds.
+    return born is None or born <= locked_at + timedelta(seconds=2)
+
+
 class RunLock:
     """A pid file with an owner check and a stale-owner reclaim."""
 
@@ -95,7 +161,7 @@ class RunLock:
         existing = self.read()
         if existing is not None:
             pid = int(existing.get("pid", 0) or 0)
-            if pid_alive(pid) and pid != os.getpid():
+            if pid != os.getpid() and lock_owner_alive(existing):
                 raise RunLockError(
                     f"run directory {self.run_dir} is locked by pid {pid} "
                     f"(started {existing.get('started', 'unknown')}). Point "
