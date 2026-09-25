@@ -642,6 +642,15 @@ def test_before_anything_is_recorded_the_per_instance_card_says_wait_not_cannot(
     assert instances["why"].startswith("nothing has finished the final stage yet")
 
 
+def test_a_finished_run_where_nothing_finished_the_final_stage_does_not_say_wait(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(100)
+    run.row("g000-c0001", 0, 1000.0, competes=False, last_failure="stage full: exit code 1")
+    run.event("run_finished", 10, stop_reason="aborted: the seed failed its own evaluation")
+    why = build_status(tmp_path, now=NOW)["instances"]["why"]
+    assert "yet" not in why and "ended" in why
+
+
 def test_the_first_generation_has_a_time_left_too_the_stage_knows(tmp_path):
     run = RunDir(tmp_path)
     run.started(2000, planned=3)

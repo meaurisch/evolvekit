@@ -1052,6 +1052,17 @@ class _Run:
         return durations
 
     @cached_property
+    def _session_ended(self) -> bool:
+        """Whether the last session said how it ended (finished, interrupted,
+        crashed) -- as opposed to still running, or killed without a word."""
+        for event in reversed(self.events):
+            if event.get("type") in TERMINAL_EVENTS:
+                return True
+            if event.get("type") == "run_started":
+                return False
+        return False
+
+    @cached_property
     def _finished_by_candidate(self) -> dict[str, list[Mapping[str, Any]]]:
         """Every `eval_finished` event, by candidate id, read once. The views
         that look at one candidate at a time used to scan the whole event log
@@ -1445,6 +1456,15 @@ class _Run:
             ),
         }
         if not self.seed or not self.best_row:
+            if self._session_ended:
+                return {
+                    "available": False,
+                    "rows": [],
+                    "why": (
+                        "the run ended without any candidate finishing the final stage, so "
+                        "there is nothing to compare. The failures section says why"
+                    ),
+                }
             # Not "this run cannot show it": nothing has been through the final
             # stage yet. With a slow solver that is the first hour of every run.
             return {
