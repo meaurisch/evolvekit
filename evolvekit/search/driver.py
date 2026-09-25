@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
-from evolvekit.budget import BudgetGuard, StopPolicy
+from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
 from evolvekit.candidate import Candidate, extract_block, splice_block
 from evolvekit.config import Config
 from evolvekit.deltas import delta_summary
@@ -257,6 +257,7 @@ class Driver:
             if suffix.isdigit():
                 self._counter = max(self._counter, int(suffix))
         self._resumed_generation = last_generation
+        self._restore_budget(rows)
         return last_generation
 
     def _settle_competes(self, row: dict) -> dict:
@@ -327,10 +328,7 @@ class Driver:
                 self.log(f"ABORT: {summary.stop_reason}")
                 return self._finalise(summary)
 
-        points = self._economics()
-        decision = self.stop_policy.update(
-            self.best.fitness if self.best else None, points[-1] if points else None
-        )
+        decision = self._restore_stop_policy()
 
         for offset in range(1, total + 1):
             generation = started_at + offset
@@ -408,6 +406,59 @@ class Driver:
         archive_payload["economics_window"] = self.config.stop.economics_window
         self.ledger.write_archive(archive_payload)
         return summary
+
+    # -- resume: what the run directory has already used up -------------
+
+    def _restore_budget(self, rows: list[dict]) -> None:
+        """Charge the guard with what this run directory has already spent.
+
+        The caps are promises about a run, and a run is a directory: it is
+        resumed by running the same command again, after a crash, a halt or a
+        budget stop. A guard that started from zero each time turned
+        `budget.max_usd` into "per invocation", and re-running a budget-stopped
+        run simply bought the allowance again.
+        """
+        for usage in self.ledger.usage():
+            self.budget.spend(
+                usd=float(usage.get("usd", 0.0) or 0.0),
+                tokens=int(usage.get("input_tokens", 0) or 0)
+                + int(usage.get("output_tokens", 0) or 0),
+            )
+        # A full evaluation is metered when the final stage is *run*, whether or
+        # not it succeeds. `created_at` is when the candidate was bred, which is
+        # the closest thing to a timestamp a row carries; a candidate bred just
+        # before midnight UTC and evaluated just after is counted a day early.
+        final = self.config.final_stage.id
+        for row in rows:
+            failure = str(row.get("last_failure") or "")
+            ran_and_failed = (
+                failure.startswith(f"stage {final}: ") and "cap reached" not in failure
+            )
+            day = str(row.get("created_at") or "")[:10]
+            if day and (final in (row.get("stages_reached") or []) or ran_and_failed):
+                self.budget.record_full_eval(day)
+
+    def _restore_stop_policy(self) -> StopDecision:
+        """Replay the recorded generations through the stop policy.
+
+        Patience is a property of the run as well: a run that stopped after
+        eight flat generations has not earned eight more by being started
+        again. Replaying the series, big steps included, leaves the policy
+        exactly where the last process left it -- and on a fresh run the series
+        is the seed generation alone, which is what the policy was always fed
+        first.
+        """
+        big_step_generations = {
+            int(c.generation)
+            for c in self.archive
+            if str(c.operator).startswith("big_step")
+        }
+        decision = StopDecision(False)
+        for point in self._economics():
+            if point.generation in big_step_generations:
+                self.stop_policy.note_big_step()
+            decision = self.stop_policy.update(point.best, point)
+        return decision
 
     # -- generation internals -------------------------------------------
 
