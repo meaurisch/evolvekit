@@ -598,7 +598,9 @@ own, and the framework knows what it could not know before:
   how many runs shared the machine with something the run's own workers do not
   explain (Windows and Linux; elsewhere nothing is recorded or flagged).
 - **A failure with an address.** A crash is *this* instance, *this* seed, *this*
-  attempt, with log files of its own (`work/stage_out/<id>.<stage>.<instance>.seed0[.try1].*`).
+  attempt, with log files of its own (`work/stage_out/<id>.<stage>.<instance>.seed0[.try1].*`;
+  when two instance names would make the same file name, such as `a b` and `a_b`,
+  every instance's position in the list is appended: `a_b-0`, `a_b-1`).
   With `retries: 1` it is run once more before the candidate's stage fails —
   the right setting for a solver that crashes once in a hundred runs — and a
   candidate that has failed for good stops costing anything: its remaining

@@ -213,6 +213,30 @@ def test_every_run_is_reported_under_its_instances_name(tmp_path):
     assert "data/s1.json" in finished[0]["argv"]
 
 
+
+def test_instances_whose_names_differ_only_in_punctuation_keep_files_of_their_own(tmp_path):
+    # `a b` and `a_b` were both written as `...full.a_b.seed0.*`: the second run
+    # overwrote the first one's logs, and with two workers one instance could
+    # read the other's `{out}` and report its result as its own.
+    instances = _instances(tmp_path, **{"a b": {"scale": 100, "sleep": 0.5}, "a_b": {"scale": 1000}})
+    config = build_config(_raw(instances, workers=2, normalize="none"), base_dir=tmp_path)
+    events: list[dict] = []
+    cascade = Cascade(config, work_dir=tmp_path / "run" / "work", on_event=lambda t, **f: events.append({"type": t, **f}))
+    result = cascade.evaluate_generation([_candidate(config, "g000-c0001", seed=True)])["g000-c0001"]
+    finished = {e["instance"]: e for e in events if e["type"] == "eval_finished"}
+    assert finished["a b"]["stdout_log"] != finished["a_b"]["stdout_log"]
+    assert finished["a b"]["kpis"]["cost"] == 100.0 and finished["a_b"]["kpis"]["cost"] == 1000.0
+    assert result.outcomes[-1].vector_kpis["cost_per_instance"] == [100.0, 1000.0]
+
+
+def test_file_names_are_unique_even_where_the_file_system_ignores_case():
+    from evolvekit.evaluate.fanout import _file_names
+
+    assert _file_names(["s1", "b1"]) == ("s1", "b1"), "names that do not collide are left as they are"
+    assert len({name.lower() for name in _file_names(["A", "a", "a-1"])}) == 3
+    assert len({name.lower() for name in _file_names(["x y", "x_y", "x.y"])}) == 3
+
+
 # -- a failure with an address ---------------------------------------------
 
 
