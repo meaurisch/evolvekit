@@ -33,8 +33,9 @@ three children to four on the plateau and shrinks back to three once the search
 starts climbing again.
 
 ```
-python tasks.py test          # 548 offline tests, about two minutes
-python tasks.py check         # same as test; the CI gate
+python tasks.py test          # the offline tests except the slow ones
+python tasks.py lint          # ruff, mistake-only rules (F, E9)
+python tasks.py check         # lint, then every test; the CI gate
 
 python -m evolvekit init my-problem/                     # scaffold a config
 python -m evolvekit preflight --config examples/binpacking/evolvekit.yaml

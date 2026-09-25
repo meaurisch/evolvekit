@@ -2,9 +2,10 @@
 
 `test` is the fast loop for local iteration: everything except tests marked
 `slow` (driver-level runs and a couple of timing-sensitive ones), which was
-~70-170s depending on load -- too slow to run after every edit. `full` and
-`check` run everything, unfiltered; `check` is what CI
-calls, so it must never lose coverage `test` skips.
+~70-170s depending on load -- too slow to run after every edit. `full` runs
+every test, unfiltered. `lint` runs ruff's mistake-only rules. `check` is
+`lint` and then `full`, and it is what CI calls, so it must never lose
+coverage `test` skips.
 
 `run` drives the bin-packing example for a few generations against the `fake`
 provider: no network, no keys, a few seconds, and a leaderboard at the end.
@@ -67,7 +68,11 @@ def lint():
 
 
 def check():
-    return full()
+    """The CI gate: lint, then every test. The tests run even when lint fails,
+    so one push reports both; either failing fails the gate."""
+    linted = lint()
+    tested = full()
+    return linted or tested
 
 
 if __name__ == "__main__":
