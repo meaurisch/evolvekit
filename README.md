@@ -835,6 +835,15 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    stdin is closed; stdout and stderr go to the log files described under
    [Quickstart](#quickstart), so nothing the evaluator prints can block it.
 
+   That guarantee needs evolvekit to be running. If evolvekit itself is
+   hard-killed (a crash, `taskkill /F`, `kill -9`, the terminal or session it
+   ran in closing), only the operating system cleans up: on Windows a native
+   solver dies with it, but a solver started by a Python evaluator under a
+   Microsoft Store Python survives, and on Linux and macOS the whole evaluator
+   tree survives. Resuming does not look for such leftovers, so after a hard
+   kill check for stray solver processes before resuming — they would share
+   cores with the resumed run's evaluations.
+
    Accept `--seed` even if you ignore it today. It costs one argparse line, and
    it is what lets you turn `seeds: N` on later without touching the evaluator.
    Both examples take one: bin packing re-draws its instance sets from a

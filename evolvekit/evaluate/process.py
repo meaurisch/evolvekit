@@ -25,6 +25,15 @@ the next candidate and silently becomes that candidate's score.
 How the tree is held together differs by platform; see `_PosixTree` and
 `_WindowsTree`. Both are best effort against a process that sets out to
 escape, and exact for the ordinary case of a wrapper and its solver.
+
+All of that holds while evolvekit is alive to do it. When evolvekit itself is
+hard-killed -- a crash, `taskkill /F`, `kill -9`, the session it ran in going
+away -- only what the operating system does on its own still happens: on
+Windows the Job Object takes down every process that stayed inside it, and
+nothing else. A process that had left the job (a packaged Python does, see
+`_WindowsTree`) and every process on POSIX outlives it, and nothing reclaims
+them when the run is resumed: after a hard kill, look for leftover solvers
+before resuming.
 """
 
 from __future__ import annotations
@@ -177,7 +186,8 @@ class _PosixTree:
 #
 # * A **Job Object** with kill-on-close. It does not care who started whom, and
 #   the operating system closes it if evolvekit itself is killed, so a
-#   hard-killed run takes its evaluator with it. A job only contains what is
+#   hard-killed run takes with it every process that is still in the job --
+#   which is not every process, see below. A job only contains what is
 #   started *after* the assignment, and a virtual environment's `python.exe` is
 #   a shim that starts the real interpreter within a millisecond -- so the
 #   command is created suspended, put in the job, and only then resumed.
@@ -191,7 +201,11 @@ class _PosixTree:
 #   process is genuine even after that process has exited -- which is what
 #   makes it safe to kill by it. A creation-time check rules out the one
 #   remaining impostor: an older orphan whose dead parent's id this tree
-#   happened to be given.
+#   happened to be given. Watching is done by evolvekit, so it ends with
+#   evolvekit: a hard-killed run leaves a broken-away tree running. Measured
+#   on Windows 11 with a Store Python venv: a Python evaluator died with the
+#   run, the Python solver it had started did not; a native tree (`cmd /c`
+#   and what it ran) stayed in the job and died with it.
 #
 # Sampling is dense while the tree is young, when launchers come and go, and
 # once a second after that: about four milliseconds per sample, on the core
