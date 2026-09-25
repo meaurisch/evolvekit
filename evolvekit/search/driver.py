@@ -918,21 +918,29 @@ class Driver:
     def _observations(self) -> list[Observation]:
         """Every configuration that was evaluated, judged by the deepest stage
         it finished. One that crashed or timed out is an observation too -- the
-        worst one: that is a region not to propose in again."""
-        scored = [
-            c for c in self.archive
-            if c.params and not c.rejected and not c.last_failure and c.stages_reached and c.score is not None
-        ]
-        floor = min((c.fitness if c.competes else c.score for c in scored), default=0.0)
-        observations = [
-            Observation(c.params, float(c.fitness if c.competes and c.fitness is not None else c.score))
-            for c in scored
-        ]
-        observations += [
-            Observation(c.params, float(floor) - 1.0)
-            for c in self.archive
-            if c.params and not c.rejected and c.last_failure
-        ]
+        worst one: that is a region not to propose in again.
+
+        A raced-out candidate still carries the score of the stage before the
+        race -- a screening score that may beat every finished candidate's --
+        but the race has just shown it to be behind the best. It is recorded at
+        the floor, no better than the worst finished configuration, rather
+        than as the good configuration its screening score would make it."""
+        scored: list[tuple[Candidate, float]] = []
+        behind: list[Candidate] = []
+        failed: list[Candidate] = []
+        for c in self.archive:
+            if not c.params or c.rejected:
+                continue
+            if c.last_failure:
+                failed.append(c)
+            elif c.raced_out:
+                behind.append(c)
+            elif c.stages_reached and c.score is not None:
+                scored.append((c, float(c.fitness if c.competes and c.fitness is not None else c.score)))
+        floor = min((value for _, value in scored), default=0.0)
+        observations = [Observation(c.params, value) for c, value in scored]
+        observations += [Observation(c.params, floor) for c in behind]
+        observations += [Observation(c.params, floor - 1.0) for c in failed]
         return observations
 
     def _parent_pool(self, wanted: int) -> list[Candidate]:

@@ -81,7 +81,7 @@ live run is built from:
   | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
-  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed` and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
+  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
 
@@ -306,8 +306,9 @@ together that were found separately. `param_tpe` is a Tree-structured Parzen
 Estimator: it models, parameter by parameter, where good configurations are
 dense relative to bad ones and proposes where that ratio is highest — a
 candidate that crashed counts as the worst observation, so a region that kills
-the solver is not proposed again, and one that was only screened by a cheap
-stage still says where not to look. Until there are eight observations it takes
+the solver is not proposed again, one that was raced out counts as no better
+than the worst finished one (whatever its screening score), and one that was
+only screened by a cheap stage still says where not to look. Until there are eight observations it takes
 a local step instead, and the record says so.
 
 Which to use depends on how good the defaults already are. Measured at equal

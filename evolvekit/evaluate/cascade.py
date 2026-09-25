@@ -186,14 +186,19 @@ class Cascade:
                 if stage.fans_out
                 else None
             )
-            failed = 0
+            failed = raced_out = 0
             for cid in alive:
                 outcome = (
                     outcomes[cid]
                     if outcomes is not None
                     else self._run_stage(stage, by_id[cid], paths[cid])
                 )
-                failed += 0 if outcome.ok else 1
+                # Raced out is not failed: nothing went wrong, the candidate
+                # was stopped because it was behind.
+                if outcome.raced_out:
+                    raced_out += 1
+                elif not outcome.ok:
+                    failed += 1
                 self._absorb(results[cid], outcome, stage)
                 if outcome.params is not None:
                     self._configure(cid, paths[cid], outcome.params)
@@ -206,7 +211,7 @@ class Cascade:
                     continue
                 survivors.append(cid)
 
-            self._stage_finished(stage, began, len(alive), failed, private=False)
+            self._stage_finished(stage, began, len(alive), failed, private=False, raced_out=raced_out)
             is_final = index == len(stages) - 1
             if is_final:
                 self._run_private(stage, by_id, paths, results, survivors)
@@ -287,7 +292,8 @@ class Cascade:
         return time.perf_counter()
 
     def _stage_finished(
-        self, stage: StageConfig, began: float, candidates: int, failed: int, *, private: bool
+        self, stage: StageConfig, began: float, candidates: int, failed: int, *, private: bool,
+        raced_out: int = 0,
     ) -> None:
         if self.on_event is not None and stage.kind == "command":
             self.on_event(
@@ -296,6 +302,7 @@ class Cascade:
                 private=private,
                 candidates=candidates,
                 failed=failed,
+                raced_out=raced_out,
                 duration_s=round(time.perf_counter() - began, 3),
             )
 
