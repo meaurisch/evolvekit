@@ -359,6 +359,17 @@ def cmd_init(args: argparse.Namespace) -> int:
     target = Path(args.directory).resolve()
     target.mkdir(parents=True, exist_ok=True)
     tune = args.template == "tune"
+    existing = target / DEFAULT_CONFIG
+    if tune and existing.exists() and not args.force:
+        # The scaffold is one piece: its solver and instances beside someone
+        # else's config would be neither, and "runs as it is" would point at a
+        # config that is not the scaffold's.
+        print(
+            f"error: {target} already holds {DEFAULT_CONFIG}; nothing written. Use another "
+            "directory, or --force to replace it (and solver.py, instances/) with the scaffold",
+            file=sys.stderr,
+        )
+        return 1
     files = (
         tuple(TUNE_FILES.items())
         if tune

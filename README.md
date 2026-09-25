@@ -409,7 +409,9 @@ What happens to a declaration:
 `parameters` and `skeleton` are alternatives: a config names one of them.
 
 `python -m evolvekit init my-tuning/ --template tune` writes such a setup, complete —
-a stand-in solver, three instances, a commented config — that runs as it is;
+a stand-in solver, three instances, a commented config — that runs as it is (into a
+directory that already holds an `evolvekit.yaml` it writes nothing and exits 1, unless
+`--force`);
 [`examples/cli-solver/`](examples/cli-solver/README.md) walks through the whole path:
 preflight, run and watch, `confirm` on seeds and instances the search never saw, `export`.
 

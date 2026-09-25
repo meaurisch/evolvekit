@@ -35,6 +35,22 @@ def test_the_tune_scaffold_does_not_overwrite_what_is_there(tmp_path, capsys):
     assert "exists, not overwritten" in capsys.readouterr().out
 
 
+def test_the_tune_scaffold_leaves_a_directory_with_a_config_alone(tmp_path, capsys):
+    """With an `evolvekit.yaml` already there, the config was skipped but the
+    stand-in solver and instances were written next to it, and "Runs as it is"
+    pointed at the user's own config. Nothing is written, and the exit code
+    says so -- unless `--force` asks for the scaffold over what is there."""
+    (tmp_path / "evolvekit.yaml").write_text("mine: true\n", encoding="utf-8")
+    assert main(["init", str(tmp_path), "--template", "tune"]) == 1
+    captured = capsys.readouterr()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["evolvekit.yaml"], "nothing written"
+    assert (tmp_path / "evolvekit.yaml").read_text(encoding="utf-8") == "mine: true\n"
+    assert "already holds" in captured.err and "--force" in captured.err
+    assert "Runs as it is" not in captured.out
+    assert main(["init", str(tmp_path), "--template", "tune", "--force"]) == 0
+    assert (tmp_path / "solver.py").is_file() and "mine" not in (tmp_path / "evolvekit.yaml").read_text(encoding="utf-8")
+
+
 @pytest.mark.slow
 def test_the_tune_scaffold_passes_preflight_as_written(tmp_path):
     main(["init", str(tmp_path), "--template", "tune"])
