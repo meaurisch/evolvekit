@@ -33,8 +33,9 @@ three children to four on the plateau and shrinks back to three once the search
 starts climbing again.
 
 ```
-python tasks.py test          # 548 offline tests, about two minutes
-python tasks.py check         # same as test; the CI gate
+python tasks.py test          # the offline tests except the slow ones
+python tasks.py lint          # ruff, mistake-only rules (F, E9)
+python tasks.py check         # lint, then every test; the CI gate
 
 python -m evolvekit init my-problem/                     # scaffold a config
 python -m evolvekit preflight --config examples/binpacking/evolvekit.yaml
@@ -81,7 +82,7 @@ live run is built from:
   | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
-  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed` and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
+  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
 
@@ -310,8 +311,11 @@ together that were found separately. `param_tpe` is a Tree-structured Parzen
 Estimator: it models, parameter by parameter, where good configurations are
 dense relative to bad ones and proposes where that ratio is highest — a
 candidate that crashed counts as the worst observation, so a region that kills
-the solver is not proposed again, and one that was only screened by a cheap
-stage still says where not to look. Until there are eight observations it takes
+the solver is not proposed again, one that was raced out counts as no better
+than the worst finished one (whatever its screening score), and one that was
+only screened by a cheap stage still says where not to look — when every command
+stage lists `instances` with `normalize: baseline`, so that its score is on the final
+stage's scale; otherwise only finished candidates (and failures) are observations. Until there are eight observations it takes
 a local step instead, and the record says so.
 
 Which to use depends on how good the defaults already are. Measured at equal
@@ -412,7 +416,9 @@ What happens to a declaration:
 `parameters` and `skeleton` are alternatives: a config names one of them.
 
 `python -m evolvekit init my-tuning/ --template tune` writes such a setup, complete —
-a stand-in solver, three instances, a commented config — that runs as it is;
+a stand-in solver, three instances, a commented config — that runs as it is (into a
+directory that already holds an `evolvekit.yaml` it writes nothing and exits 1, unless
+`--force`);
 [`examples/cli-solver/`](examples/cli-solver/README.md) walks through the whole path:
 preflight, run and watch, `confirm` on seeds and instances the search never saw, `export`.
 
@@ -640,7 +646,9 @@ own, and the framework knows what it could not know before:
   the protection against noise: set it to a few times what two runs of one
   configuration differ by. The baseline always finishes (it is the yardstick),
   so does the first candidate through a stage, and the best so far is kept in
-  `work/incumbent.json` for a resumed run. `confirm` never races.
+  `work/incumbent.json` for a resumed run. `confirm` never races. `after` must be
+  below the stage's number of instances — a candidate with nothing left to run
+  cannot be raced out — and `preflight` and `run` warn when it is not.
 - **A per-instance picture without a list KPI.** The dashboard's per-instance
   card, the noise estimate and the paired "is this more than the dice?" verdict
   are built from the runs themselves — paired by instance and seed, in percent,
@@ -892,6 +900,8 @@ with a sentence that names the difference: its candidates were scored under the 
 and `runs.jsonl` would otherwise rank scores against each other that do not mean the same thing.
 Search settings, the budget, `workers` and the like may change between sessions. Use a new
 `--run-dir`, or `--allow-changed-problem` if the change does not affect what a score means.
+Each session is compared with the one before it, so a change let through once is the problem
+from then on; commands are compared word by word, so spacing alone is no change.
 
 ### Exit codes of `run`
 
@@ -899,9 +909,12 @@ Search settings, the budget, `workers` and the like may change between sessions.
 `budget.max_full_evals_per_day`, which *stops* the run once no candidate can reach the final stage
 any more today; run the same command again tomorrow, or raise the cap). `1` an error.
 `2` a config error. `3` the run directory is locked by a live run. `4` **aborted**: the seed
-failed its own evaluation, or the model backend kept failing — nothing was searched, and a
-wrapper script, a CI step or an agent must not take that for a finished search. The reason
-is in the last lines of the output and in `status`.
+failed its own evaluation (nothing was searched), or the model backend kept failing (the search
+stopped wherever it was, possibly mid-run) — a wrapper script, a CI step or an agent must not
+take either for a finished search. The reason is in the last lines of the output and in
+`status`. Running the same command again after a seed failure evaluates the seed again before
+anything is bred — the evaluator may have been fixed in between — and aborts with `4` again if
+it still fails, so a wrapper that retries never breeds past a broken harness.
 
 ### The run lock
 
@@ -970,7 +983,8 @@ configured model role, `embed` included when a slot exists, with the prompt
 against a new key or a new deployment, not before every run.
 
 Exit codes are **0 clean / 1 warnings / 2 failures**, so a wrapper script can
-gate on it:
+gate on it. Output a console cannot encode (a solver's non-ASCII last words on
+a Windows pipe) is written as escapes, never an error that changes the code:
 
 ```
 stage static               ok      0.2s  (timeout 30s per run)
@@ -1023,9 +1037,16 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   among the operators, last month's winner:
   `confirm --run-dir runs/b --candidates g011-c0085 --against g012-c0096@runs/a --seeds 2001,2002,2003`.
   The other run's candidate has to be valid under *this* config's
-  `problem.parameters`; it is checked before anything runs.
-- A failed run costs its pair, not the comparison. Finished runs are cached, so
-  an interrupted confirmation — or one extended by more seeds — pays only for
+  `problem.parameters`; it is checked before anything runs. It is reported as
+  `ID@<its directory's name>`, with parent directories added when two
+  directories share a name (`ID@a/run`, `ID@b/run`).
+- A failed run costs its pair, not the comparison — but it is counted: per
+  candidate and per instance, `failed_pairs` (a run failed or timed out) and
+  `zero_baseline_pairs` (the baseline reached 0, and a percentage of 0 is no
+  number) are in `comparison.json` and `comparison.md`, and whenever there are
+  any the verdict says "N of M pairs failed and are not in this interval". A
+  seed given twice in `--seeds` is refused. Finished runs are cached, so an
+  interrupted confirmation — or one extended by more seeds — pays only for
   what is new.
 - Everything lands in `<run-dir>/confirm/<label>/`: `comparison.md`,
   `comparison.json`, every run in `results.json`, all logs, and an event log

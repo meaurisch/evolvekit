@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import random
+import shlex
 import socket
 import sys
 import time
@@ -40,7 +41,7 @@ from evolvekit.candidate import (
 from evolvekit.config import TYPED_SPACE_OPERATORS, Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
-from evolvekit.evaluate.cascade import Cascade, finished_final_stage
+from evolvekit.evaluate.cascade import Cascade, finished_final_stage, race_warnings
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
@@ -261,19 +262,20 @@ class Driver:
         `runs.jsonl` is append-only and the archive is rebuilt from it, so a
         second problem pointed at the same directory breeds from the first
         one's candidates and ranks scores that mean different things against
-        each other -- silently. The first session wrote down what the problem
-        was; every later one is compared with it.
+        each other -- silently. Every session writes down what the problem
+        was; the next one is compared with the *latest* of those, so a change
+        let through once with `--allow-changed-problem` is the problem from
+        then on rather than a refusal at every later session.
         """
         if self.allow_changed_problem or not self.ledger.runs():
             return
-        recorded = next(
-            (e.get("problem") for e in read_events(self.ledger.run_dir)
-             if e.get("type") == "run_started" and isinstance(e.get("problem"), dict)),
-            None,
-        )
+        recorded = None
+        for event in read_events(self.ledger.run_dir):
+            if event.get("type") == "run_started" and isinstance(event.get("problem"), dict):
+                recorded = _comparable(event["problem"])
         if recorded is None:
             return  # a run directory from before this was recorded
-        now = self._problem_identity()
+        now = _comparable(self._problem_identity())
         changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "stages")
                    if recorded.get(key) != now[key]]
         if not changed:
@@ -535,18 +537,36 @@ class Driver:
             "run_started",
             **self._describe_run(first_generation=started_at + 1, planned=total),
         )
+        for warning in race_warnings(self.config):
+            self.log(f"warning: {warning}")
         # Not `if started_at`: a run stopped before generation 1 finished holds
         # only its seed, and the seed's generation is 0.
+        seed = None
         if self.archive:
             self.log(
                 f"resumed {len(self.archive)} candidate(s) from runs.jsonl "
                 f"({self.grid.occupancy()})"
             )
-            seed = next((c for c in self.archive if c.operator == SEED_OPERATOR), None)
-            summary.seed_score = seed.score if seed else None
             summary.candidates = len(self.archive)
+            recorded = self._recorded_seed()
+            if recorded is None or not self._seed_failed(recorded):
+                summary.seed_score = recorded.score if recorded else None
+            else:
+                # The last session aborted on this seed, or bred past a seed
+                # that never got through. Running the same command again is
+                # what a retrying wrapper does; it must not step over the abort
+                # and breed against a harness that may still be broken. The
+                # seed is evaluated again first -- the evaluator may have been
+                # fixed in between -- and judged exactly as a fresh run's is.
+                self._forget_behaviour(recorded.id)
+                seed = self._seed_candidate()
+                self.log(
+                    f"gen 0  the recorded seed {recorded.id} did not get through the cascade; "
+                    "evaluating it again before anything is bred"
+                )
         else:
             seed = self._seed_candidate()
+        if seed is not None:
             began = self._generation_started(0, children=0)
             self._evaluate_and_record([seed], generation=0)
             self._generation_finished(0, began, [seed])
@@ -557,11 +577,7 @@ class Driver:
             # A seed that cannot get through the cascade means the harness is
             # broken, not the heuristic. Stop here, before the first LLM call,
             # so a misconfigured evaluator never costs money.
-            if (
-                seed.rejected
-                or seed.last_failure
-                or seed.score == self.config.evaluate.failure_score
-            ):
+            if self._seed_failed(seed):
                 detail = (seed.reject_reason or seed.last_failure or "scored failure_score").strip()
                 first_line = detail.splitlines()[0] if detail else "unknown failure"
                 summary.stop_reason = (
@@ -646,6 +662,25 @@ class Driver:
                 break
 
         return self._finalise(summary)
+
+    def _recorded_seed(self) -> Candidate | None:
+        """The seed as last evaluated: a seed evaluated again after an abort is
+        a second seed row, and the later one is the one that counts."""
+        return next((c for c in reversed(self.archive) if c.operator == SEED_OPERATOR), None)
+
+    def _seed_failed(self, seed: Candidate) -> bool:
+        return bool(
+            seed.rejected
+            or seed.last_failure
+            or seed.score == self.config.evaluate.failure_score
+        )
+
+    def _forget_behaviour(self, candidate_id: str) -> None:
+        """Drop a candidate's behaviour signatures, so that the seed evaluated
+        again is not stopped as a twin of its own failed first attempt."""
+        self.behaviour.by_key = {
+            key: owner for key, owner in self.behaviour.by_key.items() if owner != candidate_id
+        }
 
     # -- a generation that was interrupted -------------------------------
 
@@ -891,21 +926,40 @@ class Driver:
     def _observations(self) -> list[Observation]:
         """Every configuration that was evaluated, judged by the deepest stage
         it finished. One that crashed or timed out is an observation too -- the
-        worst one: that is a region not to propose in again."""
-        scored = [
-            c for c in self.archive
-            if c.params and not c.rejected and not c.last_failure and c.stages_reached and c.score is not None
-        ]
-        floor = min((c.fitness if c.competes else c.score for c in scored), default=0.0)
-        observations = [
-            Observation(c.params, float(c.fitness if c.competes and c.fitness is not None else c.score))
-            for c in scored
-        ]
-        observations += [
-            Observation(c.params, float(floor) - 1.0)
-            for c in self.archive
-            if c.params and not c.rejected and c.last_failure
-        ]
+        worst one: that is a region not to propose in again.
+
+        A raced-out candidate still carries the score of the stage before the
+        race -- a screening score that may beat every finished candidate's --
+        but the race has just shown it to be behind the best. It is recorded at
+        the floor, no better than the worst finished configuration, rather
+        than as the good configuration its screening score would make it.
+
+        A candidate that was screened out by a cheaper stage is judged by that
+        stage's score only when it is on the same scale as the final stage's:
+        when every command stage states the objective as a percentage of the
+        baseline (`normalize: baseline`). A plain mean over a proxy's few small
+        instances is a different number altogether, and would rank every
+        screened-out candidate above every finished one."""
+        commands = [stage for stage in self.config.evaluate.stages if stage.kind == "command"]
+        same_scale = all(stage.fans_out and stage.normalize == "baseline" for stage in commands)
+        scored: list[tuple[Candidate, float]] = []
+        behind: list[Candidate] = []
+        failed: list[Candidate] = []
+        for c in self.archive:
+            if not c.params or c.rejected:
+                continue
+            if c.last_failure:
+                failed.append(c)
+            elif c.raced_out:
+                behind.append(c)
+            elif c.competes and c.fitness is not None:
+                scored.append((c, float(c.fitness)))
+            elif same_scale and c.stages_reached and c.score is not None:
+                scored.append((c, float(c.score)))
+        floor = min((value for _, value in scored), default=0.0)
+        observations = [Observation(c.params, value) for c, value in scored]
+        observations += [Observation(c.params, floor) for c in behind]
+        observations += [Observation(c.params, floor - 1.0) for c in failed]
         return observations
 
     def _parent_pool(self, wanted: int) -> list[Candidate]:
@@ -1349,6 +1403,26 @@ class Driver:
 
 def _fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6g}"
+
+
+def _comparable(problem: dict) -> dict:
+    """A problem identity with each stage command as its tokens: a doubled
+    space or a trailing blank changes the string, not the command."""
+    stages = [
+        {**stage, "command": _command_tokens(stage.get("command"))} if isinstance(stage, dict) else stage
+        for stage in problem.get("stages") or []
+    ]
+    return {**problem, "stages": stages}
+
+
+def _command_tokens(command: object) -> list[str] | None:
+    if not isinstance(command, str):
+        return None
+    try:
+        # Not POSIX rules: a Windows command's backslashes are part of it.
+        return shlex.split(command, posix=False)
+    except ValueError:  # an unbalanced quote: the command is still its words
+        return command.split()
 
 
 def _competes(candidate: Candidate) -> bool:

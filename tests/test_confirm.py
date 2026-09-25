@@ -85,6 +85,18 @@ def test_the_wilcoxon_test_is_exact():
     assert tied["w_plus"] == pytest.approx(2.0 + 2.0 + 4.0), "ties share their mean rank"
 
 
+def test_the_critical_value_is_right_beyond_thirty_degrees_of_freedom():
+    """1.96 is the limit, not the value at 31 (2.040): an interval on 32
+    instances was reported about 4 % narrower than it is."""
+    from evolvekit.confirm import _t95
+
+    exact = {1: 12.706, 30: 2.042, 31: 2.040, 40: 2.021, 60: 2.000, 120: 1.980, 1000: 1.962}
+    for df, value in exact.items():
+        assert _t95(df) == pytest.approx(value, abs=0.001), df
+    values = [_t95(df) for df in range(1, 500)]
+    assert all(a > b for a, b in zip(values, values[1:])), "it only ever falls towards 1.96"
+
+
 def test_a_summary_says_in_words_what_the_interval_says():
     clear = paired_summary([1.0, 1.2, 0.8, 1.1, 0.9])
     assert clear["ci95"][0] > 0 and clear["verdict"].startswith("better than the baseline")
@@ -135,6 +147,67 @@ def test_a_failed_run_costs_its_pair_not_the_comparison(tmp_path):
     assert by_instance["medium"]["pairs"] == 1, "seed 1002 crashed for the candidate on `medium`"
     assert by_instance["small"]["pairs"] == 2 and by_instance["large"]["pairs"] == 2
     assert result["pairs"] == 5 and result["pairs_planned"] == 6 and result["failed_runs"] == 1
+
+
+def test_a_failed_pair_is_counted_and_said_in_the_verdict(tmp_path):
+    """A failed or timed-out run drops its pair from the interval. The interval
+    is still computed without it -- what to make of that is policy -- but the
+    report must say how many pairs are missing, not leave it to a reader to
+    notice that five is less than six."""
+    config_path = _write_config(tmp_path)
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    comparison = confirm(load_config(config_path), run_dir, seeds=[1001, 1002, 1003], log=lambda m: None)
+    result = comparison.per_candidate["g003-c0012"]
+    by_instance = {r["instance"]: r for r in result["per_instance"]}
+    assert result["failed_pairs"] == 1 and result["zero_baseline_pairs"] == 0
+    assert by_instance["medium"]["failed_pairs"] == 1 and by_instance["small"]["failed_pairs"] == 0
+    assert "1 of 9 pairs failed and are not in this interval" in result["summary"]["verdict"]
+    out = run_dir / "confirm" / "confirm"
+    written = json.loads((out / "comparison.json").read_text(encoding="utf-8"))["per_candidate"]["g003-c0012"]
+    assert written["failed_pairs"] == 1 and written["per_instance"][1]["failed_pairs"] == 1
+    report = (out / "comparison.md").read_text(encoding="utf-8")
+    assert "1 of 9 pairs failed and are not in this interval" in report
+    assert "| medium |" in report and "1 failed" in report
+
+
+def test_a_pair_with_a_baseline_of_zero_is_counted_too(tmp_path):
+    """An improvement in percent of zero is no number; the pair is dropped,
+    and said so, like a failed one."""
+    config_path = _write_config(tmp_path)
+    solver = (tmp_path / "solver.py").read_text(encoding="utf-8")
+    (tmp_path / "solver.py").write_text(
+        solver.replace("print(json.dumps({\"cost\": scale", "print(json.dumps({\"cost\": 0.0 if (a.instance, a.x) == (\"small\", 0.0) else scale"),
+        encoding="utf-8",
+    )
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    comparison = confirm(load_config(config_path), run_dir, seeds=[1001, 1003], log=lambda m: None)
+    result = comparison.per_candidate["g003-c0012"]
+    assert result["zero_baseline_pairs"] == 2 and result["failed_pairs"] == 0 and result["pairs"] == 4
+    assert result["per_instance"][0]["zero_baseline_pairs"] == 2
+    assert "2 of 6 pairs had a baseline of 0 and are not in this interval" in result["summary"]["verdict"]
+
+
+def test_a_seed_given_twice_is_refused(tmp_path):
+    config_path = _write_config(tmp_path)
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    with pytest.raises(ValueError, match="--seeds: 1001 is given twice"):
+        confirm(load_config(config_path), run_dir, seeds=[1001, 1003, 1001], log=lambda m: None)
+    assert main(["confirm", "--config", str(config_path), "--run-dir", str(run_dir), "--seeds", "1001,1001"]) == 1
+
+
+def test_the_baseline_is_the_seed_as_last_evaluated(tmp_path):
+    """A run that aborted on its seed evaluates the seed again when it is run
+    again: the first seed row is the failed attempt, the last one counts."""
+    config_path = _write_config(tmp_path)
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    rows = (run_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+    seed = json.loads(rows[0])
+    failed = {**seed, "id": "g000-c0000", "competes": False, "score": -1000.0, "last_failure": "stage full: exit 1"}
+    retried = {**seed, "id": "g000-c0013"}
+    lines = [json.dumps(failed), *rows[1:], json.dumps(retried)]
+    (run_dir / "runs.jsonl").write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    comparison = confirm(load_config(config_path), run_dir, seeds=[1001], label="t", log=lambda m: None)
+    assert comparison.baseline_id == "g000-c0013"
 
 
 def test_top_n_and_instances_the_search_never_saw(tmp_path):
@@ -212,6 +285,27 @@ def test_against_names_what_the_candidates_are_compared_with(tmp_path):
     assert len(comparison.runs) == 2 * 3 * 3, "the seed is not run: it is not part of this comparison"
     report = (second / "confirm" / "duel" / "comparison.md").read_text(encoding="utf-8")
     assert "Baseline: `g003-c0012@run`" in report
+
+
+def test_two_run_directories_with_the_same_name_are_told_apart(tmp_path):
+    """Candidates of other runs were named `ID@<directory name>`: `a/run` and
+    `b/run` both became `ID@run`, and two different configurations were
+    refused as "compared with itself". The name grows by parent directories
+    until it is unique."""
+    config_path = _write_config(tmp_path)
+    first, second = _two_runs(tmp_path, config_path)
+    (tmp_path / "third").mkdir()
+    third = _write_run(tmp_path / "third", config_path, {"g003-c0012": {"params": {"x": -0.02}, "score": -98.0}})
+    comparison = confirm(load_config(config_path), second, seeds=[1001, 1003], candidates=f"g003-c0012@{first}",
+                         against=f"g003-c0012@{third}", label="same-name", log=lambda m: None)
+    assert comparison.baseline_id == "g003-c0012@third/run"
+    assert comparison.candidates == ["g003-c0012@first/run"]
+    both = confirm(load_config(config_path), second, seeds=[1001], candidates=f"g003-c0012@{first},g003-c0012@{third}",
+                   label="both-named", log=lambda m: None)
+    assert both.candidates == ["g003-c0012@first/run", "g003-c0012@third/run"]
+    with pytest.raises(ValueError, match="compared twice under one name"):
+        confirm(load_config(config_path), second, seeds=[1], candidates=f"g003-c0012@{first},g003-c0012@{first}",
+                log=lambda m: None)
 
 
 def test_a_candidate_that_is_not_there_is_refused_by_name(tmp_path):

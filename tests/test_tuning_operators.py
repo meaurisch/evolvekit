@@ -173,6 +173,54 @@ def test_param_tpe_is_a_local_step_until_there_is_something_to_learn_from():
     assert later.mode == "param_tpe" and later.meta["observations"] == 30
 
 
+def _screening_driver(tmp_path, *, normalized: bool):
+    """A proxy stage on one input, then the full stage on three instances."""
+    from evolvekit.search.driver import Driver
+
+    stage = {"kind": "command", "kpis_from": "stdout", "command": "{python} solver.py --instance {instance} {params}",
+             "normalize": "baseline" if normalized else "none"}
+    config = build_config(
+        {
+            "problem": {"parameters": _raw_space(0)},
+            "evaluate": {
+                "stages": [
+                    {"id": "static", "kind": "builtin-static"},
+                    {"id": "proxy", **stage, "instances": ["small"]},
+                    {"id": "full", **stage, "instances": ["small", "medium", "large"]},
+                ],
+                "score": {"objective": "cost", "direction": "minimize"},
+            },
+            "search": {"operators": {"param_tpe": 1.0}},
+        },
+        base_dir=tmp_path,
+    )
+    return Driver(config, run_dir=tmp_path / "run", log=lambda m: None)
+
+
+@pytest.mark.parametrize("normalized", [True, False])
+def test_a_screening_score_is_an_observation_only_where_it_is_on_the_same_scale(tmp_path, normalized):
+    """A candidate screened out by the proxy stage is judged by the proxy's
+    score. With `normalize: baseline` on every stage both are percentages of
+    the baseline and can be ranked together; with plain means they are costs on
+    different instances -- the proxy's one small instance makes every screened
+    candidate look better than any finished one."""
+    driver = _screening_driver(tmp_path, normalized=normalized)
+    space = driver.config.problem.parameters
+    near, far, crashed = ({**space.defaults(), "neighbours": n} for n in (30, 110, 70))
+    driver.archive = [
+        _candidate(space, "g001-c0002", near, score=-1000.0, competes=True, stages_reached=["static", "proxy", "full"]),
+        _candidate(space, "g001-c0003", far, score=-120.0, competes=False, stages_reached=["static", "proxy"]),
+        _candidate(space, "g001-c0004", crashed, score=-1e9, competes=False, stages_reached=["static"],
+                   last_failure="stage proxy: exit 1"),
+    ]
+    seen = {o.values["neighbours"]: o.fitness for o in driver._observations()}
+    assert seen[30] == -1000.0 and seen[70] == -1001.0, "a crash is the worst observation either way"
+    if normalized:
+        assert seen[110] == -120.0
+    else:
+        assert 110 not in seen, "a cost on another input set is not a judgement of this configuration"
+
+
 # -- configuration and the whole loop --------------------------------------
 
 

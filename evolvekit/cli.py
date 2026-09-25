@@ -359,6 +359,17 @@ def cmd_init(args: argparse.Namespace) -> int:
     target = Path(args.directory).resolve()
     target.mkdir(parents=True, exist_ok=True)
     tune = args.template == "tune"
+    existing = target / DEFAULT_CONFIG
+    if tune and existing.exists() and not args.force:
+        # The scaffold is one piece: its solver and instances beside someone
+        # else's config would be neither, and "runs as it is" would point at a
+        # config that is not the scaffold's.
+        print(
+            f"error: {target} already holds {DEFAULT_CONFIG}; nothing written. Use another "
+            "directory, or --force to replace it (and solver.py, instances/) with the scaffold",
+            file=sys.stderr,
+        )
+        return 1
     files = (
         tuple(TUNE_FILES.items())
         if tune
@@ -675,7 +686,27 @@ def _load_env(args: argparse.Namespace) -> None:
             )
 
 
+def _tolerant_output() -> None:
+    """Never let a character the console cannot encode decide the exit code.
+
+    On Windows a piped or redirected stdout is encoded as cp1252. A failed
+    evaluator's last words -- an arrow, a byte that is no UTF-8 -- then raised
+    `UnicodeEncodeError` while being printed, a `ValueError` that `main` turns
+    into exit 1: `preflight` reported "warnings" for a broken harness, and a
+    wrapper that stops only on 2 went ahead. Unencodable characters are
+    written as escapes instead."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (ValueError, OSError):  # a stream that cannot be reconfigured is left alone
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_output()
     args = build_parser().parse_args(argv)
     _load_env(args)
     try:

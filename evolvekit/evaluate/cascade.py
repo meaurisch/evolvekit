@@ -33,12 +33,14 @@ from evolvekit.evaluate.stages import (
     run_static_stage,
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
+from evolvekit.ledger import _atomic_write
 
 __all__ = [
     "Cascade",
     "select_promoted",
     "archive_threshold",
     "finished_final_stage",
+    "race_warnings",
 ]
 
 
@@ -78,6 +80,25 @@ def finished_final_stage(
     if final.kind == "command" and held_out and private_score is None:
         return False
     return True
+
+
+def race_warnings(config: Config) -> list[str]:
+    """A `race` rule that can never stop anyone, said in words.
+
+    A candidate is raced out once it has finished `after` instances and still
+    has at least one left. With `after` at or above the stage's number of
+    instances that moment never comes, and the rule does nothing -- a setting
+    the user believes is saving solver time, silently inert."""
+    warnings = []
+    for stage in config.evaluate.stages:
+        count = len(stage.instance_names())
+        if stage.race is not None and stage.race.after >= count:
+            warnings.append(
+                f"stage {stage.id}: race.after is {stage.race.after}, but the stage has {count} "
+                "instance(s): no candidate can ever be raced out. Set `after` below the number of "
+                "instances, or remove `race`"
+            )
+    return warnings
 
 
 def archive_threshold(scores: Sequence[float], percentile: float) -> float | None:
@@ -186,14 +207,19 @@ class Cascade:
                 if stage.fans_out
                 else None
             )
-            failed = 0
+            failed = raced_out = 0
             for cid in alive:
                 outcome = (
                     outcomes[cid]
                     if outcomes is not None
                     else self._run_stage(stage, by_id[cid], paths[cid])
                 )
-                failed += 0 if outcome.ok else 1
+                # Raced out is not failed: nothing went wrong, the candidate
+                # was stopped because it was behind.
+                if outcome.raced_out:
+                    raced_out += 1
+                elif not outcome.ok:
+                    failed += 1
                 self._absorb(results[cid], outcome, stage)
                 if outcome.params is not None:
                     self._configure(cid, paths[cid], outcome.params)
@@ -206,7 +232,7 @@ class Cascade:
                     continue
                 survivors.append(cid)
 
-            self._stage_finished(stage, began, len(alive), failed, private=False)
+            self._stage_finished(stage, began, len(alive), failed, private=False, raced_out=raced_out)
             is_final = index == len(stages) - 1
             if is_final:
                 self._run_private(stage, by_id, paths, results, survivors)
@@ -287,7 +313,8 @@ class Cascade:
         return time.perf_counter()
 
     def _stage_finished(
-        self, stage: StageConfig, began: float, candidates: int, failed: int, *, private: bool
+        self, stage: StageConfig, began: float, candidates: int, failed: int, *, private: bool,
+        raced_out: int = 0,
     ) -> None:
         if self.on_event is not None and stage.kind == "command":
             self.on_event(
@@ -296,6 +323,7 @@ class Cascade:
                 private=private,
                 candidates=candidates,
                 failed=failed,
+                raced_out=raced_out,
                 duration_s=round(time.perf_counter() - began, 3),
             )
 
@@ -389,9 +417,9 @@ class Cascade:
         )
         if better:
             self.incumbent[stage.id] = {"id": candidate.id, "score": score, "values": values}
-            (self.work_dir / "incumbent.json").write_text(
-                json.dumps(self.incumbent, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
-            )
+            # Atomically: half a file reads back as "nothing to race against",
+            # and a resumed run would quietly stop racing.
+            _atomic_write(self.work_dir / "incumbent.json", json.dumps(self.incumbent, indent=2, sort_keys=True) + "\n")
 
     # -- normalize: baseline ---------------------------------------------
 

@@ -94,6 +94,41 @@ def test_a_candidate_clearly_behind_is_stopped_and_its_other_instances_are_never
     assert len(raced) == 1 and raced[0]["candidate_id"] == "g001-c0002" and raced[0]["runs_done"] == 2
 
 
+def test_the_stage_reports_a_raced_out_candidate_apart_from_its_failures(tmp_path):
+    """`stage_finished` counted a raced-out candidate as a failure, so a
+    healthy stage that stopped its losers early looked like a broken one."""
+    config = _config(tmp_path, race={"after": 2, "margin_pct": 1.0})
+    events: list[dict] = []
+    cascade = Cascade(config, work_dir=tmp_path / "work", on_event=lambda t, **f: events.append({"type": t, **f}))
+    cascade.evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    events.clear()
+    cascade.evaluate_generation([_candidate(config, "g001-c0002", 0.05), _candidate(config, "g001-c0003", -0.05)])
+    finished = [e for e in events if e["type"] == "stage_finished"]
+    assert [(e["candidates"], e["failed"], e["raced_out"]) for e in finished] == [(2, 0, 1)]
+
+
+def test_the_driver_does_not_learn_from_a_raced_out_candidate_as_if_it_had_finished(tmp_path):
+    """A raced-out candidate keeps the score of the stage before -- a
+    screening score that may look better than any finished candidate's. The
+    race has just shown it is behind; the Parzen estimator must not be told it
+    is good."""
+    from evolvekit.search.driver import Driver
+
+    config = _config(tmp_path, race={"after": 2, "margin_pct": 1.0})
+    driver = Driver(config, run_dir=tmp_path / "run", log=lambda m: None)
+    space = config.problem.parameters
+    finished = Candidate(id="g001-c0002", generation=1, block=space.render_block({"x": -0.05}), source="",
+                         operator="param_local", params={"x": -0.05}, score=-95.0, competes=True,
+                         stages_reached=["static", "full"])
+    raced = Candidate(id="g001-c0003", generation=1, block=space.render_block({"x": 0.2}), source="",
+                      operator="param_local", params={"x": 0.2}, score=-80.0, competes=False,
+                      stages_reached=["static", "proxy"], raced_out="raced out after 2 of 5 instances")
+    driver.archive = [finished, raced]
+    values = {o.values["x"]: o.fitness for o in driver._observations()}
+    assert values[-0.05] == -95.0
+    assert values[0.2] <= -95.0, "no better than the worst finished candidate"
+
+
 def test_the_race_is_against_the_best_so_far_not_against_the_baseline(tmp_path):
     config = _config(tmp_path, race={"after": 2, "margin_pct": 1.0})
     cascade = Cascade(config, work_dir=tmp_path / "work")
@@ -121,6 +156,49 @@ def test_the_best_so_far_survives_a_restart(tmp_path):
     resumed = Cascade(config, work_dir=tmp_path / "work")
     result = resumed.evaluate_generation([_candidate(config, "g002-c0003", 0.0 + 0.01)])["g002-c0003"]
     assert result.raced_out is not None and len(_calls(tmp_path, 0.01)) == 3
+
+
+def test_a_write_of_the_best_so_far_cut_short_does_not_lose_it(tmp_path, monkeypatch):
+    """`incumbent.json` was written in place: a run killed during the write
+    left half a file, which the next session read as "nothing to race against"
+    -- every candidate finished every instance again, silently."""
+    config = _config(tmp_path, race={"after": 2, "margin_pct": 1.0})
+    first = Cascade(config, work_dir=tmp_path / "work")
+    first.evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    first.evaluate_generation([_candidate(config, "g001-c0002", -0.05)])
+
+    write_text = Path.write_text
+
+    def cut_short(self, text, *args, **kwargs):
+        if self.name == "incumbent.json":
+            write_text(self, text[: len(text) // 2], *args, **kwargs)
+            raise KeyboardInterrupt  # the process is killed half-way through the write
+        return write_text(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", cut_short)
+    try:
+        first.evaluate_generation([_candidate(config, "g002-c0003", -0.1)])
+    except KeyboardInterrupt:
+        pass
+    monkeypatch.undo()
+    held = Cascade(config, work_dir=tmp_path / "work").incumbent
+    assert held.get("full", {}).get("id") in ("g001-c0002", "g002-c0003")
+
+
+def test_a_race_that_can_never_stop_anyone_is_said_before_the_run(tmp_path):
+    """The race is decided on instances a candidate has finished and a
+    candidate still has left; with `after` at or above the number of instances
+    that never happens, and the rule did nothing without a word."""
+    from evolvekit.preflight import preflight
+    from evolvekit.search.driver import Driver
+
+    config = _config(tmp_path, race={"after": 5, "margin_pct": 1.0})
+    said = "race.after is 5, but the stage has 5 instance(s): no candidate can ever be raced out"
+    assert any(said in w for w in preflight(config).warnings)
+    messages: list[str] = []
+    Driver(config, run_dir=tmp_path / "run", log=messages.append).run(generations=0)
+    assert any(said in m for m in messages), messages
+    assert not any("race.after" in w for w in preflight(_config(tmp_path, race={"after": 4})).warnings)
 
 
 def test_without_a_rule_every_candidate_runs_every_instance(tmp_path):
