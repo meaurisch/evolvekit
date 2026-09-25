@@ -287,6 +287,23 @@ def test_a_gain_smaller_than_the_seed_to_seed_swing_is_within_noise(tmp_path):
     assert improvement["pct"] == pytest.approx(0.5)  # a number that looks like progress
 
 
+def test_a_seed_evaluated_again_after_an_abort_is_the_baseline(tmp_path):
+    """A run whose seed failed aborts; run again, it evaluates the seed again
+    and records a second seed row. The baseline is the attempt that worked,
+    not the one that failed."""
+    from evolvekit.status import candidate_detail
+
+    run = RunDir(tmp_path)
+    run.started(1000)
+    run.row("g000-c0001", 0, 1000.0, competes=False, last_failure="stage full: exit code 1")
+    run.row("g000-c0002", 0, 200.0)
+    run.row("g001-c0003", 1, 190.0, parent_id="g000-c0002")
+    progress = build_status(tmp_path, now=NOW)["progress"]
+    assert progress["baseline"]["id"] == "g000-c0002"
+    assert progress["improvement"]["pct"] == pytest.approx(5.0)
+    assert "seed (g000-c0002)" in candidate_detail(tmp_path, "g001-c0003")["diff_vs_seed"]
+
+
 def test_gains_that_do_not_vary_are_judged_in_the_direction_of_their_mean(tmp_path):
     """The best losing by exactly 1 on every shared seed has no spread, and the
     verdict used to read "mean gain -1, t = inf ... within noise"."""

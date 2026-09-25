@@ -357,7 +357,9 @@ class _Run:
         self.by_id = {str(r.get("id")): r for r in rows}
         self.started = [e for e in events if e.get("type") == "run_started"]
         self.described = self.started[-1] if self.started else {}
-        self.seed = next((r for r in rows if r.get("operator") == SEED_OPERATOR), None)
+        # The last seed row: a run that aborted on its seed evaluates it again
+        # when it is run again, and the attempt that worked is the baseline.
+        self.seed = next((r for r in reversed(rows) if r.get("operator") == SEED_OPERATOR), None)
         self.space = _Parameters(self.described, self.seed)
         ranked = rank(rows, 1)
         self.best_row = ranked[0] if ranked else None
@@ -1656,7 +1658,7 @@ def candidate_details(
     quadratically -- about 35 minutes for a run of 2,900 candidates."""
     directory = Path(run_dir)
     rows = {str(r.get("id")): r for r in read_jsonl(directory / "runs.jsonl")}
-    seed = next((r for r in rows.values() if r.get("operator") == SEED_OPERATOR), None)
+    seed = next((r for r in reversed(list(rows.values())) if r.get("operator") == SEED_OPERATOR), None)
     events = read_events(directory)
     finished: dict[str, list[dict[str, Any]]] = {}
     for event in events:
