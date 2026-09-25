@@ -110,6 +110,26 @@ def test_params_without_a_declared_space_is_refused(tmp_path, minimal_raw):
         build_config(minimal_raw, base_dir=tmp_path)
 
 
+
+@pytest.mark.parametrize("token", ["--opts={params}", "'--opts {params}'", "x{params}"])
+def test_params_inside_a_larger_argument_is_refused(tmp_path, token):
+    # `{params}` expands to several arguments. Inside a larger one it could
+    # only be pasted in as one string with spaces -- `--opts=--neighbours 40
+    # --init savings` -- which no option parser reads as the configuration.
+    with pytest.raises(ConfigError) as error:
+        build_config(_raw(tmp_path, command=f"solver --out {{out}} {token}"), base_dir=tmp_path)
+    message = str(error.value)
+    assert "evaluate.stages[1].command" in message and "{params} must be an argument of its own" in message
+    assert "{params_json}" in message, "the way out, for a program that wants one argument"
+
+
+def test_params_inside_a_larger_argument_is_a_bad_template_to_build_argv_too(tmp_path):
+    with pytest.raises(ValueError, match="must be an argument of its own"):
+        build_argv(
+            "solver --opts={params}", candidate=tmp_path / "c.py", inputs=[], out=tmp_path / "o.json",
+            params_flags=["--neighbours", "40"],
+        )
+
 # -- the command line ------------------------------------------------------
 
 

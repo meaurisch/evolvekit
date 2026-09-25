@@ -374,7 +374,7 @@ range or default that is a numeric string is taken as its number.
 
 | Placeholder | What the command receives |
 |---|---|
-| `{params}` | one `--name value` pair per parameter: `--neighbours 40 --penalty 5000.0 --exhaustive false --init savings`. An underscore in a name becomes a dash; a boolean is `true`/`false`; `flag: "-n"` on a declaration replaces the generated flag |
+| `{params}` | one `--name value` pair per parameter: `--neighbours 40 --penalty 5000.0 --exhaustive false --init savings`. An underscore in a name becomes a dash; a boolean is `true`/`false`; `flag: "-n"` on a declaration replaces the generated flag. It has to be an argument of its own: `--opts={params}` is refused, because several arguments cannot be pasted into one |
 | `{params_json}` | the path of a JSON file with the same values, for a program that would rather read a file |
 
 `{candidate}` is no longer required — there is no module the command would

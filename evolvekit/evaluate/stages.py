@@ -26,7 +26,7 @@ from pathlib import Path
 from statistics import fmean, stdev
 from typing import Any, Callable
 
-from evolvekit.config import ProblemConfig, StageConfig
+from evolvekit.config import ProblemConfig, StageConfig, embedded_params
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.hostload import HostLoad
 from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
@@ -277,11 +277,15 @@ def build_argv(
     `{params}` on its own expands to *several* arguments -- one `--flag value`
     pair per declared parameter -- which is the other reason substitution has
     to happen after the split. `{params_json}` is the path of a JSON file with
-    the same values, for a solver that would rather read a file.
+    the same values, for a solver that would rather read a file. Only as a
+    whole token, though: see `embedded_params`, which the config check shares.
     """
     tokens = shlex.split(command, posix=True)
     if not tokens:
         raise ValueError("stage command is empty")
+    embedded = embedded_params(command)
+    if embedded is not None:
+        raise ValueError(embedded)
     flags = list(params_flags or [])
     mapping = {
         "candidate": str(candidate),
@@ -290,7 +294,6 @@ def build_argv(
         "seed": str(seed),
         "python": sys.executable,
         "instance": instance or "",
-        "params": " ".join(flags),
         "params_json": str(params_json) if params_json is not None else "",
     }
     argv: list[str] = []

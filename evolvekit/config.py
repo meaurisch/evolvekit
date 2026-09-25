@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -1595,6 +1596,34 @@ def _check_parameter_placeholders(config: Config) -> None:
                 "`--flag value` pairs), {params_json} (the path of a JSON file with the "
                 "values) or {candidate} (the generated Python module)"
             )
+        embedded = embedded_params(stage.command)
+        if embedded is not None:
+            raise ConfigError(f"{path}: {embedded}")
+
+
+def embedded_params(command: str) -> str | None:
+    """What is wrong with a `{params}` that is part of a larger argument, or `None`.
+
+    `{params}` expands to *several* arguments, one `--flag value` pair per
+    parameter. Inside a larger one (`--opts={params}`, `"x {params}"`) it could
+    only be pasted in as one string with spaces in it, which no option parser
+    reads as the configuration. Shared with `build_argv`, so the command line
+    and the config check cannot disagree about what a token is.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None  # an unbalanced quote: `build_argv` says so on the first run
+    for token in tokens:
+        if "{params}" in token and token != "{params}":
+            return (
+                f"{{params}} must be an argument of its own, and here it is part of {token!r}. "
+                "It expands to several arguments (`--flag value` pairs) that cannot be pasted "
+                "into one; write it as a separate word, or use {params_json} -- the path of a "
+                "JSON file with the values -- for a program that takes its configuration as "
+                "one argument"
+            )
+    return None
 
 
 def _parse_models(raw: Any, search: SearchConfig) -> ModelsConfig | None:
