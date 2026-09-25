@@ -961,7 +961,8 @@ configured model role, `embed` included when a slot exists, with the prompt
 against a new key or a new deployment, not before every run.
 
 Exit codes are **0 clean / 1 warnings / 2 failures**, so a wrapper script can
-gate on it:
+gate on it. Output a console cannot encode (a solver's non-ASCII last words on
+a Windows pipe) is written as escapes, never an error that changes the code:
 
 ```
 stage static               ok      0.2s  (timeout 30s per run)

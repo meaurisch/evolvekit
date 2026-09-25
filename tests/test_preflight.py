@@ -590,3 +590,38 @@ def test_a_failed_stage_repeats_the_commands_own_last_words(tmp_path, minimal_ra
     text = format_report(report, config)
     assert "failure : exit code 1" in text
     assert "| ImportError: cannot import name Location from pyvrp" in text
+
+
+def test_a_broken_harness_exits_2_whatever_the_console_can_print(tmp_path, minimal_raw):
+    """On Windows a piped stdout is encoded as cp1252. Printing a failed
+    command's last words -- an arrow, a byte that is no UTF-8 -- raised
+    `'charmap' codec can't encode`, which the command line turned into exit 1
+    ("warnings"): a broken harness passed a wrapper that stops only on 2."""
+    import os
+    import subprocess
+
+    import yaml
+
+    (tmp_path / "evaluate.py").write_text(
+        "import sys\n"
+        "sys.stderr.buffer.write('cost \u2192 nowhere\\n'.encode('utf-8') + b'bad byte \\xff\\n')\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    minimal_raw["evaluate"]["stages"].append(
+        {"id": "full", "kind": "command", "command": "{python} evaluate.py {candidate} {out}"}
+    )
+    config_path = tmp_path / "evolvekit.yaml"
+    config_path.write_text(yaml.safe_dump(minimal_raw, sort_keys=False), encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    # The Windows console's encoding everywhere, so the test means the same on Linux.
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONPATH": str(root)}
+    env.pop("PYTHONUTF8", None)
+    done = subprocess.run(
+        [sys.executable, "-m", "evolvekit", "preflight", "--config", str(config_path)],
+        capture_output=True, cwd=tmp_path, env=env, timeout=120,
+    )
+    out = done.stdout.decode("cp1252", errors="replace")
+    assert done.returncode == 2, (out, done.stderr.decode("cp1252", errors="replace"))
+    assert "failure : exit code 1" in out and "cost " in out and "nowhere" in out
+    assert "verdict : failures" in out

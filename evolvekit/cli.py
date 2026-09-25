@@ -660,7 +660,27 @@ def _load_env(args: argparse.Namespace) -> None:
     _ENV_LOADED[:] = load_env_files(starts)
 
 
+def _tolerant_output() -> None:
+    """Never let a character the console cannot encode decide the exit code.
+
+    On Windows a piped or redirected stdout is encoded as cp1252. A failed
+    evaluator's last words -- an arrow, a byte that is no UTF-8 -- then raised
+    `UnicodeEncodeError` while being printed, a `ValueError` that `main` turns
+    into exit 1: `preflight` reported "warnings" for a broken harness, and a
+    wrapper that stops only on 2 went ahead. Unencodable characters are
+    written as escapes instead."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (ValueError, OSError):  # a stream that cannot be reconfigured is left alone
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_output()
     args = build_parser().parse_args(argv)
     _load_env(args)
     try:
