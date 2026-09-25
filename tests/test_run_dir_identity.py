@@ -114,3 +114,27 @@ def test_a_refusal_leaves_the_directory_as_it_found_it(tmp_path):
         _run(tmp_path, other)
     assert len(read_events(tmp_path / "run")) == before
     assert build_status(tmp_path / "run")["health"]["state"] == "finished"
+
+
+@pytest.mark.slow
+def test_an_allowed_change_is_the_problem_from_then_on(tmp_path):
+    """`--allow-changed-problem` is said once. Every later session is compared
+    with what the directory holds *now* -- the last recorded problem -- not with
+    what it was first started with, or the flag would be needed forever."""
+    _run(tmp_path, RAW)
+    other = copy.deepcopy(RAW)
+    other["evaluate"]["stages"][1]["command"] = "{python} solver.py --scale 1.0 {params}"
+    _run(tmp_path, other, allow_changed_problem=True)
+    driver, summary = _run(tmp_path, other)
+    assert summary.generations == 1 and len(driver.ledger.runs()) == 1 + 2 + 2 + 2
+    with pytest.raises(ValueError, match="holds a run of a different problem"):
+        _run(tmp_path, RAW)  # and going back is a change again
+
+
+@pytest.mark.slow
+def test_whitespace_in_a_command_is_not_a_different_problem(tmp_path):
+    _run(tmp_path, RAW)
+    spaced = copy.deepcopy(RAW)
+    spaced["evaluate"]["stages"][1]["command"] = "{python}  solver.py   {params} "
+    driver, summary = _run(tmp_path, spaced)
+    assert summary.generations == 1

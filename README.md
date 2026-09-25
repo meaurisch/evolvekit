@@ -877,6 +877,8 @@ with a sentence that names the difference: its candidates were scored under the 
 and `runs.jsonl` would otherwise rank scores against each other that do not mean the same thing.
 Search settings, the budget, `workers` and the like may change between sessions. Use a new
 `--run-dir`, or `--allow-changed-problem` if the change does not affect what a score means.
+Each session is compared with the one before it, so a change let through once is the problem
+from then on; commands are compared word by word, so spacing alone is no change.
 
 ### Exit codes of `run`
 

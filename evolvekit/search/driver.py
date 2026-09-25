@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import random
+import shlex
 import socket
 import time
 from dataclasses import dataclass, field, replace
@@ -260,19 +261,20 @@ class Driver:
         `runs.jsonl` is append-only and the archive is rebuilt from it, so a
         second problem pointed at the same directory breeds from the first
         one's candidates and ranks scores that mean different things against
-        each other -- silently. The first session wrote down what the problem
-        was; every later one is compared with it.
+        each other -- silently. Every session writes down what the problem
+        was; the next one is compared with the *latest* of those, so a change
+        let through once with `--allow-changed-problem` is the problem from
+        then on rather than a refusal at every later session.
         """
         if self.allow_changed_problem or not self.ledger.runs():
             return
-        recorded = next(
-            (e.get("problem") for e in read_events(self.ledger.run_dir)
-             if e.get("type") == "run_started" and isinstance(e.get("problem"), dict)),
-            None,
-        )
+        recorded = None
+        for event in read_events(self.ledger.run_dir):
+            if event.get("type") == "run_started" and isinstance(event.get("problem"), dict):
+                recorded = _comparable(event["problem"])
         if recorded is None:
             return  # a run directory from before this was recorded
-        now = self._problem_identity()
+        now = _comparable(self._problem_identity())
         changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "stages")
                    if recorded.get(key) != now[key]]
         if not changed:
@@ -1374,6 +1376,26 @@ class Driver:
 
 def _fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6g}"
+
+
+def _comparable(problem: dict) -> dict:
+    """A problem identity with each stage command as its tokens: a doubled
+    space or a trailing blank changes the string, not the command."""
+    stages = [
+        {**stage, "command": _command_tokens(stage.get("command"))} if isinstance(stage, dict) else stage
+        for stage in problem.get("stages") or []
+    ]
+    return {**problem, "stages": stages}
+
+
+def _command_tokens(command: object) -> list[str] | None:
+    if not isinstance(command, str):
+        return None
+    try:
+        # Not POSIX rules: a Windows command's backslashes are part of it.
+        return shlex.split(command, posix=False)
+    except ValueError:  # an unbalanced quote: the command is still its words
+        return command.split()
 
 
 def _competes(candidate: Candidate) -> bool:
