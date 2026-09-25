@@ -226,7 +226,6 @@ def test_every_run_is_reported_under_its_instances_name(tmp_path):
     assert "data/s1.json" in finished[0]["argv"]
 
 
-
 def test_instances_whose_names_differ_only_in_punctuation_keep_files_of_their_own(tmp_path):
     # `a b` and `a_b` were both written as `...full.a_b.seed0.*`: the second run
     # overwrote the first one's logs, and with two workers one instance could

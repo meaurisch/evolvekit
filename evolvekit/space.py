@@ -228,7 +228,11 @@ class Parameter:
         raw = math.exp(math.log(low) + unit * (math.log(high) - math.log(low))) if self.log else low + unit * (high - low)
         if self.type == "int":
             return int(min(high, max(low, round(raw))))
-        return float(f"{min(high, max(low, raw)):.6g}")
+        # Six significant figures keep a value readable in a prompt and a
+        # table -- but rounded *before* the clamp, not after it: rounding a
+        # clamped 0.12345649 gives 0.123456, below its own minimum, and the
+        # child is then refused by validation. The clamp has the last word.
+        return min(high, max(low, float(f"{raw:.6g}")))
 
     def render(self, value: Any) -> str:
         """The value as one command-line token."""
