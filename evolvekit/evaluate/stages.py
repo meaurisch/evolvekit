@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 from statistics import fmean, stdev
-from typing import Any
+from typing import Any, Callable
 
 from evolvekit.config import ProblemConfig, StageConfig
+from evolvekit.evaluate.process import read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
 
 __all__ = [
@@ -33,6 +35,10 @@ __all__ = [
     "STDERR_LIMIT",
     "FEEDBACK_LIMIT",
 ]
+
+Observer = Callable[..., None]
+"""`observer(type, **fields)`: told about every evaluator run as it starts and
+as it ends. The cascade supplies one that knows which candidate this is."""
 
 STDERR_LIMIT = 2000
 """Prompt artefacts are truncated here; the post-mortem's context blow-up was
@@ -184,6 +190,8 @@ def run_command_stage(
     out_path: Path,
     cwd: Path,
     private: bool = False,
+    required_kpis: tuple[str, ...] = (),
+    observer: Observer | None = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -195,6 +203,10 @@ def run_command_stage(
     The first failure ends the stage. Averaging over the runs that happened to
     survive would report a mean the candidate never achieved, and the failure
     is the more interesting fact anyway.
+
+    `required_kpis` names scalar KPIs every run must report -- the caller passes
+    `evaluate.score.objective`. A run that leaves one out is a failed run, for
+    the reason spelled out in `_missing_required`.
     """
     if stage.seeds <= 1:
         return _run_once(
@@ -205,6 +217,8 @@ def run_command_stage(
             cwd=cwd,
             private=private,
             seed=0,
+            required_kpis=required_kpis,
+            observer=observer,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -216,6 +230,8 @@ def run_command_stage(
             cwd=cwd,
             private=private,
             seed=seed,
+            required_kpis=required_kpis,
+            observer=observer,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -302,6 +318,71 @@ def _run_once(
     cwd: Path,
     private: bool = False,
     seed: int = 0,
+    required_kpis: tuple[str, ...] = (),
+    observer: Observer | None = None,
+) -> StageOutcome:
+    """One evaluator run, announced to `observer` before and after.
+
+    The two events bracket the subprocess itself, so a reader of the event log
+    can tell at any moment which run is in flight and for how long it has been.
+    """
+    if observer is not None:
+        observer("eval_started", seed=seed, timeout_s=stage.timeout)
+    outcome = _execute_once(
+        candidate_path,
+        stage,
+        inputs=inputs,
+        out_path=out_path,
+        cwd=cwd,
+        private=private,
+        seed=seed,
+        required_kpis=required_kpis,
+    )
+    outcome.stdout_log = str(out_path.with_suffix(".stdout.log"))
+    outcome.stderr_log = str(out_path.with_suffix(".stderr.log"))
+    try:
+        outcome.argv = tuple(
+            build_argv(
+                stage.command, candidate=candidate_path, inputs=inputs, out=out_path, seed=seed
+            )
+        )
+    except (ValueError, KeyError, IndexError):
+        pass  # a bad template: the outcome's own failure already says so
+    if observer is not None:
+        failed = (
+            {
+                "failure": outcome.failure,
+                "stderr_tail": outcome.stderr,
+                "stdout_tail": outcome.stdout,
+            }
+            if not outcome.ok
+            else {}
+        )
+        observer(
+            "eval_finished",
+            seed=seed,
+            ok=outcome.ok,
+            duration_s=round(outcome.duration_s, 3),
+            kpis=outcome.kpis,
+            vector_kpis=outcome.vector_kpis,
+            argv=list(outcome.argv),
+            stdout_log=outcome.stdout_log,
+            stderr_log=outcome.stderr_log,
+            **failed,
+        )
+    return outcome
+
+
+def _execute_once(
+    candidate_path: Path,
+    stage: StageConfig,
+    *,
+    inputs: tuple[str, ...] | list[str],
+    out_path: Path,
+    cwd: Path,
+    private: bool = False,
+    seed: int = 0,
+    required_kpis: tuple[str, ...] = (),
 ) -> StageOutcome:
     """Run one external evaluator and read the KPI JSON it wrote to `{out}`."""
     started = time.perf_counter()
@@ -324,41 +405,42 @@ def _run_once(
             private=private,
         )
 
-    try:
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=stage.timeout,
-            cwd=str(cwd),
+    # Output goes to files beside the result, never to pipes: see `process.py`.
+    stdout_log = out_path.with_suffix(".stdout.log")
+    stderr_log = out_path.with_suffix(".stderr.log")
+    run = run_bounded(
+        argv,
+        timeout=stage.timeout,
+        cwd=cwd,
+        stdout_path=stdout_log,
+        stderr_path=stderr_log,
+    )
+    duration = time.perf_counter() - started
+    if run.error is not None:
+        return StageOutcome(
+            stage_id=stage.id,
+            ok=False,
+            failure=f"could not run {argv[0]!r}: {run.error}",
+            duration_s=duration,
+            private=private,
         )
-    except subprocess.TimeoutExpired:
+    stderr = read_tail(stderr_log, STDERR_LIMIT)
+    stdout = read_tail(stdout_log, STDERR_LIMIT)
+    if run.timed_out:
         return StageOutcome(
             stage_id=stage.id,
             ok=False,
             failure=f"timeout after {stage.timeout:g}s",
-            duration_s=time.perf_counter() - started,
+            stderr=stderr,
+            stdout=stdout,
+            duration_s=duration,
             private=private,
         )
-    except OSError as exc:
+    if run.returncode != 0:
         return StageOutcome(
             stage_id=stage.id,
             ok=False,
-            failure=f"could not run {argv[0]!r}: {exc}",
-            duration_s=time.perf_counter() - started,
-            private=private,
-        )
-
-    duration = time.perf_counter() - started
-    stderr = (proc.stderr or "")[-STDERR_LIMIT:]
-    stdout = (proc.stdout or "")[-STDERR_LIMIT:]
-    if proc.returncode != 0:
-        return StageOutcome(
-            stage_id=stage.id,
-            ok=False,
-            failure=f"exit code {proc.returncode}",
+            failure=f"exit code {run.returncode}",
             stderr=stderr,
             stdout=stdout,
             duration_s=duration,
@@ -366,6 +448,8 @@ def _run_once(
         )
 
     kpis, vectors, feedback, problem = _read_kpis(out_path)
+    if problem is None:
+        problem = _missing_required(kpis, required_kpis)
     if problem is not None:
         return StageOutcome(
             stage_id=stage.id,
@@ -391,6 +475,45 @@ def _run_once(
 
 def _is_number(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float))
+
+
+def _is_finite(value: Any) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an integer literal beyond the range of a float
+        return False
+
+
+def _non_finite(key: object, value: Any) -> str:
+    """`json.loads` accepts `NaN` and `Infinity`, and a solver that found no
+    feasible solution prints exactly those. Scoring used to coerce them to 0.0,
+    which under `direction: minimize` is the best score a run can hold."""
+    return (
+        f"KPI {key!r} was {value!r}; a KPI must be a finite number. Report a run "
+        "that produced no usable value with a non-zero exit code, or as a finite "
+        "penalty KPI"
+    )
+
+
+def _missing_required(
+    kpis: dict[str, float], required: tuple[str, ...]
+) -> str | None:
+    """A run that did not report the objective has not been scored.
+
+    `compute_score` counts an absent KPI as 0 so that a forgotten *secondary*
+    weight cannot blow a run up three hours in. For the objective itself that
+    default is wrong in the worst possible direction: minimising a cost, 0
+    outranks every candidate that actually ran. So the objective is checked
+    here, where the evaluator's output is read, and its absence fails the run.
+    """
+    missing = [name for name in required if name not in kpis]
+    if not missing:
+        return None
+    wanted = ", ".join(repr(name) for name in missing)
+    return (
+        f"evaluator reported no {wanted}, the objective KPI named by "
+        f"evaluate.score.objective; it reported: {', '.join(sorted(kpis))}"
+    )
 
 
 def _read_kpis(
@@ -434,9 +557,13 @@ def _read_kpis(
     vectors: dict[str, list[float]] = {}
     for key, value in raw.items():
         if _is_number(value):
+            if not _is_finite(value):
+                return {}, {}, "", _non_finite(key, value)
             kpis[str(key)] = float(value)
             continue
         if isinstance(value, list) and all(_is_number(v) for v in value):
+            if not all(_is_finite(v) for v in value):
+                return {}, {}, "", _non_finite(key, value)
             vectors[str(key)] = [float(v) for v in value]
             continue
         return (

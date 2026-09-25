@@ -55,7 +55,40 @@ and novelty verdict), `usage.jsonl` (one row per LLM call, with tokens and
 USD), `archive.json` (the MAP-Elites grid: cells, elites, children counts and
 lineage), `scratchpad.md` (the running notes), `.lock` (the owning pid) and
 `traces/<candidate-id>.json` (the exact messages sent and the response
-received; framework calls live under `traces/meta/`).
+received; framework calls live under `traces/meta/`). Under `work/` are the
+spliced candidates (`candidates/<id>.py`) and, per evaluator run, the KPI file
+it wrote plus its **complete** stdout and stderr
+(`stage_out/<id>.<stage>.json`, `.stdout.log`, `.stderr.log`) — the prompt only
+ever sees the last 2,000 characters; the files are for whoever has to debug
+the solver.
+
+### What a run says while it runs
+
+`runs.jsonl` gets a row when a generation's whole cascade has returned — with an
+hour-long evaluator, one write every few hours. Two more files in the run
+directory say what is happening in between, and they are what every view of a
+live run is built from:
+
+* **`events.jsonl`** — append-only, one JSON object per line, never rewritten.
+  Every event has `seq` (1, 2, 3 … across the whole directory), `ts` (UTC,
+  milliseconds), `session` (one id per process that ran against the directory),
+  `pid` and `type`:
+
+  | `type` | When | Carries |
+  |---|---|---|
+  | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
+  | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
+  | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s`; then `ok`, `duration_s`, `kpis`, `argv`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
+  | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
+  | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
+
+* **`heartbeat.json`** — rewritten every five seconds while the run is alive:
+  `ts`, `pid`, `phase` (`starting`, `breeding`, `evaluating`, then `finished`,
+  `interrupted` or `crashed`), `generation`, and the candidate and stage being
+  evaluated. A beat older than a few intervals while its pid is alive means the
+  process is suspended or the machine slept — which, on a wall-clock-limited
+  evaluator, also means the evaluation in flight at the time cannot be trusted.
 
 ### How it works
 
@@ -100,6 +133,19 @@ time at all; the behavioural one costs exactly the stage that caught it.
 There is one LLM call per child and one attempt at applying its response — the
 single exception is the novelty re-prompt, bounded to one extra call, because
 v1's nested 3×3 retry was the largest single multiplier on its token bill.
+
+**A finite score is not a comparable score.** A candidate *competes* — is
+ranked, archived, sampled as a parent, reported as `best` — only when it got
+through the final stage, hold-out included, without a failure. Four kinds of
+candidate keep their finite score in `runs.jsonl` (`competes: false`) and are
+never ranked: one whose evaluation failed or timed out, one that was not
+promoted past a cheaper stage, one whose final stage was skipped by
+`budget.max_full_evals_per_day`, and one whose hold-out run failed. The reason
+is arithmetic rather than taste: a proxy score comes from a different input set,
+and the default `failure_score: -1000` *outranks* every healthy candidate whose
+minimised cost is above 1000. `run` and `status` report the count as
+`unfinished`; a number that keeps climbing is an evaluator problem, not a
+search problem.
 
 ### The archive
 
@@ -827,13 +873,38 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    }
    ```
 
-   A KPI is a number, or a *list* of numbers — one entry per instance, say.
+   A KPI is a **finite** number, or a *list* of finite numbers — one entry per
+   instance, say. `NaN` and `Infinity` fail the stage, and so does a run that
+   does not report the KPI named by `evaluate.score.objective`: a solver that
+   found nothing usable should exit non-zero or report a finite penalty KPI,
+   because an objective silently read as 0 is the best score a minimising run
+   can hold. `preflight` applies the same rule to the seed.
    Lists never reach the score or the archive descriptors, which need scalars;
    they sharpen the behaviour signature, so two candidates that merely agree on
    the mean are still told apart. `text_feedback` sits **beside** `kpis`, not
    inside it, and reaches the next prompt as
    [Evaluator notes](#evaluator-notes-what-the-kpis-cannot-say). Same evaluator,
    different `inputs`, for each stage.
+
+   **The timeout covers the whole process tree.** An evaluator is usually a
+   wrapper around something else — a solver binary, a second interpreter — so
+   `timeout` is a wall-clock bound on the command *and everything it started*:
+   when it expires, all of it is killed, and the run moves on within seconds.
+   The same happens when the command returns: whatever it left running is
+   killed, because on a time-limited objective a leftover solver shares a core
+   with the next candidate and silently becomes that candidate's score. An
+   evaluator that needs a long-lived helper should start it outside evolvekit.
+   stdin is closed; stdout and stderr go to the log files described under
+   [Quickstart](#quickstart), so nothing the evaluator prints can block it.
+
+   That guarantee needs evolvekit to be running. If evolvekit itself is
+   hard-killed (a crash, `taskkill /F`, `kill -9`, the terminal or session it
+   ran in closing), only the operating system cleans up: on Windows a native
+   solver dies with it, but a solver started by a Python evaluator under a
+   Microsoft Store Python survives, and on Linux and macOS the whole evaluator
+   tree survives. Resuming does not look for such leftovers, so after a hard
+   kill check for stray solver processes before resuming — they would share
+   cores with the resumed run's evaluations.
 
    Accept `--seed` even if you ignore it today. It costs one argparse line, and
    it is what lets you turn `seeds: N` on later without touching the evaluator.
@@ -861,6 +932,14 @@ remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
    `claude-cli` that message reads like "You've hit your session limit —
    resets 12:30pm"; wait it out and re-run the same directory (the lock and
    the ledger resume cleanly).
+
+   **The caps belong to the run directory, not to the process.** On resume the
+   guard is charged with everything `usage.jsonl` already records, today's
+   full evaluations are counted from `runs.jsonl`, and the stop policy is
+   replayed over the recorded generations — so a run stopped by `max_usd`,
+   `max_tokens`, `max_full_evals_per_day` or `stop.patience` stays stopped when
+   the same command is run again, and the `spent=` on each generation line is
+   the directory's total. To go on, raise the cap or use a new `--run-dir`.
 
 7. **Tell the model what it may use.** Fill in `problem.tools`,
    `problem.constraints` and `problem.what_counts_as_new` — see

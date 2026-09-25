@@ -40,6 +40,12 @@ class StageOutcome:
     duration_s: float = 0.0
     skipped: bool = False
     private: bool = False
+    argv: tuple[str, ...] = ()
+    """The command line that was run, for the failure report: "which instance,
+    which seed, which flags" is the first question about a crashed solver."""
+    stdout_log: str = ""
+    stderr_log: str = ""
+    """Where the run's complete output was kept (`evaluate/process.py`)."""
 
 
 @dataclass
@@ -75,6 +81,11 @@ class EvalResult:
     """The earlier candidate this one behaved identically to, if any. Set
     together with `rejected`: a twin keeps its KPIs and its score for the
     record, but buys no further stages and never enters the archive."""
+    competes: bool = False
+    """True once the candidate has finished the final stage -- hold-out
+    included -- without a failure; see `cascade.finished_final_stage`. Only such
+    a score is comparable with another, so only such a candidate is ranked,
+    archived or bred from. `score` stays finite either way."""
 
     @property
     def max_kpi_cv(self) -> float:

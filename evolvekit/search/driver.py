@@ -18,18 +18,22 @@ no-ops, and its winner improved the public set while losing on the hold-out.
 from __future__ import annotations
 
 import random
+import socket
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
-from evolvekit.budget import BudgetGuard, StopPolicy
+from evolvekit import __version__
+from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
 from evolvekit.candidate import Candidate, extract_block, splice_block
 from evolvekit.config import Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
-from evolvekit.evaluate.cascade import Cascade
+from evolvekit.evaluate.cascade import Cascade, finished_final_stage
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.types import EvalResult
+from evolvekit.events import EventLog, Heartbeat
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration
@@ -46,6 +50,20 @@ __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
 SEED_OPERATOR = "human-seed"
 
 
+def _random_stream(seed: int, recorded: int) -> random.Random:
+    """The run's generator: reproducible, and never the same stream twice.
+
+    A fresh run is seeded with `search.seed`, as it always was. A resumed run
+    seeded the same way draws the same operators, parents and `param_lhs` sweep
+    seeds as its first generation did -- and `param_lhs` samples from that seed
+    alone, so the children it breeds are blocks the run already holds and the
+    novelty filter discards them. Folding in how much the directory already
+    holds gives a resumed run a stream of its own that is still a function of
+    the seed and the directory, so resuming stays reproducible too.
+    """
+    return random.Random(seed if recorded == 0 else f"{seed}/{recorded}")
+
+
 @dataclass
 class RunSummary:
     generations: int = 0
@@ -55,6 +73,11 @@ class RunSummary:
     duplicates: int = 0
     behavioural: int = 0
     near: int = 0
+    unfinished: int = 0
+    """Candidates that were evaluated but did not finish the final stage: a
+    failed or timed-out evaluation, a proxy-only candidate, a skipped final
+    stage, a failed hold-out. Recorded, never ranked -- and a number that is
+    climbing is an evaluator problem, not a search problem."""
     embedding_calls: int = 0
     children_per_generation: int = 0
     """The breadth the run ended on. Equal to the configured value unless
@@ -121,15 +144,18 @@ class Driver:
             else replace(config.stop, min_big_steps=0)
         )
         self.behaviour = BehaviourIndex()
+        self.events = EventLog(self.ledger.run_dir)
+        self.heartbeat = Heartbeat(self.ledger.run_dir, session=self.events.session)
         self.cascade = Cascade(
             config,
             work_dir=self.ledger.run_dir / "work",
             budget=self.budget,
             signatures=self.behaviour,
+            on_event=self._on_evaluation,
         )
-        self.rng = random.Random(config.search.seed)
+        self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
         self.breadth = AdaptiveBreadth.from_config(config.search)
-        self.log = log or (lambda _msg: None)
+        self._log_sink = log or (lambda _msg: None)
         self._providers = providers or {}
 
         skeleton = config.problem.skeleton.read_text(encoding="utf-8")
@@ -162,6 +188,67 @@ class Driver:
         parent's next prompt. The parent's children counter has already been
         incremented, so the archive has made it less attractive; this tells the
         model *why* the last attempt on it bought nothing."""
+
+    # -- what the run says about itself ----------------------------------
+
+    def log(self, message: str) -> None:
+        """A console line, kept. A run's stdout is gone with its terminal, or
+        still sitting in a pipe buffer when the process is killed; the event
+        log is what a second shell, a dashboard or a post-mortem can read."""
+        self.events.emit("log", message=message)
+        self._log_sink(message)
+
+    def _on_evaluation(self, type: str, **fields: object) -> None:
+        self.events.emit(type, **fields)
+        if type == "eval_started":
+            self.heartbeat.update(
+                phase="evaluating",
+                candidate_id=fields.get("candidate_id"),
+                stage=fields.get("stage"),
+            )
+
+    def _describe_run(self, *, first_generation: int, planned: int) -> dict:
+        """Everything a reader of the run directory needs in order to interpret
+        it without the config file: what is optimised, through which stages,
+        under which caps, and how far this session intends to go."""
+        config = self.config
+        final = config.final_stage.id
+        return {
+            "version": __version__,
+            "host": socket.gethostname(),
+            "config_path": str(config.source) if config.source else None,
+            "objective": config.evaluate.score.objective,
+            "direction": config.evaluate.score.direction,
+            "failure_score": config.evaluate.failure_score,
+            "stages": [
+                {
+                    "id": stage.id,
+                    "kind": stage.kind,
+                    "timeout_s": stage.timeout,
+                    "seeds": stage.seeds,
+                    "promote": stage.promote.describe(),
+                    "holdout": bool(stage.private_inputs),
+                    "final": stage.id == final,
+                }
+                for stage in config.evaluate.stages
+            ],
+            "first_generation": first_generation,
+            "generations_planned": planned,
+            "children_per_generation": self.children_per_generation,
+            "resumed": bool(self.archive),
+            "recorded_candidates": len(self.archive),
+            "budget": {
+                "max_usd": config.budget.max_usd,
+                "max_tokens": config.budget.max_tokens,
+                "max_full_evals_per_day": config.budget.max_full_evals_per_day,
+            },
+            "stop": {
+                "patience": config.stop.patience,
+                "epsilon": config.stop.epsilon,
+                "target": config.stop.target,
+                "max_usd_since_improvement": config.stop.max_usd_since_improvement,
+            },
+        }
 
     # -- providers -------------------------------------------------------
 
@@ -205,7 +292,7 @@ class Driver:
 
     def top_k(self, k: int) -> list[Candidate]:
         """Best first, by the hold-out-aware ranking score."""
-        alive = [c for c in self.archive if not c.rejected and c.fitness is not None]
+        alive = [c for c in self.archive if _competes(c)]
         return sorted(alive, key=lambda c: (-(c.fitness or 0.0), c.id))[:k]
 
     def _economics(self) -> list[GenerationPoint]:
@@ -223,11 +310,7 @@ class Driver:
         )
 
     def _archive_scores(self) -> list[float]:
-        return [
-            c.fitness
-            for c in self.archive
-            if not c.rejected and c.fitness is not None
-        ]
+        return [c.fitness for c in self.archive if _competes(c)]
 
     # -- resume ----------------------------------------------------------
 
@@ -238,7 +321,7 @@ class Driver:
         that died between the last append and the last snapshot still comes
         back consistent, which is the whole reason the rebuild reads the log.
         """
-        rows = self.ledger.runs()
+        rows = [self._settle_competes(row) for row in self.ledger.runs()]
         if not rows:
             return 0
         self.grid = Archive.from_records(rows, self.config.search.archive)
@@ -263,25 +346,77 @@ class Driver:
             if suffix.isdigit():
                 self._counter = max(self._counter, int(suffix))
         self._resumed_generation = last_generation
+        self._restore_budget(rows)
         return last_generation
+
+    def _settle_competes(self, row: dict) -> dict:
+        """Judge a row written before `competes` existed by today's rule.
+
+        Without this a resumed older run would put its failed and proxy-only
+        candidates straight back into the archive, which is the defect the
+        field exists to end.
+        """
+        if "competes" in row:
+            return row
+        return {
+            **row,
+            "competes": finished_final_stage(
+                self.config,
+                rejected=bool(row.get("rejected")),
+                last_failure=row.get("last_failure"),
+                stages_reached=row.get("stages_reached") or [],
+                private_score=row.get("private_score"),
+            ),
+        }
 
     # -- the loop --------------------------------------------------------
 
     def run(self, generations: int | None = None) -> RunSummary:
         """Take the run lock, then search. One writer per run directory."""
         with run_lock(self.ledger.run_dir) as lock:
-            if lock.reclaimed_from:
-                self.log(
-                    f"reclaimed a stale lock from dead pid {lock.reclaimed_from}"
-                )
-            return self._run(generations)
+            self.heartbeat.start(phase="starting")
+            try:
+                if lock.reclaimed_from:
+                    self.log(
+                        f"reclaimed a stale lock from dead pid {lock.reclaimed_from}"
+                    )
+                summary = self._run(generations)
+            except KeyboardInterrupt:
+                self.events.emit("run_interrupted")
+                self.heartbeat.stop(phase="interrupted")
+                raise
+            except BaseException as exc:
+                # Written before it propagates: the traceback goes to a terminal
+                # that may not exist; this goes where `status` can find it.
+                self.events.emit("run_crashed", error=f"{type(exc).__name__}: {exc}")
+                self.heartbeat.stop(phase="crashed")
+                raise
+            best = summary.best
+            self.events.emit(
+                "run_finished",
+                stop_reason=summary.stop_reason,
+                generations=summary.generations,
+                candidates=summary.candidates,
+                seed_score=summary.seed_score,
+                best_id=best.id if best else None,
+                best_score=best.score if best else None,
+                best_fitness=best.fitness if best else None,
+            )
+            self.heartbeat.stop(phase="finished")
+            return summary
 
     def _run(self, generations: int | None) -> RunSummary:
         total = generations if generations is not None else self.config.search.generations
         summary = RunSummary()
 
         started_at = self.resume()
-        if started_at:
+        self.events.emit(
+            "run_started",
+            **self._describe_run(first_generation=started_at + 1, planned=total),
+        )
+        # Not `if started_at`: a run stopped before generation 1 finished holds
+        # only its seed, and the seed's generation is 0.
+        if self.archive:
             self.log(
                 f"resumed {len(self.archive)} candidate(s) from runs.jsonl "
                 f"({self.grid.occupancy()})"
@@ -291,7 +426,9 @@ class Driver:
             summary.candidates = len(self.archive)
         else:
             seed = self._seed_candidate()
+            began = self._generation_started(0, children=0)
             self._evaluate_and_record([seed], generation=0)
+            self._generation_finished(0, began, [seed])
             summary.seed_score = seed.score
             summary.candidates += 1
             self.log(f"gen 0  seed        score={_fmt(seed.score)}")
@@ -313,10 +450,7 @@ class Driver:
                 self.log(f"ABORT: {summary.stop_reason}")
                 return self._finalise(summary)
 
-        points = self._economics()
-        decision = self.stop_policy.update(
-            self.best.fitness if self.best else None, points[-1] if points else None
-        )
+        decision = self._restore_stop_policy()
 
         for offset in range(1, total + 1):
             generation = started_at + offset
@@ -330,6 +464,9 @@ class Driver:
 
             self._maybe_refresh_scratchpad(generation)
 
+            began = self._generation_started(
+                generation, children=self.children_per_generation
+            )
             children = self._breed(generation, plateau=decision.plateau)
             summary.candidates += len(children)
             viable = [c for c in children if not c.rejected]
@@ -338,6 +475,7 @@ class Driver:
                 if child.rejected and child.id not in self.results:
                     self._record(child)
             summary.generations = offset
+            self._generation_finished(generation, began, children)
 
             if self._provider_is_dead():
                 summary.stop_reason = (
@@ -381,6 +519,9 @@ class Driver:
             1 for c in self.archive if c.novelty == "behavioural"
         )
         summary.near = sum(1 for c in self.archive if c.novelty == "near")
+        summary.unfinished = sum(
+            1 for c in self.archive if not c.rejected and not c.competes
+        )
         summary.embedding_calls = self.ledger.embedding_calls
         summary.cells = len(self.grid.cells)
         summary.occupancy = self.grid.occupancy()
@@ -392,7 +533,87 @@ class Driver:
         self.ledger.write_archive(archive_payload)
         return summary
 
+    # -- resume: what the run directory has already used up -------------
+
+    def _restore_budget(self, rows: list[dict]) -> None:
+        """Charge the guard with what this run directory has already spent.
+
+        The caps are promises about a run, and a run is a directory: it is
+        resumed by running the same command again, after a crash, a halt or a
+        budget stop. A guard that started from zero each time turned
+        `budget.max_usd` into "per invocation", and re-running a budget-stopped
+        run simply bought the allowance again.
+        """
+        for usage in self.ledger.usage():
+            self.budget.spend(
+                usd=float(usage.get("usd", 0.0) or 0.0),
+                tokens=int(usage.get("input_tokens", 0) or 0)
+                + int(usage.get("output_tokens", 0) or 0),
+            )
+        # A full evaluation is metered when the final stage is *run*, whether or
+        # not it succeeds. `created_at` is when the candidate was bred, which is
+        # the closest thing to a timestamp a row carries; a candidate bred just
+        # before midnight UTC and evaluated just after is counted a day early.
+        final = self.config.final_stage.id
+        for row in rows:
+            failure = str(row.get("last_failure") or "")
+            ran_and_failed = (
+                failure.startswith(f"stage {final}: ") and "cap reached" not in failure
+            )
+            day = str(row.get("created_at") or "")[:10]
+            if day and (final in (row.get("stages_reached") or []) or ran_and_failed):
+                self.budget.record_full_eval(day)
+
+    def _restore_stop_policy(self) -> StopDecision:
+        """Replay the recorded generations through the stop policy.
+
+        Patience is a property of the run as well: a run that stopped after
+        eight flat generations has not earned eight more by being started
+        again. Replaying the series, big steps included, leaves the policy
+        exactly where the last process left it -- and on a fresh run the series
+        is the seed generation alone, which is what the policy was always fed
+        first.
+        """
+        big_step_generations = {
+            int(c.generation)
+            for c in self.archive
+            if str(c.operator).startswith("big_step")
+        }
+        decision = StopDecision(False)
+        for point in self._economics():
+            if point.generation in big_step_generations:
+                self.stop_policy.note_big_step()
+            decision = self.stop_policy.update(point.best, point)
+        return decision
+
     # -- generation internals -------------------------------------------
+
+    def _generation_started(self, generation: int, *, children: int) -> float:
+        self.events.emit(
+            "generation_started", generation=generation, children_planned=children
+        )
+        self.heartbeat.update(
+            phase="breeding" if children else "evaluating",
+            generation=generation,
+            candidate_id=None,
+            stage=None,
+        )
+        return time.perf_counter()
+
+    def _generation_finished(
+        self, generation: int, began: float, children: Sequence[Candidate]
+    ) -> None:
+        best = self.best
+        self.events.emit(
+            "generation_finished",
+            generation=generation,
+            duration_s=round(time.perf_counter() - began, 3),
+            children=len(children),
+            rejected=sum(1 for c in children if c.rejected),
+            best_id=best.id if best else None,
+            best_fitness=best.fitness if best else None,
+            spent_usd=self.budget.state.usd,
+        )
 
     def _seed_candidate(self) -> Candidate:
         return Candidate(
@@ -585,11 +806,13 @@ class Driver:
             self._provider_halt = outcome.error or "provider error"
         if not outcome.ok:
             child.rejected = True
+            child.competes = False
             child.reject_reason = outcome.error
             child.last_failure = outcome.error
             child.score = self.config.evaluate.failure_score
         elif verdict is not None and verdict.rejects:
             child.rejected = True
+            child.competes = False
             child.novelty = verdict.kind
             child.twin_id = verdict.twin_id
             child.reject_reason = verdict.reason
@@ -618,6 +841,17 @@ class Driver:
             child.operator = f"big_step/{child.operator}"
         elif operator == "crossover" and outcome.ok:
             child.operator = "crossover"
+        self.events.emit(
+            "candidate_bred",
+            candidate_id=child.id,
+            generation=generation,
+            operator=child.operator,
+            parent_id=parent.id,
+            attempts=attempts,
+            ok=not child.rejected,
+            novelty=child.novelty,
+            reason=child.reject_reason,
+        )
         return child
 
     def _propose(
@@ -792,6 +1026,7 @@ class Driver:
             result = results[candidate.id]
             self.results[candidate.id] = result
             candidate.score = result.score
+            candidate.competes = result.competes
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis
@@ -852,6 +1087,14 @@ class Driver:
 
 def _fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6g}"
+
+
+def _competes(candidate: Candidate) -> bool:
+    return (
+        not candidate.rejected
+        and candidate.competes
+        and candidate.fitness is not None
+    )
 
 
 def _fingerprint_line(block: str, limit: int = 90) -> str:

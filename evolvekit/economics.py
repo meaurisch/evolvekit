@@ -82,7 +82,7 @@ class GenerationPoint:
 
 def _fitness(row: Mapping[str, Any]) -> float | None:
     """What the search ranks by, the same rule the leaderboard uses."""
-    if row.get("rejected"):
+    if row.get("rejected") or not row.get("competes", True):
         return None
     value = row.get("ranking_score")
     if value is None:

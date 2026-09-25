@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from statistics import quantiles
-from typing import Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import Candidate
@@ -28,7 +28,49 @@ from evolvekit.evaluate.stages import (
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
 
-__all__ = ["Cascade", "select_promoted", "archive_threshold"]
+__all__ = [
+    "Cascade",
+    "select_promoted",
+    "archive_threshold",
+    "finished_final_stage",
+]
+
+
+def finished_final_stage(
+    config: Config,
+    *,
+    rejected: bool,
+    last_failure: str | None,
+    stages_reached: Sequence[str],
+    private_score: float | None,
+) -> bool:
+    """Whether a candidate's score may be compared with anybody else's.
+
+    A score means something only next to scores from the same stage on the
+    same inputs, so a candidate competes -- is ranked, archived, bred from --
+    only when it got all the way through. That rules out four cases which used
+    to be ranked as if they had:
+
+    * a **failed** evaluation. It carries `evaluate.failure_score`, and the
+      default `-1000` outranks every healthy candidate whose minimised cost is
+      above 1000;
+    * a candidate **not promoted** past a cheaper stage, whose score comes from
+      a different input set;
+    * a final stage **skipped** by `budget.max_full_evals_per_day`;
+    * a **hold-out run that failed**, which would otherwise keep its public
+      score with no discount -- the one thing the hold-out is there to prevent.
+
+    Takes plain values rather than an `EvalResult` so that a `runs.jsonl` row
+    written before the `competes` field existed can be judged by the same rule.
+    """
+    if rejected or last_failure:
+        return False
+    final = config.final_stage
+    if final.id not in stages_reached:
+        return False
+    if final.kind == "command" and final.private_inputs and private_score is None:
+        return False
+    return True
 
 
 def archive_threshold(scores: Sequence[float], percentile: float) -> float | None:
@@ -81,8 +123,12 @@ class Cascade:
         work_dir: Path,
         budget: BudgetGuard | None = None,
         signatures: BehaviourIndex | None = None,
+        on_event: Callable[..., Any] | None = None,
     ) -> None:
         self.config = config
+        self.on_event = on_event
+        """`on_event(type, **fields)`, called for every evaluator run as it starts
+        and ends. The driver points it at the run's event log."""
         self.work_dir = Path(work_dir)
         self.candidates_dir = self.work_dir / "candidates"
         self.candidates_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +180,14 @@ class Cascade:
             scored = [(cid, results[cid].score) for cid in survivors]
             alive = select_promoted(scored, stage.promote, prior)
 
+        for result in results.values():
+            result.competes = finished_final_stage(
+                self.config,
+                rejected=result.rejected,
+                last_failure=result.last_failure,
+                stages_reached=result.stages_reached,
+                private_score=result.private_score,
+            )
         return results
 
     # -- internals -------------------------------------------------------
@@ -161,10 +215,42 @@ class Cascade:
             inputs=stage.inputs,
             out_path=self.work_dir / "stage_out" / f"{candidate.id}.{stage.id}.json",
             cwd=self.config.base_dir,
+            required_kpis=(self.config.evaluate.score.objective,),
+            observer=self._observer(candidate.id, stage, private=False),
         )
         if self._is_final(stage) and self.budget is not None:
             self.budget.record_full_eval()
         return outcome
+
+    def _observer(
+        self, candidate_id: str, stage: StageConfig, *, private: bool
+    ) -> Callable[..., None] | None:
+        """What `run_command_stage` reports to, with the context it lacks.
+
+        The stage runner knows a seed and a duration; which candidate that was,
+        at which stage, on the public inputs or the hold-out, is known here.
+        Log paths are rewritten relative to the run directory so the event log
+        still makes sense after the directory has been moved or copied.
+        """
+        if self.on_event is None:
+            return None
+        run_dir = self.work_dir.parent
+
+        def relative(path: str) -> str:
+            try:
+                return Path(path).relative_to(run_dir).as_posix()
+            except ValueError:
+                return path
+
+        def observe(type: str, **fields: Any) -> None:
+            for key in ("stdout_log", "stderr_log"):
+                if fields.get(key):
+                    fields[key] = relative(fields[key])
+            self.on_event(
+                type, candidate_id=candidate_id, stage=stage.id, private=private, **fields
+            )
+
+        return observe
 
     def _note_behaviour(
         self,
@@ -268,6 +354,8 @@ class Cascade:
                 out_path=self.work_dir / "stage_out" / f"{cid}.{stage.id}.private.json",
                 cwd=self.config.base_dir,
                 private=True,
+                required_kpis=(self.config.evaluate.score.objective,),
+                observer=self._observer(cid, stage, private=True),
             )
             result = results[cid]
             result.outcomes.append(outcome)
