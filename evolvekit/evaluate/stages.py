@@ -721,7 +721,11 @@ def _collect_kpis(stage: StageConfig, out_path: Path, stdout_log: Path) -> Kpis:
     if stage.kpi_patterns:
         printed = read_tail(stdout_log, TAIL_BYTES)
         for name, pattern in stage.kpi_patterns:
-            found = re.findall(pattern, printed)
+            # MULTILINE: `^` and `$` are the start and end of a *line*. What a
+            # program prints is lines, and `^Cost: (\d+)` is how anybody writes
+            # "the line that reports the cost"; without the flag `^` meant the
+            # start of the whole output and such a pattern never matched.
+            found = re.findall(pattern, printed, re.MULTILINE)
             if not found:
                 return {}, {}, "", (
                     f"`kpi_patterns.{name}` matched nothing in what the program printed"

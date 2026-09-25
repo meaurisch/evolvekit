@@ -454,7 +454,8 @@ class StageConfig:
     kpi_patterns: tuple[tuple[str, str], ...] = ()
     """`(kpi, regular expression)`: numbers picked out of what the command
     prints, for a program that reports in text. One capturing group; the last
-    match counts, because a solver logs its progress before its result."""
+    match counts, because a solver logs its progress before its result. Applied
+    line by line (`re.MULTILINE`): `^` and `$` are the start and end of a line."""
     normalize: str = "baseline"
     """How per-instance values of the objective combine (`instances` only).
     `baseline`: each instance counts as a percentage of what the seed candidate

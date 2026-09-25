@@ -199,3 +199,14 @@ def test_a_pattern_that_captured_something_else_than_a_number_says_what(tmp_path
     outcome = _run(tmp_path, stage)
     assert not outcome.ok
     assert outcome.failure == "`kpi_patterns.cost` captured 'optimal', which is not a number"
+
+
+def test_a_pattern_anchored_at_the_start_of_a_line_matches_every_line(tmp_path):
+    # `^Cost:` is how anybody writes "the line that reports the cost". Without
+    # re.MULTILINE `^` means the start of the whole output, and the run failed
+    # with "matched nothing" although the line was right there.
+    program = "print('reading instance')\nprint('Cost: 1300')\nprint('Cost: 1250')\nprint('done')\n"
+    stage = _stage(tmp_path, program, kpi_patterns={"cost": r"^Cost: (\d+)$"})
+    outcome = _run(tmp_path, stage)
+    assert outcome.ok, outcome.failure
+    assert outcome.kpis == {"cost": 1250.0}
