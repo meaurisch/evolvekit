@@ -51,10 +51,10 @@ def test_the_miniature_is_the_real_setup_with_smaller_numbers():
     assert real_stages["full"]["workers"] == 3 and real_stages["full"]["pin_cpus"] == [2, 4, 6]
 
 
-def test_the_second_run_is_the_first_with_a_model_among_the_operators_and_racing(tmp_path, monkeypatch):
-    # The real configs pin CPUs 2, 4, 6 and list instances that are generated, not committed:
-    # load copies on a machine that has the CPUs and the files.
-    monkeypatch.setattr("os.cpu_count", lambda: 8)
+def test_the_second_run_is_the_first_with_a_model_among_the_operators_and_racing(tmp_path):
+    # The real configs list instances that are generated, not committed: load
+    # copies with stand-ins for the files. Their `pin_cpus: [2, 4, 6]` needs no
+    # stand-in -- CPUs are checked when a stage runs, not when a config is read.
     (tmp_path / "instances").mkdir()
     for name in ("t01", "t04", "t07", "t10"):
         (tmp_path / "instances" / f"{name}.json").write_text("{}", encoding="utf-8")

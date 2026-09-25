@@ -584,6 +584,10 @@ own, and the framework knows what it could not know before:
   every worker a logical CPU of its own (on a machine with simultaneous
   multithreading, name one per *physical* core and leave a core to everything
   else); the whole process tree of a run is pinned from its first instruction.
+  The CPUs are checked against the machine when the stage is about to run, not
+  when the config is read, so a config written for a bigger machine still loads
+  and fails only if you run it; a run that cannot be pinned all the same says
+  so on stderr instead of silently sharing a core.
   The pool spans the generation, not one candidate — six candidates on ten
   instances are sixty runs for three workers, and no worker idles while another
   finishes a candidate's last instance. `preflight` warns when there are more

@@ -38,7 +38,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Mapping, Sequence
 
-from evolvekit.config import StageConfig
+from evolvekit.config import ConfigError, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
@@ -114,7 +114,14 @@ def run_instance_stage(
     the search never saw names them. `keep_going` runs a candidate's remaining
     instances after one has failed: a search has no use for them, a comparison
     does, because every pair that did finish still counts.
+
+    A `pin_cpus` this machine cannot honour is a `ConfigError` here, before
+    the first run: the config may have been written for another machine, and
+    runs that silently share cores would be scored as if they had not.
     """
+    missing = stage.missing_cpus()
+    if missing is not None:
+        raise ConfigError(missing)
     instances = stage.private_instances if private else stage.instances
     names = stage.instance_names(private)
     files = _file_names(names)

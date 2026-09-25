@@ -146,9 +146,22 @@ def test_every_worker_needs_a_cpu_of_its_own(tmp_path):
         build_config(raw, base_dir=tmp_path)
 
 
-def test_a_cpu_the_machine_does_not_have_is_refused(tmp_path):
+def test_a_config_pinned_for_a_bigger_machine_loads_here_and_refuses_to_run_here(tmp_path):
+    # `pin_cpus` was checked against this machine when the config was *read*,
+    # so a config written for the 8-CPU benchmark machine could not even be
+    # loaded -- let alone inspected, extended or tested -- on a 4-CPU laptop.
     raw = _raw(_instances(tmp_path, s1={"scale": 100}), pin_cpus=[4096])
-    with pytest.raises(ConfigError, match="CPU 4096 does not exist on this machine"):
+    config = build_config(raw, base_dir=tmp_path)
+    assert config.evaluate.stages[1].pin_cpus == (4096,)
+    with pytest.raises(ConfigError, match=r"pin_cpus: CPU 4096 does not exist on this machine"):
+        Cascade(config, work_dir=tmp_path / "work").evaluate_generation([_candidate(config, "g000-c0001", seed=True)])
+    assert not (tmp_path / "calls").exists(), "nothing ran unpinned in the meantime"
+
+
+@pytest.mark.parametrize("cpus, fragment", [([1, 1], "lists a CPU twice"), ([-1], "must be >= 0")])
+def test_the_shape_of_pin_cpus_is_still_checked_when_the_config_is_read(tmp_path, cpus, fragment):
+    raw = _raw(_instances(tmp_path, s1={"scale": 100}), pin_cpus=cpus)
+    with pytest.raises(ConfigError, match=fragment):
         build_config(raw, base_dir=tmp_path)
 
 
