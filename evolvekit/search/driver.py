@@ -40,7 +40,7 @@ from evolvekit.candidate import (
 from evolvekit.config import TYPED_SPACE_OPERATORS, Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
-from evolvekit.evaluate.cascade import Cascade, finished_final_stage
+from evolvekit.evaluate.cascade import Cascade, finished_final_stage, race_warnings
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
@@ -536,6 +536,8 @@ class Driver:
             "run_started",
             **self._describe_run(first_generation=started_at + 1, planned=total),
         )
+        for warning in race_warnings(self.config):
+            self.log(f"warning: {warning}")
         # Not `if started_at`: a run stopped before generation 1 finished holds
         # only its seed, and the seed's generation is 0.
         seed = None

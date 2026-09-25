@@ -158,6 +158,49 @@ def test_the_best_so_far_survives_a_restart(tmp_path):
     assert result.raced_out is not None and len(_calls(tmp_path, 0.01)) == 3
 
 
+def test_a_write_of_the_best_so_far_cut_short_does_not_lose_it(tmp_path, monkeypatch):
+    """`incumbent.json` was written in place: a run killed during the write
+    left half a file, which the next session read as "nothing to race against"
+    -- every candidate finished every instance again, silently."""
+    config = _config(tmp_path, race={"after": 2, "margin_pct": 1.0})
+    first = Cascade(config, work_dir=tmp_path / "work")
+    first.evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    first.evaluate_generation([_candidate(config, "g001-c0002", -0.05)])
+
+    write_text = Path.write_text
+
+    def cut_short(self, text, *args, **kwargs):
+        if self.name == "incumbent.json":
+            write_text(self, text[: len(text) // 2], *args, **kwargs)
+            raise KeyboardInterrupt  # the process is killed half-way through the write
+        return write_text(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", cut_short)
+    try:
+        first.evaluate_generation([_candidate(config, "g002-c0003", -0.1)])
+    except KeyboardInterrupt:
+        pass
+    monkeypatch.undo()
+    held = Cascade(config, work_dir=tmp_path / "work").incumbent
+    assert held.get("full", {}).get("id") in ("g001-c0002", "g002-c0003")
+
+
+def test_a_race_that_can_never_stop_anyone_is_said_before_the_run(tmp_path):
+    """The race is decided on instances a candidate has finished and a
+    candidate still has left; with `after` at or above the number of instances
+    that never happens, and the rule did nothing without a word."""
+    from evolvekit.preflight import preflight
+    from evolvekit.search.driver import Driver
+
+    config = _config(tmp_path, race={"after": 5, "margin_pct": 1.0})
+    said = "race.after is 5, but the stage has 5 instance(s): no candidate can ever be raced out"
+    assert any(said in w for w in preflight(config).warnings)
+    messages: list[str] = []
+    Driver(config, run_dir=tmp_path / "run", log=messages.append).run(generations=0)
+    assert any(said in m for m in messages), messages
+    assert not any("race.after" in w for w in preflight(_config(tmp_path, race={"after": 4})).warnings)
+
+
 def test_without_a_rule_every_candidate_runs_every_instance(tmp_path):
     config = _config(tmp_path)
     cascade = Cascade(config, work_dir=tmp_path / "work")

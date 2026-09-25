@@ -628,7 +628,9 @@ own, and the framework knows what it could not know before:
   the protection against noise: set it to a few times what two runs of one
   configuration differ by. The baseline always finishes (it is the yardstick),
   so does the first candidate through a stage, and the best so far is kept in
-  `work/incumbent.json` for a resumed run. `confirm` never races.
+  `work/incumbent.json` for a resumed run. `confirm` never races. `after` must be
+  below the stage's number of instances — a candidate with nothing left to run
+  cannot be raced out — and `preflight` and `run` warn when it is not.
 - **A per-instance picture without a list KPI.** The dashboard's per-instance
   card, the noise estimate and the paired "is this more than the dice?" verdict
   are built from the runs themselves — paired by instance and seed, in percent,

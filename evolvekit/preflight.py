@@ -34,6 +34,7 @@ from typing import Callable
 
 from evolvekit.candidate import extract_block, splice_block
 from evolvekit.config import Config, ModelConfig, StageConfig
+from evolvekit.evaluate.cascade import race_warnings
 from evolvekit.evaluate.fanout import Job, run_instance_stage
 from evolvekit.evaluate.process import can_pin
 from evolvekit.evaluate.stages import Configuration, run_command_stage, run_static_stage
@@ -212,6 +213,7 @@ def preflight(
 
     _check_timeouts(config, report)
     _check_workers(config, report)
+    report.warnings.extend(race_warnings(config))
     _check_budget(config, report)
     if provider_check:
         _check_providers(config, report, providers or {})

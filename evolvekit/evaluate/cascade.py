@@ -33,12 +33,14 @@ from evolvekit.evaluate.stages import (
     run_static_stage,
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
+from evolvekit.ledger import _atomic_write
 
 __all__ = [
     "Cascade",
     "select_promoted",
     "archive_threshold",
     "finished_final_stage",
+    "race_warnings",
 ]
 
 
@@ -78,6 +80,25 @@ def finished_final_stage(
     if final.kind == "command" and held_out and private_score is None:
         return False
     return True
+
+
+def race_warnings(config: Config) -> list[str]:
+    """A `race` rule that can never stop anyone, said in words.
+
+    A candidate is raced out once it has finished `after` instances and still
+    has at least one left. With `after` at or above the stage's number of
+    instances that moment never comes, and the rule does nothing -- a setting
+    the user believes is saving solver time, silently inert."""
+    warnings = []
+    for stage in config.evaluate.stages:
+        count = len(stage.instance_names())
+        if stage.race is not None and stage.race.after >= count:
+            warnings.append(
+                f"stage {stage.id}: race.after is {stage.race.after}, but the stage has {count} "
+                "instance(s): no candidate can ever be raced out. Set `after` below the number of "
+                "instances, or remove `race`"
+            )
+    return warnings
 
 
 def archive_threshold(scores: Sequence[float], percentile: float) -> float | None:
@@ -396,9 +417,9 @@ class Cascade:
         )
         if better:
             self.incumbent[stage.id] = {"id": candidate.id, "score": score, "values": values}
-            (self.work_dir / "incumbent.json").write_text(
-                json.dumps(self.incumbent, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
-            )
+            # Atomically: half a file reads back as "nothing to race against",
+            # and a resumed run would quietly stop racing.
+            _atomic_write(self.work_dir / "incumbent.json", json.dumps(self.incumbent, indent=2, sort_keys=True) + "\n")
 
     # -- normalize: baseline ---------------------------------------------
 
