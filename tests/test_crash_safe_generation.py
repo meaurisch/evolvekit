@@ -136,6 +136,55 @@ def test_a_changed_command_is_a_different_run(tmp_path):
     assert len(_calls(tmp_path)) == 6
 
 
+def test_an_instance_file_that_changed_is_a_different_run(tmp_path):
+    """The key named the instance, not what was in it: regenerate `f01.json`
+    under the same name and `confirm` or a resumed run served the old results
+    as if they had just been measured."""
+    config = _config(tmp_path)
+    for name in ("a", "bb", "ccc"):
+        (tmp_path / name).write_text(f"instance {name}\n", encoding="utf-8")
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    (tmp_path / "bb").write_text("instance bb, regenerated with more clients\n", encoding="utf-8")
+    Cascade(config, work_dir=tmp_path / "work").evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    calls = _calls(tmp_path)
+    assert calls.count("bb.0.0") == 2, "the changed instance was not run again"
+    assert calls.count("a.0.0") == 1 and calls.count("ccc.0.0") == 1, "the unchanged ones were"
+
+
+def test_a_solver_script_that_changed_is_a_different_run(tmp_path):
+    config = _config(tmp_path)
+    Cascade(config, work_dir=tmp_path / "work").evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    with (tmp_path / "solver.py").open("a", encoding="utf-8") as handle:
+        handle.write("# a fix to the solver\n")
+    Cascade(config, work_dir=tmp_path / "work").evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    assert len(_calls(tmp_path)) == 6
+
+
+def test_a_result_slower_than_todays_timeout_is_not_reused(tmp_path):
+    """A success is only an answer under a timeout it fits in. Raising the
+    timeout keeps the cache; lowering it below what a run took must not."""
+    from dataclasses import replace
+
+    config = _config(tmp_path)
+    Cascade(config, work_dir=tmp_path / "work").evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    for entry in (tmp_path / "work" / "cache").glob("*.json"):
+        payload = json.loads(entry.read_text(encoding="utf-8"))
+        entry.write_text(json.dumps({**payload, "ran_for_s": 50.0}), encoding="utf-8")
+
+    def with_timeout(seconds: float):
+        stage = config.evaluate.stages[1]
+        return replace(config, evaluate=replace(config.evaluate, stages=(
+            config.evaluate.stages[0], replace(stage, timeout=seconds))))
+
+    longer = with_timeout(120.0)
+    Cascade(longer, work_dir=tmp_path / "work").evaluate_generation([_candidate(longer, "g000-c0001", 0.0, seed=True)])
+    assert len(_calls(tmp_path)) == 3, "a longer timeout: the 50 s results still stand"
+    shorter = with_timeout(30.0)
+    Cascade(shorter, work_dir=tmp_path / "work").evaluate_generation([_candidate(shorter, "g000-c0001", 0.0, seed=True)])
+    assert len(_calls(tmp_path)) == 6, "a 30 s timeout: a 50 s result would have timed out"
+
+
 # -- the generation that was interrupted -----------------------------------
 
 

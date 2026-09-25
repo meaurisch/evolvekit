@@ -472,8 +472,9 @@ def _run_once(
             instance=unit.instance if unit is not None else None,
             seed=seed,
             private=private,
+            cwd=cwd,
         )
-        known = cache.load(key, stage.id, private)
+        known = cache.load(key, stage.id, private, timeout=stage.timeout)
         if known is not None and _missing_required(known.kpis, required_kpis) is not None:
             known = None  # kept under another objective: not an answer to this question
     if known is not None:

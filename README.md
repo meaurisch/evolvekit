@@ -907,13 +907,17 @@ two things keep a power cut from costing those hours:
 
 - **Every successful evaluator run is kept** under `work/cache/`, keyed by what
   was run: the candidate's source, the stage and its command, the instance,
-  the seed, public or hold-out. Running the same thing again is a lookup
-  (`eval_finished` with `cached: true` and no evaluator time; `status` counts
-  them). Failures are never kept — a crash may have been the machine's fault,
-  and a retry has to be a real one. The same configuration under a second
-  candidate id is the same run, too. The key cannot see the solver itself: a
-  run directory is one experiment, so swap the binary under a new `--run-dir`,
-  or set `evaluate.cache: false`.
+  the seed, public or hold-out — and the *contents* of every file among them
+  (the instance file, input files and directories, the solver script and
+  interpreter named in the command), so a regenerated instance or a fixed
+  `solve.py` is a new run, not an old result. Running the same thing again is a
+  lookup (`eval_finished` with `cached: true` and no evaluator time; `status`
+  counts them). A kept result that took longer than the stage's current
+  `timeout` is not reused. Failures are never kept — a crash may have been the
+  machine's fault, and a retry has to be a real one. The same configuration
+  under a second candidate id is the same run, too. The key cannot see a
+  program found on `PATH`, or files the solver opens by itself: swap those
+  under a new `--run-dir`, or set `evaluate.cache: false`.
 - **A generation's children are written down before they are evaluated**
   (`pending.json`). The resumed run evaluates *those* children, under the same
   ids — so their finished runs are in the cache and the model calls that bred
