@@ -72,8 +72,28 @@ _T95 = (
 )
 
 
+_Z975 = 1.959963984540054
+"""The normal quantile the t quantile falls towards as the samples grow."""
+
+
 def _t95(df: int) -> float:
-    return _T95[df - 1] if 1 <= df <= len(_T95) else 1.96
+    """The two-sided 95 % critical value of Student's t with `df` degrees of
+    freedom. The table up to 30; beyond it the Cornish-Fisher expansion around
+    the normal quantile, which is within 0.0005 of the exact value from 30 on.
+    1.96 is the limit, not the value: at 31 it is 2.040, and an interval on
+    32 instances drawn with 1.96 is about 4 % narrower than it should be."""
+    if df < 1:
+        raise ValueError(f"degrees of freedom must be >= 1, got {df}")
+    if df <= len(_T95):
+        return _T95[df - 1]
+    z = _Z975
+    return (
+        z
+        + (z**3 + z) / (4 * df)
+        + (5 * z**5 + 16 * z**3 + 3 * z) / (96 * df**2)
+        + (3 * z**7 + 19 * z**5 + 17 * z**3 - 15 * z) / (384 * df**3)
+        + (79 * z**9 + 776 * z**7 + 1482 * z**5 - 1920 * z**3 - 945 * z) / (92160 * df**4)
+    )
 
 
 def wilcoxon_signed_rank(differences: Sequence[float]) -> dict[str, Any]:
@@ -224,6 +244,11 @@ def confirm(
         raise ValueError(f"{run_dir} holds no seed candidate: there is no baseline to compare with")
     if not seeds:
         raise ValueError("--seeds: name at least one seed the search never used")
+    twice = sorted({seed for seed in seeds if list(seeds).count(seed) > 1})
+    if twice:
+        # The same seed twice is the same run twice: a pair counted double,
+        # and an interval narrower than the evidence.
+        raise ValueError(f"--seeds: {', '.join(map(str, twice))} is given twice")
     stage = config.final_stage
     if stage.kind != "command" or not stage.fans_out:
         raise ConfigError(
@@ -358,10 +383,17 @@ def _analyse(comparison: Comparison) -> None:
         mine = table.get(cid, {})
         per_instance = []
         for instance in comparison.instances:
-            pairs = [(base[(instance, s)], mine[(instance, s)]) for s in comparison.seeds
-                     if (instance, s) in base and (instance, s) in mine and base[(instance, s)] != 0]
+            # A pair is dropped when either run of it failed or timed out, and
+            # when the baseline reached 0 (a percentage of it is no number).
+            # Both are counted: an interval over fewer pairs than planned has
+            # to say so.
+            keys = [(instance, s) for s in comparison.seeds]
+            finished = [key for key in keys if key in base and key in mine]
+            pairs = [(base[key], mine[key]) for key in finished if base[key] != 0]
+            dropped = {"failed_pairs": len(keys) - len(finished), "zero_baseline_pairs": len(finished) - len(pairs)}
             if not pairs:
-                per_instance.append({"instance": instance, "pairs": 0, "baseline": None, "candidate": None, "improvement_pct": None})
+                per_instance.append({"instance": instance, "pairs": 0, "baseline": None, "candidate": None,
+                                     "improvement_pct": None, **dropped})
                 continue
             gains = [100.0 * sign * (b - c) / abs(b) for b, c in pairs]
             per_instance.append({
@@ -369,15 +401,28 @@ def _analyse(comparison: Comparison) -> None:
                 "baseline": fmean(b for b, _ in pairs), "candidate": fmean(c for _, c in pairs),
                 "improvement_pct": fmean(gains),
                 "pair_wins": sum(1 for g in gains if g > 0),
+                **dropped,
             })
         differences = [r["improvement_pct"] for r in per_instance if r["improvement_pct"] is not None]
         failed = sum(1 for r in comparison.runs if r["configuration"] in (cid, BASELINE) and not r["ok"])
+        planned = len(comparison.instances) * len(comparison.seeds)
+        failed_pairs = sum(r["failed_pairs"] for r in per_instance)
+        zero_pairs = sum(r["zero_baseline_pairs"] for r in per_instance)
+        summary = paired_summary(differences)
+        # The statistic and its thresholds stay as they are; the verdict says
+        # plainly what the interval leaves out.
+        if failed_pairs:
+            summary["verdict"] += f"; {failed_pairs} of {planned} pairs failed and are not in this interval"
+        if zero_pairs:
+            summary["verdict"] += f"; {zero_pairs} of {planned} pairs had a baseline of 0 and are not in this interval"
         comparison.per_candidate[cid] = {
             "per_instance": per_instance,
-            "summary": paired_summary(differences),
+            "summary": summary,
             "pairs": sum(r["pairs"] for r in per_instance),
-            "pairs_planned": len(comparison.instances) * len(comparison.seeds),
+            "pairs_planned": planned,
             "failed_runs": failed,
+            "failed_pairs": failed_pairs,
+            "zero_baseline_pairs": zero_pairs,
         }
 
 
@@ -394,29 +439,44 @@ def render_markdown(comparison: Comparison) -> str:
     for cid, result in comparison.per_candidate.items():
         s = result["summary"]
         lines += [f"## `{cid}` against the baseline", ""]
+        counted = (
+            f"{result['pairs']} of {result['pairs_planned']} (instance, seed) pairs are in the comparison; "
+            f"{result.get('failed_pairs', 0)} failed or timed out, "
+            f"{result.get('zero_baseline_pairs', 0)} had a baseline of 0; {result['failed_runs']} run(s) failed."
+        )
         if s["mean"] is None:
-            lines += ["No pair of runs finished for both configurations.", ""]
+            lines += ["No pair of runs finished for both configurations.", "", counted, ""]
             continue
         interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]" if s.get("ci95") else "n/a"
         p = s["wilcoxon"]["p"]
+        verdict = s["verdict"].capitalize()
         lines += [
             f"**Mean improvement {s['mean']:+.3f} %**, 95 % CI {interval} over {s['n']} instance(s); "
             f"{s['wins']} better, {s['losses']} worse; Wilcoxon signed-rank p = "
-            + ("n/a" if p is None else f"{p:.4f}") + f". **{s['verdict'].capitalize()}.**",
+            + ("n/a" if p is None else f"{p:.4f}") + f". **{verdict}.**",
             "",
-            f"{result['pairs']} of {result['pairs_planned']} (instance, seed) pairs finished for both; "
-            f"{result['failed_runs']} run(s) failed.",
+            counted,
             "",
-            "| instance | baseline | candidate | improvement | pairs won |",
-            "|---|--:|--:|--:|--:|",
+            "| instance | baseline | candidate | improvement | pairs won | dropped |",
+            "|---|--:|--:|--:|--:|--:|",
         ]
         for row in result["per_instance"]:
+            dropped = _dropped(row)
             if row["improvement_pct"] is None:
-                lines.append(f"| {row['instance']} | – | – | – | 0 of 0 |")
+                lines.append(f"| {row['instance']} | – | – | – | 0 of 0 | {dropped} |")
             else:
                 lines.append(
                     f"| {row['instance']} | {row['baseline']:.6g} | {row['candidate']:.6g} | "
-                    f"{row['improvement_pct']:+.3f} % | {row['pair_wins']} of {row['pairs']} |"
+                    f"{row['improvement_pct']:+.3f} % | {row['pair_wins']} of {row['pairs']} | {dropped} |"
                 )
         lines.append("")
     return "\n".join(lines)
+
+
+def _dropped(row: dict[str, Any]) -> str:
+    parts = []
+    if row.get("failed_pairs"):
+        parts.append(f"{row['failed_pairs']} failed")
+    if row.get("zero_baseline_pairs"):
+        parts.append(f"{row['zero_baseline_pairs']} baseline 0")
+    return ", ".join(parts) or "–"

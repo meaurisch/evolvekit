@@ -1015,8 +1015,13 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   `confirm --run-dir runs/b --candidates g011-c0085 --against g012-c0096@runs/a --seeds 2001,2002,2003`.
   The other run's candidate has to be valid under *this* config's
   `problem.parameters`; it is checked before anything runs.
-- A failed run costs its pair, not the comparison. Finished runs are cached, so
-  an interrupted confirmation — or one extended by more seeds — pays only for
+- A failed run costs its pair, not the comparison — but it is counted: per
+  candidate and per instance, `failed_pairs` (a run failed or timed out) and
+  `zero_baseline_pairs` (the baseline reached 0, and a percentage of 0 is no
+  number) are in `comparison.json` and `comparison.md`, and whenever there are
+  any the verdict says "N of M pairs failed and are not in this interval". A
+  seed given twice in `--seeds` is refused. Finished runs are cached, so an
+  interrupted confirmation — or one extended by more seeds — pays only for
   what is new.
 - Everything lands in `<run-dir>/confirm/<label>/`: `comparison.md`,
   `comparison.json`, every run in `results.json`, all logs, and an event log
