@@ -12,3 +12,6 @@ Conventions for ANY coding agent (vendor-neutral).
 - The README is the manual. To set up a new experiment, start from
   [docs/new-experiment.md](docs/new-experiment.md) and copy the closest
   directory under `examples/`.
+- To put an application behind evolvekit for studies, write a harness:
+  [docs/harness-authoring.md](docs/harness-authoring.md). Inside a harness
+  folder, its own `AGENTS.md` governs, and `evolvekit harness check` must pass.

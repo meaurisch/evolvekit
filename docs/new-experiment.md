@@ -7,6 +7,12 @@ the README section that explains the why. `examples/binpacking/` is the worked
 version of everything below; `examples/pyvrp/` is the heavyweight version
 (long stochastic evaluator, external solver, multi-seed stages).
 
+An application that already has a **harness** — PyVRP, or anything else
+under `harnesses/` — needs no experiment directory at all: make a study on it
+instead ([Harnesses and studies](../README.md#harnesses-and-studies)). An
+application that several people will tune is worth a harness of its own:
+[harness-authoring.md](harness-authoring.md).
+
 ## 0. Scaffold
 
 ```
