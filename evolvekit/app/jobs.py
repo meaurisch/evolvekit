@@ -47,6 +47,7 @@ PRICES = {"anthropic/claude-sonnet-5": (2.0, 10.0)}
 """USD per million input and output tokens, for the models the app suggests."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+_BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
 DocumentOf = Callable[[Path], Any]
 
 
@@ -109,7 +110,9 @@ def phase(run_dir: Path) -> dict[str, Any]:
                     "error": f"the run did not start: {_log_tail(run_dir)}"}
         return {"phase": "unknown"}
     if job.get("phase") in ("search", "check") and not _alive(job.get("pid")):
-        return {**job, "phase": "failed", "error": f"the run's process ended without finishing: {_log_tail(run_dir)}"}
+        return {**job, "phase": "failed",
+                "error": "the run's process ended without finishing: it was ended from outside, or the computer "
+                         f"restarted. The last thing it wrote: {_log_tail(run_dir, 1)}"}
     return job
 
 
@@ -152,20 +155,40 @@ def ai_models(home: Any) -> dict[str, Any] | None:
     return {"small": dict(slot), "strong": dict(slot)}
 
 
+_LAUNCHER = r"""
+import json, os, subprocess, sys
+argv, cwd, log = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
+with open(log, "ab") as out:
+    options = dict(cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True)
+    if os.name == "nt":
+        try:
+            process = subprocess.Popen(argv, creationflags=%d, **options)
+        except OSError:
+            process = subprocess.Popen(argv, creationflags=%d, **options)
+    else:
+        process = subprocess.Popen(argv, start_new_session=True, **options)
+print(process.pid)
+""" % (_DETACHED | _BREAKAWAY, _DETACHED)
+
+
 def _launch(home: Any, root: Path, run_dir: Path, extra: list[str]) -> int:
+    """Start the run so that nothing that ends the app ends the run: through a
+    launcher that exits at once, so the run is nobody's child -- a host that
+    kills the app's process tree (a terminal, an IDE) does not reach it --
+    detached from any console, in a process group (or session) of its own,
+    and outside the app's job object where Windows allows that."""
     env = {**os.environ, **home.job_environment(), "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     argv = [sys.executable, "-m", "evolvekit.app.job", str(root), run_dir.name, *extra]
-    with open(run_dir / LOG, "ab") as log:
-        options: dict[str, Any] = {"cwd": str(root), "stdin": subprocess.DEVNULL, "stdout": log,
-                                   "stderr": subprocess.STDOUT, "env": env, "close_fds": True}
-        if os.name == "nt":
-            options["creationflags"] = _DETACHED
-        else:
-            options["start_new_session"] = True
-        process = subprocess.Popen(argv, **options)
-    (run_dir / LAUNCH).write_text(json.dumps({"pid": process.pid, "started_at": _now().isoformat(timespec="seconds"),
+    done = subprocess.run([sys.executable, "-c", _LAUNCHER, json.dumps(argv), str(root), str(run_dir / LOG)],
+                          env=env, capture_output=True, text=True, timeout=60)
+    try:
+        pid = int(done.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        said = (done.stderr.strip().splitlines() or ["no message"])[-1]
+        raise AppError(f"the run could not be started: {said}", 500) from None
+    (run_dir / LAUNCH).write_text(json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
                                               "argv": argv[1:]}, indent=2), encoding="utf-8")
-    return process.pid
+    return pid
 
 
 def start(home: Any, root: Path) -> dict[str, Any]:
@@ -311,7 +334,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     pct, verdict = improvement.get("pct"), improvement.get("verdict")
     better = _better_word(goal["direction"])
     if pct is None or verdict in ("none", None) or (pct or 0) <= 0:
-        best_line = "No combination has beaten the starting point yet."
+        best_line = "No combination beat the starting point." if finished else "No combination has beaten the starting point yet."
     else:
         noise = {"clear": "clearly better", "within noise": "within the noise so far", "worse": "worse",
                  "unknown": "too early to tell"}.get(str(verdict), str(verdict))
@@ -321,14 +344,18 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
               if s.get("elapsed_s") is not None]
 
     stage = health.get("stage") or {}
-    current = generation.get("current")
+    # The round being run is the one after the last finished; round 0 is the
+    # starting point alone.
+    current = done_rounds + 1 if isinstance(done_rounds, int) else (0 if stage else None)
     if job.get("phase") == "check":
         now_line = "The final check: the best against the starting point on the held-back cases."
     elif stage and isinstance(current, int):
-        what = "measuring the starting point" if current == 0 else f"round {current}"
         cases = len(study.training)
-        now_line = (f"{what[0].upper() + what[1:]}: {stage.get('candidates')} combination{'s' if stage.get('candidates') != 1 else ''} "
-                    f"on {cases} case{'s' if cases != 1 else ''}, {stage.get('runs_done')} of {stage.get('runs_planned')} runs done.")
+        on = f"on {cases} case{'s' if cases != 1 else ''}"
+        runs = f"{stage.get('runs_done')} of {stage.get('runs_planned')} runs done"
+        count = stage.get("candidates") or 0
+        now_line = (f"Measuring the starting point {on}: {runs}." if current == 0
+                    else f"Round {current}: {count} combination{'s' if count != 1 else ''} {on}, {runs}.")
     elif job.get("phase") in ("starting", "search"):
         now_line = "Getting ready: preparing the runs."
     else:
@@ -469,10 +496,16 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
             resolved = resolve_kpi(study, harness, name)
         except KeyError:
             continue
+        def value(row: dict[str, Any] | None) -> Any:
+            # A goal measured per case as a share of the start is kept beside
+            # its plain mean (`<name>_raw`): people read the plain one.
+            measured = (row or {}).get("kpis") or {}
+            return measured.get(f"{name}_raw", measured.get(name))
+
         kpis.append({
             "name": name, "says": resolved.get("says") or name, "unit": resolved.get("unit") or "",
             "direction": resolved.get("direction", "lower"),
-            "training": {"start": (seed or {}).get("kpis", {}).get(name), "best": (best or {}).get("kpis", {}).get(name)},
+            "training": {"start": value(seed), "best": value(best)},
             "test": {"start": test.get(BASELINE, {}).get(name), "best": test.get((job.get("final") or {}).get("candidate") or "", {}).get(name)},
         })
     guardrails = [{"kpi": g.kpi, "max": g.max, "min": g.min} for g in study.guardrails]
@@ -663,7 +696,8 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
     if state == "done":
         final = job.get("final") or {}
         if final.get("skipped"):
-            return {"kind": "finished", "run": run_dir.name, "line": "finished · no final check"}
+            reason = str(final["skipped"]).split(":")[0].split(",")[0]  # "the starting point stayed the best"
+            return {"kind": "finished", "run": run_dir.name, "line": f"finished · {reason}"}
         comparison = _read(run_dir / final["comparison"]) if final.get("comparison") else None
         summary = (((comparison or {}).get("per_candidate") or {}).get(final.get("candidate") or "") or {}).get("summary") or {}
         mean = summary.get("mean")

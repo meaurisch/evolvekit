@@ -16,6 +16,7 @@ its harness and says, in sentences naming the key, what is missing or wrong
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
@@ -450,12 +451,28 @@ class Study:
         return self.tuned_settings() + list(self.data)
 
 
+_RETRIES, _RETRY_S = 40, 0.025
+
+
+def _retrying(action: Any) -> Any:
+    """`action()`, tried again for up to a second while Windows says the file
+    is in use: a study can be read at the moment the app replaces it."""
+    for attempt in range(_RETRIES):
+        try:
+            return action()
+        except PermissionError:
+            if attempt == _RETRIES - 1:
+                raise
+            time.sleep(_RETRY_S)
+    return None
+
+
 def load_study(folder: str | Path) -> Study:
     path = Path(folder) / "study.yaml"
     if not path.is_file():
         raise HarnessError(f"{folder}: there is no study.yaml in this folder")
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(_retrying(lambda: path.read_text(encoding="utf-8")))
     except yaml.YAMLError as exc:
         raise HarnessError(f"study.yaml: not valid YAML: {exc}") from None
     return Study.parse(raw)
@@ -463,15 +480,10 @@ def load_study(folder: str | Path) -> Study:
 
 def save_study(study: Study, folder: str | Path) -> Path:
     """Write `study.yaml` (atomically: a half-written study is worse than the last one)."""
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
-    target = folder / "study.yaml"
-    scratch = target.with_suffix(".yaml.tmp")
-    scratch.write_text(
-        yaml.safe_dump(study.to_yaml(), sort_keys=False, allow_unicode=True, width=100),
-        encoding="utf-8", newline="\n",
-    )
-    scratch.replace(target)
+    from evolvekit.ledger import _atomic_write
+
+    target = Path(folder) / "study.yaml"
+    _atomic_write(target, yaml.safe_dump(study.to_yaml(), sort_keys=False, allow_unicode=True, width=100))
     return target
 
 

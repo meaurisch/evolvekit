@@ -21,8 +21,8 @@ cases:
   label: delivery request
   formats: [.json, .vrp, .txt]
   describe: >
-    A PyVRP request in JSON -- the pyvrp_hard benchmark's format, optionally with tags on tasks and
-    vehicle types (see the harness's README) -- or a VRPLIB instance file. VRPLIB files suit settings
+    A PyVRP request in JSON (the pyvrp_hard benchmark's format, optionally with tags on tasks and
+    vehicle types) or a VRPLIB instance file. VRPLIB files suit settings
     studies only: they have no vehicle classes or tags for a data change to select by.
 
 inputs:
@@ -484,8 +484,8 @@ levers:
     help: Change the costs PyVRP sees for some vehicle types.
     explain: >
       PyVRP minimises the sum of these costs plus the prizes of the tasks it leaves out. Changing
-      them changes which plans it prefers -- how many vehicles, shorter or quicker routes, which
-      class serves what -- not what the plans really cost. Measure success with real_cost,
+      them changes which plans it prefers (how many vehicles, shorter or quicker routes, which
+      class serves what), not what the plans really cost. Measure success with real_cost,
       deliveries_per_hour or another KPI of the untouched request, never with solver_cost.
   fleet_size:
     label: Fleet size

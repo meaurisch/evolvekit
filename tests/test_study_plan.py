@@ -72,6 +72,19 @@ def test_a_plan_with_fewer_than_three_rounds_is_blocked_with_three_ways_out():
     assert len(plan.ways_out) == 3 and plan.summary() == plan.blocked
 
 
+def test_the_last_way_out_is_said_in_minutes_below_an_hour_and_a_half():
+    short = _plan(training=10, time_limit_s=20, hours=0.1)
+    assert short.blocked and short.ways_out[-1].endswith("minutes in total.")
+    assert _plan(training=10, time_limit_s=120, hours=1).ways_out[-1].endswith("hours in total.")
+
+
+def test_an_expert_who_sets_the_rounds_is_not_blocked():
+    blocked = _plan(training=10, time_limit_s=120, hours=1)
+    assert blocked.blocked
+    decided = _plan(training=10, time_limit_s=120, hours=1, overrides={"children": 2, "generations": 2})
+    assert not decided.blocked and decided.ways_out == () and decided.generations == 2
+
+
 def test_when_the_final_check_alone_is_too_long_the_way_out_is_fewer_test_cases():
     plan = _plan(training=2, test=10, time_limit_s=60, hours=0.5)
     # Two workers; the final check alone is ceil(60/2) x 61 s = 30.5 min, more

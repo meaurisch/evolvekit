@@ -31,6 +31,7 @@ from evolvekit.harness.execute import runner_command
 from evolvekit.harness.library import HarnessEntry, create_study, find_harnesses, install_harness, slugify
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, save_study, study_problems
+from evolvekit.ledger import _atomic_write
 
 __all__ = ["STEPS", "Home", "safe_name"]
 
@@ -180,10 +181,7 @@ class Home:
                 values[name] = str(value).strip()
         lines = ["# API keys for evolvekit's app. Written by the app; it never shows them again."]
         lines += [f"{name}={value}" for name, value in sorted(values.items())]
-        target = self.root / ".env"
-        scratch = target.with_suffix(".tmp")
-        scratch.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-        scratch.replace(target)
+        _atomic_write(self.root / ".env", "\n".join(lines) + "\n")
 
     def job_environment(self) -> dict[str, str]:
         """The keys a run needs, for its environment: passed explicitly, so the
@@ -193,9 +191,7 @@ class Home:
 
     @staticmethod
     def _write_yaml(path: Path, data: Any) -> None:
-        scratch = path.with_suffix(".tmp")
-        scratch.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8", newline="\n")
-        scratch.replace(path)
+        _atomic_write(path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
     # -- harnesses --------------------------------------------------------------
 
@@ -335,6 +331,40 @@ class Home:
             self.inspect_case(slug, name)
         return added
 
+    def import_folder(self, slug: str, folder: str) -> dict[str, Any]:
+        """Copy every case file in `folder` (and below it) into the study: the
+        app runs on this computer, so a folder can be named instead of uploaded."""
+        root, study, harness = self.load(slug)
+        source = Path(str(folder or "").strip().strip('"')).expanduser()
+        if not str(folder or "").strip() or not source.is_absolute():
+            raise AppError("give the full path of the folder, such as C:\\Users\\you\\Documents\\cases")
+        if not source.is_dir():
+            raise AppError(f"there is no folder at {source}")
+        found = sorted(p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in harness.cases.formats)
+        if not found:
+            raise AppError(f"{source} holds no {' or '.join(harness.cases.formats)} files")
+        if len(found) > 500:
+            raise AppError(f"{source} holds {len(found)} case files; a study needs a few, not hundreds -- choose a smaller folder")
+        added, skipped = [], []
+        for path in found:
+            try:
+                name = safe_name(path.name, harness.cases.formats)
+            except AppError:
+                skipped.append(path.name)
+                continue
+            if path.stat().st_size > MAX_UPLOAD:
+                skipped.append(path.name)
+                continue
+            shutil.copyfile(path, root / "cases" / name)
+            relative = f"cases/{name}"
+            if relative not in study.training and relative not in study.test:
+                study.training.append(relative)
+            added.append(name)
+        save_study(study, root)
+        for name in added:
+            self.inspect_case(slug, name, force=True)
+        return {"added": added, "skipped": skipped}
+
     def put_input(self, slug: str, input_name: str, filename: str, data: bytes) -> str:
         root, study, harness = self.load(slug)
         spec = harness.inputs.get(input_name)
@@ -383,10 +413,7 @@ class Home:
 
     @staticmethod
     def _write_inspected(root: Path, cache: dict[str, Any]) -> None:
-        path = root / "cases" / INSPECTED
-        scratch = path.with_suffix(".tmp")
-        scratch.write_text(json.dumps(cache, indent=1), encoding="utf-8")
-        scratch.replace(path)
+        _atomic_write(root / "cases" / INSPECTED, json.dumps(cache, indent=1))
 
     def inspect_case(self, slug: str, name: str, *, force: bool = False) -> dict[str, Any]:
         """What the harness's runner says about a case ("1,200 tasks, 18

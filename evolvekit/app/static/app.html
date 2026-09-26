@@ -1,3 +1,1641 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>evolvekit</title></head>
-<body><main id="app">evolvekit</main></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>evolvekit</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M8 21l5-6 4 3 7-9' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+/* ------------------------------------------------------------------ tokens
+   The dashboard's colours, light and dark, so the two feel like one product.
+   Status colours are reserved for state and always travel with an icon and
+   a word. */
+:root {
+  color-scheme: light;
+  --page: #f6f6f3; --surface: #ffffff; --surface-2: #fafaf8; --sunken: #f1f0ec;
+  --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #85837c;
+  --hair: rgba(11,11,11,.10); --hair-strong: rgba(11,11,11,.18);
+  --grid: #e7e6df; --axis: #c3c2b7;
+  --accent: #2a78d6; --accent-wash: rgba(42,120,214,.12); --accent-ink: #1c5cab; --on-accent: #ffffff;
+  --worse: #e34948; --worse-wash: rgba(227,73,72,.12);
+  --good: #0ca30c; --good-ink: #006300; --good-wash: rgba(12,163,12,.10);
+  --warning: #9a6600; --warning-fill: #fab219; --warning-wash: rgba(250,178,25,.16);
+  --critical: #d03b3b; --critical-ink: #b42525;
+  --shadow: 0 1px 2px rgba(11,11,11,.04), 0 8px 24px -12px rgba(11,11,11,.12);
+  --radius: 12px;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #201f1e; --sunken: #141413;
+  --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #8f8d86;
+  --hair: rgba(255,255,255,.10); --hair-strong: rgba(255,255,255,.20);
+  --grid: #2a2a28; --axis: #3d3d3a;
+  --accent: #4a93ea; --accent-wash: rgba(74,147,234,.16); --accent-ink: #86b6ef; --on-accent: #0b0b0b;
+  --worse: #e66767; --worse-wash: rgba(230,103,103,.16);
+  --good: #25b825; --good-ink: #4fd14f; --good-wash: rgba(37,184,37,.14);
+  --warning: #fab219; --warning-fill: #fab219; --warning-wash: rgba(250,178,25,.14);
+  --critical: #ef6a6a; --critical-ink: #ef6a6a;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px -16px rgba(0,0,0,.7);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #201f1e; --sunken: #141413;
+    --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #8f8d86;
+    --hair: rgba(255,255,255,.10); --hair-strong: rgba(255,255,255,.20);
+    --grid: #2a2a28; --axis: #3d3d3a;
+    --accent: #4a93ea; --accent-wash: rgba(74,147,234,.16); --accent-ink: #86b6ef; --on-accent: #0b0b0b;
+    --worse: #e66767; --worse-wash: rgba(230,103,103,.16);
+    --good: #25b825; --good-ink: #4fd14f; --good-wash: rgba(37,184,37,.14);
+    --warning: #fab219; --warning-fill: #fab219; --warning-wash: rgba(250,178,25,.14);
+    --critical: #ef6a6a; --critical-ink: #ef6a6a;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px -16px rgba(0,0,0,.7);
+  }
+}
+
+/* -------------------------------------------------------------------- base */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+code, pre, .mono { font-family: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace; font-size: 13px; }
+a { color: var(--accent-ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.num { font-variant-numeric: tabular-nums; }
+h1, h2, h3 { letter-spacing: -.01em; line-height: 1.25; }
+h1 { font-size: 26px; margin: 0 0 6px; }
+h2 { font-size: 19px; margin: 28px 0 10px; }
+h3 { font-size: 16px; margin: 18px 0 8px; }
+p { margin: 8px 0; }
+.lede { color: var(--ink-2); max-width: 70ch; }
+.muted { color: var(--ink-2); }
+.faint { color: var(--ink-3); font-size: 13px; }
+.small { font-size: 13px; }
+hr { border: 0; border-top: 1px solid var(--hair); margin: 24px 0; }
+
+/* ------------------------------------------------------------------ header */
+.top {
+  position: sticky; top: 0; z-index: 30;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--hair);
+}
+.top-in { max-width: 1240px; margin: 0 auto; padding: 10px 20px; display: flex; align-items: center; gap: 14px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); font-weight: 650; }
+.crumbs { display: flex; gap: 6px; align-items: center; min-width: 0; color: var(--ink-2); font-size: 14px; flex: 1; }
+.crumbs a { color: var(--ink-2); text-decoration: none; }
+.crumbs a:hover { color: var(--ink); text-decoration: underline; }
+.crumbs span.sep { color: var(--ink-3); }
+.crumbs .here { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top-actions { display: flex; gap: 8px; }
+
+/* -------------------------------------------------------------------- page */
+main { max-width: 1240px; margin: 0 auto; padding: 24px 20px 96px; }
+.narrow { max-width: 820px; }
+.card {
+  background: var(--surface); border: 1px solid var(--hair); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 18px 20px;
+}
+:not(.grid) > .card + .card { margin-top: 12px; }
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.row.between { justify-content: space-between; }
+.stack > * + * { margin-top: 10px; }
+.spacer { flex: 1; }
+
+/* ----------------------------------------------------------------- buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 40px; padding: 8px 16px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--hair-strong); background: var(--surface); color: var(--ink);
+  font-weight: 600; text-decoration: none; white-space: nowrap;
+}
+.btn:hover { background: var(--surface-2); }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.danger { color: var(--critical-ink); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--accent-ink); padding-inline: 8px; }
+.btn.quiet:hover { background: var(--accent-wash); }
+.btn.small { min-height: 32px; padding: 4px 10px; font-size: 13px; border-radius: 8px; }
+.linkish { background: none; border: 0; padding: 0; color: var(--accent-ink); text-decoration: underline; cursor: pointer; }
+
+/* ------------------------------------------------------------------ forms */
+label.field { display: block; margin: 12px 0; }
+label.field > span.label, .label { display: block; font-weight: 600; margin-bottom: 4px; }
+.hint { display: block; color: var(--ink-2); font-size: 13px; margin-top: 4px; }
+input[type=text], input[type=number], input[type=password], input[type=search], select, textarea {
+  width: 100%; min-height: 40px; padding: 8px 10px; border-radius: 9px;
+  border: 1px solid var(--hair-strong); background: var(--surface); color: var(--ink);
+}
+textarea { min-height: 90px; resize: vertical; }
+input.inline, select.inline { width: auto; display: inline-block; }
+input[type=number] { font-variant-numeric: tabular-nums; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+fieldset { border: 0; margin: 0; padding: 0; }
+legend { font-weight: 600; margin-bottom: 6px; }
+.seg { display: inline-flex; border: 1px solid var(--hair-strong); border-radius: 10px; overflow: hidden; flex-wrap: wrap; }
+.seg label { display: flex; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer; font-size: 14px; border-right: 1px solid var(--hair); }
+.seg label:last-child { border-right: 0; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label:has(input:checked) { background: var(--accent-wash); color: var(--accent-ink); font-weight: 600; }
+.seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.choice {
+  display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 12px; cursor: pointer;
+  border: 1px solid var(--hair-strong); background: var(--surface);
+}
+.choice:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-wash); }
+.choice input { margin-top: 4px; accent-color: var(--accent); }
+.choice .t { font-weight: 650; }
+.choice .d { color: var(--ink-2); font-size: 14px; }
+.choices { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+
+/* ----------------------------------------------------------------- status */
+.icon { width: 18px; height: 18px; flex: none; }
+.status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; }
+.status.good { color: var(--good-ink); } .status.bad { color: var(--critical-ink); }
+.status.warn { color: var(--warning); } .status.info { color: var(--accent-ink); } .status.none { color: var(--ink-2); }
+.note { border-radius: 10px; padding: 10px 14px; background: var(--sunken); display: flex; gap: 10px; align-items: flex-start; }
+.note .icon { flex: none; width: 18px; height: 18px; margin-top: 2px; }
+.note.warn { background: var(--warning-wash); } .note.bad { background: var(--worse-wash); }
+.note.good { background: var(--good-wash); } .note.info { background: var(--accent-wash); }
+.badge { display: inline-block; font-size: 12px; font-weight: 650; padding: 1px 8px; border-radius: 999px; background: var(--sunken); color: var(--ink-2); }
+.badge.accent { background: var(--accent-wash); color: var(--accent-ink); }
+.badge.good { background: var(--good-wash); color: var(--good-ink); }
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--hair-strong); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--good); animation: pulse 1.8s ease-out infinite; flex: none; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 55%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+@media (prefers-reduced-motion: reduce) { .spinner, .pulse { animation: none; } }
+
+/* ---------------------------------------------------------------- tables */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+th { font-size: 12px; font-weight: 650; color: var(--ink-2); text-transform: uppercase; letter-spacing: .04em; }
+td.n, th.n { text-align: right; }
+
+/* ------------------------------------------------------------------ home */
+.study-card { display: flex; flex-direction: column; gap: 8px; text-decoration: none; color: var(--ink); min-height: 132px; }
+.study-card:hover { border-color: var(--accent); }
+.study-card .name { font-weight: 650; font-size: 17px; }
+.empty { text-align: center; padding: 40px 20px; }
+.drop {
+  border: 2px dashed var(--hair-strong); border-radius: 14px; padding: 26px 18px; text-align: center;
+  background: var(--surface-2); color: var(--ink-2);
+}
+.drop.over { border-color: var(--accent); background: var(--accent-wash); color: var(--ink); }
+
+/* ---------------------------------------------------------------- wizard */
+.wizard { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 28px; align-items: start; }
+.wizard > * { min-width: 0; }
+.step { overflow-wrap: break-word; }
+.wizard.with-side { grid-template-columns: 230px minmax(0, 1fr) 340px; }
+.rail { position: sticky; top: 76px; }
+.rail ol { list-style: none; margin: 0; padding: 0; }
+.rail li a {
+  display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px;
+  color: var(--ink-2); text-decoration: none; font-size: 14px;
+}
+.rail li a:hover { background: var(--surface); color: var(--ink); }
+.rail li a[aria-current="step"] { background: var(--accent-wash); color: var(--accent-ink); font-weight: 650; }
+.rail .dot { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; border: 1px solid var(--hair-strong); background: var(--surface); flex: none; }
+.rail .dot.ok { background: var(--good-wash); border-color: transparent; color: var(--good-ink); }
+.rail .dot.todo { background: var(--warning-wash); border-color: transparent; color: var(--warning); }
+.step-foot { display: flex; gap: 10px; justify-content: space-between; align-items: center; margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--hair); flex-wrap: wrap; }
+.side { position: sticky; top: 76px; max-height: calc(100vh - 96px); display: flex; flex-direction: column; }
+.setting { padding: 14px 0; border-bottom: 1px solid var(--hair); }
+.setting:last-child { border-bottom: 0; }
+.setting .head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.setting .title { font-weight: 650; }
+.setting .more { margin-top: 8px; display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); max-width: 560px; }
+details > summary { cursor: pointer; color: var(--accent-ink); font-size: 14px; }
+details[open] > summary { margin-bottom: 6px; }
+.explain { color: var(--ink-2); font-size: 14px; max-width: 70ch; }
+.item { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-bottom: 1px solid var(--hair); }
+.item:last-child { border-bottom: 0; }
+.item .body { flex: 1; min-width: 0; }
+.item .what { font-weight: 600; }
+.bar { height: 8px; border-radius: 999px; background: var(--sunken); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+
+/* ------------------------------------------------------------- assistant */
+.chat { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; min-height: 120px; }
+.bubble { padding: 10px 12px; border-radius: 12px; background: var(--sunken); font-size: 14px; }
+.bubble.me { background: var(--accent-wash); align-self: flex-end; max-width: 90%; }
+.proposal { border: 1px solid var(--hair-strong); border-radius: 12px; padding: 10px 12px; background: var(--surface); font-size: 14px; }
+.proposal.bad { border-color: color-mix(in srgb, var(--critical) 50%, transparent); }
+.proposal .says { font-weight: 600; }
+.proposal pre { white-space: pre-wrap; word-break: break-word; background: var(--sunken); padding: 8px; border-radius: 8px; margin: 6px 0 0; }
+
+/* --------------------------------------------------------------- running */
+.big { font-size: 22px; font-weight: 650; line-height: 1.3; }
+.facts { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.fact .k { color: var(--ink-2); font-size: 13px; } .fact .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+svg.chart { width: 100%; height: 170px; display: block; }
+.toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 50; max-width: min(640px, calc(100vw - 32px));
+  background: var(--ink); color: var(--page); padding: 10px 16px; border-radius: 12px; box-shadow: var(--shadow); font-size: 14px; }
+.toast.bad { background: var(--critical-ink); color: #fff; }
+.toast[hidden] { display: none; }
+dialog { border: 1px solid var(--hair); border-radius: 14px; background: var(--surface); color: var(--ink); max-width: min(520px, calc(100vw - 32px)); padding: 20px; box-shadow: var(--shadow); }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+
+/* ------------------------------------------------------------ small screens */
+@media (max-width: 1100px) {
+  .wizard.with-side { grid-template-columns: 210px minmax(0, 1fr); }
+  .wizard.with-side .side { grid-column: 2; position: static; max-height: none; }
+}
+@media (max-width: 760px) {
+  main { padding: 16px 14px 80px; }
+  .top-in { padding: 8px 14px; }
+  .wizard, .wizard.with-side { grid-template-columns: 1fr; gap: 14px; }
+  .wizard.with-side .side { grid-column: 1; }
+  .rail { position: static; }
+  .rail ol { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
+  .rail li a { white-space: nowrap; padding: 6px 8px; }
+  .rail li a .t { display: none; }
+  .rail li a[aria-current="step"] .t { display: inline; }
+  h1 { font-size: 22px; }
+  .card { padding: 14px; }
+  .crumbs .hide-small { display: none; }
+  .step-foot .btn { flex: 1; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="#/" aria-label="evolvekit, home">
+      <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M8 21l5-6 4 3 7-9" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>evolvekit</span>
+    </a>
+    <nav class="crumbs" id="crumbs" aria-label="Where you are"></nav>
+    <div class="top-actions"><a class="btn quiet small" href="#/settings">Settings</a></div>
+  </div>
+</header>
+<main id="view" tabindex="-1"></main>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script>
+"use strict";
+/* =========================================================================
+   evolvekit's app: one page, the JSON API, no build step, no network.
+   ========================================================================= */
+
+// ------------------------------------------------------------------ theme
+(() => {
+  const theme = new URLSearchParams(location.search).get("theme");
+  if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
+})();
+
+// ------------------------------------------------------------------ helpers
+const $ = (sel, root = document) => root.querySelector(sel);
+const view = $("#view");
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value === null || value === undefined || value === false) continue;
+    if (value === "" && (key === "disabled" || key === "checked" || key === "selected" || key === "hidden")) continue;
+    if (key === "class") el.className = value;
+    else if (key === "text") el.textContent = value;
+    else if (key.startsWith("on") && typeof value === "function") el.addEventListener(key.slice(2), value);
+    else if (key === "html") el.innerHTML = value;  // only ever given constant markup
+    else if (value === true) el.setAttribute(key, "");
+    else el.setAttribute(key, value);
+  }
+  for (const child of children.flat(Infinity)) {
+    if (child === null || child === undefined || child === false) continue;
+    el.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return el;
+}
+
+const ICONS = {
+  ok: '<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor" opacity=".16"/><path d="M6 10.5l2.6 2.6L14 7.5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  bad: '<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor" opacity=".16"/><path d="M7 7l6 6M13 7l-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  warn: '<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5l8 14H2z" fill="currentColor" opacity=".18"/><path d="M10 8v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="10" cy="14.6" r="1.1" fill="currentColor"/></svg>',
+  info: '<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor" opacity=".16"/><path d="M10 9v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="10" cy="6.2" r="1.1" fill="currentColor"/></svg>',
+  draft: '<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 14.5V16h1.5l8.6-8.6-1.5-1.5zM15.2 6.3l-1.5-1.5 1-1a1 1 0 011.5 1.5z" fill="currentColor"/></svg>',
+  stop: '<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="2" fill="currentColor"/></svg>',
+};
+function icon(name) { const span = h("span"); span.innerHTML = ICONS[name] || ""; return span.firstChild; }
+function status(kind, text) { return h("span", { class: `status ${kind}` }, icon({ good: "ok", bad: "bad", warn: "warn", info: "info", none: "info" }[kind] || "info"), h("span", {}, text)); }
+function note(kind, ...content) { return h("div", { class: `note ${kind}`, role: kind === "bad" ? "alert" : null }, icon({ good: "ok", bad: "bad", warn: "warn", info: "info" }[kind] || "info"), h("div", {}, ...content)); }
+function fill(box, ...children) { box.replaceChildren(); put(box, ...children); }
+function put(box, ...children) {
+  for (const child of children.flat(Infinity)) if (child !== null && child !== undefined && child !== false && child !== "") box.append(child instanceof Node ? child : String(child));
+}
+function capital(text) { text = String(text || ""); return text ? text[0].toUpperCase() + text.slice(1) : text; }
+function sentence(text) { text = capital(text).trim(); return text && !/[.!?]$/.test(text) ? text + "." : text; }
+function plural(n, one, many) { return `${n} ${n === 1 ? one : (many || one + "s")}`; }
+function fmt(value, digits = 4) {
+  if (value === null || value === undefined || value === "") return "–";
+  if (typeof value === "boolean") return value ? "on" : "off";
+  if (typeof value !== "number") return String(value);
+  if (!isFinite(value)) return "–";
+  const abs = Math.abs(value);
+  if (abs !== 0 && (abs >= 1e6 || abs < 1e-3)) return value.toPrecision(3);
+  return value.toLocaleString(undefined, { maximumFractionDigits: abs >= 100 ? 1 : digits });
+}
+function duration(seconds) {
+  if (seconds === null || seconds === undefined) return "–";
+  seconds = Math.max(0, seconds);
+  if (seconds < 90) return `${Math.round(seconds)} s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} min`;
+  const minutes = Math.round(seconds / 60);
+  return `${Math.floor(minutes / 60)} h ${minutes % 60 ? (minutes % 60) + " min" : ""}`.trim();
+}
+function toast(message, bad = false) {
+  const el = $("#toast");
+  el.textContent = message; el.className = "toast" + (bad ? " bad" : ""); el.hidden = false;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => { el.hidden = true; }, bad ? 7000 : 3500);
+}
+
+async function api(method, path, body, options = {}) {
+  const init = { method, headers: {} };
+  if (body instanceof Blob || body instanceof ArrayBuffer) { init.body = body; init.headers["Content-Type"] = "application/octet-stream"; }
+  else if (body !== undefined) { init.body = JSON.stringify(body); init.headers["Content-Type"] = "application/json"; }
+  let response;
+  try { response = await fetch(path, init); }
+  catch (err) { throw new Error("The app does not answer. Is its window still open?"); }
+  const type = response.headers.get("Content-Type") || "";
+  const payload = type.startsWith("application/json") ? await response.json() : await response.blob();
+  if (!response.ok) {
+    const error = new Error(sentence((payload && payload.error) || `the app answered ${response.status}`));
+    error.status = response.status; throw error;
+  }
+  return options.raw ? { payload, response } : payload;
+}
+async function guarded(action, button) {
+  if (button) button.disabled = true;
+  try { return await action(); }
+  catch (err) { toast(err.message, true); }
+  finally { if (button) button.disabled = false; }
+}
+
+// ------------------------------------------------------------------ routing
+const timers = new Set();
+function every(ms, fn) { const id = setInterval(fn, ms); timers.add(id); return id; }
+function clearTimers() { for (const id of timers) clearInterval(id); timers.clear(); }
+
+function crumbs(...parts) {
+  const nav = $("#crumbs"); nav.replaceChildren();
+  parts.forEach((part, i) => {
+    const hidden = part.small ? "hide-small" : null;
+    if (i) nav.append(h("span", { class: "sep" + (parts[i - 1].small ? " hide-small" : ""), "aria-hidden": "true" }, "/"));
+    nav.append(part.href ? h("a", { href: part.href, class: hidden }, part.text) : h("span", { class: "here" }, part.text));
+  });
+}
+
+async function route() {
+  clearTimers();
+  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  view.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), "Loading…"));
+  try {
+    if (!parts.length) await renderHome();
+    else if (parts[0] === "settings") await renderSettings();
+    else if (parts[0] === "new") await renderNew();
+    else if (parts[0] === "study" && parts[1]) {
+      const slug = parts[1];
+      if (parts[2] === "running") await renderRunning(slug);
+      else if (parts[2] === "results") await renderResults(slug, parts[3]);
+      else await renderStep(slug, Math.min(7, Math.max(1, parseInt(parts[2] || "1", 10) || 1)));
+    } else await renderHome();
+  } catch (err) {
+    view.replaceChildren(h("div", { class: "narrow" }, note("bad", h("p", {}, err.message)), h("p", {}, h("a", { href: "#/" }, "Back to your studies"))));
+  }
+  view.focus({ preventScroll: true });
+}
+window.addEventListener("hashchange", route);
+
+// ===================================================================== home
+const STATE_ICON = { draft: ["none", "draft"], running: ["good", "pulse"], finished: ["good", "ok"], stopped: ["warn", "stop"], failed: ["bad", "bad"], broken: ["bad", "bad"] };
+
+function studyLink(study) {
+  if (study.kind === "running") return `#/study/${study.slug}/running`;
+  if (study.kind === "finished" || study.kind === "stopped" || study.kind === "failed") return `#/study/${study.slug}/results`;
+  return `#/study/${study.slug}/${Math.max(1, parseInt(String(study.line).match(/step (\d)/)?.[1] || "1", 10))}`;
+}
+
+async function renderHome() {
+  crumbs({ text: "Your studies" });
+  const home = await api("GET", "/api/home");
+  const hasKey = Object.values(home.keys || {}).some(Boolean);
+  const studies = home.studies.length ? h("div", { class: "grid" }, home.studies.map((s) => {
+    const [kind, sym] = STATE_ICON[s.kind] || ["none", "info"];
+    const stateEl = sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
+      : h("span", { class: `status ${kind}` }, icon(sym), h("span", {}, s.line));
+    return h("a", { class: "card study-card", href: studyLink(s) },
+      h("span", { class: "name" }, s.name), h("span", { class: "faint" }, s.harness), h("span", { class: "spacer" }), stateEl);
+  })) : h("div", { class: "card empty" },
+    h("h2", { style: "margin-top:0" }, "No studies yet"),
+    h("p", { class: "lede", style: "margin: 0 auto 16px" }, "A study finds the best settings for an application — or the best data to give it — on cases you choose, and then checks the result on cases it never saw."),
+    h("a", { class: "btn primary", href: "#/new" }, "New study"));
+
+  const upload = h("input", { type: "file", accept: ".zip", class: "sr", id: "harness-zip", onchange: (e) => installHarness(e.target.files[0]) });
+  const zipPath = h("input", { type: "text", id: "harness-path", placeholder: "C:\\...\\pyvrp-1.0.0.zip" });
+  const zipAdd = h("button", { class: "btn small", type: "button", onclick: () => guarded(async () => {
+    const harness = await api("POST", "/api/harnesses", { path: zipPath.value.trim() });
+    toast(`${harness.title} ${harness.version} is installed.`); renderHome();
+  }, zipAdd) }, "Install");
+  const harnesses = h("div", { class: "grid" }, home.harnesses.map((x) => h("div", { class: "card" },
+    h("div", { class: "row between" }, h("strong", {}, x.title || x.id), h("span", { class: "badge" + (x.built_in ? "" : " accent") }, x.problem ? "cannot be read" : (x.built_in ? "built in" : "installed") + (x.version ? " · " + x.version : ""))),
+    h("p", { class: "muted small" }, x.problem || x.summary || ""))));
+  const drop = h("div", { class: "drop", tabindex: "0" },
+    h("p", { style: "margin:0 0 8px" }, "Add a harness: drop its .zip file here, or"),
+    h("label", { class: "btn small", for: "harness-zip" }, "Choose a .zip file"), upload,
+    h("div", { class: "row", style: "margin-top:10px; flex-wrap:nowrap; max-width:560px; margin-inline:auto" },
+      h("label", { for: "harness-path", class: "small", style: "white-space:nowrap" }, "or its path:"), zipPath, zipAdd));
+  dropZone(drop, (files) => files[0] && installHarness(files[0]));
+
+  view.replaceChildren(
+    h("div", { class: "row between" }, h("div", {}, h("h1", {}, "Your studies"), h("p", { class: "lede" }, "Each study tunes one application on your cases.")), home.studies.length ? h("a", { class: "btn primary", href: "#/new" }, "New study") : null),
+    studies,
+    h("h2", {}, "Applications you can tune"),
+    h("p", { class: "lede" }, "A harness connects evolvekit to one application. Your colleagues who build them send them as .zip files."),
+    harnesses, h("div", { style: "margin-top:12px" }, drop),
+    h("h2", {}, "The AI assistant"),
+    hasKey ? note("good", h("p", { style: "margin:0" }, "A key is set: the assistant can help you write measures and data changes. ", h("a", { href: "#/settings" }, "Settings"))) :
+      note("info", h("p", { style: "margin:0" }, "Optional: with an API key the assistant helps you describe measures and data changes in your own words. Everything else works without one. ", h("a", { href: "#/settings" }, "Add a key in Settings"))),
+    h("p", { class: "faint", style: "margin-top:24px" }, `Your library is in ${home.home}.`),
+  );
+}
+
+function dropZone(el, onFiles) {
+  el.addEventListener("dragover", (e) => { e.preventDefault(); el.classList.add("over"); });
+  el.addEventListener("dragleave", () => el.classList.remove("over"));
+  el.addEventListener("drop", async (e) => {
+    e.preventDefault(); el.classList.remove("over");
+    onFiles(await droppedFiles(e.dataTransfer));
+  });
+}
+
+async function droppedFiles(transfer) {
+  // Folders are walked in the browser: every file inside, however deep.
+  const items = [...(transfer.items || [])].map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!items.length) return [...(transfer.files || [])];
+  const files = [];
+  async function walk(entry) {
+    if (entry.isFile) files.push(await new Promise((ok, fail) => entry.file(ok, fail)));
+    else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do { batch = await new Promise((ok, fail) => reader.readEntries(ok, fail)); for (const child of batch) await walk(child); } while (batch.length);
+    }
+  }
+  for (const entry of items) await walk(entry);
+  return files;
+}
+
+async function installHarness(file) {
+  if (!file) return;
+  await guarded(async () => {
+    const harness = await api("POST", `/api/harnesses?name=${encodeURIComponent(file.name)}`, await file.arrayBuffer());
+    toast(`${harness.title} ${harness.version} is installed.`);
+    renderHome();
+  });
+}
+
+// ================================================================ settings
+async function renderSettings() {
+  crumbs({ href: "#/", text: "Your studies" }, { text: "Settings" });
+  const settings = await api("GET", "/api/settings");
+  const PROVIDERS = { openrouter: "OpenRouter (one key for many models)", azure: "Azure OpenAI", "claude-cli": "Claude Code on this computer (no key)" };
+  const KEYS = { openrouter: ["OPENROUTER_API_KEY"], azure: ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"], "claude-cli": [] };
+  const LABELS = { OPENROUTER_API_KEY: "OpenRouter key", AZURE_OPENAI_API_KEY: "Azure OpenAI key", AZURE_OPENAI_ENDPOINT: "Azure OpenAI endpoint (https://….openai.azure.com)" };
+  const provider = h("select", { id: "provider" }, Object.entries(PROVIDERS).map(([v, t]) => h("option", { value: v, selected: v === settings.provider }, t)));
+  const keysBox = h("div");
+  const inputs = {};
+  function drawKeys() {
+    keysBox.replaceChildren();
+    for (const name of KEYS[provider.value]) {
+      const set = settings.keys[name];
+      inputs[name] = h("input", { type: "password", id: `key-${name}`, autocomplete: "off", placeholder: set ? "set — type to replace it" : "paste it here" });
+      keysBox.append(h("label", { class: "field", for: `key-${name}` }, h("span", { class: "label" }, LABELS[name]), inputs[name],
+        h("span", { class: "hint" }, set ? status("good", "Set. It is kept on this computer and never shown again.") : "Not set yet.")));
+    }
+    if (!KEYS[provider.value].length) keysBox.append(note("info", h("p", { style: "margin:0" }, "Uses the Claude Code command on this computer, signed in as you. No key is needed here.")));
+  }
+  provider.addEventListener("change", drawKeys);
+  drawKeys();
+  const assistantModel = h("input", { type: "text", id: "model-assistant", value: settings.models.assistant });
+  const searchModel = h("input", { type: "text", id: "model-search", value: settings.models.search });
+  const save = h("button", { class: "btn primary", type: "submit" }, "Save");
+  const form = h("form", { class: "card narrow", onsubmit: async (e) => {
+    e.preventDefault();
+    const keys = {};
+    for (const [name, input] of Object.entries(inputs)) if (input.value.trim() && KEYS[provider.value].includes(name)) keys[name] = input.value.trim();
+    await guarded(async () => {
+      await api("PUT", "/api/settings", { provider: provider.value, models: { assistant: assistantModel.value, search: searchModel.value }, keys });
+      toast("Saved."); renderSettings();
+    }, save);
+  } },
+    h("h2", { style: "margin-top:0" }, "The AI model"),
+    h("p", { class: "muted" }, "The assistant helps you write measures and data changes; AI search help lets a model propose settings during a study. Both are optional."),
+    h("label", { class: "field", for: "provider" }, h("span", { class: "label" }, "Provider"), provider),
+    keysBox,
+    h("details", {}, h("summary", {}, "Models"),
+      h("label", { class: "field", for: "model-assistant" }, h("span", { class: "label" }, "For the assistant"), assistantModel),
+      h("label", { class: "field", for: "model-search" }, h("span", { class: "label" }, "For AI search help"), searchModel),
+      h("span", { class: "hint" }, "The default, anthropic/claude-sonnet-5, costs about $2 per million words read and $10 per million written; an answer of the assistant costs a few cents.")),
+    h("div", { class: "row", style: "margin-top:16px" }, save));
+  view.replaceChildren(h("h1", {}, "Settings"), form,
+    h("div", { class: "card narrow" }, h("h2", { style: "margin-top:0" }, "Your library"), h("p", { class: "mono" }, settings.home),
+      h("p", { class: "muted small" }, "Studies, installed harnesses, and the keys live here. Start the app with another --home to keep a second library.")));
+}
+
+// ============================================================== new study
+async function renderNew() {
+  crumbs({ href: "#/", text: "Your studies" }, { text: "New study" });
+  const home = await api("GET", "/api/home");
+  const usable = home.harnesses.filter((x) => !x.problem);
+  if (!usable.length) {
+    view.replaceChildren(note("warn", h("p", {}, "There is no harness to build a study on yet. Add one on the home page.")));
+    return;
+  }
+  let harnessId = usable.length === 1 ? usable[0].id : null;
+  let template = null;
+  const name = h("input", { type: "text", id: "study-name", placeholder: "e.g. PyVRP settings for the March routes", required: true });
+  const templatesBox = h("div");
+  const create = h("button", { class: "btn primary", type: "submit" }, "Create the study");
+  function drawTemplates() {
+    templatesBox.replaceChildren();
+    if (!harnessId) return;
+    const harness = usable.find((x) => x.id === harnessId);
+    const entries = harness.templates || [];
+    if (template === null) template = entries.length ? entries[0].id : "";
+    templatesBox.append(h("fieldset", {}, h("legend", {}, "2. What do you want to find out?"),
+      h("div", { class: "choices" },
+        entries.map((t) => h("label", { class: "choice" },
+          h("input", { type: "radio", name: "template", value: t.id, checked: template === t.id, onchange: () => { template = t.id; suggest(); } }),
+          h("span", {}, h("span", { class: "t" }, t.title, " ", h("span", { class: "badge" }, t.kind === "settings" ? "settings" : "data")),
+            h("span", { class: "d", style: "display:block" }, t.summary)))),
+        h("label", { class: "choice" },
+          h("input", { type: "radio", name: "template", value: "", checked: template === "", onchange: () => { template = ""; suggest(); } }),
+          h("span", {}, h("span", { class: "t" }, "Blank"), h("span", { class: "d", style: "display:block" }, "Start empty and describe what you want to the assistant, or build it yourself.")))),
+    ));
+    suggest();
+  }
+  function suggest() {
+    const harness = usable.find((x) => x.id === harnessId);
+    if (!harness || name.dataset.touched) return;
+    const chosen = (harness.templates || []).find((t) => t.id === template);
+    name.value = chosen ? `${harness.title}: ${chosen.title.toLowerCase()}` : `${harness.title} study`;
+  }
+  name.addEventListener("input", () => { name.dataset.touched = "1"; });
+  const form = h("form", { class: "narrow", onsubmit: async (e) => {
+    e.preventDefault();
+    if (!harnessId) { toast("Choose the application first.", true); return; }
+    await guarded(async () => {
+      const document_ = await api("POST", "/api/studies", { harness: harnessId, template: template || null, name: name.value });
+      location.hash = `#/study/${document_.slug}/2`;
+    }, create);
+  } },
+    h("h1", {}, "New study"),
+    h("p", { class: "lede" }, "Three questions, then evolvekit walks you through the rest. Everything is saved as you go."),
+    h("fieldset", {}, h("legend", {}, "1. Which application do you want to tune?"),
+      h("div", { class: "choices" }, usable.map((x) => h("label", { class: "choice" },
+        h("input", { type: "radio", name: "harness", value: x.id, checked: harnessId === x.id, onchange: () => { harnessId = x.id; template = null; drawTemplates(); } }),
+        h("span", {}, h("span", { class: "t" }, x.title), h("span", { class: "d", style: "display:block" }, x.summary)))))),
+    h("div", { style: "margin-top:18px" }, templatesBox),
+    h("label", { class: "field", for: "study-name", style: "margin-top:18px" }, h("span", { class: "label" }, "3. What do you call this study?"), name,
+      h("span", { class: "hint" }, "You can change it later.")),
+    h("div", { class: "row", style: "margin-top:18px" }, create, h("a", { class: "btn quiet", href: "#/" }, "Cancel")));
+  view.replaceChildren(form);
+  drawTemplates();
+}
+
+// ================================================================= a study
+const STEPS = ["Question", "Application", "Cases", "What may change", "Goal", "Limits and budget", "Review and start"];
+let current = null;  // {slug, doc, harness, chat}
+
+async function loadStudy(slug, fresh = false) {
+  if (!current || current.slug !== slug || fresh) {
+    const [doc, harness] = await Promise.all([api("GET", `/api/studies/${encodeURIComponent(slug)}`), api("GET", `/api/studies/${encodeURIComponent(slug)}/harness`)]);
+    current = { slug, doc, harness, chat: current && current.slug === slug ? current.chat : null };
+  }
+  return current;
+}
+const studyPath = (tail = "") => `/api/studies/${encodeURIComponent(current.slug)}${tail}`;
+async function refreshDoc() { current.doc = await api("GET", studyPath()); return current.doc; }
+async function patch(changes) {
+  current.doc = await api("PATCH", studyPath(), changes);
+  return current.doc;
+}
+function studyRunning(doc) { return doc.state && (doc.state.kind === "running"); }
+const kpiLabel = (name) => {
+  const study = current.doc.study.kpis[name];
+  if (study && study.says) return study.says;
+  if (current.harness.kpis[name]) return current.harness.kpis[name].label;
+  if (study && study.template) {
+    let label = current.harness.kpi_templates[study.template]?.label || name;
+    for (const [k, v] of Object.entries(study.params || {})) label = label.replace(`{${k}}`, v);
+    return label;
+  }
+  return name;
+};
+function kpiDirection(name) {
+  const study = current.doc.study.kpis[name] || {};
+  if (current.harness.kpis[name]) return current.harness.kpis[name].direction;
+  if (study.template) return current.harness.kpi_templates[study.template]?.direction || "lower";
+  return study.direction || "lower";
+}
+function kpiUnit(name) {
+  const study = current.doc.study.kpis[name] || {};
+  return (current.harness.kpis[name] || {}).unit || study.unit || (current.harness.kpi_templates[study.template] || {}).unit || "";
+}
+
+async function renderStep(slug, step) {
+  await loadStudy(slug, true);
+  const { doc } = current;
+  if (studyRunning(doc)) { location.hash = `#/study/${slug}/running`; return; }
+  crumbs({ href: "#/", text: "Your studies", small: true }, { text: doc.study.name });
+  const content = h("div", { class: "step" });
+  const withSide = step === 4 || step === 5 || (step === 1 && !doc.study.template);
+  const layout = h("div", { class: "wizard" + (withSide ? " with-side" : "") }, railFor(step), content, withSide ? assistantPanel() : null);
+  view.replaceChildren(layout);
+  const draw = [null, step1, step2, step3, step4, step5, step6, step7][step];
+  await draw(content, step);
+}
+
+function railFor(step) {
+  const { doc, slug } = current;
+  const reached = Math.max(1, doc.study.step || 1);
+  return h("nav", { class: "rail", "aria-label": "The study's steps" }, h("ol", {}, STEPS.map((title, i) => {
+    const n = i + 1;
+    const problems = doc.steps[i].problems;
+    const done = n < reached && !problems;
+    const dot = h("span", { class: "dot" + (n === step ? "" : problems && n <= reached ? " todo" : done ? " ok" : "") },
+      n !== step && problems && n <= reached ? "!" : done && n !== step ? "✓" : String(n));
+    return h("li", {}, h("a", { href: `#/study/${slug}/${n}`, "aria-current": n === step ? "step" : null,
+      "aria-label": `Step ${n}: ${title}${problems && n <= reached ? ", needs attention" : done ? ", done" : ""}` }, dot, h("span", { class: "t" }, title)));
+  })));
+}
+
+function stepFoot(step, { next, nextLabel, beforeNext } = {}) {
+  const back = step > 1 ? h("a", { class: "btn", href: `#/study/${current.slug}/${step - 1}` }, "Back") : h("span");
+  const go = h("button", { class: "btn primary", type: "button" }, nextLabel || `Next: ${STEPS[step]}`);
+  go.addEventListener("click", () => guarded(async () => {
+    if (beforeNext) { const ok = await beforeNext(); if (ok === false) return; }
+    if ((current.doc.study.step || 1) < step + 1) await patch({ step: step + 1 });
+    location.hash = next || `#/study/${current.slug}/${step + 1}`;
+  }, go));
+  return h("div", { class: "step-foot" }, back, go);
+}
+
+function problemsOf(step) {
+  const list = current.doc.problems.filter((p) => p.step === step);
+  return list.length ? note("warn", h("p", { style: "margin:0 0 4px", class: "small" }, "Still to do on this step:"),
+    h("ul", { style: "margin:0; padding-left:18px" }, list.map((p) => h("li", { class: "small" }, sentence(p.text))))) : null;
+}
+
+// ------------------------------------------------------------ 1. question
+async function step1(box) {
+  const { doc, harness } = current;
+  const name = h("input", { type: "text", id: "name", value: doc.study.name });
+  name.addEventListener("change", () => guarded(async () => { await patch({ name: name.value }); toast("Saved."); }));
+  const template = doc.study.template ? (harness.templates[doc.study.template] || {}).title : "Blank: you build it, with the assistant if you like";
+  put(box, 
+    h("h1", {}, "The question"),
+    h("p", { class: "lede" }, "What this study is about. The application and the kind of study stay as they are; for another, start a new study."),
+    h("div", { class: "card" },
+      h("p", {}, h("span", { class: "label" }, "Application"), `${harness.title} (harness ${harness.version})`, h("span", { class: "hint" }, harness.summary)),
+      h("p", {}, h("span", { class: "label" }, "Kind of study"), template),
+      h("label", { class: "field", for: "name" }, h("span", { class: "label" }, "Name"), name)),
+    problemsOf(1), stepFoot(1));
+}
+
+// ---------------------------------------------------------- 2. application
+async function step2(box) {
+  const { harness } = current;
+  const kind = harness.application.kind;
+  const label = harness.application.label;
+  const result = h("div", { "aria-live": "polite" });
+  const found = h("div");
+  let detected = null;
+  async function use(path) {
+    result.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), `Asking ${path}…`));
+    const answer = await api("POST", studyPath("/application"), { path });
+    current.doc = answer.study;
+    result.replaceChildren(answer.probe.ok ? "" : note("bad", h("p", { style: "margin:0" }, `That is not it: ${answer.probe.message}.`)));
+    if (answer.probe.ok) { toast("Saved."); drawCurrent(); drawList(); }
+  }
+  const currentBox = h("div");
+  function drawCurrent() {
+    const now = current.doc.study.application || {};
+    const what = kind === "python" ? harness.title : label;
+    currentBox.replaceChildren(now.path ? h("div", { class: "card" }, status("good", `In use: ${what}${now.version ? " " + now.version : ""}`), h("p", { class: "mono small", style: "word-break:break-all" }, now.path),
+      h("p", { class: "faint", style: "margin:0" }, "Choose another below if this is not the right one.")) : h("span"));
+  }
+  function drawList() {
+    if (!detected) return;
+    const inUse = (current.doc.study.application || {}).path;
+    if (!detected.length) { found.replaceChildren(h("p", { class: "muted" }, kind === "python" ? "None found. Use Browse or paste the path." : "Nothing yet. Use Browse or paste the path.")); return; }
+    found.replaceChildren(h("div", { class: "stack", role: "list" }, detected.map((item) => h("div", { class: "card row", role: "listitem", style: "flex-wrap:nowrap" },
+      h("span", { class: "status " + (item.ok ? "good" : "bad") }, icon(item.ok ? "ok" : "bad")),
+      h("div", { style: "flex:1; min-width:0" }, h("div", { class: item.ok ? "" : "muted" }, h("strong", {}, sentence(item.message))), h("div", { class: "mono faint", style: "word-break:break-all" }, item.path)),
+      item.ok ? (inUse === item.path ? h("span", { class: "badge good" }, "in use")
+        : h("button", { class: "btn primary", type: "button", onclick: (e) => guarded(() => use(item.path), e.currentTarget) }, "Use this")) : null))));
+  }
+  drawCurrent();
+  const paste = h("input", { type: "text", id: "app-path", placeholder: kind === "python" ? "C:\\...\\python.exe" : "C:\\...\\solver.exe" });
+  const check = h("button", { class: "btn", type: "button", onclick: () => guarded(() => use(paste.value.trim()), check) }, "Check this path");
+  const browse = h("button", { class: "btn", type: "button", onclick: () => guarded(async () => {
+    const picked = await api("POST", "/api/pick-file", { kind: "file", title: `Choose ${label}` });
+    if (picked.path) { paste.value = picked.path; await use(picked.path); }
+  }, browse) }, "Browse…");
+  put(box, 
+    h("h1", {}, "The application"),
+    h("p", { class: "lede" }, kind === "python" ? `evolvekit needs to know which Python on this computer has ${harness.title} installed. It looks for you; pick the one that says it is found.`
+      : `evolvekit needs to know where ${label} is on this computer.`),
+    currentBox,
+    h("h2", {}, kind === "python" ? "Found on this computer" : "Used before"), found,
+    h("h2", {}, "Somewhere else?"),
+    h("div", { class: "row" }, browse, h("span", { class: "muted small" }, "or paste its full path:")),
+    h("div", { class: "row", style: "margin-top:8px; flex-wrap:nowrap" }, paste, check),
+    result,
+    harness.application.help ? h("details", { style: "margin-top:14px" }, h("summary", {}, "Where do I find this?"), h("p", { class: "explain" }, harness.application.help)) : null,
+    problemsOf(2), stepFoot(2));
+  found.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), kind === "python" ? `Looking for Python installations with ${harness.title}… this takes up to 10 seconds.` : "Looking…"));
+  try {
+    detected = await api("GET", `/api/detect?study=${encodeURIComponent(current.slug)}`);
+    drawList();
+  } catch (err) { found.replaceChildren(note("bad", h("p", { style: "margin:0" }, err.message))); }
+}
+
+// ----------------------------------------------------------------- 3. cases
+function smallestTraining(doc) {
+  const training = doc.cases.filter((c) => c.set === "training");
+  return training.length ? training.reduce((a, b) => (b.bytes < a.bytes ? b : a)) : null;
+}
+function previewLine(doc) {
+  const p = doc.preview || {};
+  if (p.state === "running") return h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "The preview is running: the smallest case is being solved once at the starting values.");
+  if (p.state === "failed" || p.state === "interrupted") return note("bad", h("p", { style: "margin:0" }, `The preview did not work: ${sentence(p.error || (p.result || {}).error || "no reason given")}`));
+  if (p.result && p.result.ok) return status("good", `Preview done: ${p.result.case.replace("cases/", "")} solved in ${fmt(p.result.wall_s, 1)} s.`);
+  return null;
+}
+async function ensurePreview() {
+  const doc = await refreshDoc();
+  const smallest = smallestTraining(doc);
+  if (!smallest || !doc.study.application.path) return;
+  const p = doc.preview || {};
+  const stale = !p.result || !p.result.ok || p.result.case !== `cases/${smallest.name}` || p.state === "interrupted";
+  if (p.state !== "running" && stale) await api("POST", studyPath("/preview"));
+}
+
+async function step3(box) {
+  const { harness } = current;
+  const formats = harness.cases.formats;
+  const list = h("div");
+  const progress = h("div", { "aria-live": "polite" });
+  const testCount = h("input", { type: "number", min: "0", step: "1", id: "test-count", class: "inline", style: "width:90px" });
+  const warnings = h("div", { class: "stack" });
+  const files = h("input", { type: "file", multiple: true, accept: formats.join(","), class: "sr", id: "case-files", onchange: (e) => upload([...e.target.files]) });
+  const samples = h("button", { class: "btn", type: "button", onclick: () => guarded(async () => {
+    current.doc = await api("POST", studyPath("/samples"));
+    const held = await firstSplit();
+    progress.replaceChildren(note("good", h("p", { style: "margin:0" }, `The sample cases are in.${held}`)));
+    draw();
+  }, samples) }, "Use the sample cases");
+  const folderPath = h("input", { type: "text", id: "case-folder-path", placeholder: "C:\\Users\\you\\Documents\\cases" });
+  async function firstSplit() {
+    // The first time cases arrive, hold back the suggested number at once;
+    // the person can change it below.
+    const doc = current.doc;
+    if (doc.study.cases.test.length || doc.cases.length < 4 || !doc.suggested_test) return "";
+    current.doc = await api("POST", studyPath("/split"), { test: doc.suggested_test });
+    return ` ${plural(current.doc.study.cases.test.length, "case")} of different sizes ${current.doc.study.cases.test.length === 1 ? "is" : "are"} held back for the final check; change that below.`;
+  }
+  async function importFolder(path) {
+    progress.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), `Reading the cases in ${path}…`));
+    try {
+      const answer = await api("POST", studyPath("/import"), { folder: path });
+      current.doc = answer.study;
+      const added = answer.imported.added.length, skipped = answer.imported.skipped.length;
+      const held = await firstSplit();
+      progress.replaceChildren(note("good", h("p", { style: "margin:0" }, `${plural(added, "case")} added${skipped ? `; ${plural(skipped, "file")} skipped` : ""}.${held}`)));
+      draw();
+    } catch (err) { progress.replaceChildren(); throw err; }
+  }
+  const pickFolder = h("button", { class: "btn", type: "button", onclick: () => guarded(async () => {
+    const picked = await api("POST", "/api/pick-file", { kind: "folder", title: "Choose the folder with the cases" });
+    if (picked.path) { folderPath.value = picked.path; await importFolder(picked.path); }
+  }, pickFolder) }, "Choose a folder…");
+  const addFolder = h("button", { class: "btn", type: "button", onclick: () => guarded(() => importFolder(folderPath.value.trim()), addFolder) }, "Add the cases in this folder");
+  const drop = h("div", { class: "drop" },
+    h("p", { style: "margin:0 0 10px" }, `Drop ${harness.cases.label} files or whole folders here (${formats.join(", ")}), or`),
+    h("div", { class: "row", style: "justify-content:center" }, h("label", { class: "btn", for: "case-files" }, "Choose files"), pickFolder, samples),
+    h("div", { class: "row", style: "margin-top:12px; flex-wrap:nowrap; max-width:640px; margin-inline:auto" },
+      h("label", { for: "case-folder-path", class: "small", style: "white-space:nowrap" }, "or type a folder:"), folderPath, addFolder),
+    files);
+  dropZone(drop, upload);
+
+  async function upload(chosen) {
+    const usable = chosen.filter((f) => formats.some((ext) => f.name.toLowerCase().endsWith(ext)));
+    const skipped = chosen.length - usable.length;
+    for (const [i, file] of usable.entries()) {
+      progress.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), `Reading ${file.name} (${i + 1} of ${usable.length})…`));
+      try { await api("PUT", studyPath(`/cases/${encodeURIComponent(file.name)}`), await file.arrayBuffer()); }
+      catch (err) { toast(`${file.name}: ${err.message}`, true); }
+    }
+    await refreshDoc();
+    const held = await firstSplit();
+    progress.replaceChildren(skipped || held ? note("info", h("p", { style: "margin:0" },
+      skipped ? `${plural(skipped, "file")} skipped: not ${formats.join(" or ")}.` : "", held)) : "");
+    draw();
+  }
+
+  function draw() {
+    const doc = current.doc;
+    const test = doc.cases.filter((c) => c.set === "test").length;
+    const training = doc.cases.filter((c) => c.set === "training").length;
+    testCount.value = String(test || (doc.study.cases.test.length ? 0 : doc.suggested_test));
+    if (!doc.cases.length) { list.replaceChildren(h("p", { class: "muted" }, "No cases yet.")); warnings.replaceChildren(); return; }
+    list.replaceChildren(h("div", { class: "table-wrap card", style: "padding:6px 12px" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "Case"), h("th", {}, "What it is"), h("th", {}, "Used for"), h("th", {}, h("span", { class: "sr" }, "Actions")))),
+      h("tbody", {}, doc.cases.map((c) => {
+        const inspected = c.inspected;
+        const what = !inspected ? h("span", { class: "muted small" }, "not read yet")
+          : inspected.ok ? h("span", { class: "row small", style: "gap:6px; flex-wrap:nowrap; align-items:flex-start" }, h("span", { class: "status good", title: "It can be read" }, icon("ok")), h("span", {}, inspected.summary))
+          : inspected.ok === null ? h("span", { class: "muted small" }, sentence(inspected.error)) : status("bad", sentence(inspected.error));
+        const other = c.set === "test" ? "training" : "test";
+        return h("tr", {}, h("td", { class: "mono", style: "overflow-wrap:anywhere; min-width:110px" }, c.name), h("td", {}, what),
+          h("td", {}, h("span", { class: "badge" + (c.set === "test" ? " accent" : "") }, c.set === "test" ? "final check" : "search")),
+          h("td", { class: "n" }, h("div", { class: "row", style: "justify-content:flex-end; flex-wrap:nowrap" },
+            h("button", { class: "btn small quiet", type: "button", title: `Use it for the ${other === "test" ? "final check" : "search"}`, onclick: (e) => guarded(() => move(c.name, other), e.currentTarget) }, other === "test" ? "Hold back" : "Search with it"),
+            h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${c.name}`, onclick: (e) => guarded(async () => { current.doc = await api("DELETE", studyPath(`/cases/${encodeURIComponent(c.name)}`)); draw(); }, e.currentTarget) }, "Remove"))));
+      })))));
+    const notes = [];
+    if (test === 0) notes.push(note("warn", h("p", { style: "margin:0" }, "No cases are held back: there will be no final check, and the result will look better than it is.")));
+    else if (test < 3) notes.push(note("warn", h("p", { style: "margin:0" }, `Only ${plural(test, "case")} held back: the final check will be weak. Three or more make it reliable.`)));
+    if (training < 3) notes.push(note("warn", h("p", { style: "margin:0" }, `Only ${plural(training, "case")} for the search: it may fit ${training === 1 ? "it" : "them"} too closely.`)));
+    const unread = doc.cases.filter((c) => c.inspected && c.inspected.ok === false);
+    if (unread.length) notes.push(note("bad", h("p", { style: "margin:0" }, `${plural(unread.length, "case")} cannot be read. Remove ${unread.length === 1 ? "it" : "them"}, or check the file${unread.length === 1 ? "" : "s"}.`)));
+    const line = previewLine(doc);
+    warnings.replaceChildren(...notes, line || "");
+  }
+
+  async function move(name, to) {
+    const doc = current.doc;
+    const relative = `cases/${name}`;
+    let training = doc.study.cases.training.filter((c) => c !== relative);
+    let test = doc.study.cases.test.filter((c) => c !== relative);
+    (to === "test" ? test : training).push(relative);
+    await patch({ cases: { training, test } });
+    draw();
+  }
+
+  const apply = h("button", { class: "btn", type: "button", onclick: () => guarded(async () => {
+    current.doc = await api("POST", studyPath("/split"), { test: parseInt(testCount.value || "0", 10) });
+    draw(); toast("The cases are split.");
+  }, apply) }, "Hold these back");
+  put(box, 
+    h("h1", {}, "The cases"),
+    h("p", { class: "lede" }, `The ${harness.cases.label}s the study works on. ${harness.cases.describe || ""}`),
+    drop, progress,
+    h("h2", {}, "Your cases"), list,
+    h("h2", {}, "A test set"),
+    h("p", { class: "lede" }, "The search learns from most of the cases. A few are held back: at the end, the best result is checked on them — cases the search never saw — to see whether it really is better."),
+    h("div", { class: "row" }, h("label", { for: "test-count" }, "How many cases do you want to keep as a test set?"), testCount, apply),
+    h("p", { class: "faint" }, "evolvekit picks cases of different sizes, and keeps the smallest one for the search. Swap any case with the buttons in the list."),
+    warnings, problemsOf(3),
+    stepFoot(3, { beforeNext: async () => { await ensurePreview(); } }));
+  draw();
+  if (!current.doc.cases.some((c) => c.inspected) && current.doc.cases.length && current.doc.study.application.path) {
+    current.doc = await api("POST", studyPath("/inspect")); draw();
+  }
+  if ((current.doc.preview || {}).state === "running") every(2000, async () => { await refreshDoc(); draw(); if ((current.doc.preview || {}).state !== "running") clearTimers(); });
+}
+
+// ------------------------------------------------------- 4. what may change
+function settingControl(setting, choice, onChange) {
+  const name = setting.name;
+  const mode = choice === undefined || choice === "default" ? "default" : choice === "tune" || (choice && choice.tune) ? "tune" : "fixed";
+  const id = `set-${name}`;
+  const seg = h("div", { class: "seg", role: "radiogroup", "aria-label": `${setting.label}: what to do with it` },
+    [["tune", "Tune"], ["fixed", "Keep fixed"], ["default", "Default"]].map(([value, text]) => h("label", {},
+      h("input", { type: "radio", name: id, value, checked: mode === value, onchange: () => onChange(value) }), text)));
+  const details = h("div");
+  if (mode === "fixed") {
+    const value = choice && choice.fixed !== undefined ? choice.fixed : setting.default;
+    let input;
+    if (setting.type === "bool") input = h("select", { id: `${id}-fixed`, class: "inline" }, h("option", { value: "true", selected: value === true }, "on"), h("option", { value: "false", selected: value === false }, "off"));
+    else if (setting.type === "choice") input = h("select", { id: `${id}-fixed`, class: "inline" }, setting.choices.map((c) => h("option", { value: JSON.stringify(c), selected: c === value }, String(c))));
+    else input = h("input", { type: "number", id: `${id}-fixed`, class: "inline", style: "width:150px", value: String(value), step: setting.type === "int" ? "1" : "any", min: setting.low, max: setting.high });
+    input.addEventListener("change", () => {
+      const raw = input.value;
+      const parsed = setting.type === "bool" ? raw === "true" : setting.type === "choice" ? JSON.parse(raw) : Number(raw);
+      onChange("fixed", parsed);
+    });
+    details.append(h("div", { class: "row small", style: "margin-top:6px" }, h("label", { for: `${id}-fixed` }, "Keep it at"), input,
+      setting.type !== "bool" && setting.type !== "choice" ? h("span", { class: "faint" }, `(allowed ${fmt(setting.low)} to ${fmt(setting.high)})`) : null));
+  }
+  if (mode === "tune" && (setting.type === "int" || setting.type === "float")) {
+    const range = typeof choice === "object" && choice ? choice : {};
+    const low = h("input", { type: "number", id: `${id}-low`, value: range.low ?? setting.low, step: "any" });
+    const high = h("input", { type: "number", id: `${id}-high`, value: range.high ?? setting.high, step: "any" });
+    const save = () => onChange("tune", null, { low: Number(low.value), high: Number(high.value) });
+    low.addEventListener("change", save); high.addEventListener("change", save);
+    details.append(h("details", { style: "margin-top:6px" }, h("summary", {}, `Search between ${fmt(range.low ?? setting.low)} and ${fmt(range.high ?? setting.high)}`),
+      h("div", { class: "more" }, h("label", { for: `${id}-low`, class: "small" }, "From", low), h("label", { for: `${id}-high`, class: "small" }, "To", high))));
+  }
+  return h("div", { class: "setting" },
+    h("div", { class: "head" }, h("div", {}, h("span", { class: "title" }, setting.label), " ", setting.recommended ? h("span", { class: "badge accent" }, "recommended") : null,
+      h("div", { class: "muted small" }, setting.help)), seg),
+    details,
+    h("details", {}, h("summary", {}, "Why would I tune this?"), h("p", { class: "explain" }, setting.explain || setting.help),
+      h("p", { class: "faint" }, `Its name in ${current.harness.title}: `, h("code", {}, name), `; its default: ${fmt(setting.default)}.`)));
+}
+
+async function step4(box) {
+  const { harness } = current;
+  const settingsBox = h("div");
+  const dataBox = h("div");
+  const rulesBox = h("div");
+  const planNote = h("div");
+
+  async function saveVary(settings, data) {
+    await patch({ vary: { settings: settings ?? current.doc.study.vary.settings, data: data ?? current.doc.study.vary.data } });
+    drawAll();
+  }
+
+  function drawSettings() {
+    const chosen = current.doc.study.vary.settings || {};
+    const tuned = Object.entries(chosen).filter(([, c]) => c === "tune" || (c && c.tune)).length;
+    const groups = {};
+    for (const s of harness.settings) (groups[s.group] = groups[s.group] || []).push(s);
+    const input = Object.keys(harness.inputs).find((n) => harness.inputs[n].provides === "settings");
+    const imported = input && current.doc.study.inputs[input];
+    const importer = input ? h("input", { type: "file", accept: ".json", class: "sr", id: "settings-file", onchange: (e) => guarded(async () => {
+      const file = e.target.files[0]; if (!file) return;
+      current.doc = await api("PUT", studyPath(`/inputs/${input}/${encodeURIComponent(file.name)}`), await file.arrayBuffer());
+      toast("The settings file is in: every setting starts from it."); drawAll();
+    }) }) : null;
+    fill(settingsBox, 
+      h("div", { class: "row between" }, h("p", { class: "muted", style: "margin:0" }, `${plural(tuned, "setting")} of ${harness.settings.length} will be tuned.`),
+        h("div", { class: "row" },
+          h("button", { class: "btn small", type: "button", onclick: (e) => guarded(() => saveVary(Object.fromEntries(harness.settings.filter((s) => s.recommended).map((s) => [s.name, "tune"]))), e.currentTarget) }, "Tune the recommended ones"),
+          h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(() => saveVary({}), e.currentTarget) }, "Tune none"))),
+      input ? h("div", { class: "card", style: "margin-top:12px" },
+        imported ? h("div", { class: "row between" }, status("good", `Starting from ${imported.replace("inputs/", "")}`),
+          h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { current.doc = await api("DELETE", studyPath(`/inputs/${input}`)); drawAll(); }, e.currentTarget) }, "Remove"))
+          : h("div", { class: "row between" }, h("span", { class: "muted small" }, "Have settings you use today? Start from them: every setting not tuned keeps its value from the file."), h("label", { class: "btn small", for: "settings-file" }, "Import current settings from a file")),
+        importer) : null,
+      ...Object.entries(groups).map(([group, list]) => {
+        const control = (s) => settingControl(s, chosen[s.name], (mode, value, range) => guarded(() => {
+          const next = { ...chosen };
+          if (mode === "default") delete next[s.name];
+          else if (mode === "fixed") next[s.name] = { fixed: value === undefined || value === null ? s.default : value };
+          else next[s.name] = range ? { tune: true, low: range.low, high: range.high } : "tune";
+          return saveVary(next);
+        }));
+        // What matters first: the recommended settings and the ones already chosen.
+        const shown = list.filter((s) => s.recommended || s.name in chosen || openGroups.has(group));
+        const hidden = list.filter((s) => !shown.includes(s));
+        const more = hidden.length ? h("button", { class: "btn small quiet", type: "button", style: "white-space:normal; text-align:left; height:auto", onclick: () => { openGroups.add(group); drawSettings(); } },
+          `Show ${plural(hidden.length, "more setting")}: ${hidden.map((s) => s.label.toLowerCase()).slice(0, 3).join(", ")}${hidden.length > 3 ? ", …" : ""}`) : null;
+        return h("div", { class: "card", style: "margin-top:12px" }, h("h3", { style: "margin-top:0" }, group), shown.map(control), more);
+      }));
+  }
+  const openGroups = new Set();
+
+  function drawData() {
+    const data = current.doc.study.vary.data || {};
+    const levers = Object.entries(harness.levers);
+    if (!levers.length) { dataBox.replaceChildren(h("p", { class: "muted" }, "This application's data cannot be changed by a study.")); return; }
+    const rows = Object.entries(data).map(([name, change]) => {
+      const lever = harness.levers[change.lever] || { label: change.lever, columns: {} };
+      const column = change.column ? (lever.columns[change.column] || change.column) : "in code";
+      const how = change.mode === "scale" ? `multiplied by ${fmt(change.low)} to ${fmt(change.high)}` : change.mode === "add" ? `plus ${fmt(change.low)} to ${fmt(change.high)}` : `set to ${fmt(change.low)} to ${fmt(change.high)}`;
+      return h("div", { class: "item" }, h("div", { class: "body" },
+        h("div", { class: "what" }, change.says || `${lever.label}: ${column}`),
+        h("div", { class: "muted small" }, `${capital(column)} of ${change.where ? "the rows where " : "all rows of "}`, h("code", {}, change.where || lever.table), `, ${how}, starting at ${fmt(change.start)}.`)),
+        h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${name}`, onclick: (e) => guarded(() => { const next = { ...data }; delete next[name]; return saveVary(null, next); }, e.currentTarget) }, "Remove"));
+    });
+    dataBox.replaceChildren(rows.length ? h("div", { class: "card", style: "padding:4px 18px" }, rows) : h("p", { class: "muted" }, "No data changes: the study leaves the data as it is."), dataForm());
+  }
+
+  function dataForm() {
+    const leverSel = h("select", { id: "dc-lever" }, Object.entries(harness.levers).map(([n, l]) => h("option", { value: n }, l.label)));
+    const columnSel = h("select", { id: "dc-column" });
+    const modeSel = h("select", { id: "dc-mode" });
+    const where = h("input", { type: "text", id: "dc-where", placeholder: "all rows, or e.g. class = 'van'" });
+    const low = h("input", { type: "number", id: "dc-low", value: "0.5", step: "any" });
+    const high = h("input", { type: "number", id: "dc-high", value: "2", step: "any" });
+    const start = h("input", { type: "number", id: "dc-start", value: "1", step: "any" });
+    const name = h("input", { type: "text", id: "dc-name", placeholder: "e.g. van_km_cost" });
+    const help = h("p", { class: "explain" });
+    const values = h("div", { class: "faint" });
+    function sync() {
+      const lever = harness.levers[leverSel.value];
+      columnSel.replaceChildren(...(Object.keys(lever.columns).length ? Object.entries(lever.columns).map(([c, label]) => h("option", { value: c }, label)) : [h("option", { value: "" }, "(changed in code)")]));
+      modeSel.replaceChildren(...lever.modes.map((m) => h("option", { value: m }, { scale: "multiply today's value", set: "set a value", add: "add to today's value" }[m] || m)));
+      help.textContent = lever.explain || lever.help;
+      const categorical = Object.entries(harness.tables[lever.table]?.columns || {}).filter(([, c]) => c.categorical).map(([c]) => c);
+      values.replaceChildren(categorical.length ? `Rows can be picked by ${categorical.join(", ")} (the table is ${lever.table}).` : `The rows are those of ${lever.table}.`);
+    }
+    leverSel.addEventListener("change", sync); sync();
+    const add = h("button", { class: "btn", type: "button" }, "Add this data change");
+    add.addEventListener("click", () => guarded(async () => {
+      const card = { kind: "data_change", name: name.value.trim(), lever: leverSel.value, column: columnSel.value, where: where.value.trim(), mode: modeSel.value,
+        low: Number(low.value), high: Number(high.value), start: Number(start.value) };
+      const answer = await api("POST", studyPath("/cards"), { card });
+      current.doc = answer.study; toast(`Added: it applies to ${plural(answer.card.applies_to, "row")}.`); drawAll();
+    }, add));
+    return h("details", { class: "card", style: "margin-top:12px" }, h("summary", {}, "Add a data change"),
+      help,
+      h("div", { class: "grid", style: "grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:10px" },
+        h("label", { class: "field", for: "dc-lever" }, h("span", { class: "label" }, "What"), leverSel),
+        h("label", { class: "field", for: "dc-column" }, h("span", { class: "label" }, "Which value"), columnSel),
+        h("label", { class: "field", for: "dc-mode" }, h("span", { class: "label" }, "How"), modeSel),
+        h("label", { class: "field", for: "dc-name" }, h("span", { class: "label" }, "Its name"), name)),
+      h("label", { class: "field", for: "dc-where" }, h("span", { class: "label" }, "Which rows (a condition; empty for all)"), where, values),
+      h("div", { class: "grid", style: "grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap:10px" },
+        h("label", { class: "field", for: "dc-low" }, h("span", { class: "label" }, "From"), low),
+        h("label", { class: "field", for: "dc-high" }, h("span", { class: "label" }, "To"), high),
+        h("label", { class: "field", for: "dc-start" }, h("span", { class: "label" }, "Start at"), start)),
+      h("p", { class: "faint" }, "It is checked on the preview case before it is added: the condition must pick at least one row."), add);
+  }
+
+  function drawRules() {
+    const rules = current.doc.study.constraints || [];
+    const names = [...Object.entries(current.doc.study.vary.settings || {}).filter(([, c]) => c === "tune" || (c && c.tune)).map(([n]) => n), ...Object.keys(current.doc.study.vary.data || {})];
+    const expr = h("input", { type: "text", id: "rule-expr", placeholder: names.length > 1 ? `e.g. ${names[1]} >= ${names[0]}` : "e.g. a >= b" });
+    const says = h("input", { type: "text", id: "rule-says", placeholder: "In words, e.g. trucks stay dearer than vans" });
+    const add = h("button", { class: "btn", type: "button" }, "Add this rule");
+    add.addEventListener("click", () => guarded(async () => {
+      const answer = await api("POST", studyPath("/cards"), { card: { kind: "constraint", expr: expr.value.trim(), says: says.value.trim() || expr.value.trim() } });
+      current.doc = answer.study; toast("Added: it holds for the starting values."); drawAll();
+    }, add));
+    fill(rulesBox, 
+      rules.length ? h("div", { class: "card", style: "padding:4px 18px" }, rules.map((rule, i) => h("div", { class: "item" },
+        h("div", { class: "body" }, h("div", { class: "what" }, sentence(rule.says)), h("div", { class: "faint" }, h("code", {}, rule.expr || rule.sql))),
+        h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await patch({ constraints: rules.filter((_, j) => j !== i) }); drawAll(); }, e.currentTarget) }, "Remove"))))
+        : h("p", { class: "muted" }, "No rules: every combination in the ranges above may be tried."),
+      names.length ? h("details", { class: "card", style: "margin-top:12px" }, h("summary", {}, "Add a rule"),
+        h("p", { class: "explain" }, "A rule the combinations must keep, written with the names of what is tuned: ", names.map((n, i) => [i ? ", " : "", h("code", {}, n)]),
+          ". Use + - * / and comparisons (>=, <=, <, >), for example ", h("code", {}, "max_penalty >= 100 * min_penalty"), "."),
+        h("label", { class: "field", for: "rule-expr" }, h("span", { class: "label" }, "The rule"), expr),
+        h("label", { class: "field", for: "rule-says" }, h("span", { class: "label" }, "In words"), says), add) : null);
+  }
+
+  async function drawPlan() {
+    try {
+      const plan = await api("GET", studyPath("/plan"));
+      planNote.replaceChildren(plan.warning ? note("warn", h("p", { style: "margin:0" }, plan.warning)) : "");
+    } catch (err) { planNote.replaceChildren(); }
+  }
+
+  function drawAll() { drawSettings(); drawData(); drawRules(); drawPlan(); }
+  put(box, 
+    h("h1", {}, "What may change"),
+    h("p", { class: "lede" }, "Choose what the search may try: settings of the application, changes to the data it gets, or both — and the rules every combination has to keep."),
+    planNote,
+    harness.settings.length ? [h("h2", {}, "Settings"), settingsBox] : null,
+    h("h2", {}, "Data changes"), h("p", { class: "lede" }, "Try other values in the cases' data — costs, fleet, time windows — to find the data that gives the best plans."), dataBox,
+    h("h2", {}, "Rules"), rulesBox,
+    problemsOf(4), stepFoot(4));
+  drawAll();
+  current.redraw = drawAll;
+}
+
+// ------------------------------------------------------------------ 5. goal
+async function step5(box) {
+  const { harness } = current;
+  const kpisBox = h("div"), goalBox = h("div"), railsBox = h("div"), addBox = h("div");
+  let choices = {};
+  try { choices = await api("GET", studyPath("/choices")); } catch (err) { choices = {}; }
+  const today = {};
+
+  async function valueOf(name) {
+    if (name in today) return today[name];
+    const doc = current.doc;
+    const kpi = doc.study.kpis[name] || {};
+    const preview = (doc.preview || {}).result || {};
+    if (preview.kpis && name in preview.kpis) return (today[name] = preview.kpis[name]);
+    try {
+      if (kpi.sql) return (today[name] = (await api("POST", studyPath("/kpis/try"), { sql: kpi.sql })).value);
+      if (kpi.template) return (today[name] = (await api("POST", studyPath("/kpis/try"), { sql: harness.kpi_templates[kpi.template].sql, params: kpi.params })).value);
+    } catch (err) { return (today[name] = null); }
+    return null;
+  }
+
+  function drawKpis() {
+    const kpis = current.doc.study.kpis;
+    const rows = Object.entries(kpis).map(([name, kpi]) => {
+      const valueEl = h("span", { class: "num" }, "…");
+      valueOf(name).then((v) => { valueEl.textContent = v === null || v === undefined ? "no preview yet" : `${fmt(v)} ${kpiUnit(name)}`.trim(); });
+      const rowsBtn = kpi.rows_sql ? h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => {
+        const tried = await api("POST", studyPath("/kpis/try"), { sql: kpi.sql, rows_sql: kpi.rows_sql });
+        const out = h("div", { class: "table-wrap", style: "margin-top:8px" }, h("table", {}, h("thead", {}, h("tr", {}, tried.rows.columns.map((c) => h("th", {}, c)))),
+          h("tbody", {}, tried.rows.rows.map((r) => h("tr", {}, r.map((v) => h("td", {}, fmt(v))))))));
+        e.currentTarget.replaceWith(out);
+      }, e.currentTarget) }, "Show which rows count") : null;
+      const used = current.doc.study.goal.levels.some((l) => l.kpi === name) || current.doc.study.guardrails.some((g) => g.kpi === name)
+        || Object.values(kpis).some((k) => k.weighted && name in k.weighted);
+      return h("div", { class: "item" }, h("div", { class: "body" },
+        h("div", { class: "what" }, kpiLabel(name)),
+        h("div", { class: "muted small" }, `${kpiDirection(name) === "lower" ? "Lower" : "Higher"} is better. On the preview case today: `, valueEl),
+        kpi.sql ? h("details", {}, h("summary", {}, "How it is counted"), h("pre", { class: "mono small", style: "white-space:pre-wrap" }, kpi.sql)) : null, rowsBtn),
+        used ? h("span", { class: "badge" }, "in use") : h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => {
+          const next = { ...kpis }; delete next[name]; await patch({ kpis: next }); drawAll(); }, e.currentTarget) }, "Remove"));
+    });
+    kpisBox.replaceChildren(rows.length ? h("div", { class: "card", style: "padding:4px 18px" }, rows) : h("p", { class: "muted" }, "No measures yet."));
+  }
+
+  function drawAdd() {
+    const kpis = current.doc.study.kpis;
+    const ready = Object.entries(harness.kpis).filter(([n]) => !(n in kpis));
+    const readySel = h("select", { id: "add-ready" }, ready.map(([n, k]) => h("option", { value: n }, `${k.label}${k.changes_with_levers ? " (what the solver saw)" : ""}`)));
+    const addReady = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await patch({ kpis: { ...kpis, [readySel.value]: { from: "harness" } } }); drawAll(); }, e.currentTarget) }, "Add");
+    const templates = Object.entries(harness.kpi_templates);
+    const tplSel = h("select", { id: "add-template" }, templates.map(([n, t]) => h("option", { value: n }, t.label.replace(/\{(\w+)\}/g, "…"))));
+    const tplParams = h("div", { class: "row" });
+    function syncTemplate() {
+      const t = harness.kpi_templates[tplSel.value];
+      tplParams.replaceChildren(...Object.entries(t.params).map(([p, spec]) => {
+        const options = (choices[tplSel.value] || {})[p] || spec.choices || [];
+        const input = options.length ? h("select", { "data-param": p, id: `tp-${p}`, class: "inline" }, options.map((o) => h("option", { value: String(o) }, String(o))))
+          : h("input", { type: spec.type === "text" ? "text" : "number", "data-param": p, id: `tp-${p}`, class: "inline", style: "width:120px", step: "any" });
+        return h("label", { for: `tp-${p}`, class: "small" }, `${spec.label || p} `, input);
+      }));
+    }
+    if (templates.length) { tplSel.addEventListener("change", syncTemplate); syncTemplate(); }
+    const addTpl = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+      const t = harness.kpi_templates[tplSel.value];
+      const params = {};
+      for (const el of tplParams.querySelectorAll("[data-param]")) {
+        const spec = t.params[el.dataset.param];
+        params[el.dataset.param] = spec.type === "number" || spec.type === "int" ? Number(el.value) : el.value;
+        if (el.value === "") throw new Error("Fill in every blank of the measure.");
+      }
+      const name = (tplSel.value + "_" + Object.values(params).join("_")).toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+      await patch({ kpis: { ...kpis, [name]: { template: tplSel.value, params } } }); drawAll();
+    }, e.currentTarget) }, "Add");
+    const sqlName = h("input", { type: "text", id: "sql-name", placeholder: "e.g. late_frozen" });
+    const sqlSays = h("input", { type: "text", id: "sql-says", placeholder: "In words: what exactly it counts" });
+    const sqlDir = h("select", { id: "sql-dir", class: "inline" }, h("option", { value: "lower" }, "lower is better"), h("option", { value: "higher" }, "higher is better"));
+    const sql = h("textarea", { id: "sql", class: "mono", placeholder: "SELECT COUNT(*) FROM visits WHERE late_s > 0" });
+    const rowsSql = h("textarea", { id: "rows-sql", class: "mono", placeholder: "Optional: SELECT * FROM visits WHERE late_s > 0 (the rows it counts)" });
+    const tried = h("div", { "aria-live": "polite" });
+    const tryBtn = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+      const answer = await api("POST", studyPath("/kpis/try"), { sql: sql.value, rows_sql: rowsSql.value });
+      tried.replaceChildren(note("good", h("p", { style: "margin:0" }, `On the preview case: ${fmt(answer.value)}${answer.note ? " (" + answer.note + ")" : ""}${answer.rows ? `; ${plural(answer.rows.rows.length, "row")} counted` : ""}.`)));
+    }, e.currentTarget) }, "Try it");
+    const addSql = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+      const answer = await api("POST", studyPath("/cards"), { card: { kind: "kpi", name: sqlName.value.trim(), says: sqlSays.value.trim() || sqlName.value.trim(), direction: sqlDir.value, sql: sql.value, rows_sql: rowsSql.value || undefined } });
+      current.doc = answer.study; drawAll(); toast("Added.");
+    }, e.currentTarget) }, "Add");
+    current.fillSql = (card) => { sqlName.value = card.name || ""; sqlSays.value = card.says || ""; sqlDir.value = card.direction || "lower"; sql.value = card.sql || ""; rowsSql.value = card.rows_sql || ""; addBox.querySelector("#sql-box").open = true; sql.focus(); };
+    addBox.replaceChildren(h("div", { class: "card" },
+      h("h3", { style: "margin-top:0" }, "Add a measure"),
+      ready.length ? h("div", { class: "row", style: "flex-wrap:nowrap" }, h("label", { for: "add-ready", class: "sr" }, "A ready-made measure"), readySel, addReady) : null,
+      templates.length ? h("details", { style: "margin-top:10px" }, h("summary", {}, "One with blanks to fill in"), h("div", { class: "row", style: "margin-top:6px" }, h("label", { for: "add-template", class: "sr" }, "Measure"), tplSel), tplParams, h("div", { style: "margin-top:8px" }, addTpl)) : null,
+      h("details", { style: "margin-top:10px", id: "sql-box" }, h("summary", {}, "Your own, in SQL"),
+        h("p", { class: "explain" }, "SQL over the tables of the case and the plan; the first number it returns is the measure. The assistant can write it for you."),
+        h("div", { class: "grid", style: "grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:10px" },
+          h("label", { class: "field", for: "sql-name" }, h("span", { class: "label" }, "Name"), sqlName),
+          h("label", { class: "field", for: "sql-says" }, h("span", { class: "label" }, "In words"), sqlSays)),
+        h("label", { class: "field", for: "sql-dir" }, h("span", { class: "label" }, "Which way is better"), sqlDir),
+        h("label", { class: "field", for: "sql" }, h("span", { class: "label" }, "SQL"), sql),
+        h("label", { class: "field", for: "rows-sql" }, h("span", { class: "label" }, "The rows it counts (optional)"), rowsSql),
+        h("div", { class: "row" }, tryBtn, addSql), tried)));
+  }
+
+  function drawGoal() {
+    const study = current.doc.study;
+    const names = Object.keys(study.kpis);
+    const levels = study.goal.levels || [];
+    const weighted = levels.length === 1 && study.kpis[levels[0].kpi] && study.kpis[levels[0].kpi].weighted;
+    let mode = levels.length > 1 ? "order" : weighted ? "mix" : "one";
+    const box = h("div");
+    const modes = h("div", { class: "seg", role: "radiogroup", "aria-label": "Kind of goal" }, [["one", "One measure"], ["mix", "A combination"], ["order", "In order of importance"]].map(([v, t]) =>
+      h("label", {}, h("input", { type: "radio", name: "goal-mode", value: v, checked: mode === v, onchange: () => { mode = v; drawMode(); } }), t)));
+    function saveLevels(next) { return guarded(async () => { await patch({ goal: { levels: next } }); drawAll(); }); }
+    function drawMode() {
+      if (!names.length) { fill(box, h("p", { class: "muted" }, "Add a measure first.")); return; }
+      if (mode === "one") {
+        const first = levels[0] && !weighted ? levels[0] : { kpi: names[0], direction: kpiDirection(names[0]) };
+        const sel = h("select", { id: "goal-kpi", class: "inline" }, names.filter((n) => !study.kpis[n].weighted).map((n) => h("option", { value: n, selected: n === first.kpi }, kpiLabel(n))));
+        const dir = h("select", { id: "goal-dir", class: "inline" }, h("option", { value: "lower", selected: first.direction === "lower" }, "as low as possible"), h("option", { value: "higher", selected: first.direction === "higher" }, "as high as possible"));
+        sel.addEventListener("change", () => { dir.value = kpiDirection(sel.value); saveLevels([{ kpi: sel.value, direction: dir.value }]); });
+        dir.addEventListener("change", () => saveLevels([{ kpi: sel.value, direction: dir.value }]));
+        fill(box, h("div", { class: "row" }, h("label", { for: "goal-kpi" }, "Make"), sel, dir));
+        if (!levels.length || weighted || levels.length > 1) saveLevels([{ kpi: sel.value, direction: dir.value }]);
+      } else if (mode === "mix") {
+        const parts = weighted ? { ...study.kpis[levels[0].kpi].weighted } : {};
+        const plain = names.filter((n) => !study.kpis[n].weighted);
+        const inputs = plain.map((n) => {
+          const input = h("input", { type: "number", step: "any", min: "0", id: `w-${n}`, class: "inline", style: "width:100px", value: parts[n] ?? "" });
+          return [n, input];
+        });
+        const rates = h("div", { class: "explain" });
+        function describe() {
+          const w = inputs.map(([n, i]) => [n, Number(i.value)]).filter(([, v]) => v > 0);
+          rates.replaceChildren(...(w.length > 1 ? w.slice(1).map(([n, v]) => h("p", { style: "margin:4px 0" }, `1 ${kpiUnit(n) || "unit"} of “${kpiLabel(n)}” counts as much as ${fmt(v / w[0][1])} ${kpiUnit(w[0][0]) || "units"} of “${kpiLabel(w[0][0])}”.`)) : [h("p", {}, "Give two or more measures a weight.")]));
+        }
+        const save = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+          const w = Object.fromEntries(inputs.map(([n, i]) => [n, Number(i.value)]).filter(([, v]) => v > 0));
+          if (Object.keys(w).length < 2) throw new Error("Give two or more measures a weight.");
+          const says = "Combined: " + Object.entries(w).map(([n, v]) => `${fmt(v)} × ${kpiLabel(n)}`).join(" + ");
+          await patch({ kpis: { ...study.kpis, combined: { says, direction: "lower", weighted: w } }, goal: { levels: [{ kpi: "combined", direction: "lower" }] } });
+          drawAll();
+        }, e.currentTarget) }, "Use this combination");
+        for (const [, input] of inputs) input.addEventListener("input", describe);
+        fill(box, h("p", { class: "explain" }, "Lower is better for the combination: a measure where higher is better counts against it. The weights say how much a unit of each is worth."),
+          h("div", { class: "stack" }, inputs.map(([n, input]) => h("div", { class: "row" }, h("label", { for: `w-${n}`, style: "min-width:220px" }, kpiLabel(n)), input, h("span", { class: "faint" }, kpiUnit(n))))),
+          rates, save);
+        describe();
+      } else {
+        const list = levels.length > 1 ? levels.map((l) => ({ ...l })) : [{ kpi: names[0], direction: kpiDirection(names[0]), equal_within: "1 %" }, { kpi: names[1] || names[0], direction: kpiDirection(names[1] || names[0]) }];
+        const rows = list.map((level, i) => {
+          const sel = h("select", { class: "inline", "aria-label": `Level ${i + 1}: measure` }, names.filter((n) => !study.kpis[n].weighted || n === level.kpi).map((n) => h("option", { value: n, selected: n === level.kpi }, kpiLabel(n))));
+          const dir = h("select", { class: "inline", "aria-label": `Level ${i + 1}: direction` }, h("option", { value: "lower", selected: level.direction === "lower" }, "lower"), h("option", { value: "higher", selected: level.direction === "higher" }, "higher"));
+          const within = String(level.equal_within ?? "");
+          const amount = h("input", { type: "number", step: "any", min: "0", class: "inline", style: "width:90px", "aria-label": `Level ${i + 1}: counts as equal within`, value: within.replace("%", "").trim() });
+          const unit = h("select", { class: "inline", "aria-label": "in percent or in the measure's unit" }, h("option", { value: "%", selected: within.includes("%") || !within }, "%"), h("option", { value: "abs", selected: within && !within.includes("%") }, kpiUnit(level.kpi) || "units"));
+          const last = i === list.length - 1;
+          const read = () => ({ kpi: sel.value, direction: dir.value, ...(last ? {} : { equal_within: unit.value === "%" ? `${amount.value || 1} %` : Number(amount.value || 0) }) });
+          for (const el of [sel, dir, amount, unit]) el.addEventListener("change", () => { list[i] = read(); saveLevels(list.map((l, j) => j === list.length - 1 ? { kpi: l.kpi, direction: l.direction } : l)); });
+          return h("div", { class: "item" }, h("span", { class: "badge" }, String(i + 1)), h("div", { class: "body" },
+            h("div", { class: "row" }, sel, dir, "is better"),
+            last ? h("p", { class: "faint", style: "margin:4px 0 0" }, "The last level decides whatever is left.") : h("div", { class: "row small", style: "margin-top:4px" }, "Counts as equal within", amount, unit)),
+            h("div", { class: "row", style: "flex-wrap:nowrap" },
+              h("button", { class: "btn small quiet", type: "button", disabled: i === 0, "aria-label": "Move up", onclick: () => { [list[i - 1], list[i]] = [list[i], list[i - 1]]; saveLevels(fixLevels(list)); } }, "↑"),
+              h("button", { class: "btn small quiet", type: "button", disabled: last, "aria-label": "Move down", onclick: () => { [list[i + 1], list[i]] = [list[i], list[i + 1]]; saveLevels(fixLevels(list)); } }, "↓"),
+              h("button", { class: "btn small quiet", type: "button", disabled: list.length <= 2, "aria-label": "Remove level", onclick: () => saveLevels(fixLevels(list.filter((_, j) => j !== i))) }, "✕")));
+        });
+        fill(box, h("p", { class: "explain" }, "A is better than B if, at the first level where they differ by more than that level's tolerance, A is better."),
+          h("div", { class: "card", style: "padding:4px 18px" }, rows),
+          list.length < 4 ? h("button", { class: "btn small", type: "button", style: "margin-top:8px", onclick: () => saveLevels(fixLevels([...list, { kpi: names.find((n) => !list.some((l) => l.kpi === n)) || names[0], direction: "lower" }])) }, "Add a level") : null);
+        if (levels.length <= 1) saveLevels(fixLevels(list));
+      }
+    }
+    goalBox.replaceChildren(modes, h("div", { style: "margin-top:12px" }, box));
+    drawMode();
+  }
+  function fixLevels(list) { return list.map((l, i) => i === list.length - 1 ? { kpi: l.kpi, direction: l.direction } : { ...l, equal_within: l.equal_within ?? "1 %" }); }
+
+  function drawRails() {
+    const study = current.doc.study;
+    const candidates = [...new Set([...Object.keys(study.kpis).filter((n) => !study.kpis[n].weighted), ...Object.keys(harness.kpis)])];
+    const rails = study.guardrails || [];
+    railsBox.replaceChildren(h("p", { class: "lede" }, "Conditions every case must meet. A combination that breaks one on any case does not count, however good it is otherwise."),
+      h("div", { class: "card", style: "padding:4px 18px" }, candidates.map((name) => {
+        const rail = rails.find((g) => g.kpi === name);
+        const lower = kpiDirection(name) === "lower";
+        const on = h("input", { type: "checkbox", id: `rail-${name}`, checked: !!rail });
+        const bound = h("input", { type: "number", step: "any", class: "inline", style: "width:110px", "aria-label": `${kpiLabel(name)}: ${lower ? "at most" : "at least"}`, value: rail ? (rail.max ?? rail.min) : "0" });
+        const valueEl = h("span", { class: "num" }, "…");
+        valueOf(name).then((v) => {
+          valueEl.textContent = v === null || v === undefined ? "–" : fmt(v);
+          if (!rail && typeof v === "number") bound.value = String(Math.round(v * 1000) / 1000);  // a bound at today's value
+        });
+        const save = () => guarded(async () => {
+          let next = rails.filter((g) => g.kpi !== name);
+          if (on.checked) next = [...next, lower ? { kpi: name, max: Number(bound.value) } : { kpi: name, min: Number(bound.value) }];
+          const kpis = { ...study.kpis };
+          if (on.checked && !(name in kpis)) kpis[name] = { from: "harness" };
+          await patch({ kpis, guardrails: next }); drawAll();
+        });
+        on.addEventListener("change", save); bound.addEventListener("change", () => { if (on.checked) save(); });
+        return h("div", { class: "item" }, on, h("label", { for: `rail-${name}`, class: "body" }, h("div", { class: "what" }, kpiLabel(name)),
+          h("div", { class: "muted small" }, "Today on the preview case: ", valueEl)), h("div", { class: "row small" }, lower ? "at most" : "at least", bound));
+      })));
+  }
+
+  function drawAll() { drawKpis(); drawAdd(); drawGoal(); drawRails(); }
+  const trap = Object.keys(current.doc.study.vary.data || {}).length && current.doc.study.goal.levels.some((l) => (harness.kpis[l.kpi] || {}).changes_with_levers);
+  put(box, 
+    h("h1", {}, "The goal"),
+    h("p", { class: "lede" }, "How to tell a better result: the measures to watch, what the search should improve, and the conditions it must never break."),
+    previewLine(current.doc) || "",
+    trap ? note("warn", h("p", { style: "margin:0" }, "The goal is measured with what the solver saw, and this study changes what it sees. A better number could then just mean different data. Choose a measure of the untouched cases instead.")) : "",
+    h("h2", {}, "Measures"), kpisBox, addBox,
+    h("h2", {}, "What should improve"), goalBox,
+    h("h2", {}, "Guardrails"), railsBox,
+    problemsOf(5), stepFoot(5));
+  drawAll();
+  current.redraw = drawAll;
+}
+
+// ---------------------------------------------------------- 6. limits
+async function step6(box) {
+  const { harness } = current;
+  const study = current.doc.study;
+  const settings = await api("GET", "/api/settings");
+  const hasKey = settings.provider === "claude-cli" || Object.entries(settings.keys).some(([k, v]) => v && (settings.provider === "openrouter" ? k.startsWith("OPENROUTER") : k.startsWith("AZURE")));
+  const time = h("input", { type: "number", id: "time", min: String(harness.time_limit.min_s), step: "any", class: "inline", style: "width:110px", value: String(study.limits.time_per_case_s) });
+  const retries = h("select", { id: "retries", class: "inline" }, [0, 1, 2, 3].map((n) => h("option", { value: String(n), selected: n === study.limits.retries }, String(n))));
+  const runs = h("select", { id: "runs", class: "inline" }, [1, 2, 3, 5].map((n) => h("option", { value: String(n), selected: n === study.limits.runs_per_case }, String(n))));
+  const hours = h("input", { type: "number", id: "hours", min: "0", step: "1", class: "inline", style: "width:80px", value: String(Math.floor(study.budget.hours)) });
+  const minutes = h("input", { type: "number", id: "minutes", min: "0", max: "59", step: "5", class: "inline", style: "width:80px", value: String(Math.round((study.budget.hours % 1) * 60)) });
+  const ai = h("input", { type: "checkbox", id: "ai", checked: study.budget.ai.enabled, disabled: !hasKey && !study.budget.ai.enabled });
+  const usd = h("input", { type: "number", id: "usd", min: "0", step: "0.5", class: "inline", style: "width:90px", value: String(study.budget.ai.max_usd) });
+  const consequence = h("p", { class: "hint" });
+  const planBox = h("div", { "aria-live": "polite" });
+  function explain() {
+    const t = Number(time.value) || 0;
+    consequence.textContent = harness.time_limit.accepts
+      ? `${harness.title} stops itself after ${fmt(t)} s; a run still going after ${fmt(t * 1.5 + 30)} s is stopped and counts as failed.`
+      : `${harness.title} does not stop itself: a run still going after ${fmt(t)} s is stopped and counts as failed.`;
+  }
+  async function save() {
+    const total = Math.max(0, Number(hours.value) || 0) + Math.max(0, Math.min(59, Number(minutes.value) || 0)) / 60;
+    await patch({ limits: { time_per_case_s: Number(time.value), retries: Number(retries.value), runs_per_case: Number(runs.value) },
+      budget: { hours: Math.round(total * 10000) / 10000, ai: { enabled: ai.checked, max_usd: Number(usd.value) } } });
+    await drawPlan();
+  }
+  for (const el of [time, retries, runs, hours, minutes, ai, usd]) el.addEventListener("change", () => guarded(save));
+  time.addEventListener("input", explain);
+  async function drawPlan() {
+    let plan;
+    try { plan = await api("GET", studyPath("/plan")); } catch (err) { planBox.replaceChildren(note("warn", h("p", { style: "margin:0" }, err.message))); return; }
+    const adjust = h("details", { style: "margin-top:10px" }, h("summary", {}, "Adjust (for experts)"), adjustForm(plan));
+    planBox.replaceChildren(
+      plan.blocked ? note("bad", h("p", { style: "margin:0 0 6px" }, "With these choices the search gets fewer than 3 rounds, too few to learn anything. Any one of these would fix it:"),
+        h("ul", { style: "margin:0; padding-left:18px" }, (plan.ways_out || []).map((w) => h("li", {}, w))))
+        : note("info", h("p", { style: "margin:0" }, h("strong", {}, sentence(plan.summary))), plan.estimated ? h("p", { class: "small", style: "margin:4px 0 0" }, "An estimate: the preview has not measured a run yet.") : null),
+      plan.warning ? note("warn", h("p", { style: "margin:0" }, plan.warning)) : "",
+      adjust);
+  }
+  function adjustForm(plan) {
+    const children = h("input", { type: "number", min: "1", class: "inline", style: "width:80px", id: "adj-children", value: String(plan.children) });
+    const generations = h("input", { type: "number", min: "1", class: "inline", style: "width:80px", id: "adj-generations", value: String(plan.generations) });
+    const auto = (current.doc.study.plan || {}).auto !== false;
+    return h("div", { class: "stack small" },
+      h("p", { class: "muted" }, `${plural(plan.workers, "run")} at a time. Each round tries ${plural(plan.children, "combination")}${plan.screening ? `, first on ${plural(plan.screen_cases, "case")} at a quarter of the time` : ""}.`),
+      h("div", { class: "row" }, h("label", { for: "adj-children" }, "Combinations per round"), children, h("label", { for: "adj-generations" }, "Rounds (the engine's generations)"), generations),
+      h("div", { class: "row" },
+        h("button", { class: "btn small", type: "button", onclick: (e) => guarded(async () => { await patch({ plan: { auto: false, children: Number(children.value), generations: Number(generations.value) } }); drawPlan(); }, e.currentTarget) }, "Use these numbers"),
+        auto ? null : h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await patch({ plan: { auto: true } }); drawPlan(); }, e.currentTarget) }, "Back to automatic")));
+  }
+  explain();
+  put(box, 
+    h("h1", {}, "Limits and budget"),
+    h("p", { class: "lede" }, "How long each run may take, and how long the whole study may take."),
+    h("div", { class: "card" },
+      h("div", { class: "row" }, h("label", { for: "time", class: "label", style: "margin:0" }, "Time per case"), time, "seconds"), consequence,
+      h("div", { class: "row", style: "margin-top:12px" }, h("label", { for: "retries", class: "label", style: "margin:0" }, "Retries"), retries),
+      h("p", { class: "hint" }, "If a run fails (the application crashed, say), it is tried again this many times before it counts as failed."),
+      h("details", { style: "margin-top:10px" }, h("summary", {}, "More reliable, slower"),
+        h("div", { class: "row" }, h("label", { for: "runs" }, "Runs per case"), runs),
+        h("p", { class: "hint" }, harness.seeds ? "Each case is solved this many times with different random seeds, and the results are averaged: steadier numbers, but each round takes that many times longer." : "This application takes no seed, so a second run repeats the first."))),
+    h("div", { class: "card" },
+      h("div", { class: "row" }, h("span", { class: "label", style: "margin:0" }, "Total time"), hours, h("label", { for: "hours" }, "hours"), minutes, h("label", { for: "minutes" }, "minutes")),
+      h("p", { class: "hint" }, "The whole study, the final check included. The search stops in time for the check.")),
+    h("div", { class: "card" },
+      h("div", { class: "row" }, ai, h("label", { for: "ai", class: "label", style: "margin:0" }, "Let an AI model propose combinations too"), h("span", { class: "faint" }, "at most $"), usd),
+      hasKey ? h("p", { class: "hint" }, "Besides the search's own methods, a model reads what has been tried and suggests what to try next. It costs money: the study stops using it at the limit.")
+        : h("p", { class: "hint" }, "Needs an API key: ", h("a", { href: "#/settings" }, "add one in Settings"), ". The search works well without it.")),
+    h("h2", {}, "The plan"), planBox,
+    problemsOf(6), stepFoot(6));
+  await drawPlan();
+}
+
+// -------------------------------------------------------- 7. review, start
+async function step7(box) {
+  const { harness } = current;
+  const doc = current.doc;
+  const study = doc.study;
+  const tunedSettings = Object.entries(study.vary.settings || {}).filter(([, c]) => c === "tune" || (c && c.tune)).map(([n]) => harness.settings.find((s) => s.name === n)?.label || n);
+  const fixedSettings = Object.entries(study.vary.settings || {}).filter(([, c]) => c !== null && typeof c === "object" && "fixed" in c);
+  const data = Object.values(study.vary.data || {});
+  const training = study.cases.training.length, test = study.cases.test.length;
+  let plan = null;
+  try { plan = await api("GET", studyPath("/plan")); } catch (err) { plan = null; }
+  const goal = study.goal.levels || [];
+  const goalText = goal.length === 0 ? "No goal yet." : goal.length === 1 ? `Make ${kpiLabel(goal[0].kpi)} as ${goal[0].direction === "lower" ? "low" : "high"} as possible.`
+    : "In order of importance: " + goal.map((l, i) => `${i + 1}. ${kpiLabel(l.kpi)} (${l.direction}${l.equal_within ? `, equal within ${l.equal_within}` : ""})`).join("; ") + ".";
+  const lines = [
+    tunedSettings.length ? `Tune ${plural(tunedSettings.length, "setting")} of ${harness.title}: ${tunedSettings.join(", ")}.` : null,
+    fixedSettings.length ? `Keep ${plural(fixedSettings.length, "setting")} fixed: ${fixedSettings.map(([n, c]) => `${harness.settings.find((s) => s.name === n)?.label || n} at ${fmt(c.fixed)}`).join(", ")}.` : null,
+    data.length ? `Try ${plural(data.length, "data change")}: ${data.map((d) => d.says || `${d.lever} ${d.column}`).join("; ")}.` : null,
+    study.constraints.length ? `Keep ${plural(study.constraints.length, "rule")}: ${study.constraints.map((c) => c.says).join("; ")}.` : null,
+    `Search on ${plural(training, "case")}; ${test ? `check the result on ${plural(test, "case")} held back.` : "no case is held back, so there is no final check."}`,
+    goalText,
+    study.guardrails.length ? `Never break: ${study.guardrails.map((g) => `${kpiLabel(g.kpi)} ${g.max !== undefined && g.max !== null ? "at most " + fmt(g.max) : "at least " + fmt(g.min)}`).join("; ")}.` : null,
+    `Each case gets ${fmt(study.limits.time_per_case_s)} s; the study takes at most ${duration(study.budget.hours * 3600)}${plan && !plan.blocked ? ` — ${plan.summary}` : "."}`,
+    study.budget.ai.enabled ? `An AI model helps the search, for at most $${fmt(study.budget.ai.max_usd)}.` : null,
+  ].filter(Boolean);
+  const problems = doc.problems;
+  const testResult = h("div", { "aria-live": "polite" });
+  const testBtn = h("button", { class: "btn", type: "button" }, "Test run");
+  const start = h("button", { class: "btn primary", type: "button", disabled: problems.length > 0 || Boolean(plan && plan.blocked) }, "Start the study");
+  function drawTest(state) {
+    if (!state || state.state === "none") { testResult.replaceChildren(h("p", { class: "muted small" }, "Runs the compiled study once on the smallest case: everything works together, and the starting point keeps the guardrails. Takes about one run.")); return; }
+    if (state.state === "running") { testResult.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), "The test run is running…")); return; }
+    const r = state.result || {};
+    if (state.state === "done" && r.ok) {
+      testResult.replaceChildren(note(r.guardrails_hold ? "good" : "warn",
+        h("p", { style: "margin:0 0 4px" }, h("strong", {}, r.guardrails_hold ? "The test run worked." : "The test run worked, and the starting point breaks a guardrail."), ` ${r.case.replace("cases/", "")}, ${fmt(r.duration_s, 1)} s.`),
+        h("ul", { style: "margin:0; padding-left:18px" }, Object.entries(r.kpis || {}).filter(([k]) => current.doc.study.kpis[k]).map(([k, v]) => h("li", { class: "small" }, `${kpiLabel(k)}: ${fmt(v)} ${kpiUnit(k)}`)))));
+    } else {
+      testResult.replaceChildren(note("bad", h("p", { style: "margin:0 0 4px" }, h("strong", {}, "The test run found a problem:")),
+        h("ul", { style: "margin:0; padding-left:18px" }, (r.failures && r.failures.length ? r.failures : [state.error || "no reason given"]).map((f) => h("li", { class: "small" }, sentence(f))))));
+    }
+  }
+  testBtn.addEventListener("click", () => guarded(async () => {
+    drawTest(await api("POST", studyPath("/test-run")));
+    every(1500, async () => { const state = await api("GET", studyPath("/test-run")); drawTest(state); if (state.state !== "running") clearTimers(); });
+  }, testBtn));
+  start.addEventListener("click", () => guarded(async () => {
+    await api("POST", studyPath("/start"));
+    location.hash = `#/study/${current.slug}/running`;
+  }, start));
+  put(box, 
+    h("h1", {}, "Review and start"),
+    h("div", { class: "card" }, h("ul", { style: "margin:0; padding-left:18px" }, lines.map((l) => h("li", { style: "margin:4px 0" }, l)))),
+    problems.length ? note("warn", h("p", { style: "margin:0 0 4px" }, h("strong", {}, "Before it can start:")),
+      h("ul", { style: "margin:0; padding-left:18px" }, problems.map((p) => h("li", {}, h("a", { href: `#/study/${current.slug}/${p.step}` }, `Step ${p.step}, ${STEPS[p.step - 1]}`), `: ${sentence(p.text)}`)))) : null,
+    plan && plan.blocked ? note("bad", h("p", { style: "margin:0" }, sentence(plan.blocked))) : null,
+    h("h2", {}, "Test run"), testResult, h("div", { class: "row", style: "margin-top:8px" }, testBtn),
+    h("div", { class: "step-foot" }, h("a", { class: "btn", href: `#/study/${current.slug}/6` }, "Back"),
+      h("div", { class: "row" }, h("span", { class: "faint" }, "The study runs on even if you close the app."), start)));
+  drawTest(doc.test_run);
+  if ((doc.test_run || {}).state === "running") every(1500, async () => { const state = await api("GET", studyPath("/test-run")); drawTest(state); if (state.state !== "running") clearTimers(); });
+}
+
+// ============================================================== assistant
+function assistantPanel() {
+  const slug = current.slug;
+  const panel = h("aside", { class: "side card", "aria-label": "Assistant" });
+  const log = h("div", { class: "chat", "aria-live": "polite" });
+  const input = h("textarea", { id: "ask", placeholder: "Say what you want in your own words, e.g. “count late deliveries to frozen customers”", style: "min-height:70px" });
+  const ask = h("button", { class: "btn primary", type: "button" }, "Ask");
+  const cost = h("p", { class: "faint", style: "margin:6px 0 0" });
+  panel.append(h("h3", { style: "margin-top:0" }, "Assistant"),
+    h("p", { class: "faint", style: "margin-top:0" }, "It sees the tables' structure and summaries of the preview case — never rows, names, addresses or coordinates."),
+    log, h("label", { for: "ask", class: "sr" }, "Ask the assistant"), input, h("div", { class: "row", style: "margin-top:8px" }, ask), cost);
+
+  function bubble(text, me) { log.append(h("div", { class: "bubble" + (me ? " me" : "") }, text)); log.scrollTop = log.scrollHeight; }
+  function proposal(card) {
+    const kindText = { kpi: "A measure", data_change: "A data change", constraint: "A rule", setting: "A setting", weighted: "A combination", goal: "The goal", guardrail: "A guardrail" }[card.kind] || card.kind;
+    const detail = card.sql || card.expr || (card.kind === "data_change" ? `${card.lever} · ${card.column || "in code"} · where ${card.where || "all rows"} · ${card.mode} ${card.low}–${card.high}` : "")
+      || (card.kind === "goal" ? card.levels.map((l) => `${l.kpi} ${l.direction}${l.equal_within ? " within " + l.equal_within : ""}`).join(" → ") : "")
+      || (card.kind === "guardrail" ? `${card.kpi} ${card.max !== undefined ? "≤ " + card.max : "≥ " + card.min}` : "")
+      || (card.kind === "weighted" ? Object.entries(card.weighted || {}).map(([k, w]) => `${w} × ${k}`).join(" + ") : "")
+      || (card.kind === "setting" ? `${card.name}: ${card.mode}` : "");
+    const facts = card.ok ? [card.value !== undefined ? `On the preview case: ${fmt(card.value)}.` : null, card.applies_to !== undefined ? `Applies to ${plural(card.applies_to, "row")}.` : null,
+      card.holds_today ? "Holds today." : null].filter(Boolean).join(" ") : "";
+    const el = h("div", { class: "proposal" + (card.ok ? "" : " bad") },
+      h("div", { class: "faint" }, kindText), h("div", { class: "says" }, card.says || card.name || kindText),
+      detail ? h("pre", { class: "mono" }, detail) : null,
+      card.ok ? (facts ? h("p", { class: "small", style: "margin:6px 0 0" }, facts) : null) : h("p", { class: "small", style: "margin:6px 0 0; color: var(--critical-ink)" }, card.problem));
+    if (card.ok) {
+      const add = h("button", { class: "btn small primary", type: "button", onclick: () => guarded(async () => {
+        const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/cards`, { card });
+        current.doc = answer.study; add.replaceWith(status("good", "Added")); edit.remove(); dismiss.remove();
+        if (current.redraw) current.redraw();
+      }, add) }, "Add");
+      const edit = card.kind === "kpi" && current.fillSql ? h("button", { class: "btn small", type: "button", onclick: () => current.fillSql(card) }, "Edit") : h("span");
+      const dismiss = h("button", { class: "btn small quiet", type: "button", onclick: () => el.remove() }, "Dismiss");
+      el.append(h("div", { class: "row", style: "margin-top:8px" }, add, edit, dismiss));
+    }
+    log.append(el); log.scrollTop = log.scrollHeight;
+  }
+  ask.addEventListener("click", () => guarded(async () => {
+    const message = input.value.trim(); if (!message) return;
+    bubble(message, true); input.value = "";
+    const thinking = h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "Thinking… (checking every proposal on the preview case)");
+    log.append(thinking);
+    try {
+      const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/assistant`, { message });
+      thinking.remove();
+      if (answer.needs_key) { log.append(note("info", h("p", { style: "margin:0" }, answer.say, " ", h("a", { href: "#/settings" }, "Settings")))); return; }
+      if (answer.say) bubble(answer.say);
+      for (const card of answer.cards) proposal(card);
+      cost.textContent = `This answer cost $${fmt(answer.usd, 3)}; this study's assistant, $${fmt(answer.total_usd, 3)} so far.`;
+    } catch (err) { thinking.remove(); throw err; }
+  }, ask));
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask.click(); });
+  api("GET", `/api/studies/${encodeURIComponent(slug)}/assistant`).then((history) => {
+    for (const turn of history.turns.slice(-6)) turn.role === "user" ? bubble(turn.text, true) : (turn.say ? bubble(turn.say) : null);
+    if (history.total_usd) cost.textContent = `This study's assistant has cost $${fmt(history.total_usd, 3)} so far.`;
+    if (!history.turns.length) log.append(h("p", { class: "muted small", style: "margin:0" }, "For example: “a measure for late deliveries to VIP customers”, or “try cheaper vans and dearer trucks, trucks must stay dearer”."));
+  }).catch(() => {});
+  return panel;
+}
+
+// ================================================================ running
+function chart(series) {
+  const points = series.filter(([t, v]) => t !== null && v !== null);
+  if (points.length < 2) return h("p", { class: "muted small" }, "The chart appears after the first rounds.");
+  const W = 600, H = 170, pad = 30;
+  const xs = points.map((p) => p[0]), ys = points.map((p) => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(0, ...ys), y1 = Math.max(0.5, ...ys);
+  const X = (t) => pad + (W - 2 * pad) * (x1 === x0 ? 1 : (t - x0) / (x1 - x0));
+  const Y = (v) => H - pad + ((H - 2 * pad) * -(v - y0)) / (y1 - y0 || 1);
+  const path = points.map(([t, v], i) => `${i ? "L" : "M"}${X(t).toFixed(1)},${Y(v).toFixed(1)}`).join("");
+  const svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="The best improvement over time, from ${fmt(ys[0])} % to ${fmt(ys[ys.length - 1])} %">
+    <line x1="${pad}" y1="${Y(0).toFixed(1)}" x2="${W - pad}" y2="${Y(0).toFixed(1)}" stroke="var(--axis)" stroke-dasharray="4 4"/>
+    <text x="${pad}" y="${Y(0) - 6}" font-size="11" fill="var(--ink-3)">starting point</text>
+    <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/>
+    ${points.map(([t, v]) => `<circle cx="${X(t).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="3" fill="var(--accent)"/>`).join("")}
+    <text x="${W - pad}" y="${H - 8}" font-size="11" fill="var(--ink-3)" text-anchor="end">${duration(x1)} of search</text>
+    <text x="${pad}" y="14" font-size="11" fill="var(--ink-3)">% better than the start</text></svg>`;
+  const wrap = h("div"); wrap.innerHTML = svg; return wrap;
+}
+
+async function renderRunning(slug) {
+  await loadStudy(slug, true);
+  crumbs({ href: "#/", text: "Your studies", small: true }, { href: `#/study/${slug}/7`, text: current.doc.study.name, small: true }, { text: "Running" });
+  const box = h("div", { class: "narrow" });
+  view.replaceChildren(box);
+  let stopping = false;
+  async function draw() {
+    let s;
+    try { s = await api("GET", studyPath("/status")); }
+    catch (err) { fill(box, note("bad", h("p", {}, err.message))); return; }
+    const running = ["starting", "search", "check"].includes(s.phase);
+    const pill = running ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.phase === "check" ? "Final check" : "Running"))
+      : s.phase === "done" ? status("good", "Finished") : s.phase === "stopped" ? status("warn", "Stopped") : status("bad", "Failed");
+    const planned = Math.max(s.rounds.planned, s.rounds.done, 1);
+    const stop = h("button", { class: "btn danger", type: "button", disabled: !running || stopping, onclick: () => {
+      const dialog = h("dialog", {}, h("h3", { style: "margin-top:0" }, "Stop the study?"),
+        h("p", {}, "Runs in progress are stopped within seconds. The best so far is kept, and you see the results."),
+        h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Keep running"),
+          h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop")); toast("Stopping…"); draw(); }) }, "Stop")));
+      document.body.append(dialog); dialog.showModal(); dialog.addEventListener("close", () => dialog.remove());
+    } }, stopping && running ? "Stopping…" : "Stop");
+    fill(box, 
+      h("div", { class: "row between" }, h("h1", { style: "margin:0" }, current.doc.study.name), pill),
+      h("p", { class: "big", style: "margin:14px 0 4px" }, s.sentence),
+      s.error ? note("bad", h("p", { style: "margin:0" }, sentence(s.error))) : null,
+      h("div", { class: "card" },
+        h("div", { class: "facts" },
+          h("div", { class: "fact" }, h("div", { class: "k" }, "Time used"), h("div", { class: "v" }, s.time.used || "–")),
+          h("div", { class: "fact" }, h("div", { class: "k" }, "Time left"), h("div", { class: "v" }, running ? (s.time.left || "–") : "–")),
+          h("div", { class: "fact" }, h("div", { class: "k" }, "Done around"), h("div", { class: "v" }, running ? (s.time.finish_at || "–") : "–")),
+          h("div", { class: "fact" }, h("div", { class: "k" }, "Rounds done"), h("div", { class: "v" }, `${s.rounds.done} of about ${planned}`))),
+        h("div", { class: "bar", style: "margin-top:12px", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(planned), "aria-valuenow": String(s.rounds.done), "aria-label": "Rounds done" },
+          h("i", { style: `width:${Math.min(100, (100 * s.rounds.done) / planned)}%` }))),
+      h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "The best so far"), h("p", { class: "big" }, s.best.line),
+        s.best.levels ? h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Level"), h("th", {}, "Measure"), h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"), h("th", {}, "Verdict"))),
+          h("tbody", {}, s.best.levels.map((l) => h("tr", {}, h("td", {}, String(l.level)), h("td", {}, kpiLabel(l.kpi)), h("td", { class: "n" }, fmt(l.baseline)), h("td", { class: "n" }, fmt(l.best)), h("td", {}, l.state || "–")))))) : null,
+        chart(s.series)),
+      s.now ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Right now"), h("p", {}, s.now)) : null,
+      s.gated_line ? note("info", h("p", { style: "margin:0" }, s.gated_line)) : null,
+      s.failures.length ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Runs that failed"),
+        s.failures.map((f) => h("div", { class: "item" }, h("span", { class: "badge" }, `${f.count}×`), h("div", { class: "body" }, h("div", { class: "what small" }, sentence(f.message)), h("div", { class: "muted small" }, f.todo))))) : null,
+      h("div", { class: "step-foot" }, h("a", { class: "btn", href: s.dashboard, target: "_blank", rel: "noopener" }, "Detailed dashboard"),
+        running ? stop : h("div", { class: "row" },
+          s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check")); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
+          s.phase === "failed" ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start")); toast("Started again."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Start it again") : null,
+          s.phase === "failed" && !s.rounds.done ? null : h("a", { class: "btn primary", href: `#/study/${slug}/results` }, "See the results"))));
+    if (!running) clearTimers();
+  }
+  await draw();
+  every(2500, draw);
+}
+
+// ================================================================ results
+async function renderResults(slug, run) {
+  await loadStudy(slug, true);
+  crumbs({ href: "#/", text: "Your studies", small: true }, { href: `#/study/${slug}/7`, text: current.doc.study.name, small: true }, { text: "Results" });
+  let r;
+  try { r = await api("GET", studyPath("/results" + (run ? `?run=${encodeURIComponent(run)}` : ""))); }
+  catch (err) {
+    if (err.status === 404) { view.replaceChildren(note("info", h("p", {}, "This study has not been run yet. "), h("a", { href: `#/study/${slug}/7` }, "Review and start it"))); return; }
+    throw err;
+  }
+  const running = ["starting", "search", "check"].includes(r.phase);
+  const finalKind = { confirmed: "good", worse: "bad", unclear: "warn", single: "info", skipped: "info", stopped: "warn", missing: "info" }[r.final.state] || "info";
+  const unitOf = (k) => k.unit ? ` ${k.unit}` : "";
+  const kpiTable = h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "Measure"), h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"), h("th", { class: "n" }, "Start, held back"), h("th", { class: "n" }, "Best, held back"))),
+    h("tbody", {}, r.kpis.map((k) => h("tr", {}, h("td", {}, k.says, h("div", { class: "faint" }, `${k.direction === "lower" ? "lower" : "higher"} is better${unitOf(k) ? " ·" + unitOf(k) : ""}`)),
+      h("td", { class: "n" }, fmt(k.training.start, 2)), h("td", { class: "n" }, h("strong", {}, fmt(k.training.best, 2))), h("td", { class: "n" }, fmt(k.test.start, 2)), h("td", { class: "n" }, h("strong", {}, fmt(k.test.best, 2))))))));
+  const changed = h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "What"), h("th", {}, "Before"), h("th", {}, "Now"))),
+    h("tbody", {}, r.changed.map((c) => h("tr", {}, h("td", {}, c.label, h("div", { class: "faint" }, c.help)), h("td", { class: "num" }, c.old_text), h("td", { class: "num" }, c.changed ? h("strong", {}, c.new_text) : c.new_text))))));
+  const downloads = h("div", { class: "row" }, r.downloads.map((d) => h("a", { class: "btn" + (d.name === "settings_json" || d.name === "data_changes" ? " primary" : ""), href: `${studyPath("/download/" + d.name)}?run=${encodeURIComponent(r.run)}`, download: "" }, d.label)));
+  const next = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+    const doc = await api("POST", studyPath(`/next?run=${encodeURIComponent(r.run)}`), { name: `${current.doc.study.name} (next)` });
+    location.hash = `#/study/${doc.slug}/4`;
+  }, e.currentTarget) }, "Start a new study from this result");
+  view.replaceChildren(h("div", { class: "narrow" },
+    h("h1", {}, r.study),
+    running ? note("info", h("p", { style: "margin:0" }, "The study is still running; these are the results so far. ", h("a", { href: `#/study/${slug}/running` }, "See it run"))) : null,
+    h("div", { class: "card" }, h("p", { class: "big", style: "margin:0" }, r.headline)),
+    h("h2", {}, "The final check"),
+    h("div", { class: "card" }, status(finalKind, { good: "Confirmed", bad: "Worse", warn: "Not clear", info: "Note" }[finalKind]), h("p", { style: "margin:8px 0 0" }, r.final.line),
+      r.final.levels ? h("ul", { class: "small" }, r.final.levels.map((l) => h("li", {}, `${kpiLabel(l.kpi)}: ${l.verdict || l.state || ""}`))) : null),
+    h("h2", {}, "Every measure"), h("div", { class: "card" }, kpiTable,
+      r.guardrails.length ? h("p", { class: "faint" }, "Guardrails: ", r.guardrails.map((g) => `${kpiLabel(g.kpi)} ${g.max !== null && g.max !== undefined ? "at most " + fmt(g.max) : "at least " + fmt(g.min)}`).join("; "), ".") : null),
+    h("h2", {}, "What changed"), h("div", { class: "card" }, r.is_seed ? h("p", { class: "muted" }, "Nothing: no combination beat the starting point.") : changed),
+    h("h2", {}, "Take it with you"), h("div", { class: "card" }, downloads, h("p", { class: "faint" }, "The settings file holds every setting, the tuned ones included, ready for the application.")),
+    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), next)));
+}
+
+route();
+</script>
+</body>
+</html>

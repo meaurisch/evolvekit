@@ -118,11 +118,22 @@ def home(req: Request) -> dict[str, Any]:
             continue
         h = entry.harness
         harnesses.append({"id": h.id, "version": h.version, "title": h.title, "summary": h.summary,
-                          "built_in": entry.built_in, "templates": {t: str(v.get("title") or t) for t, v in h.templates.items()},
+                          "built_in": entry.built_in, "templates": _templates(h),
                           "application": {"kind": h.application.kind, "label": h.application.label}})
     settings = req.home.settings()
     return {"home": str(req.home.root), "studies": studies, "harnesses": harnesses, "keys": req.home.keys(),
             "provider": settings["provider"]}
+
+
+def _templates(harness: Harness) -> list[dict[str, Any]]:
+    """The study templates, settings studies first: they are the simpler start."""
+    listed = []
+    for tid, template in harness.templates.items():
+        vary = template.get("vary") or {}
+        kind = "data" if vary.get("data") else "settings"
+        listed.append({"id": tid, "title": str(template.get("title") or tid),
+                       "summary": " ".join(str(template.get("summary") or "").split()), "kind": kind})
+    return sorted(listed, key=lambda t: (t["kind"] != "settings", t["title"]))
 
 
 def get_settings(req: Request) -> dict[str, Any]:
@@ -135,7 +146,16 @@ def put_settings(req: Request) -> dict[str, Any]:
 
 
 def install(req: Request) -> dict[str, Any]:
-    harness = req.home.install(req.body, req.query.get("name") or "harness.zip")
+    """A harness from the .zip in the body -- or, as JSON `{path}`, from a
+    .zip on this computer."""
+    if (req.headers.get("Content-Type") or "").startswith("application/json"):
+        raw = str(req.json().get("path") or "").strip().strip('"')
+        path = Path(raw).expanduser()
+        if not raw or not path.is_absolute() or not path.is_file():
+            raise AppError("give the full path of the harness's .zip file, such as C:\\Users\\you\\Downloads\\pyvrp-1.0.0.zip")
+        harness = req.home.install(path.read_bytes(), path.name)
+    else:
+        harness = req.home.install(req.body, req.query.get("name") or "harness.zip")
     return describe_harness(harness)
 
 
@@ -242,6 +262,14 @@ def delete_case(req: Request) -> dict[str, Any]:
         raise AppError("the study is running; its cases cannot change now", 409)
     req.home.delete_case(slug, req.params["name"])
     return _document(req, slug)
+
+
+def import_cases(req: Request) -> dict[str, Any]:
+    slug = req.params["slug"]
+    if jobs.running(req.home.study_root(slug)):
+        raise AppError("the study is running; its cases cannot change now", 409)
+    imported = req.home.import_folder(slug, str(req.json().get("folder") or ""))
+    return {"imported": imported, "study": _document(req, slug)}
 
 
 def use_samples(req: Request) -> dict[str, Any]:
@@ -424,6 +452,7 @@ ROUTES = [
     route("PUT", "/api/studies/{slug}/cases/{name}")(put_case),
     route("DELETE", "/api/studies/{slug}/cases/{name}")(delete_case),
     route("POST", "/api/studies/{slug}/samples")(use_samples),
+    route("POST", "/api/studies/{slug}/import")(import_cases),
     route("POST", "/api/studies/{slug}/inspect")(inspect_cases),
     route("POST", "/api/studies/{slug}/split")(split),
     route("PUT", "/api/studies/{slug}/inputs/{input}/{name}")(put_input),

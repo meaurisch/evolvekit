@@ -160,6 +160,39 @@ def test_a_study_through_its_steps(app):
     assert [s["slug"] for s in home["studies"]] == ["tours"] and home["studies"][0]["line"] == "draft · step 6 of 7"
 
 
+def test_cases_come_from_a_folder_on_this_computer(app, tmp_path):
+    call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Folder"})
+    call(app, "POST", "/api/studies/folder/application", {"path": str(SOLVER)})
+    folder = tmp_path / "handover" / "cases"
+    (folder / "deeper").mkdir(parents=True)
+    for name in ("town-40.json", "county-50.json"):
+        (folder / name).write_bytes((DEMO / "samples" / name).read_bytes())
+    (folder / "deeper" / "region 60.json").write_bytes((DEMO / "samples" / "region-60.json").read_bytes())
+    (folder / "notes.txt").write_text("not a case")
+    status, answer = call(app, "POST", "/api/studies/folder/import", {"folder": str(folder)})
+    assert status == 200, answer
+    assert sorted(answer["imported"]["added"]) == ["county-50.json", "region-60.json", "town-40.json"]
+    assert all(c["inspected"]["ok"] for c in answer["study"]["cases"])
+    for bad, says in (("relative/path", "full path"), (str(tmp_path / "nowhere"), "no folder"), (str(tmp_path), "holds no .json")):
+        if says == "holds no .json":
+            (tmp_path / "empty").mkdir()
+            bad = str(tmp_path / "empty")
+        status, body = call(app, "POST", "/api/studies/folder/import", {"folder": bad})
+        assert status == 400 and says in body["error"], body
+
+
+def test_a_harness_is_installed_from_a_path_on_this_computer(app, tmp_path):
+    from evolvekit.harness.library import pack_harness
+
+    archive = pack_harness(DEMO, tmp_path)
+    status, harness = call(app, "POST", "/api/harnesses", {"path": str(archive)})
+    assert status == 200 and harness["id"] == "demo-tour"
+    status, home = call(app, "GET", "/api/home")
+    assert any(h["id"] == "demo-tour" and not h["built_in"] for h in home["harnesses"]), "the installed copy is listed"
+    status, body = call(app, "POST", "/api/harnesses", {"path": "pyvrp-1.0.0.zip"})
+    assert status == 400 and "full path" in body["error"]
+
+
 def test_the_detection_list_answers_for_a_study(app):
     call(app, "POST", "/api/studies", {"harness": "pyvrp", "template": "tune", "name": "Detect"})
     status, found = call(app, "GET", "/api/detect?study=detect")

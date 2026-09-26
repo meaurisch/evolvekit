@@ -222,6 +222,7 @@ def make_plan(
         generations = max(1, int(overrides["generations"]))
         rounds = generations
         adjusted.append("generations")
+        blocked, ways_out = "", ()  # an expert who sets the rounds has decided
     if "workers" in overrides:
         adjusted.append("workers")
     plan = Plan(
@@ -264,5 +265,7 @@ def _ways_out(shape: _Shape, screening: bool) -> tuple[str, ...]:
                 break
     layout = _layout(shape, min(CHILDREN), 3, screening)
     hours = (MIN_ROUNDS * layout["round"] + layout["seed"] + layout["final"]) / 0.95 / 3600.0
-    ways.append(f"Allow at least {math.ceil(hours * 4) / 4:g} hours.")
+    quarters = math.ceil(hours * 4) / 4
+    ways.append(f"Allow at least {round(quarters * 60)} minutes in total." if quarters < 1.5
+                else f"Allow at least {quarters:g} hours in total.")
     return tuple(ways)

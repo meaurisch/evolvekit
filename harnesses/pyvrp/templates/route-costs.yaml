@@ -1,7 +1,7 @@
 title: Route cost sets → deliveries per hour
 summary: >
   Try other distance and time costs per vehicle class, and find the set that makes PyVRP plan the
-  most deliveries per hour on the road -- without leaving a required task out. The solver settings
+  most deliveries per hour on the road, without leaving a required task out. The solver settings
   stay as they are.
 vary:
   data:

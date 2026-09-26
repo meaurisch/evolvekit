@@ -380,6 +380,13 @@ def build_parser() -> argparse.ArgumentParser:
     h_list = harness.add_parser("list", help="the harnesses evolvekit can offer")
     h_list.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
 
+    p_app = sub.add_parser("app", help="the app: set up, run and read studies in the browser")
+    p_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    p_app.add_argument("--port", type=int, default=None, help="first port to try (default 8780)")
+    p_app.add_argument("--no-browser", action="store_true", help="print the address; do not open a browser")
+    p_app.add_argument("--shortcut", action="store_true",
+                       help="write evolvekit.cmd to the Windows desktop, which starts the app with a double-click")
+
     p_study = sub.add_parser("study", help="make, preview, compile and run studies")
     study = p_study.add_subparsers(dest="study_command", required=True)
     s_new = study.add_parser("new", help="a new study folder from a harness (and a template)")
@@ -529,6 +536,52 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     print(f"dashboard   : {server.url}")
     print(f"for agents  : {server.url}api/status   (the same document as `status --json`)")
     print("Ctrl+C to stop. The run, if there is one, is not affected.")
+    if not args.no_browser:
+        open_in_browser(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        server.stop()
+    return 0
+
+
+def _desktop() -> Path:
+    """The Windows desktop, OneDrive's when it has taken the folder over."""
+    home = Path.home()
+    for candidate in (home / "OneDrive" / "Desktop", home / "Desktop"):
+        if candidate.is_dir():
+            return candidate
+    return home
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    """Serve the app for a library home until Ctrl+C. Runs started from it
+    carry on when it stops."""
+    from evolvekit.app.server import DEFAULT_PORT, AppServer
+    from evolvekit.dashboard import open_in_browser
+    from evolvekit.harness.library import default_home
+
+    home = Path(args.home).expanduser().resolve() if args.home else default_home()
+    if args.shortcut:
+        if os.name != "nt":
+            print("error: --shortcut writes a Windows .cmd file; elsewhere, start the app with "
+                  "`python -m evolvekit app`", file=sys.stderr)
+            return 1
+        target = _desktop() / "evolvekit.cmd"
+        target.write_text(
+            "@echo off\r\ntitle evolvekit\r\n"
+            f'"{sys.executable}" -m evolvekit app --home "{home}"\r\n'
+            "pause\r\n",
+            encoding="utf-8",
+        )
+        print(f"wrote {target}: double-click it to start the app, and keep its window open while you work")
+        return 0
+    server = AppServer(home, port=args.port or DEFAULT_PORT)
+    print(f"evolvekit app : {server.url}")
+    print(f"library home  : {server.home.root}")
+    print("Keep this window open while you work. Runs carry on when it closes; Ctrl+C stops the app.")
     if not args.no_browser:
         open_in_browser(server.url)
     try:
@@ -814,6 +867,7 @@ _COMMANDS = {
     "stop": cmd_stop,
     "harness": cmd_harness,
     "study": cmd_study,
+    "app": cmd_app,
 }
 
 
