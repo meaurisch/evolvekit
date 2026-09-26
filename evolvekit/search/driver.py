@@ -245,9 +245,10 @@ class Driver:
             ] if space is not None else None,
             "objective": config.evaluate.score.objective,
             "direction": config.evaluate.score.direction,
-            # Which candidates compete. `None` when there are none, which is
-            # also what a run directory from before gates existed recorded.
+            # Which candidates compete, and how they rank. `None` when there are
+            # none: what a run directory from before either existed recorded.
             "gates": [gate.describe() for gate in config.evaluate.gates] or None,
+            "levels": [level.describe() for level in config.evaluate.score.levels] or None,
             "stages": [
                 {
                     "id": stage.id, "command": stage.command, "seeds": stage.seeds,
@@ -279,7 +280,7 @@ class Driver:
         if recorded is None:
             return  # a run directory from before this was recorded
         now = _comparable(self._problem_identity())
-        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "gates", "stages")
+        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "levels", "gates", "stages")
                    if recorded.get(key) != now[key]]
         if not changed:
             return
@@ -298,7 +299,8 @@ class Driver:
              "parameters": "the declared parameters changed (names, types or choices)",
              "objective": f"the objective is now {now['objective']!r}, was {recorded.get('objective')!r}",
              "direction": f"the direction is now {now['direction']!r}",
-             "gates": "the gates changed (evaluate.gates), so earlier candidates were judged by other rules"}[key]
+             "gates": "the gates changed (evaluate.gates), so earlier candidates were judged by other rules",
+             "levels": "the levels changed (evaluate.score.levels), so earlier scores rank by other rules"}[key]
             for key in changed if key != "stages"
         ]
         raise ValueError(
@@ -330,6 +332,7 @@ class Driver:
                 if config.problem.parameters else None
             ),
             "gates": [gate.describe() for gate in config.evaluate.gates],
+            "levels": [level.describe() for level in config.evaluate.score.levels],
             "failure_score": config.evaluate.failure_score,
             "stages": [
                 {

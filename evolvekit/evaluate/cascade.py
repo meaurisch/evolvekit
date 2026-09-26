@@ -23,6 +23,7 @@ from evolvekit.candidate import SEED_OPERATOR, Candidate
 from evolvekit.config import Config, PromoteRule, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
+from evolvekit.evaluate.levels import Anchor, level_score, make_anchor
 from evolvekit.evaluate.scoring import compute_score, ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
 from evolvekit.evaluate.stages import (
@@ -181,6 +182,13 @@ class Cascade:
         """Per stage, what the baseline reached on each instance: the yardstick
         of `normalize: baseline`. Kept on disk, because a resumed run does not
         evaluate its seed again."""
+        self.anchors: dict[str, Anchor] = {
+            key: Anchor.from_json(value)
+            for key, value in self._load_json(self.work_dir / "levels.json").items()
+            if isinstance(value, dict)
+        }
+        """Per stage, what `evaluate.score.levels` are measured from: the
+        seed's values (`evaluate/levels.py`). On disk for the same reason."""
 
     # -- public ----------------------------------------------------------
 
@@ -257,6 +265,25 @@ class Cascade:
                 gated=result.gated,
             )
         return results
+
+    # -- levels ----------------------------------------------------------
+
+    def _level_score(self, key: str, values: dict[str, float]) -> float:
+        """`evaluate.score.levels` as one score, measured from the anchor of
+        stage `key`. The first candidate through a stage anchors it -- in a
+        run that is the seed, which therefore scores exactly 0 -- and the
+        anchor is kept on disk so that a resumed run measures from it too."""
+        levels = self.config.evaluate.score.levels
+        anchor = self.anchors.get(key)
+        if anchor is None:
+            anchor = self.anchors[key] = make_anchor(levels, values)
+            # Atomically: half a file reads back as "no anchor", and a resumed
+            # run would quietly anchor at its first child instead of the seed.
+            _atomic_write(
+                self.work_dir / "levels.json",
+                json.dumps({k: a.to_json() for k, a in self.anchors.items()}, indent=2, sort_keys=True) + "\n",
+            )
+        return level_score(levels, anchor, values)
 
     # -- gates -----------------------------------------------------------
 
@@ -623,9 +650,12 @@ class Cascade:
         if stage.kind == "builtin-static":
             # No objective KPI here; a static pass carries no score of its own.
             return
-        score, penalty_total, terms = compute_score(
-            result.kpis, self.config.evaluate.score, self.config.evaluate.penalties
-        )
+        if self.config.evaluate.score.levels:
+            score, penalty_total, terms = self._level_score(stage.id, result.kpis), 0.0, {}
+        else:
+            score, penalty_total, terms = compute_score(
+                result.kpis, self.config.evaluate.score, self.config.evaluate.penalties
+            )
         result.score = score
         result.penalty_total = penalty_total
         result.penalty_terms = terms
@@ -688,9 +718,12 @@ class Cascade:
                 )
             merged = dict(result.kpis)
             merged.update(outcome.kpis)
-            private_score, _, _ = compute_score(
-                merged, self.config.evaluate.score, self.config.evaluate.penalties
-            )
+            if self.config.evaluate.score.levels:
+                private_score = self._level_score(f"{stage.id}/private", merged)
+            else:
+                private_score, _, _ = compute_score(
+                    merged, self.config.evaluate.score, self.config.evaluate.penalties
+                )
             result.private_score = private_score
             if result.public_score is not None:
                 result.generalization_gap = result.public_score - private_score
