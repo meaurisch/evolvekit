@@ -61,6 +61,8 @@ DELETE = object()
         ({"settings__factor__weight": 1}, r"settings\.factor: unknown key\(s\) \['weight'\]"),
         ({"tables__items__source": DELETE}, r"tables\.items\.source: required"),
         ({"tables__items__columns__value__type": "decimal"}, r"tables\.items\.columns\.value\.type: must be one of"),
+        ({"tables__items__columns__kind__private": True, "tables__items__columns__kind__categorical": True},
+         r"tables\.items\.columns\.kind: a column is categorical .* or private .*, not both"),
         ({"tables__orig_items": {"source": "request", "columns": {"x": {"type": "int"}}}},
          r"tables\.orig_items: `orig_` names the untouched copy"),
         ({"levers__item_values__table": "things"}, r"levers\.item_values\.table: 'things' is not a declared table"),

@@ -351,8 +351,8 @@ tables:
       task_id: {type: int, describe: The task's number within the request}
       kind: {type: text, categorical: true, describe: "delivery, pickup, exchange (both), visit (neither), shipment_pickup or shipment_delivery"}
       location: {type: int, describe: "The location's number; tasks at the same address share it"}
-      x_m: {type: int, unit: m, describe: East-west position}
-      y_m: {type: int, unit: m, describe: North-south position}
+      x_m: {type: int, unit: m, private: true, describe: East-west position}
+      y_m: {type: int, unit: m, private: true, describe: North-south position}
       tw_early_s: {type: int, unit: s, describe: "Earliest start of service, seconds after the time zero"}
       tw_late_s: {type: int, unit: s, describe: "Latest start of service, seconds after the time zero (NULL: no limit)"}
       release_s: {type: int, unit: s, describe: "When the goods are ready at the depot, seconds after the time zero"}
@@ -411,8 +411,8 @@ tables:
     columns:
       depot_id: {type: int, describe: The depot's number}
       name: {type: text, describe: The depot's name}
-      x_m: {type: int, unit: m, describe: East-west position}
-      y_m: {type: int, unit: m, describe: North-south position}
+      x_m: {type: int, unit: m, private: true, describe: East-west position}
+      y_m: {type: int, unit: m, private: true, describe: North-south position}
       tw_early_s: {type: int, unit: s, describe: "Opening time, seconds after the time zero"}
       tw_late_s: {type: int, unit: s, describe: "Closing time, seconds after the time zero (NULL: no limit)"}
       service_s: {type: int, unit: s, describe: Loading time at every depot visit}

@@ -58,6 +58,7 @@ __all__ = [
     "JOB",
     "PREVIEW",
     "Job",
+    "final_check",
     "plan_for",
     "preview",
     "read_job",
@@ -263,6 +264,16 @@ class Job:
         self.state: dict[str, Any] = {"phase": "search", "pid": os.getpid(), "started_at": _now(), **fields}
         self._write()
 
+    @classmethod
+    def resume(cls, run_dir: Path, state: dict[str, Any], phase: str) -> "Job":
+        """The job of `run_dir` again, in `phase`: a stopped final check resumed."""
+        job = cls.__new__(cls)
+        job.path = Path(run_dir) / JOB
+        job.state = {**state, "phase": phase, "pid": os.getpid(), "resumed_at": _now()}
+        job.state.pop("finished_at", None)
+        job._write()
+        return job
+
     def update(self, **fields: Any) -> None:
         self.state.update(fields)
         self._write()
@@ -317,6 +328,30 @@ def run_study(
             job.finish("stopped")
             return job.state
         _final_check(study, plan, config, run_dir, job, log)
+    except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
+        job.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    return job.state
+
+
+def final_check(root: str | Path, run_id: str, *, log: Callable[[str], None] = print) -> dict[str, Any]:
+    """The final check of a search that has finished, run again: after a stop
+    during the check, or a crash in it. `confirm` keeps what it measured, so
+    the runs already done are not repeated. Returns the final `job.json`."""
+    root = Path(root)
+    run_dir = root / "runs" / run_id
+    state = read_job(run_dir)
+    if not state or not state.get("search"):
+        raise HarnessError(f"runs/{run_id}: the search has not finished, so there is nothing to check yet")
+    if (state.get("search") or {}).get("aborted"):
+        raise HarnessError(f"runs/{run_id}: the search was aborted: {state['search'].get('stop_reason')}")
+    study = load_study(root)
+    checks = int((state.get("plan") or {}).get("check_seeds") or len(CHECK_SEEDS))
+    (run_dir / STOP_REQUEST).unlink(missing_ok=True)
+    job = Job.resume(run_dir, state, "check")
+    try:
+        config = load_config(run_dir / CONFIG)
+        _final_check(study, replace(Plan.fixed(), check_seeds=checks), config, run_dir, job, log)
     except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
         job.finish("failed", error=f"{type(exc).__name__}: {exc}")
         raise

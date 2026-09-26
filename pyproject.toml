@@ -29,9 +29,10 @@ evolvekit = "evolvekit.cli:main"
 include = ["evolvekit*"]
 
 [tool.setuptools.package-data]
-# The dashboard is one HTML file, served as it is: no build step. The harness
-# SDK is copied into every harness, and AGENTS.md into every new one.
-evolvekit = ["dashboard/*.html", "harness/templates/*.md", "harness/sdk/*.py"]
+# The dashboard and the app are one HTML file each, served as they are: no
+# build step. The harness SDK is copied into every harness, and AGENTS.md into
+# every new one.
+evolvekit = ["dashboard/*.html", "app/static/*.html", "harness/templates/*.md", "harness/sdk/*.py"]
 
 [tool.pytest.ini_options]
 # Without this, a bare `pytest` also collects whatever sits under `runs/` -- a

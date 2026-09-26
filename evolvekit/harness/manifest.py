@@ -292,22 +292,30 @@ class Column:
     describe: str = ""
     categorical: bool = False
     """Only categorical columns' distinct values may be summarised to a model."""
+    private: bool = False
+    """Never summarised to a model at all, not even its range: coordinates,
+    and anything else that would locate a customer."""
 
     @staticmethod
     def parse(table: str, name: Any, raw: Any) -> "Column":
         path = f"tables.{table}.columns.{name}"
         _name(name, path)
         data = _mapping(raw, path)
-        _known(data, {"type", "unit", "describe", "categorical"}, path)
+        _known(data, {"type", "unit", "describe", "categorical", "private"}, path)
         kind = _text(_required(data, "type", path), f"{path}.type")
         if kind not in COLUMN_TYPES:
             raise HarnessError(f"{path}.type: must be one of {list(COLUMN_TYPES)}, got {kind!r}")
-        return Column(
+        column = Column(
             name=name, type=kind,
             unit=_text(data.get("unit", ""), f"{path}.unit", empty=True),
             describe=_text(data.get("describe"), f"{path}.describe", empty=True),
             categorical=_flag(data.get("categorical", False), f"{path}.categorical"),
+            private=_flag(data.get("private", False), f"{path}.private"),
         )
+        if column.categorical and column.private:
+            raise HarnessError(f"{path}: a column is categorical (its values may be shown to a model) or private "
+                               "(nothing about it is), not both")
+        return column
 
 
 @dataclass(frozen=True)

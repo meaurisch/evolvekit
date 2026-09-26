@@ -96,7 +96,9 @@ most. Every default lies in its range.
 **Tables** are the vocabulary of every study (next section). Each column has
 a `type` (`int`, `float`, `text`, `bool`), a `unit`, a one-line `describe`,
 and `categorical: true` only when its distinct values are safe to show a
-model: tags, classes, kinds — never names, addresses or coordinates.
+model: tags, classes, kinds — never names, addresses or coordinates. The app's
+assistant is otherwise told a numeric column's minimum, mean and maximum;
+`private: true` withholds even that, which coordinates need.
 
 **Levers** name a request table, the numeric columns they may change, and
 their modes: `scale` multiplies today's value, `set` replaces it, `add` adds
