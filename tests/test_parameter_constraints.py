@@ -187,3 +187,61 @@ def test_draw_without_constraints_takes_the_first_proposal():
 def test_with_constraints_is_a_space_error_for_the_space_itself():
     with pytest.raises(SpaceError, match=r"x\[0\]: 'q' is not a parameter"):
         ParameterSpace.parse(SPACE).with_constraints(["q > 1"], path="x")
+
+
+# -- the model-free operators draw again rather than propose a breaking configuration
+
+from evolvekit.search.operators import param_cross, param_lhs_typed, param_local, param_tpe  # noqa: E402
+from evolvekit.search.tuning import Observation  # noqa: E402
+
+ORDERED = ParameterSpace.parse(
+    {"a": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.2},
+     "b": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.8}}
+).with_constraints(["a <= b"])
+
+
+def _parent(space, values, cid="g001-c0001"):
+    return Candidate(
+        id=cid, generation=1, block=space.render_block(values), source="", operator="param_local", params=dict(values)
+    )
+
+
+@pytest.mark.parametrize("seed", range(60))
+def test_every_model_free_operator_respects_the_constraints(seed):
+    # Parent and mate sit close to the line a == b: half of what an operator
+    # would propose unconstrained is on the wrong side of it.
+    parent = _parent(ORDERED, {"a": 0.45, "b": 0.5})
+    mate = _parent(ORDERED, {"a": 0.6, "b": 0.65}, "g001-c0002")
+    rng = random.Random(seed)
+    observations = []
+    for _ in range(12):
+        a = rng.random() * 0.9
+        observations.append(Observation({"a": a, "b": a + rng.random() * (1 - a)}, rng.random()))
+    for result in (
+        param_lhs_typed(ORDERED, parent, seed=seed),
+        param_local(ORDERED, parent, seed=seed),
+        param_cross(ORDERED, parent, mate, seed=seed),
+        param_tpe(ORDERED, parent, observations, seed=seed),
+    ):
+        assert result.ok, result.error
+        values = result.meta["params"]
+        assert values["a"] <= values["b"], (result.operator, values)
+
+
+def test_a_constraint_nothing_can_meet_leaves_the_last_draw_to_the_static_stage():
+    pinned = ParameterSpace.parse(
+        {"a": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.2},
+         "b": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.8}}
+    ).with_constraints(["a == 0.2 and b == 0.8"])
+    result = param_local(pinned, _parent(pinned, pinned.defaults()), seed=3)
+    assert result.ok
+    assert pinned.violations(result.meta["params"]), "every move breaks it; the static stage refuses the child"
+
+
+def test_without_constraints_the_operators_propose_what_they_always_did():
+    free = ParameterSpace.parse(
+        {"a": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.2},
+         "b": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.8}}
+    )
+    parent = _parent(free, {"a": 0.45, "b": 0.5})
+    assert param_local(free, parent, seed=7).meta["params"] == free.perturb({"a": 0.45, "b": 0.5}, random.Random(7))

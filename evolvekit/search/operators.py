@@ -25,7 +25,7 @@ from evolvekit.prompts import Inspiration, build_messages
 from evolvekit.providers.base import Completion, Provider, ProviderError
 from evolvekit.search.params import param_variant
 from evolvekit.search.tuning import Observation, propose_tpe
-from evolvekit.space import ParameterSpace
+from evolvekit.space import CONSTRAINT_ATTEMPTS, ParameterSpace
 
 __all__ = [
     "OperatorResult",
@@ -168,6 +168,15 @@ def param_lhs_typed(
     rng = random.Random(seed)
     base = parent.params or space.defaults()
     variants = [v for v in space.latin_hypercube(max(2, n_variants), rng) if v != base]
+    if space.constraints:
+        # Draw the hypercube again until some of it satisfies the constraints;
+        # after CONSTRAINT_ATTEMPTS draws the static stage has the last word.
+        for _ in range(CONSTRAINT_ATTEMPTS):
+            feasible = [v for v in variants if space.satisfies(v)]
+            if feasible:
+                variants = feasible
+                break
+            variants = [v for v in space.latin_hypercube(max(2, n_variants), rng) if v != base]
     if not variants:  # a space of one point
         return OperatorResult(
             operator="param_lhs",
@@ -198,9 +207,10 @@ def param_local(space: ParameterSpace, parent: Candidate, *, seed: int) -> Opera
     """A neighbour of the parent's configuration: one to three parameters moved
     a little (`ParameterSpace.perturb`). The exploiting half of a model-free
     search -- most of what can be won from a mature solver's defaults is next
-    to them."""
+    to them. Drawn again while it breaks a constraint (`ParameterSpace.draw`)."""
     base = dict(parent.params or space.defaults())
-    return _rendered(space, space.perturb(base, random.Random(seed)), "param_local")
+    rng = random.Random(seed)
+    return _rendered(space, space.draw(lambda: space.perturb(base, rng)), "param_local")
 
 
 def param_cross(
@@ -214,12 +224,16 @@ def param_cross(
     other = dict(mate.params) if mate is not None and mate.params else {}
     differing = [p.name for p in space if p.name in other and other[p.name] != base[p.name]]
     if len(differing) < 2:  # any cross of these two is one of the two
-        return _rendered(space, space.perturb(base, rng), "param_local", fallback_of="param_cross")
-    taken = [name for name in differing if rng.random() < 0.5]
-    if not taken or len(taken) == len(differing):  # the coin fell the same way every time
-        taken = rng.sample(differing, k=rng.randint(1, len(differing) - 1))
-    child = {**base, **{name: other[name] for name in taken}}
-    return _rendered(space, child, "param_cross", mate_id=mate.id)
+        child = space.draw(lambda: space.perturb(base, rng))
+        return _rendered(space, child, "param_local", fallback_of="param_cross")
+
+    def cross() -> dict:
+        taken = [name for name in differing if rng.random() < 0.5]
+        if not taken or len(taken) == len(differing):  # the coin fell the same way every time
+            taken = rng.sample(differing, k=rng.randint(1, len(differing) - 1))
+        return {**base, **{name: other[name] for name in taken}}
+
+    return _rendered(space, space.draw(cross), "param_cross", mate_id=mate.id)
 
 
 def param_tpe(
@@ -236,6 +250,7 @@ def param_tpe(
     proposal = propose_tpe(space, observations, rng)
     if proposal is None:
         base = dict(parent.params or space.defaults())
-        return _rendered(space, space.perturb(base, rng), "param_local", fallback_of="param_tpe")
+        child = space.draw(lambda: space.perturb(base, rng))
+        return _rendered(space, child, "param_local", fallback_of="param_tpe")
     return _rendered(space, proposal, "param_tpe", observations=len(observations))
 
