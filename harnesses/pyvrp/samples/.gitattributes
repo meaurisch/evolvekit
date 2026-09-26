@@ -1,0 +1,4 @@
+# make_samples.py writes these byte for byte, and the tests regenerate and
+# compare them. A checkout with core.autocrlf=true would rewrite "\n" as
+# "\r\n" and break the comparison.
+*.json text eol=lf

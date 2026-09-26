@@ -13,6 +13,13 @@ What matters is only what any such program offers:
 
 The "problem" is a toy (a random travelling-salesman tour improved by 2-opt
 with a few knobs), so the numbers mean nothing beyond the example.
+
+An instance names a seed and a number of cities, which are then placed at
+random; or it lists its stops, `"stops": [[x, y, weight], ...]`. A leg between
+two stops costs its length times the mean of their weights, so weights other
+than 1 change which tour the solver prefers -- the demo harness
+(`harnesses/demo-tour/`) tunes them. `cost` is what the solver minimised,
+`length` the tour's plain length.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ import time
 
 def main() -> int:
     p = argparse.ArgumentParser()
+    p.add_argument("--version", action="version", version="cli-solver 1.0")
     p.add_argument("--instance", required=True)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--time-limit", type=float, default=2.0)
@@ -36,21 +44,30 @@ def main() -> int:
     p.add_argument("--accept-worse", type=float, default=0.0, help="probability of accepting a worse move")
     p.add_argument("--init", choices=("random", "nearest"), default="random")
     p.add_argument("--or-opt", choices=("true", "false"), default="false")
+    p.add_argument("--print-tour", action="store_true", help="also report the tour, stop by stop")
     a = p.parse_args()
 
     spec = json.load(open(a.instance, encoding="utf-8"))
-    rng = random.Random(a.seed * 1_000_003 + spec["seed"])
+    rng = random.Random(a.seed * 1_000_003 + spec.get("seed", 0))
     # A real solver's one-in-twenty-five segfault: not reproducible, so a retry helps.
     # (CLI_SOLVER_NO_CRASH=1 switches it off, for the test suite.)
     if not os.environ.get("CLI_SOLVER_NO_CRASH") and random.SystemRandom().random() < spec.get("crash_rate", 0.0):
         sys.stderr.write("solver: fatal: corrupted neighbour list\n")
         return 139
 
-    points = [(random.Random(spec["seed"] + i).random(), random.Random(spec["seed"] - i - 1).random()) for i in range(spec["cities"])]
+    if "stops" in spec:
+        points = [(float(s[0]), float(s[1])) for s in spec["stops"]]
+        weights = [float(s[2]) if len(s) > 2 else 1.0 for s in spec["stops"]]
+    else:
+        points = [(random.Random(spec["seed"] + i).random(), random.Random(spec["seed"] - i - 1).random()) for i in range(spec["cities"])]
+        weights = [1.0] * len(points)
     n = len(points)
 
-    def dist(i: int, j: int) -> float:
+    def plain(i: int, j: int) -> float:
         return math.hypot(points[i][0] - points[j][0], points[i][1] - points[j][1])
+
+    def dist(i: int, j: int) -> float:
+        return plain(i, j) * (weights[i] + weights[j]) / 2
 
     near = [sorted(range(n), key=lambda j, i=i: dist(i, j))[1 : a.neighbours + 1] for i in range(n)]
     if a.init == "nearest":
@@ -94,8 +111,12 @@ def main() -> int:
             if stalled >= a.restart_after:
                 tour, current, stalled = best[:], best_len, 0
 
-    print(json.dumps({"cost": round(best_len, 6), "iterations": iterations, "instance": spec["name"],
-                      "settings": {"neighbours": a.neighbours, "init": a.init}}))
+    result = {"cost": round(best_len, 6), "iterations": iterations, "instance": spec["name"],
+              "length": round(sum(plain(best[k], best[(k + 1) % n]) for k in range(n)), 6),
+              "settings": {"neighbours": a.neighbours, "init": a.init}}
+    if a.print_tour:
+        result["tour"] = best
+    print(json.dumps(result))
     return 0
 
 

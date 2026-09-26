@@ -146,6 +146,9 @@ class Candidate:
     raced_out: str | None = None
     """Why the final stage was not finished, when that was the stage's `race`
     rule: the candidate was clearly behind after a few instances."""
+    gated: str | None = None
+    """The gate it broke (`evaluate.gates`), as `"missed = 2 > 0"`: it is not
+    competing, and nothing failed. `None` for every other candidate."""
     competes: bool = True
     """False when the candidate did not finish the final stage -- a failed
     evaluation, a proxy-only candidate, a final stage skipped by the daily cap,

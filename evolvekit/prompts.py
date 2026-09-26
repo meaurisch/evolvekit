@@ -153,12 +153,24 @@ def _parameter_section(config: Config) -> str:
         else:
             domain = "one of " + ", ".join(repr(c) for c in p.choices)
         lines.append(f"- `{p.name}`: {domain}; default {p.default!r}" + (f" -- {p.help}" if p.help else ""))
+    constraints = ""
+    if space.constraints:
+        constraints = (
+            "\nConstraints on these values (a configuration that breaks one is rejected before "
+            "it is evaluated):\n"
+            + "\n".join(
+                f"- `{c.text}`" if c.says == c.text else f"- {c.says}: `{c.text}`"
+                for c in space.constraints
+            )
+            + "\n"
+        )
     return (
         "\n## Parameters `configure()` returns\n"
         + "\n".join(lines)
         + "\nReturn a dict with these keys. A value outside its range, or an unknown key, "
         "is rejected before it is evaluated. `configure()` may compute its values, but it "
         "takes no arguments and must return plain numbers, booleans and strings.\n"
+        + constraints
     )
 
 
