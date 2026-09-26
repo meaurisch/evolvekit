@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import fmean, stdev
@@ -56,7 +57,7 @@ from evolvekit.leaderboard import rank
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import run_lock
 
-__all__ = ["confirm", "Comparison", "paired_summary", "wilcoxon_signed_rank", "render_markdown"]
+__all__ = ["confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown"]
 
 BASELINE = "baseline"
 
@@ -252,6 +253,11 @@ def _select(rows: list[dict[str, Any]], wanted: str) -> list[dict[str, Any]]:
     return [_find(rows, spec.strip(), "--candidates") for spec in wanted.split(",") if spec.strip()]
 
 
+class ConfirmStopped(RuntimeError):
+    """The comparison was stopped before it finished (`stop` was set). Its
+    finished runs are cached: running the same confirmation again resumes it."""
+
+
 def confirm(
     config: Config,
     run_dir: str | Path,
@@ -262,8 +268,13 @@ def confirm(
     label: str = "confirm",
     against: str | None = None,
     log: Callable[[str], None] = print,
+    stop: threading.Event | None = None,
 ) -> Comparison:
-    """Run the comparison described in the module docstring; returns it."""
+    """Run the comparison described in the module docstring; returns it.
+
+    `stop`, once set, stops the runs in flight and starts no other, and the
+    comparison ends with `ConfirmStopped` instead of a verdict on half the
+    pairs."""
     run_dir = Path(run_dir)
     rows = list(read_jsonl(run_dir / "runs.jsonl"))
     if against is not None:
@@ -359,12 +370,17 @@ def confirm(
             run_instance_stage(
                 jobs, stage, out_dir=work / "stage_out", cwd=config.base_dir,
                 required_kpis=config.evaluate.required_kpis, cache=EvalCache(work / "cache"),
-                seeds=list(seeds), keep_going=True,
+                seeds=list(seeds), keep_going=True, stop=stop,
             )
             events.emit("stage_finished", stage=stage.id, private=False, candidates=len(jobs),
                         failed=sum(1 for r in comparison.runs if not r["ok"]), duration_s=None)
+            if stop is not None and stop.is_set():
+                raise ConfirmStopped(
+                    f"the comparison '{label}' was stopped; its finished runs are kept, and running it "
+                    "again finishes it"
+                )
         except BaseException as exc:
-            interrupted = isinstance(exc, KeyboardInterrupt)
+            interrupted = isinstance(exc, (KeyboardInterrupt, ConfirmStopped))
             events.emit("run_interrupted" if interrupted else "run_crashed", error=f"{type(exc).__name__}: {exc}")
             heartbeat.stop(phase="interrupted" if interrupted else "crashed")
             raise

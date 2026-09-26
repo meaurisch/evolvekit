@@ -40,7 +40,10 @@ from evolvekit.harness.manifest import Harness
 from evolvekit.harness.plan import Plan
 from evolvekit.harness.study import Study, parse_within, resolve_kpi
 
-__all__ = ["compile_study", "write_run", "OPERATORS", "OPERATORS_WITH_AI", "STUDY_RUN", "CONFIG"]
+__all__ = [
+    "compile_study", "write_run", "runner_input", "runner_kpi", "base_settings",
+    "OPERATORS", "OPERATORS_WITH_AI", "STUDY_RUN", "CONFIG", "UP",
+]
 
 STUDY_RUN = "study-run.json"
 CONFIG = "evolvekit.yaml"
@@ -61,7 +64,7 @@ def _quoted(path: str) -> str:
     return f'"{posix}"' if " " in posix else posix
 
 
-def _base_settings(study: Study, harness: Harness, root: Path | None) -> dict[str, Any]:
+def base_settings(study: Study, harness: Harness, root: Path | None) -> dict[str, Any]:
     """Every setting's value when it is not tuned: fixed, else the input
     settings file's, else the harness's default."""
     from_file: dict[str, Any] = {}
@@ -180,7 +183,7 @@ def compile_study(
     when the study lets a model take part (`budget.ai`)."""
     if plan.blocked:
         raise HarnessError(f"plan: {plan.blocked}")
-    base = _base_settings(study, harness, root)
+    base = base_settings(study, harness, root)
     parameters = _parameters(study, harness, base)
     single = len(study.goal) == 1
     time_limit = float(study.limits.time_per_case_s)
@@ -270,11 +273,27 @@ def compile_study(
     }
     if ai:
         config["models"] = models
-    study_run = {
+    return config, runner_input(study, harness, base)
+
+
+def runner_input(
+    study: Study,
+    harness: Harness,
+    base: dict[str, Any],
+    *,
+    kpis: dict[str, dict[str, Any]] | None = None,
+    guardrails: bool = True,
+    up: str = UP,
+) -> dict[str, Any]:
+    """`study-run.json`: what the runner needs besides the tuned values.
+    `kpis` replaces the study's own (the preview measures every KPI the
+    harness offers, so the app can show each one's value before it is chosen).
+    `up` is the way from the folder the runner runs in to the study's."""
+    return {
         "study_run": 1,
         "harness": {"id": harness.id, "version": harness.version},
         "name": study.name,
-        "time_limit_s": time_limit,
+        "time_limit_s": float(study.limits.time_per_case_s),
         "settings": {"base": base, "tuned": study.tuned_settings()},
         "levers": {
             name: {
@@ -286,18 +305,20 @@ def compile_study(
             for name, change in study.data.items()
         },
         "constraints": [c.to_yaml() for c in study.constraints],
-        "kpis": {name: _runner_kpi(resolve_kpi(study, harness, name)) for name in study.kpis},
+        "kpis": kpis if kpis is not None else {
+            name: runner_kpi(resolve_kpi(study, harness, name)) for name in study.kpis
+        },
         "guardrails": [
             {"kpi": r.kpi, **({"max": r.max} if r.max is not None else {}), **({"min": r.min} if r.min is not None else {})}
             for r in study.guardrails
-        ],
-        "inputs": {name: f"{UP}/{path}" for name, path in study.inputs.items()},
+        ] if guardrails else [],
+        "inputs": {name: f"{up}/{path}" for name, path in study.inputs.items()},
         "tables": harness.declared(),
     }
-    return config, study_run
 
 
-def _runner_kpi(resolved: dict[str, Any]) -> dict[str, Any]:
+def runner_kpi(resolved: dict[str, Any]) -> dict[str, Any]:
+    """A resolved KPI (`study.resolve_kpi`) as the runner reads it."""
     kpi: dict[str, Any] = {"direction": resolved["direction"]}
     for key in ("sql", "params", "measure", "weighted"):
         if resolved.get(key):
