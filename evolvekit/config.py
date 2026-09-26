@@ -13,7 +13,7 @@ import re
 import shlex
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -30,6 +30,7 @@ __all__ = [
     "PromoteRule",
     "ScoreConfig",
     "PenaltyConfig",
+    "GateConfig",
     "EvaluateConfig",
     "DescriptorConfig",
     "ArchiveConfig",
@@ -789,10 +790,63 @@ class PenaltyConfig:
 
 
 @dataclass(frozen=True)
+class GateConfig:
+    """`evaluate.gates`: a KPI condition every candidate has to meet to compete.
+
+    A penalty makes a violation expensive; a gate makes it disqualifying. "No
+    required task left unserved" is not a cost to trade against distance -- a
+    plan that breaks it is not a plan anybody would use, however cheap. So it
+    is checked after every command stage on the stage's aggregated KPIs, and a
+    candidate that breaks it keeps its score for the record but is not
+    promoted and never competes.
+    """
+
+    kpi: str
+    max: float | None = None
+    min: float | None = None
+
+    def broken_by(self, kpis: Mapping[str, float]) -> str | None:
+        """`"missed = 2 > 0"` when `kpis` break the gate, else `None`. A KPI
+        that is absent is not judged here: `required_kpis` has already made
+        its absence a failed run."""
+        value = kpis.get(self.kpi)
+        if value is None:
+            return None
+        if self.max is not None and value > self.max:
+            return f"{self.kpi} = {value:g} > {self.max:g}"
+        if self.min is not None and value < self.min:
+            return f"{self.kpi} = {value:g} < {self.min:g}"
+        return None
+
+    def describe(self) -> dict[str, Any]:
+        return {"kpi": self.kpi, "max": self.max, "min": self.min}
+
+    @staticmethod
+    def parse(raw: Any, index: int) -> "GateConfig":
+        path = f"evaluate.gates[{index}]"
+        data = _as_mapping(raw, path)
+        _reject_unknown(data, {"kpi", "max", "min"}, path)
+        kpi = _as_str(_require(data, "kpi", path), f"{path}.kpi")
+        has_max, has_min = data.get("max") is not None, data.get("min") is not None
+        if has_max == has_min:
+            raise ConfigError(
+                f"{path}: give exactly one of `max` or `min` (a range is two gates), got "
+                f"{'both' if has_max else 'neither'}"
+            )
+        return GateConfig(
+            kpi=kpi,
+            max=_as_float(data["max"], f"{path}.max") if has_max else None,
+            min=_as_float(data["min"], f"{path}.min") if has_min else None,
+        )
+
+
+@dataclass(frozen=True)
 class EvaluateConfig:
     stages: tuple[StageConfig, ...]
     score: ScoreConfig
     penalties: tuple[PenaltyConfig, ...] = ()
+    gates: tuple[GateConfig, ...] = ()
+    """KPI conditions a candidate has to meet to compete: see `GateConfig`."""
     failure_score: float = -1000.0
     holdout_penalty: float = 1.0
     """How hard a private hold-out that does worse than the public set is
@@ -818,6 +872,14 @@ class EvaluateConfig:
             else self.signature_digits
         )
 
+    @property
+    def required_kpis(self) -> tuple[str, ...]:
+        """KPIs every command-stage run must report: the objective and every
+        gate's. A run that leaves one out has not been judged, so it fails --
+        a gate on a KPI nobody reports would otherwise pass everything,
+        silently."""
+        return tuple(dict.fromkeys([self.score.objective, *(gate.kpi for gate in self.gates)]))
+
     @staticmethod
     def parse(raw: Any) -> "EvaluateConfig":
         data = _as_mapping(raw, "evaluate")
@@ -833,6 +895,7 @@ class EvaluateConfig:
                 "signature_digits_stochastic",
                 "signature_ignore",
                 "cache",
+                "gates",
             },
             "evaluate",
         )
@@ -888,6 +951,10 @@ class EvaluateConfig:
                 for i, p in enumerate(
                     _as_list(data.get("penalties"), "evaluate.penalties")
                 )
+            ),
+            gates=tuple(
+                GateConfig.parse(g, i)
+                for i, g in enumerate(_as_list(data.get("gates"), "evaluate.gates"))
             ),
             failure_score=_as_float(
                 data.get("failure_score", -1000.0), "evaluate.failure_score"

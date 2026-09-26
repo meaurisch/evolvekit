@@ -700,8 +700,8 @@ def _missing_required(
         return None
     wanted = ", ".join(repr(name) for name in missing)
     return (
-        f"evaluator reported no {wanted}, the objective KPI named by "
-        f"evaluate.score.objective; it reported: {', '.join(sorted(kpis))}"
+        f"evaluator reported no {wanted}, which the score or a gate is computed from "
+        f"(evaluate.score, evaluate.gates); it reported: {', '.join(sorted(kpis))}"
     )
 
 

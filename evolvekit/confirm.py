@@ -354,7 +354,7 @@ def confirm(
                         runs_per_candidate=len(stage.instances) * len(seeds), workers=stage.workers)
             run_instance_stage(
                 jobs, stage, out_dir=work / "stage_out", cwd=config.base_dir,
-                required_kpis=(comparison.objective,), cache=EvalCache(work / "cache"),
+                required_kpis=config.evaluate.required_kpis, cache=EvalCache(work / "cache"),
                 seeds=list(seeds), keep_going=True,
             )
             events.emit("stage_finished", stage=stage.id, private=False, candidates=len(jobs),

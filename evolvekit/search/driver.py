@@ -245,6 +245,9 @@ class Driver:
             ] if space is not None else None,
             "objective": config.evaluate.score.objective,
             "direction": config.evaluate.score.direction,
+            # Which candidates compete. `None` when there are none, which is
+            # also what a run directory from before gates existed recorded.
+            "gates": [gate.describe() for gate in config.evaluate.gates] or None,
             "stages": [
                 {
                     "id": stage.id, "command": stage.command, "seeds": stage.seeds,
@@ -276,7 +279,7 @@ class Driver:
         if recorded is None:
             return  # a run directory from before this was recorded
         now = _comparable(self._problem_identity())
-        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "stages")
+        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "gates", "stages")
                    if recorded.get(key) != now[key]]
         if not changed:
             return
@@ -294,7 +297,8 @@ class Driver:
             {"skeleton_sha": "the skeleton (or the generated one) changed",
              "parameters": "the declared parameters changed (names, types or choices)",
              "objective": f"the objective is now {now['objective']!r}, was {recorded.get('objective')!r}",
-             "direction": f"the direction is now {now['direction']!r}"}[key]
+             "direction": f"the direction is now {now['direction']!r}",
+             "gates": "the gates changed (evaluate.gates), so earlier candidates were judged by other rules"}[key]
             for key in changed if key != "stages"
         ]
         raise ValueError(
@@ -325,6 +329,7 @@ class Driver:
                 [c.text for c in config.problem.parameters.constraints]
                 if config.problem.parameters else None
             ),
+            "gates": [gate.describe() for gate in config.evaluate.gates],
             "failure_score": config.evaluate.failure_score,
             "stages": [
                 {
@@ -481,6 +486,7 @@ class Driver:
                 last_failure=row.get("last_failure"),
                 stages_reached=row.get("stages_reached") or [],
                 private_score=row.get("private_score"),
+                gated=row.get("gated"),
             ),
         }
 
@@ -588,6 +594,13 @@ class Driver:
                     "seed failed evaluation — fix the harness before spending: "
                     f"{first_line}"
                 )
+                if seed.gated and not (seed.rejected or seed.last_failure):
+                    # Every candidate is judged against the seed, and a seed
+                    # outside the gates is not a starting point anybody wants.
+                    summary.stop_reason = (
+                        f"the seed breaks a gate: {seed.gated} (evaluate.gates). Nothing was "
+                        "searched: change the starting point or the gate, then run again"
+                    )
                 summary.aborted = True
                 self.log(f"ABORT: {summary.stop_reason}")
                 return self._finalise(summary)
@@ -676,6 +689,7 @@ class Driver:
         return bool(
             seed.rejected
             or seed.last_failure
+            or seed.gated
             or seed.score == self.config.evaluate.failure_score
         )
 
@@ -952,7 +966,9 @@ class Driver:
         for c in self.archive:
             if not c.params or c.rejected:
                 continue
-            if c.last_failure:
+            # A configuration that broke a gate is as bad as one that crashed:
+            # a region the estimator should not propose in again.
+            if c.last_failure or c.gated:
                 failed.append(c)
             elif c.raced_out:
                 behind.append(c)
@@ -1347,6 +1363,7 @@ class Driver:
             candidate.params = result.params
             candidate.competes = result.competes
             candidate.raced_out = result.raced_out
+            candidate.gated = result.gated
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis

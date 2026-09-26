@@ -51,13 +51,16 @@ def finished_final_stage(
     last_failure: str | None,
     stages_reached: Sequence[str],
     private_score: float | None,
+    gated: str | None = None,
 ) -> bool:
     """Whether a candidate's score may be compared with anybody else's.
 
     A score means something only next to scores from the same stage on the
     same inputs, so a candidate competes -- is ranked, archived, bred from --
-    only when it got all the way through. That rules out four cases which used
-    to be ranked as if they had:
+    only when it got all the way through, and broke no gate (`evaluate.gates`):
+    a gated candidate's score is real, but it is the score of a plan nobody
+    would use. That rules out four cases which used to be ranked as if they
+    had:
 
     * a **failed** evaluation. It carries `evaluate.failure_score`, and the
       default `-1000` outranks every healthy candidate whose minimised cost is
@@ -71,7 +74,7 @@ def finished_final_stage(
     Takes plain values rather than an `EvalResult` so that a `runs.jsonl` row
     written before the `competes` field existed can be judged by the same rule.
     """
-    if rejected or last_failure:
+    if rejected or last_failure or gated:
         return False
     final = config.final_stage
     if final.id not in stages_reached:
@@ -230,6 +233,9 @@ class Cascade:
                 # deeper stage, no hold-out run, no archive entry.
                 if self._note_behaviour(results[cid], outcome, stage, cid):
                     continue
+                # So does one that broke a gate: not a failure, not a contender.
+                if self._gate(results[cid], outcome, stage):
+                    continue
                 survivors.append(cid)
 
             self._stage_finished(stage, began, len(alive), failed, private=False, raced_out=raced_out)
@@ -248,8 +254,30 @@ class Cascade:
                 last_failure=result.last_failure,
                 stages_reached=result.stages_reached,
                 private_score=result.private_score,
+                gated=result.gated,
             )
         return results
+
+    # -- gates -----------------------------------------------------------
+
+    def _broken_gate(self, kpis: dict[str, float]) -> str | None:
+        """The first gate `kpis` break, as `"missed = 2 > 0"`, or `None`."""
+        for gate in self.config.evaluate.gates:
+            broken = gate.broken_by(kpis)
+            if broken is not None:
+                return broken
+        return None
+
+    def _gate(self, result: EvalResult, outcome: StageOutcome, stage: StageConfig, *, private: bool = False) -> bool:
+        """Judge a command stage's aggregated KPIs against `evaluate.gates`.
+        True when the candidate broke one: it stops here, with the reason."""
+        if stage.kind != "command":
+            return False
+        broken = self._broken_gate(outcome.kpis)
+        if broken is None:
+            return False
+        result.gated = f"{broken} on the hold-out" if private else broken
+        return True
 
     # -- internals -------------------------------------------------------
 
@@ -288,7 +316,7 @@ class Cascade:
             inputs=stage.inputs,
             out_path=self.work_dir / "stage_out" / f"{candidate.id}.{stage.id}.json",
             cwd=self.config.base_dir,
-            required_kpis=(self.config.evaluate.score.objective,),
+            required_kpis=self.config.evaluate.required_kpis,
             observer=self._observer(candidate.id, stage, private=False),
             configuration=self._configurations.get(candidate.id),
             cache=self.cache,
@@ -366,7 +394,7 @@ class Cascade:
                 out_dir=self.work_dir / "stage_out",
                 cwd=self.config.base_dir,
                 private=private,
-                required_kpis=(self.config.evaluate.score.objective,),
+                required_kpis=self.config.evaluate.required_kpis,
                 cache=self.cache,
                 race=self._race_for(stage, admitted, private=private),
             )
@@ -403,8 +431,10 @@ class Cascade:
         )
 
     def _note_incumbent(self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome) -> None:
-        """Remember the best candidate to have finished this stage, instance by instance."""
-        if stage.race is None or not outcome.ok:
+        """Remember the best candidate to have finished this stage, instance by
+        instance. Never one that broke a gate: it is not a contender, so it is
+        not the one to race against either."""
+        if stage.race is None or not outcome.ok or self._broken_gate(outcome.kpis) is not None:
             return
         objective = self.config.evaluate.score.objective
         values = dict(zip(outcome.instance_names, outcome.vector_kpis.get(per_instance_key(objective), [])))
@@ -635,7 +665,7 @@ class Cascade:
                     out_path=self.work_dir / "stage_out" / f"{cid}.{stage.id}.private.json",
                     cwd=self.config.base_dir,
                     private=True,
-                    required_kpis=(self.config.evaluate.score.objective,),
+                    required_kpis=self.config.evaluate.required_kpis,
                     observer=self._observer(cid, stage, private=True),
                     configuration=self._configurations.get(cid),
                     cache=self.cache,
@@ -670,6 +700,7 @@ class Cascade:
                 private_score,
                 self.config.evaluate.holdout_penalty,
             )
+            self._gate(result, outcome, stage, private=True)
         self._stage_finished(stage, began, len(survivors), failed, private=True)
 
 

@@ -104,6 +104,9 @@ class EvalResult:
     raced_out: str | None = None
     """Why the final stage was not finished, when that was the stage's `race`
     rule and not a failure."""
+    gated: str | None = None
+    """The gate this candidate broke (`evaluate.gates`), as `"missed = 2 > 0"`.
+    It keeps its score, is not promoted and does not compete; nothing failed."""
     competes: bool = False
     """True once the candidate has finished the final stage -- hold-out
     included -- without a failure; see `cascade.finished_final_stage`. Only such
