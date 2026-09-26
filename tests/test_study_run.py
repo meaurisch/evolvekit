@@ -22,7 +22,7 @@ DEMO = ROOT / "harnesses" / "demo-tour"
 SOLVER = ROOT / "examples" / "cli-solver" / "solver.py"
 
 
-def _study(tmp_path: Path, template: str = "tune", hours: float = 0.004) -> Path:
+def _study(tmp_path: Path, template: str = "tune", hours: float = 0.01) -> Path:
     folder = tmp_path / "study"
     create_study(folder, DEMO, "Demo settings", template)
     for sample in sorted((DEMO / "samples").glob("*.json")):
