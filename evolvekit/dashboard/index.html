@@ -212,7 +212,14 @@ main { max-width: 1440px; margin: 0 auto; padding: 20px 24px 64px; display: grid
 .badge[data-v="clear"] { color: var(--good-ink); border-color: color-mix(in srgb, var(--good) 45%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); }
 .badge[data-v="within noise"] { color: var(--warning); border-color: color-mix(in srgb, var(--warning-fill) 55%, transparent); background: color-mix(in srgb, var(--warning-fill) 10%, transparent); }
 .badge[data-v="worse"] { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); background: color-mix(in srgb, var(--critical) 8%, transparent); }
-.badge[data-v="unknown"], .badge[data-v="none"] { color: var(--ink-2); background: var(--sunken); }
+.badge[data-v="unknown"], .badge[data-v="none"], .badge[data-v="equal"] { color: var(--ink-2); background: var(--sunken); }
+.badge[data-v="better"] { color: var(--good-ink); border-color: color-mix(in srgb, var(--good) 45%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); }
+.hero .big.words { font-size: 30px; letter-spacing: -.02em; }
+.levels { margin-bottom: 16px; }
+.levels tr.deciding td { font-weight: 650; }
+.levels tr.below td { color: var(--ink-3); }
+.levels td { white-space: nowrap; }
+.levels tr.below .badge { opacity: .55; }
 .hero .why { color: var(--ink-2); font-size: 12.5px; margin-top: 10px; max-width: 46ch; }
 .pair { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin-top: 16px; font-size: 13px; }
 .pair dt { color: var(--ink-3); }
@@ -707,15 +714,35 @@ function screeningNote(sc) {
       h("div", null, isNum(p.spearman) ? h("b", null, "ρ = " + p.spearman.toFixed(2)) : h("b", null, "–"), ` over ${p.n} candidates that reached both`),
       h("div", { class: "note" }, p.verdict + ". Each point: a candidate's score at the earlier stage (→) against the later one (↑)."))); }));
 }
+/* Goals in order of importance (evaluate.score.levels): one row per level instead of one percentage. */
+function renderLevels(lv) {
+  if (!lv) return null;
+  const within = (l) => l.tolerance == null ? "– (decides the rest)" : l.relative ? num(100 * l.tolerance) + " %" : num(l.tolerance);
+  const word = (l) => ({ better: "▲ better", worse: "▼ worse", equal: "= equal" })[l.state] || "–";
+  return h("div", { class: "scroll levels", id: "levels" }, h("table", null,
+    h("thead", null, h("tr", null, ["level", "goal", "counts as equal within", "baseline", "best", "change", "verdict"].map((t, i) =>
+      h("th", { class: i === 0 || (i >= 3 && i <= 5) ? "num" : "" }, t)))),
+    h("tbody", null, lv.levels.map((l) => h("tr", {
+        class: l.level === lv.deciding ? "deciding" : lv.deciding && l.level > lv.deciding ? "below" : "",
+        title: lv.deciding && l.level > lv.deciding ? "Below the deciding level: it counts only between candidates equal above it" : "" },
+      h("td", { class: "num" }, l.level),
+      h("td", null, h("b", null, l.kpi), h("div", { class: "note" }, l.direction === "minimize" ? "lower is better" : "higher is better")),
+      h("td", null, within(l)),
+      h("td", { class: "num" }, num(l.baseline)), h("td", { class: "num" }, num(l.best)),
+      h("td", { class: "num" }, pct(l.improvement_pct)),
+      h("td", null, h("span", { class: "badge", "data-v": l.state || "unknown", title: isNum(l.steps) ? l.steps + " step(s) of " + num(l.tolerance_abs) + " from the baseline" : "" }, word(l))))))));
+}
 function renderProgress(doc) {
   const pr = doc.progress || {}, imp = pr.improvement || {}, ob = doc.objective || {};
   const v = imp.pct, sign = !isNum(v) || v === 0 ? "" : v > 0 ? "up" : "down";
+  const lv = pr.levels && pr.levels.available ? pr.levels : null, decided = lv && lv.deciding ? lv.levels[lv.deciding - 1] : null;
   const meas = (mm) => mm ? [num(mm.objective), isNum(mm.sd) ? h("span", { class: "pm" }, " ± " + num(mm.sd)) : null, h("span", { class: "pm" }, "  n=" + (mm.n || 1))] : "–";
   const hero = h("div", { class: "hero" },
-    h("div", { class: "k" }, "Improvement over the baseline"),
-    h("div", { class: "big " + sign }, isNum(v) ? pct(v) : "–"),
-    h("span", { class: "badge", "data-v": imp.verdict || "unknown" }, { clear: "✓ clear of the noise", worse: "✗ behind the baseline", "within noise": "≈ within the noise", unknown: "? noise unknown", none: "no improvement yet" }[imp.verdict] || "? noise unknown"),
-    h("div", { class: "why" }, imp.why || ""),
+    h("div", { class: "k" }, lv ? "Goals in order of importance" : "Improvement over the baseline"),
+    lv ? h("div", { class: "big words " + (decided ? (decided.state === "better" ? "up" : "down") : "") }, decided ? (decided.state === "better" ? "▲ better" : "▼ worse") + " on level " + decided.level : "= equal")
+       : h("div", { class: "big " + sign }, isNum(v) ? pct(v) : "–"),
+    lv ? null : h("span", { class: "badge", "data-v": imp.verdict || "unknown" }, { clear: "✓ clear of the noise", worse: "✗ behind the baseline", "within noise": "≈ within the noise", unknown: "? noise unknown", none: "no improvement yet" }[imp.verdict] || "? noise unknown"),
+    h("div", { class: "why" }, lv ? lv.verdict + (lv.warning ? ". " + lv.warning : "") : imp.why || ""),
     h("dl", { class: "pair" },
       h("dt", null, "objective"), h("dd", null, (ob.name || "?") + " · " + (ob.direction === "minimize" ? "lower is better" : "higher is better")),
       h("dt", null, "baseline"), h("dd", null, meas(pr.baseline)),
@@ -739,7 +766,7 @@ function renderProgress(doc) {
     ui.chartTable ? null : seg([["generation", "By generation"], ["time", "By time"]], ui.chartX || "generation", (val) => { ui.chartX = val; redraw(); }),
     seg([[false, "Chart"], [true, "Table"]], ui.chartTable, (val) => { ui.chartTable = val; redraw(); }));
   return [cardHead("progress", "Progress", "Is it improving, and is the improvement real?", controls),
-          h("div", { class: "progress" }, hero, h("div", { style: { minWidth: 0 } }, body, ui.chartTable ? null : legend, screeningNote(pr.screening)))];
+          h("div", { class: "progress" }, hero, h("div", { style: { minWidth: 0 } }, renderLevels(lv), body, ui.chartTable ? null : legend, screeningNote(pr.screening)))];
 }
 
 /* -------------------------------------------------------------------- best */

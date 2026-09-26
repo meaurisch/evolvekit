@@ -44,6 +44,7 @@ from statistics import fmean, median, stdev
 from typing import Any, Callable, Mapping, Sequence
 
 from evolvekit.economics import DEFAULT_WINDOW, series
+from evolvekit.evaluate.levels import K as LEVEL_STEPS
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
 from evolvekit.leaderboard import competes, fitness_of, rank
 from evolvekit.ledger import read_jsonl
@@ -1033,7 +1034,101 @@ class _Run:
             "generations": self._generation_ribbon(per_generation),
             "spread": self._spread_basis(),
             "screening": self._screening_agreement(),
+            "levels": self._levels(),
         }
+
+    def _levels(self) -> dict[str, Any]:
+        """`evaluate.score.levels`, level by level: the baseline against the
+        best, the difference in tolerance steps from the seed's value (the
+        steps the score counts), and which level decides. A run that ranks by
+        one objective says so."""
+        described = [
+            dict(item) for item in self.described.get("levels") or []
+            if isinstance(item, Mapping) and item.get("kpi")
+        ]
+        if not described:
+            return {
+                "available": False,
+                "levels": [],
+                "why": "the run ranks by one objective, not by goals in order of importance (evaluate.score.levels)",
+            }
+        anchor = (_read_json(self.directory / "work" / "levels.json") or {}).get(self._final_stage or "") or {}
+        tolerances = anchor.get("tolerances") or {}
+        base_kpis = (self.seed or {}).get("kpis") or {}
+        best_kpis = (self.best_row or {}).get("kpis") or {}
+        rows, deciding, parts = [], None, []
+        for index, level in enumerate(described):
+            kpi, last = str(level["kpi"]), index == len(described) - 1
+            sign = 1.0 if level.get("direction") == "maximize" else -1.0
+            base, best = _number(base_kpis.get(kpi)), _number(best_kpis.get(kpi))
+            difference = best - base if base is not None and best is not None else None
+            tolerance_abs = None if last else _number(tolerances.get(kpi))
+            steps = state = None
+            if difference is not None and last:
+                gain = sign * difference
+                state = "better" if gain > 0 else "worse" if gain < 0 else "equal"
+            elif difference is not None and tolerance_abs:
+                steps = int(max(-LEVEL_STEPS, min(LEVEL_STEPS, round(sign * difference / tolerance_abs))))
+                state = "better" if steps > 0 else "worse" if steps < 0 else "equal"
+            pct = _improvement_pct(base, best, str(level.get("direction")))
+            rows.append({
+                "level": index + 1, "kpi": kpi, "direction": level.get("direction"),
+                "tolerance": level.get("tolerance"), "relative": bool(level.get("relative")),
+                "tolerance_abs": tolerance_abs, "baseline": base, "best": best, "difference": difference,
+                "difference_pct": 100.0 * difference / abs(base) if difference is not None and base else None,
+                "improvement_pct": pct, "steps": steps, "state": state,
+            })
+            if deciding is None and state is not None:
+                if state == "equal" and not last:
+                    tolerance = level.get("tolerance")
+                    within = f"{100 * tolerance:g} %" if level.get("relative") else f"{tolerance:g}"
+                    parts.append(f"equal on level {index + 1} ({kpi}, within {within})")
+                elif state != "equal":
+                    deciding = index + 1
+                    change = f"{pct:+.2f} %" if pct is not None else f"{sign * difference:+.6g}"
+                    parts.append(f"{state} on level {index + 1} ({kpi}, {change})")
+                else:
+                    parts.append(f"equal on level {index + 1} ({kpi}) as well")
+        if self.best_row is None or self.seed is None:
+            verdict = "nothing has finished the final stage yet"
+        elif self.best_row.get("id") == self.seed.get("id"):
+            verdict = "the best candidate is the baseline"
+        else:
+            verdict = ", ".join(parts) or "not comparable: a level's value is missing"
+        saturated = self._saturated(described, anchor)
+        return {
+            "available": True,
+            "levels": rows,
+            "deciding": deciding,
+            "verdict": verdict,
+            "saturated": saturated,
+            "warning": (
+                f"{len(saturated)} candidate(s) differ from the seed by more than {LEVEL_STEPS:,} tolerance "
+                "steps on a level. Beyond that the steps saturate and such candidates can tie: widen that "
+                "level's tolerance"
+                if saturated else None
+            ),
+            "why": (
+                "a level is compared in steps of its tolerance, counted from the seed's value; the first "
+                "level that is not in the seed's step decides"
+            ),
+        }
+
+    def _saturated(self, described: Sequence[Mapping[str, Any]], anchor: Mapping[str, Any]) -> list[str]:
+        """Competing candidates more than K steps from the seed on some level."""
+        values, tolerances = anchor.get("values") or {}, anchor.get("tolerances") or {}
+        found = []
+        for row in self.rows:
+            if not competes(row):
+                continue
+            kpis = row.get("kpis") or {}
+            for level in described[:-1]:
+                kpi = str(level["kpi"])
+                tolerance, base, value = _number(tolerances.get(kpi)), _number(values.get(kpi)), _number(kpis.get(kpi))
+                if tolerance and base is not None and value is not None and abs(value - base) / tolerance >= LEVEL_STEPS:
+                    found.append(str(row.get("id")))
+                    break
+        return found
 
     def _elapsed_at_generation_end(self, generation: int) -> float | None:
         """Evaluation wall clock spent when `generation` finished: the sum of the
@@ -1870,6 +1965,23 @@ def render_text(document: Mapping[str, Any]) -> str:
     lines.append(
         f"improvement  : {'n/a' if pct is None else f'{pct:+.2f} %'}  [{improvement.get('verdict', 'unknown')}] {improvement.get('why', '')}"
     )
+    levels = progress.get("levels") or {}
+    if levels.get("available"):
+        lines.append(f"levels       : {levels.get('verdict')}")
+        for level in levels.get("levels") or []:
+            change = _number(level.get("improvement_pct"))
+            lines.append(
+                f"  level {level.get('level')}    : {level.get('kpi')} ({level.get('direction')}) "
+                f"baseline {_fmt(level.get('baseline'))} best {_fmt(level.get('best'))}"
+                + (f" ({change:+.2f} %)" if change is not None else "")
+                + f" -- {level.get('state') or 'n/a'}"
+                + (
+                    f", {level['steps']:+d} step(s) of {_fmt(level.get('tolerance_abs'))}"
+                    if isinstance(level.get("steps"), int) else ""
+                )
+            )
+        if levels.get("warning"):
+            lines.append(f"  warning    : {levels['warning']}")
     failures = document.get("failures") or []
     lines.append(f"failures     : {len(failures)}" + ("" if not failures else "  (most recent first)"))
     for failure in failures[:5]:

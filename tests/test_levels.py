@@ -213,3 +213,71 @@ def test_a_run_directory_remembers_its_levels(tmp_path):
     raw["search"] = {"operators": {"param_lhs": 1.0}, "generations": 2}
     with pytest.raises(ValueError, match="the levels changed"):
         Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run").run()
+
+
+# -- status and the dashboard -------------------------------------------------
+
+from evolvekit import dashboard  # noqa: E402
+from evolvekit.status import build_status, render_text  # noqa: E402
+
+
+@pytest.mark.slow
+def test_status_reports_progress_level_by_level(tmp_path):
+    Driver(_levels_config(tmp_path), run_dir=tmp_path / "run").run()
+    document = build_status(tmp_path / "run")
+    levels = document["progress"]["levels"]
+    assert levels["available"] is True
+    first, second = levels["levels"]
+    assert (first["kpi"], first["state"], first["steps"], first["tolerance_abs"]) == ("dph", "equal", 0, 1.0)
+    assert (second["kpi"], second["state"]) == ("wait", "better") and second["difference"] < 0
+    assert second["steps"] is None and second["tolerance"] is None, "the last level has no steps"
+    assert levels["deciding"] == 2
+    assert levels["verdict"].startswith("equal on level 1 (dph, within 1), better on level 2 (wait, ")
+    assert levels["saturated"] == [] and levels["warning"] is None
+    text = render_text(document)
+    assert "levels       : equal on level 1" in text
+    assert "  level 1    : dph (maximize)" in text and "  level 2    : wait (minimize)" in text
+
+
+def _event(seq, type, **fields):
+    return {"seq": seq, "ts": f"2026-09-26T10:00:0{seq}.000+00:00", "session": "s1", "pid": 1, "type": type, **fields}
+
+
+def test_status_warns_about_a_candidate_beyond_k_steps(tmp_path):
+    run = tmp_path / "run"
+    (run / "work").mkdir(parents=True)
+    levels = [{"kpi": "dph", "direction": "maximize", "tolerance": 0.01, "relative": False},
+              {"kpi": "wait", "direction": "minimize", "tolerance": None, "relative": False}]
+    events = [
+        _event(1, "run_started", objective="dph", direction="maximize", levels=levels,
+               stages=[{"id": "full", "kind": "command", "final": True}]),
+        _event(2, "run_finished", stop_reason="generations exhausted"),
+    ]
+    rows = [
+        {"id": "g000-c0001", "generation": 0, "operator": "human-seed", "competes": True, "score": 0.0,
+         "kpis": {"dph": 10.0, "wait": 5.0}, "block": ""},
+        {"id": "g001-c0002", "generation": 1, "operator": "param_lhs", "competes": True, "score": 1e8,
+         "kpis": {"dph": 500.0, "wait": 5.0}, "block": ""},
+    ]
+    (run / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    (run / "runs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    anchor = make_anchor((LevelConfig("dph", "maximize", 0.01), LevelConfig("wait", "minimize")), {"dph": 10.0, "wait": 5.0})
+    (run / "work" / "levels.json").write_text(json.dumps({"full": anchor.to_json()}), encoding="utf-8")
+    summary = build_status(run)["progress"]["levels"]
+    assert summary["saturated"] == ["g001-c0002"]
+    assert "10,000" in summary["warning"]
+
+
+def test_status_says_when_a_run_does_not_rank_by_levels(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    events = [_event(1, "run_started", objective="cost", direction="minimize",
+                     stages=[{"id": "full", "kind": "command", "final": True}])]
+    (run / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    levels = build_status(run)["progress"]["levels"]
+    assert levels["available"] is False and levels["levels"] == [] and "evaluate.score.levels" in levels["why"]
+
+
+def test_the_dashboard_draws_a_row_per_level():
+    page = (Path(dashboard.__file__).parent / "index.html").read_text(encoding="utf-8")
+    assert "pr.levels" in page and '"counts as equal within"' in page and 'id: "levels"' in page
