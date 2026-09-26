@@ -708,6 +708,8 @@ async function step1(box) {
       h("p", {}, h("span", { class: "label" }, "Application"), `${harness.title} (harness ${harness.version})`, h("span", { class: "hint" }, harness.summary)),
       h("p", {}, h("span", { class: "label" }, "Kind of study"), template),
       h("label", { class: "field", for: "name" }, h("span", { class: "label" }, "Name"), name)),
+    harness.readme ? h("details", { class: "card", style: "margin-top:12px" }, h("summary", {}, "About this harness"),
+      h("div", { class: "explain mono", style: "white-space:pre-wrap; max-height:420px; overflow:auto; margin-top:8px" }, harness.readme)) : null,
     problemsOf(1), stepFoot(1));
 }
 
@@ -1132,12 +1134,12 @@ async function step5(box) {
     const rows = Object.entries(kpis).map(([name, kpi]) => {
       const valueEl = h("span", { class: "num" }, "…");
       valueOf(name).then((v) => { valueEl.textContent = v === null || v === undefined ? "no preview yet" : `${fmt(v)} ${kpiUnit(name)}`.trim(); });
-      const rowsBtn = kpi.rows_sql ? h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => {
+      const rowsBtn = kpi.rows_sql ? h("button", { class: "btn small quiet", type: "button", onclick: (e) => { const button = e.currentTarget; return guarded(async () => {
         const tried = await api("POST", studyPath("/kpis/try"), { sql: kpi.sql, rows_sql: kpi.rows_sql });
         const out = h("div", { class: "table-wrap", style: "margin-top:8px" }, h("table", {}, h("thead", {}, h("tr", {}, tried.rows.columns.map((c) => h("th", {}, c)))),
           h("tbody", {}, tried.rows.rows.map((r) => h("tr", {}, r.map((v) => h("td", {}, fmt(v))))))));
-        e.currentTarget.replaceWith(out);
-      }, e.currentTarget) }, "Show which rows count") : null;
+        button.replaceWith(out);
+      }, button); } }, "Show which rows count") : null;
       const used = current.doc.study.goal.levels.some((l) => l.kpi === name) || current.doc.study.guardrails.some((g) => g.kpi === name)
         || Object.values(kpis).some((k) => k.weighted && name in k.weighted);
       return h("div", { class: "item" }, h("div", { class: "body" },
@@ -1617,6 +1619,16 @@ async function renderResults(slug, run) {
     h("thead", {}, h("tr", {}, h("th", {}, "What"), h("th", {}, "Before"), h("th", {}, "Now"))),
     h("tbody", {}, r.changed.map((c) => h("tr", {}, h("td", {}, c.label, h("div", { class: "faint" }, c.help)), h("td", { class: "num" }, c.old_text), h("td", { class: "num" }, c.changed ? h("strong", {}, c.new_text) : c.new_text))))));
   const downloads = h("div", { class: "row" }, r.downloads.map((d) => h("a", { class: "btn" + (d.name === "settings_json" || d.name === "data_changes" ? " primary" : ""), href: `${studyPath("/download/" + d.name)}?run=${encodeURIComponent(r.run)}`, download: "" }, d.label)));
+  const shown = h("div");
+  const showSettings = r.downloads.some((d) => d.name === "settings_json") ? h("button", { class: "btn quiet small", type: "button", onclick: (e) => { const button = e.currentTarget; return guarded(async () => {
+    const response = await fetch(`${studyPath("/download/settings_json")}?run=${encodeURIComponent(r.run)}`);
+    if (!response.ok) throw new Error("The settings could not be read.");
+    const text = await response.text();
+    const pre = h("pre", { class: "mono", style: "white-space:pre-wrap; background:var(--sunken); padding:12px; border-radius:10px; max-height:360px; overflow:auto" }, text);
+    const copy = h("button", { class: "btn small", type: "button", onclick: async () => { try { await navigator.clipboard.writeText(text); toast("Copied."); } catch (err) { toast("Select the text and copy it.", true); } } }, "Copy");
+    shown.replaceChildren(h("p", { class: "small", style: "margin:10px 0 4px" }, "The settings file, ready for the application:"), pre, copy);
+    button.remove();
+  }, button); } }, "Show the settings here") : null;
   const next = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
     const doc = await api("POST", studyPath(`/next?run=${encodeURIComponent(r.run)}`), { name: `${current.doc.study.name} (next)` });
     location.hash = `#/study/${doc.slug}/4`;
@@ -1631,7 +1643,7 @@ async function renderResults(slug, run) {
     h("h2", {}, "Every measure"), h("div", { class: "card" }, kpiTable,
       r.guardrails.length ? h("p", { class: "faint" }, "Guardrails: ", r.guardrails.map((g) => `${kpiLabel(g.kpi)} ${g.max !== null && g.max !== undefined ? "at most " + fmt(g.max) : "at least " + fmt(g.min)}`).join("; "), ".") : null),
     h("h2", {}, "What changed"), h("div", { class: "card" }, r.is_seed ? h("p", { class: "muted" }, "Nothing: no combination beat the starting point.") : changed),
-    h("h2", {}, "Take it with you"), h("div", { class: "card" }, downloads, h("p", { class: "faint" }, "The settings file holds every setting, the tuned ones included, ready for the application.")),
+    h("h2", {}, "Take it with you"), h("div", { class: "card" }, downloads, h("p", { class: "faint" }, "The settings file holds every setting, the tuned ones included, ready for the application."), showSettings, shown),
     h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), next)));
 }
 

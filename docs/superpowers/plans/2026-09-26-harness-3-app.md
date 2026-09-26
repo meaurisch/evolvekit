@@ -48,7 +48,7 @@ All JSON; errors are `{"error": "<sentence>"}` with 400 (the request is wrong), 
 | Endpoint | Handler returns |
 |---|---|
 | `GET /api/home` | `{studies: [{slug, name, harness, state, line, updated_at}], harnesses: [...], keys: {name: bool}, home}` |
-| `POST /api/harnesses` (zip body) | the installed harness's entry |
+| `POST /api/harnesses` (zip body, or JSON `{path}` of a .zip on this computer) | the installed harness's entry |
 | `GET /api/harnesses/{id}` | settings, tables, levers, KPIs, KPI templates, study templates, exports, README |
 | `POST /api/studies` `{harness, template, name}` | the study document (below) |
 | `GET /api/studies/{slug}` | the study document: `study` (the YAML as JSON), `problems` by step, `cases` with inspections, `inputs`, `preview`, `runs`, `harness` summary |
@@ -58,7 +58,10 @@ All JSON; errors are `{"error": "<sentence>"}` with 400 (the request is wrong), 
 | `POST /api/pick-file` `{kind, title}` | `{path}` or `{cancelled: true}` |
 | `PUT …/cases/{name}` | the case with its inspection |
 | `DELETE …/cases/{name}` | the study document |
-| `POST …/cases/samples` | the study document, with the harness's samples copied in |
+| `POST …/samples` | the study document, with the harness's samples copied in |
+| `POST …/import` `{folder}` | the cases in a folder on this computer, copied in (added while building: a local app should not need the browser's file picker) |
+| `POST …/cards` `{card}` | a card (the assistant's, or one a form made) checked on the preview and added to the study (added while building) |
+| `GET …/choices` | the choices of every KPI template's blanks, from the preview's tables (added while building) |
 | `POST …/split` `{test}` | the study document, with a test set that spans the sizes |
 | `PUT …/inputs/{name}/{file}` | the study document |
 | `POST …/preview`, `GET …/preview` | the preview's state and result |
