@@ -1610,6 +1610,9 @@ class _Run:
                     "novelty": row.get("novelty"),
                     "reason": row.get("reject_reason") or _first_line(row.get("last_failure")),
                     "raced_out": row.get("raced_out"),
+                    # Not in `reason`: a view reads a reason as "failed", and a
+                    # candidate that broke a gate did not fail -- it is not competing.
+                    "gated": row.get("gated"),
                     "deepest_stage": stages[-1] if stages else None,
                     "evaluation_s": durations.get(cid),
                     "usd": _number(row.get("usd")),
@@ -1738,6 +1741,7 @@ def _candidate_detail(
         "novelty": row.get("novelty"),
         "reject_reason": row.get("reject_reason"),
         "last_failure": row.get("last_failure"),
+        "gated": row.get("gated"),
         "stages_reached": row.get("stages_reached") or [],
         "stage_scores": row.get("stage_scores") or {},
         "kpis": row.get("kpis") or {},

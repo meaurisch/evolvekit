@@ -12,12 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from evolvekit import cli
+from evolvekit import cli, dashboard
 from evolvekit.candidate import Candidate, splice_block
 from evolvekit.config import ConfigError, GateConfig, build_config
 from evolvekit.evaluate.cascade import Cascade
 from evolvekit.preflight import preflight
 from evolvekit.search.driver import Driver
+from evolvekit.status import build_status, candidate_detail
 
 SOLVER = (
     "import argparse, json\n"
@@ -119,11 +120,17 @@ def test_a_candidate_that_breaks_a_gate_keeps_its_score_is_not_promoted_and_does
 # -- the driver --------------------------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def gated_run(tmp_path_factory):
+    """One small run in which about a third of the children break the gate."""
+    tmp_path = tmp_path_factory.mktemp("gated")
+    driver = Driver(_config(tmp_path, [{"kpi": "missed", "max": 0}]), run_dir=tmp_path / "run")
+    return driver, driver.run()
+
+
 @pytest.mark.slow
-def test_gated_candidates_are_recorded_but_never_the_best(tmp_path):
-    config = _config(tmp_path, [{"kpi": "missed", "max": 0}])
-    driver = Driver(config, run_dir=tmp_path / "run")
-    summary = driver.run()
+def test_gated_candidates_are_recorded_but_never_the_best(gated_run):
+    driver, summary = gated_run
     rows = driver.ledger.runs()
     gated = [r for r in rows if r.get("gated")]
     assert gated, "param_lhs over [0, 1] proposes x > 0.7 a third of the time"
@@ -131,6 +138,24 @@ def test_gated_candidates_are_recorded_but_never_the_best(tmp_path):
         if row["params"] and row["params"]["x"] > 0.7:
             assert row["gated"] == "missed = 1 > 0" and row["competes"] is False and not row["last_failure"]
     assert summary.best is not None and summary.best.params["x"] <= 0.7
+
+
+@pytest.mark.slow
+def test_status_lists_a_gated_candidate_as_not_competing_and_never_as_a_failure(gated_run):
+    driver, _ = gated_run
+    document = build_status(driver.ledger.run_dir)
+    gated = [c for c in document["candidates"] if c.get("gated")]
+    assert gated and all(c["competes"] is False for c in gated)
+    # The dashboard reads any `reason` as "failed": a gated candidate has none.
+    assert all(not c["reason"] for c in gated)
+    assert not {f.get("candidate_id") for f in document["failures"]} & {c["id"] for c in gated}
+    assert candidate_detail(driver.ledger.run_dir, gated[0]["id"])["gated"] == "missed = 1 > 0"
+
+
+def test_the_dashboard_names_the_gate_a_candidate_broke():
+    page = (Path(dashboard.__file__).parent / "index.html").read_text(encoding="utf-8")
+    assert '["dim", "broke a gate"]' in page
+    assert '"broke a gate: " + c.gated' in page and '"broke a gate: " + d.gated' in page
 
 
 def test_the_search_learns_a_gated_configuration_is_a_bad_one(tmp_path):
