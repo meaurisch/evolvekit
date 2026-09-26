@@ -321,6 +321,10 @@ class Driver:
             "parameters": (
                 config.problem.parameters.describe() if config.problem.parameters else None
             ),
+            "parameter_constraints": (
+                [c.text for c in config.problem.parameters.constraints]
+                if config.problem.parameters else None
+            ),
             "failure_score": config.evaluate.failure_score,
             "stages": [
                 {

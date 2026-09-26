@@ -134,7 +134,11 @@ def run_static_stage(
         else:
             params, invalid = problem.parameters.validate(values)
             problems.extend(f"configure() returned an invalid configuration -- {p}" for p in invalid)
-            if invalid:
+            if not invalid:
+                # `problem.parameter_constraints`: refused here, before the
+                # configuration can cost a second of solver time.
+                problems.extend(f"the configuration {b}" for b in problem.parameters.violations(params))
+            if problems:
                 params = None
     elif not problems and stage.import_check:
         crash = _import_check(candidate_path, stage.timeout)

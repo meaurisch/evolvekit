@@ -243,6 +243,7 @@ class ProblemConfig:
             "required_functions",
             "forbidden_imports",
             "parameters",
+            "parameter_constraints",
         }
         _reject_unknown(data, known, "problem")
         parameters: ParameterSpace | None = None
@@ -254,9 +255,16 @@ class ProblemConfig:
                     "or `parameters` (a typed space; the skeleton is generated), not both"
                 )
             try:
-                parameters = ParameterSpace.parse(data["parameters"])
+                parameters = ParameterSpace.parse(data["parameters"]).with_constraints(
+                    data.get("parameter_constraints")
+                )
             except SpaceError as exc:
                 raise ConfigError(str(exc)) from None
+        elif data.get("parameter_constraints") is not None:
+            raise ConfigError(
+                "problem.parameter_constraints: conditions on the values of `problem.parameters`, "
+                "and this config declares none. Declare the parameters, or remove the constraints"
+            )
         else:
             skeleton = base_dir / _as_str(
                 _require(data, "skeleton", "problem"), "problem.skeleton"
