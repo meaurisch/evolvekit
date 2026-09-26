@@ -14,11 +14,13 @@ from . import instance as benchmark
 class Solved:
     """What `solve` hands to `solution_tables`."""
 
-    def __init__(self, best, built, *, iterations, runtime_s):
+    def __init__(self, best, built, *, iterations, runtime_s, stopped=False):
         self.best = best
         self.built = built
         self.iterations = iterations
         self.runtime_s = runtime_s
+        self.stopped = stopped
+        """PyVRP had not come back after the time limit and was stopped (solving.py)."""
 
 
 def task_id(activity, first_shipment_task):
@@ -136,5 +138,6 @@ def tables(req, solved):
         "missed_required": int(best.num_missing_clients() + best.num_missing_groups() + best.num_missing_shipments()),
         "iterations": int(solved.iterations),
         "runtime_s": round(solved.runtime_s, 3),
+        "stopped": bool(solved.stopped),
     }]
     return {"routes": routes, "visits": visits, "unassigned": unassigned, "summary": summary}

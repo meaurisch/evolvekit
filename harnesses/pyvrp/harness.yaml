@@ -470,6 +470,7 @@ tables:
       missed_required: {type: int, describe: Required tasks (and groups) left out}
       iterations: {type: int, describe: Iterations PyVRP ran within the time limit}
       runtime_s: {type: float, unit: s, describe: Time PyVRP took}
+      stopped: {type: bool, describe: "PyVRP had not come back after the time limit and was stopped; the plan is the best it had found by then"}
 
 levers:
   vehicle_costs:

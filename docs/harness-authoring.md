@@ -194,6 +194,11 @@ if __name__ == "__main__":
   whatever else you need in `case.native`.
 - `settings` holds every setting — the study's base values with the tuned
   ones on top — and `time_limit_s` is the study's time per case.
+- **Keep to the time limit.** A run that has not finished by 1.5 times the
+  limit plus 30 seconds is stopped and counts as failed. If the application
+  can hang for some settings, run it in a process of its own and stop that
+  after the limit, keeping its best answer so far — the PyVRP harness's
+  `kit/solving.py` does exactly that.
 - `apply_lever` gets the rows (dicts) the lever's `where` selected: change
   them in place. It gets `mode=` (`scale`, `set` or `add`) when it takes a
   `mode` argument.

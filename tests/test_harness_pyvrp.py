@@ -306,6 +306,82 @@ def test_a_solved_plan_adds_up(tmp_path):
         db.close()
 
 
+STAND_IN = """import importlib.util, os, sys, time
+spec = importlib.util.spec_from_file_location("child", {child!r})
+child = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(child)
+with open({pid!r}, "w") as handle:
+    handle.write(str(os.getpid()))
+first = child.Reports.on_start
+def on_start(self, ils):
+    {before}
+    first(self, ils)
+    time.sleep(3600)
+child.Reports.on_start = on_start
+sys.exit(child.main(sys.argv))
+"""
+"""kit/child.py with a search that never comes back: after its first plan,
+or (before="time.sleep(3600)") before it."""
+
+SEARCH = """import copy, json, os, subprocess, sys, time
+sys.path.insert(0, sys.argv[1])
+import evk_harness as evk
+from kit import params, plan, request, solving
+req = request.read(sys.argv[2])
+tables = request.tables(req)
+req.original = copy.deepcopy(tables)
+built = request.problem(req, tables)
+solving.patience = lambda limit: 2.0
+out = {}
+for path in sys.argv[3:]:
+    name = os.path.basename(path)
+    solving.CHILD = path + ".py"
+    started = time.perf_counter()
+    try:
+        solved = solving.search(built, params.resolve({}), req.scale, 1.0, 0)
+        summary = plan.tables(req, solved)["summary"][0]
+        out[name] = {"s": time.perf_counter() - started, "stopped": summary["stopped"],
+                     "routes": len(solved.best.routes()), "missed": summary["missed_required"]}
+    except evk.HarnessStop as exc:
+        out[name] = {"s": time.perf_counter() - started, "error": str(exc)}
+    if os.path.exists(path + ".pid"):
+        pid = int(open(path + ".pid").read())
+        if os.name == "nt":
+            listed = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/NH"], capture_output=True, text=True).stdout
+            out[name]["left_running"] = str(pid) in listed.split()
+        else:
+            try:
+                os.kill(pid, 0)
+                out[name]["left_running"] = True
+            except OSError:
+                out[name]["left_running"] = False
+print(json.dumps(out))
+"""
+
+
+@needs_pyvrp
+def test_a_search_that_does_not_come_back_is_stopped_with_its_best_plan(tmp_path):
+    child = str(HARNESS / "kit" / "child.py")
+    stand_ins = {
+        "after_a_plan": STAND_IN.format(child=child, pid=str(tmp_path / "after_a_plan.pid"), before="pass"),
+        "before_a_plan": STAND_IN.format(child=child, pid=str(tmp_path / "before_a_plan.pid"), before="time.sleep(3600)"),
+        "crashing": "import sys\nsys.stderr.write('Traceback ...\\nValueError: no such thing\\n')\nsys.exit(1)\n",
+    }
+    for name, text in stand_ins.items():
+        (tmp_path / f"{name}.py").write_text(text, encoding="utf-8")
+    done = subprocess.run([PYVRP, "-c", SEARCH, str(HARNESS), str(CITY)] + [str(tmp_path / name) for name in stand_ins],
+                          capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout.strip().splitlines()[-1])
+    after, before, crashing = out["after_a_plan"], out["before_a_plan"], out["crashing"]
+    assert after["stopped"] and after["routes"] > 0, "stopped, with the plan it had reported"
+    assert after["s"] < 1.0 + 2.0 + 5.0, "at the time limit plus the grace, not whenever PyVRP comes back"
+    assert before["stopped"] and before["routes"] == 0 and before["missed"] > 0, "no plan yet: an empty plan"
+    assert not after["left_running"] and not before["left_running"], "the search is gone, launcher and all"
+    assert crashing["error"] == "PyVRP stopped with an error: ValueError: no such thing"
+    assert "was stopped; the plan is the best it had found" in done.stderr
+
+
 @needs_pyvrp
 def test_a_data_change_moves_what_the_solver_sees_but_not_the_real_rates(tmp_path):
     levers = {"van_km": {"lever": "vehicle_costs", "table": "vehicle_types", "column": "unit_distance_cost",
