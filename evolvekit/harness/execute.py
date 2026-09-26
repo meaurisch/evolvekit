@@ -209,7 +209,7 @@ def plan_for(study: Study, harness: Harness, measured: dict[str, Any]) -> Plan:
     )
 
 
-def _measured(root: Path) -> dict[str, Any]:
+def measured(root: Path) -> dict[str, Any]:
     measured = read_preview(root)
     if measured is None or not measured.get("ok"):
         measured = preview(root)
@@ -298,7 +298,7 @@ def run_study(
     study = load_study(root)
     harness = study_harness(root)
     require_valid(study, harness, root=root)
-    plan = plan_for(study, harness, _measured(root))
+    plan = plan_for(study, harness, measured(root))
     run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = write_run(study, harness, plan, root, run_id, models=models)
     (run_dir / STOP_REQUEST).unlink(missing_ok=True)
