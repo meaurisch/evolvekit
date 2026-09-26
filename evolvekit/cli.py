@@ -1,4 +1,4 @@
-"""`python -m evolvekit init | preflight | run | status | dashboard | leaderboard`."""
+"""`python -m evolvekit init | preflight | run | status | dashboard | leaderboard | confirm | export | stop`."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from evolvekit import __version__
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
 from evolvekit.env import LoadedEnv, load_env_files
+from evolvekit.events import utc_now
 from evolvekit.leaderboard import (
     fitness_of,
     novelty_counts,
@@ -26,6 +27,7 @@ from evolvekit.preflight import run_preflight
 from evolvekit.scaffold import TUNE_FILES, TUNE_NEXT
 from evolvekit.search.driver import Driver
 from evolvekit.status import build_status, render_text
+from evolvekit.stopping import STOP_REQUEST
 
 __all__ = ["main", "build_parser"]
 
@@ -347,6 +349,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_board.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
     p_board.add_argument("--limit", type=int, default=20)
     p_board.add_argument("--html", metavar="PATH", help="also write an HTML dashboard")
+
+    p_stop = sub.add_parser(
+        "stop",
+        help="ask a running search to stop: what is in flight is stopped within seconds, "
+        "and the run can be resumed with the command that started it",
+    )
+    p_stop.add_argument("--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}")
     return parser
 
 
@@ -591,8 +600,11 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     )
     print(render_markdown(comparison))
     print(f"written to {Path(args.run_dir) / 'confirm' / args.label}")
+    # With evaluate.score.levels the claim is the lexicographic one: better,
+    # and clear, on the first level that is not equal.
     confirmed = all(
-        (result["summary"].get("ci95") or [0.0])[0] > 0 for result in comparison.per_candidate.values()
+        result["levels"]["confirmed"] if "levels" in result else (result["summary"].get("ci95") or [0.0])[0] > 0
+        for result in comparison.per_candidate.values()
     )
     return 0 if confirmed else 1
 
@@ -645,6 +657,20 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Write the run directory's `stop-request` (`evolvekit/stopping.py`)."""
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        print(f"error: there is no run directory at {run_dir.resolve()}", file=sys.stderr)
+        return 1
+    (run_dir / STOP_REQUEST).write_text(utc_now() + "\n", encoding="utf-8")
+    print(
+        f"asked the run in {run_dir} to stop. Evaluations in flight are stopped within seconds and "
+        "the run ends with `stopped on request`; the command that started it resumes it"
+    )
+    return 0
+
+
 _COMMANDS = {
     "confirm": cmd_confirm,
     "export": cmd_export,
@@ -654,6 +680,7 @@ _COMMANDS = {
     "status": cmd_status,
     "dashboard": cmd_dashboard,
     "leaderboard": cmd_leaderboard,
+    "stop": cmd_stop,
 }
 
 

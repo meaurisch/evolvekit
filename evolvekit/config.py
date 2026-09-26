@@ -13,7 +13,7 @@ import re
 import shlex
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -28,8 +28,11 @@ __all__ = [
     "ProblemConfig",
     "StageConfig",
     "PromoteRule",
+    "LevelConfig",
+    "MAX_LEVELS",
     "ScoreConfig",
     "PenaltyConfig",
+    "GateConfig",
     "EvaluateConfig",
     "DescriptorConfig",
     "ArchiveConfig",
@@ -243,6 +246,7 @@ class ProblemConfig:
             "required_functions",
             "forbidden_imports",
             "parameters",
+            "parameter_constraints",
         }
         _reject_unknown(data, known, "problem")
         parameters: ParameterSpace | None = None
@@ -254,9 +258,16 @@ class ProblemConfig:
                     "or `parameters` (a typed space; the skeleton is generated), not both"
                 )
             try:
-                parameters = ParameterSpace.parse(data["parameters"])
+                parameters = ParameterSpace.parse(data["parameters"]).with_constraints(
+                    data.get("parameter_constraints")
+                )
             except SpaceError as exc:
                 raise ConfigError(str(exc)) from None
+        elif data.get("parameter_constraints") is not None:
+            raise ConfigError(
+                "problem.parameter_constraints: conditions on the values of `problem.parameters`, "
+                "and this config declares none. Declare the parameters, or remove the constraints"
+            )
         else:
             skeleton = base_dir / _as_str(
                 _require(data, "skeleton", "problem"), "problem.skeleton"
@@ -514,7 +525,7 @@ class StageConfig:
         return stems if len(set(stems)) == len(stems) else tuple(entries)
 
     @staticmethod
-    def parse(raw: Any, index: int) -> "StageConfig":
+    def parse(raw: Any, index: int, *, default_normalize: str = "baseline") -> "StageConfig":
         path = f"evaluate.stages[{index}]"
         data = _as_mapping(raw, path)
         known = {
@@ -594,7 +605,7 @@ class StageConfig:
             _as_int(v, f"{path}.pin_cpus[{i}]", minimum=0)
             for i, v in enumerate(_as_list(data.get("pin_cpus"), f"{path}.pin_cpus"))
         )
-        normalize = _as_str(data.get("normalize", "baseline"), f"{path}.normalize")
+        normalize = _as_str(data.get("normalize", default_normalize), f"{path}.normalize")
         if normalize not in NORMALIZE_MODES:
             raise ConfigError(
                 f"{path}.normalize: must be one of {list(NORMALIZE_MODES)}, got {normalize!r}"
@@ -702,20 +713,131 @@ def _parse_kpi_patterns(raw: Any, path: str) -> tuple[tuple[str, str], ...]:
     return tuple(patterns)
 
 
+MAX_LEVELS = 4
+"""More levels would leave the combined score's integer part beyond what a
+double holds exactly: see `evaluate/levels.py`."""
+
+DIRECTIONS = ("maximize", "minimize")
+
+
+@dataclass(frozen=True)
+class LevelConfig:
+    """One goal of `evaluate.score.levels`, in order of importance.
+
+    `tolerance` is how far apart two values may be and still count as equal on
+    this level -- required on every level but the last, which decides whatever
+    the levels above it leave equal. `relative: true` makes it a fraction of
+    the seed's value (0.01 is "within 1 %")."""
+
+    kpi: str
+    direction: str
+    tolerance: float | None = None
+    relative: bool = False
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "kpi": self.kpi, "direction": self.direction,
+            "tolerance": self.tolerance, "relative": self.relative,
+        }
+
+
+def _parse_levels(raw: Any) -> tuple[LevelConfig, ...]:
+    if raw is None:
+        return ()
+    path = "evaluate.score.levels"
+    items = _as_list(raw, path)
+    if len(items) < 2:
+        raise ConfigError(
+            f"{path}: needs at least two levels. One level is a plain goal: set "
+            "evaluate.score.objective and direction instead"
+        )
+    if len(items) > MAX_LEVELS:
+        raise ConfigError(
+            f"{path}: at most {MAX_LEVELS} levels (so that the combined score stays exact in "
+            f"double precision), got {len(items)}"
+        )
+    levels = []
+    for index, item in enumerate(items):
+        where = f"{path}[{index}]"
+        data = _as_mapping(item, where)
+        _reject_unknown(data, {"kpi", "direction", "tolerance", "relative"}, where)
+        direction = _as_str(_require(data, "direction", where), f"{where}.direction")
+        if direction not in DIRECTIONS:
+            raise ConfigError(f"{where}.direction: must be 'maximize' or 'minimize', got {direction!r}")
+        last = index == len(items) - 1
+        tolerance = data.get("tolerance")
+        relative = _as_flag(data.get("relative", False), f"{where}.relative")
+        if last and tolerance is not None:
+            raise ConfigError(
+                f"{where}.tolerance: the last level has none -- it decides whatever the levels "
+                "above it leave equal"
+            )
+        if not last and tolerance is None:
+            raise ConfigError(
+                f"{where}.tolerance: required on every level but the last: how far apart two "
+                "values may be and still count as equal (with `relative: true`, a fraction of the "
+                "seed's value, e.g. 0.01 for 1 %)"
+            )
+        if tolerance is None and relative:
+            raise ConfigError(f"{where}.relative: only with a tolerance, and the last level has none")
+        if tolerance is not None:
+            tolerance = _as_positive(tolerance, f"{where}.tolerance")
+        levels.append(
+            LevelConfig(
+                kpi=_as_str(_require(data, "kpi", where), f"{where}.kpi"),
+                direction=direction,
+                tolerance=tolerance,
+                relative=relative,
+            )
+        )
+    names = [level.kpi for level in levels]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise ConfigError(f"{path}: names {twice[0]!r} more than once; each level is a different KPI")
+    return tuple(levels)
+
+
 @dataclass(frozen=True)
 class ScoreConfig:
-    """Objective KPI, direction and per-KPI weights. Higher score is better."""
+    """Objective KPI, direction and per-KPI weights. Higher score is better.
+
+    Or, with `levels`, goals in order of importance (`evaluate/levels.py`):
+    `objective` and `direction` are then level 1's, and are what reports
+    lead with."""
 
     objective: str
     direction: str = "maximize"
     weights: dict[str, float] = field(default_factory=dict)
+    levels: tuple[LevelConfig, ...] = ()
 
     @staticmethod
     def parse(raw: Any) -> "ScoreConfig":
         data = _as_mapping(raw, "evaluate.score")
         _reject_unknown(
-            data, {"objective", "direction", "weights"}, "evaluate.score"
+            data, {"objective", "direction", "weights", "levels"}, "evaluate.score"
         )
+        levels = _parse_levels(data.get("levels"))
+        if levels:
+            first = levels[0]
+            objective = data.get("objective", first.kpi)
+            direction = data.get("direction", first.direction)
+            if objective != first.kpi:
+                raise ConfigError(
+                    f"evaluate.score.objective: with `levels` the objective is level 1's KPI "
+                    f"({first.kpi!r}), got {objective!r}; remove it, or make it match"
+                )
+            if direction != first.direction:
+                raise ConfigError(
+                    f"evaluate.score.direction: with `levels` the direction is level 1's "
+                    f"({first.direction!r}), got {direction!r}; remove it, or make it match"
+                )
+            if data.get("weights"):
+                raise ConfigError(
+                    "evaluate.score.weights: cannot be combined with `levels`, which already say "
+                    "how the KPIs rank. For a weighted sum, report it as a KPI of its own and make "
+                    "that a level"
+                )
+            return ScoreConfig(objective=first.kpi, direction=first.direction, weights={first.kpi: 1.0}, levels=levels)
         objective = _as_str(
             _require(data, "objective", "evaluate.score"), "evaluate.score.objective"
         )
@@ -780,11 +902,86 @@ class PenaltyConfig:
         )
 
 
+def _check_levels(score: ScoreConfig, stages: tuple[StageConfig, ...], data: dict[str, Any]) -> None:
+    """What `evaluate.score.levels` cannot be combined with, said per key."""
+    if data.get("penalties"):
+        raise ConfigError(
+            "evaluate.penalties: cannot be combined with evaluate.score.levels -- a penalty "
+            "subtracted from the combined score would move it between levels. Make the "
+            "penalised KPI a level of its own, or a gate (evaluate.gates)"
+        )
+    for index, stage in enumerate(stages):
+        if stage.race is not None:
+            raise ConfigError(
+                f"evaluate.stages[{index}].race: cannot be combined with evaluate.score.levels: a "
+                "race compares one objective, and levels have several"
+            )
+        if stage.fans_out and stage.normalize != "none":
+            raise ConfigError(
+                f"evaluate.stages[{index}].normalize: must be `none` with evaluate.score.levels "
+                "(the default there): the levels compare plain means over instances, and "
+                "`baseline` would restate level 1 alone as a percentage"
+            )
+
+
+@dataclass(frozen=True)
+class GateConfig:
+    """`evaluate.gates`: a KPI condition every candidate has to meet to compete.
+
+    A penalty makes a violation expensive; a gate makes it disqualifying. "No
+    required task left unserved" is not a cost to trade against distance -- a
+    plan that breaks it is not a plan anybody would use, however cheap. So it
+    is checked after every command stage on the stage's aggregated KPIs, and a
+    candidate that breaks it keeps its score for the record but is not
+    promoted and never competes.
+    """
+
+    kpi: str
+    max: float | None = None
+    min: float | None = None
+
+    def broken_by(self, kpis: Mapping[str, float]) -> str | None:
+        """`"missed = 2 > 0"` when `kpis` break the gate, else `None`. A KPI
+        that is absent is not judged here: `required_kpis` has already made
+        its absence a failed run."""
+        value = kpis.get(self.kpi)
+        if value is None:
+            return None
+        if self.max is not None and value > self.max:
+            return f"{self.kpi} = {value:g} > {self.max:g}"
+        if self.min is not None and value < self.min:
+            return f"{self.kpi} = {value:g} < {self.min:g}"
+        return None
+
+    def describe(self) -> dict[str, Any]:
+        return {"kpi": self.kpi, "max": self.max, "min": self.min}
+
+    @staticmethod
+    def parse(raw: Any, index: int) -> "GateConfig":
+        path = f"evaluate.gates[{index}]"
+        data = _as_mapping(raw, path)
+        _reject_unknown(data, {"kpi", "max", "min"}, path)
+        kpi = _as_str(_require(data, "kpi", path), f"{path}.kpi")
+        has_max, has_min = data.get("max") is not None, data.get("min") is not None
+        if has_max == has_min:
+            raise ConfigError(
+                f"{path}: give exactly one of `max` or `min` (a range is two gates), got "
+                f"{'both' if has_max else 'neither'}"
+            )
+        return GateConfig(
+            kpi=kpi,
+            max=_as_float(data["max"], f"{path}.max") if has_max else None,
+            min=_as_float(data["min"], f"{path}.min") if has_min else None,
+        )
+
+
 @dataclass(frozen=True)
 class EvaluateConfig:
     stages: tuple[StageConfig, ...]
     score: ScoreConfig
     penalties: tuple[PenaltyConfig, ...] = ()
+    gates: tuple[GateConfig, ...] = ()
+    """KPI conditions a candidate has to meet to compete: see `GateConfig`."""
     failure_score: float = -1000.0
     holdout_penalty: float = 1.0
     """How hard a private hold-out that does worse than the public set is
@@ -810,6 +1007,22 @@ class EvaluateConfig:
             else self.signature_digits
         )
 
+    @property
+    def required_kpis(self) -> tuple[str, ...]:
+        """KPIs every command-stage run must report: the objective, every
+        level's and every gate's. A run that leaves one out has not been
+        judged, so it fails -- a gate on a KPI nobody reports would otherwise
+        pass everything, silently."""
+        return tuple(
+            dict.fromkeys(
+                [
+                    self.score.objective,
+                    *(level.kpi for level in self.score.levels),
+                    *(gate.kpi for gate in self.gates),
+                ]
+            )
+        )
+
     @staticmethod
     def parse(raw: Any) -> "EvaluateConfig":
         data = _as_mapping(raw, "evaluate")
@@ -825,6 +1038,7 @@ class EvaluateConfig:
                 "signature_digits_stochastic",
                 "signature_ignore",
                 "cache",
+                "gates",
             },
             "evaluate",
         )
@@ -850,7 +1064,16 @@ class EvaluateConfig:
         )
         if not stages_raw:
             raise ConfigError("evaluate.stages: at least one stage is required")
-        stages = tuple(StageConfig.parse(s, i) for i, s in enumerate(stages_raw))
+        score = ScoreConfig.parse(_require(data, "score", "evaluate"))
+        # Levels compare plain means over instances: `normalize: baseline`
+        # rewrites only the objective, and would put level 1 on a different
+        # scale from the others.
+        default_normalize = "none" if score.levels else "baseline"
+        stages = tuple(
+            StageConfig.parse(s, i, default_normalize=default_normalize) for i, s in enumerate(stages_raw)
+        )
+        if score.levels:
+            _check_levels(score, stages, data)
         ids = [s.id for s in stages]
         duplicates = sorted({i for i in ids if ids.count(i) > 1})
         if duplicates:
@@ -874,12 +1097,16 @@ class EvaluateConfig:
                 )
         return EvaluateConfig(
             stages=stages,
-            score=ScoreConfig.parse(_require(data, "score", "evaluate")),
+            score=score,
             penalties=tuple(
                 PenaltyConfig.parse(p, i)
                 for i, p in enumerate(
                     _as_list(data.get("penalties"), "evaluate.penalties")
                 )
+            ),
+            gates=tuple(
+                GateConfig.parse(g, i)
+                for i, g in enumerate(_as_list(data.get("gates"), "evaluate.gates"))
             ),
             failure_score=_as_float(
                 data.get("failure_score", -1000.0), "evaluate.failure_score"
@@ -1020,6 +1247,11 @@ class BudgetConfig:
     # Consecutive backend failures (rate limit, session cap, outage) before the
     # run halts instead of breeding children into a dead provider.
     max_consecutive_provider_errors: int = 3
+    max_hours: float | None = None
+    """The run's active time across sessions (`evolvekit/stopping.py`): no
+    generation is started that would not finish within it, and one still
+    running when it is reached is stopped and finished on resume. Off by
+    default."""
 
     @staticmethod
     def parse(raw: Any) -> "BudgetConfig":
@@ -1031,10 +1263,15 @@ class BudgetConfig:
                 "max_tokens",
                 "max_full_evals_per_day",
                 "max_consecutive_provider_errors",
+                "max_hours",
             },
             "budget",
         )
         return BudgetConfig(
+            max_hours=(
+                None if data.get("max_hours") is None
+                else _as_positive(data["max_hours"], "budget.max_hours")
+            ),
             max_usd=_as_positive(data.get("max_usd", 1.0), "budget.max_usd"),
             max_tokens=_as_int(
                 data.get("max_tokens", 1_000_000), "budget.max_tokens", minimum=1
@@ -1508,6 +1745,11 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
     _check_embedding_route(config)
     _check_parameter_placeholders(config)
     _check_typed_operators(config)
+    if config.evaluate.score.levels and config.stop.target is not None:
+        raise ConfigError(
+            "stop.target: cannot be combined with evaluate.score.levels -- the combined score "
+            "counts steps between levels, not a quantity a target could be stated in"
+        )
     return _expand_instance_patterns(config)
 
 
