@@ -15,7 +15,7 @@ from evolvekit.harness.manifest import load_harness
 from evolvekit.harness.plan import Plan, make_plan
 from evolvekit.harness.study import Study
 from harness_toy import write_toy_harness
-from test_study import EXAMPLE, _study_folder, _with
+from test_study import APPLICATION, EXAMPLE, _study_folder, _with
 
 
 @pytest.fixture(scope="module")
@@ -62,7 +62,7 @@ def test_the_stages_run_the_harness_once_per_training_case(tmp_path, harness):
     assert static == {"id": "static", "kind": "builtin-static"}
     assert full["instances"] == ["../../cases/a.json", "../../cases/b.json", "../../cases/c.json"]
     assert full["command"] == (
-        "C:/work/.venv/Scripts/python.exe ../../harness/runner.py solve --case {instance} --seed {seed} "
+        f"{APPLICATION} ../../harness/runner.py solve --case {{instance}} --seed {{seed}} "
         "--values {params_json} --study study-run.json --time-limit 5"
     )
     assert (full["seeds"], full["retries"], full["workers"], full["pin_cpus"]) == (2, 1, 3, [2, 4, 6])

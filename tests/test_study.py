@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -18,12 +20,15 @@ from evolvekit.harness.study import (
 )
 from harness_toy import write_toy_harness
 
+APPLICATION = Path(sys.executable).as_posix()
+"""A study's application must be an absolute path that exists: this interpreter is one."""
+
 EXAMPLE = {
     "study": 1,
     "name": "Item values for the March lists",
     "harness": {"id": "toy", "version": "1.0.0"},
     "template": "values",
-    "application": {"path": "C:/work/.venv/Scripts/python.exe", "version": "3.12.1"},
+    "application": {"path": APPLICATION, "version": "3.12.1"},
     "cases": {"training": ["cases/a.json", "cases/b.json", "cases/c.json"], "test": ["cases/d.json"]},
     "inputs": {"start": "inputs/start.json"},
     "vary": {
@@ -140,6 +145,8 @@ def _with(**changes):
         ({"inputs__weights": "inputs/w.json"}, "inputs.weights: the harness takes no input called 'weights'"),
         ({"limits__time_per_case_s": 0.5}, "limits.time_per_case_s: at least 1 s"),
         ({"application__path": ""}, "application: say where the application is"),
+        ({"application__path": "venv/bin/python"}, "application: give the full path to the application"),
+        ({"application__path": "C:/nowhere/python.exe"}, "application: there is nothing at C:/nowhere/python.exe any more"),
         ({"name": ""}, "name: give the study a name"),
     ],
 )

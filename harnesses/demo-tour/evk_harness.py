@@ -667,6 +667,10 @@ def run_solve(hooks, args):
         target = sqlite3.connect(args.tables_out)
         db.backup(target)
         target.close()
+        # The columns the runner produced, before the declaration typed them:
+        # `harness check` compares the two.
+        with open(args.tables_out + ".columns.json", "w", encoding="utf-8") as handle:
+            json.dump({name: _columns_of(rows) for name, rows in tables.items()}, handle)
     measured = {}
     if any(kpi.get("measure") for kpi in (study.get("kpis") or {}).values()):
         measured = _hook(hooks, "measure")(case, solution, tables) or {}

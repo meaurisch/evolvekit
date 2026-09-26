@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 import yaml
@@ -521,6 +521,13 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None) 
         add(f"harness: the study is for {study.harness_id} {study.harness_version}, this harness is {harness.id} {harness.version}")
     if harness.application.kind and not study.application_path:
         add("application: say where the application is")
+    elif study.application_path:
+        where = Path(study.application_path)
+        if not (PurePosixPath(study.application_path).is_absolute() or PureWindowsPath(study.application_path).is_absolute()):
+            add(f"application: give the full path to the application; {study.application_path!r} is relative, "
+                "and a run starts it from its own folder")
+        elif root is not None and not where.exists():
+            add(f"application: there is nothing at {study.application_path} any more; point the study at the application again")
 
     # cases and inputs
     if not study.training:
@@ -742,7 +749,7 @@ def check_templates(harness: Harness) -> None:
             study = study_from_template(harness, template, "template check")
         except HarnessError as exc:
             raise HarnessError(f"{where}: {exc}") from None
-        study.application_path = "application"
+        study.application_path = str(Path.home() / "application")  # never started: only its form counts here
         study.training = ["cases/a.case", "cases/b.case"]
         problems = study_problems(study, harness)
         if problems:
