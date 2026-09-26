@@ -591,8 +591,11 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     )
     print(render_markdown(comparison))
     print(f"written to {Path(args.run_dir) / 'confirm' / args.label}")
+    # With evaluate.score.levels the claim is the lexicographic one: better,
+    # and clear, on the first level that is not equal.
     confirmed = all(
-        (result["summary"].get("ci95") or [0.0])[0] > 0 for result in comparison.per_candidate.values()
+        result["levels"]["confirmed"] if "levels" in result else (result["summary"].get("ci95") or [0.0])[0] > 0
+        for result in comparison.per_candidate.values()
     )
     return 0 if confirmed else 1
 

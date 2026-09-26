@@ -281,3 +281,112 @@ def test_status_says_when_a_run_does_not_rank_by_levels(tmp_path):
 def test_the_dashboard_draws_a_row_per_level():
     page = (Path(dashboard.__file__).parent / "index.html").read_text(encoding="utf-8")
     assert "pr.levels" in page and '"counts as equal within"' in page and 'id: "levels"' in page
+
+# -- confirm, level by level ---------------------------------------------------
+
+import random as _random  # noqa: E402
+
+from evolvekit import cli  # noqa: E402
+from evolvekit.confirm import BASELINE, Comparison, _analyse, confirm, render_markdown  # noqa: E402
+
+DESCRIBED = [LevelConfig("dph", "maximize", 0.01, True).describe(), LevelConfig("wait", "minimize").describe()]
+
+
+def _comparison(dph_factor: float, wait_shift: float) -> Comparison:
+    """Three instances, two seeds: the candidate's deliveries per hour are the
+    baseline's times `dph_factor`, its waiting the baseline's plus `wait_shift`."""
+    rng = _random.Random(4)
+    comparison = Comparison(
+        label="t", objective="dph", direction="maximize", stage="full", seeds=[1, 2],
+        instances=["a", "b", "c"], baseline_id="g000-c0001", candidates=["g003-c0014"], levels=DESCRIBED,
+    )
+    for instance, size in (("a", 10.0), ("b", 20.0), ("c", 40.0)):
+        for seed in (1, 2):
+            dph, wait = size * (1 + rng.uniform(-0.001, 0.001)), 5.0 + rng.uniform(-0.05, 0.05)
+            comparison.runs.append({"configuration": BASELINE, "instance": instance, "seed": seed, "ok": True,
+                                    "cached": False, "kpis": {"dph": dph, "wait": wait}, "failure": None})
+            comparison.runs.append({"configuration": "g003-c0014", "instance": instance, "seed": seed, "ok": True,
+                                    "cached": False, "kpis": {"dph": dph * dph_factor, "wait": wait + wait_shift + rng.uniform(-0.05, 0.05)},
+                                    "failure": None})
+    return comparison
+
+
+def test_confirm_says_equal_on_level_1_and_better_on_level_2():
+    comparison = _comparison(dph_factor=1.002, wait_shift=-1.0)
+    _analyse(comparison)
+    levels = comparison.per_candidate["g003-c0014"]["levels"]
+    assert levels["verdict"] == "equal on level 1 (dph within 1 %), better on level 2 (wait): clear"
+    assert levels["deciding"] == 2 and levels["confirmed"] is True
+    first, second = levels["levels"]
+    assert first["state"] == "equal" and first["tolerance_abs"] == pytest.approx(0.01 * first["baseline_mean"])
+    assert second["state"] == "better" and second["clear"] and second["mean_difference"] > 0, "positive is better"
+    markdown = render_markdown(comparison)
+    assert "### Level by level" in markdown and "equal on level 1 (dph within 1 %)" in markdown.lower()
+
+
+def test_confirm_says_worse_when_level_1_falls_beyond_its_tolerance():
+    comparison = _comparison(dph_factor=0.95, wait_shift=-1.0)
+    _analyse(comparison)
+    levels = comparison.per_candidate["g003-c0014"]["levels"]
+    assert levels["verdict"] == "worse on level 1 (dph): clear"
+    assert levels["deciding"] == 1 and levels["confirmed"] is False
+
+
+def test_a_level_that_does_not_differ_clearly_is_not_confirmed():
+    comparison = _comparison(dph_factor=1.0, wait_shift=0.01)
+    _analyse(comparison)
+    levels = comparison.per_candidate["g003-c0014"]["levels"]
+    assert levels["verdict"].startswith("equal on level 1 (dph within 1 %), worse on level 2 (wait)")
+    assert levels["confirmed"] is False
+
+
+PER_INSTANCE_SOLVER = (
+    "import argparse, json\n"
+    "p = argparse.ArgumentParser(); p.add_argument('--x', type=float); p.add_argument('--instance'); p.add_argument('--seed', type=int)\n"
+    "a = p.parse_args()\n"
+    "size = {'a': 1.0, 'b': 2.0}[a.instance]\n"
+    "print(json.dumps({'dph': size * (10 + 0.4 * a.x), 'wait': size * (a.x - 0.2) ** 2 + 0.001 * a.seed}))\n"
+)
+
+
+@pytest.mark.slow
+def test_confirm_compares_a_levels_run_level_by_level(tmp_path):
+    (tmp_path / "solver.py").write_text(PER_INSTANCE_SOLVER, encoding="utf-8")
+    raw = _raw(
+        _levels({"kpi": "dph", "direction": "maximize", "tolerance": 0.05, "relative": True}, LEVEL_2),
+        stages=[{"id": "static", "kind": "builtin-static"},
+                {"id": "full", "kind": "command", "kpis_from": "stdout", "instances": ["a", "b"],
+                 "command": "{python} solver.py --instance {instance} --seed {seed} {params}"}],
+    )
+    raw["search"] = {"operators": {"param_lhs": 1.0}, "children_per_generation": 6, "generations": 1, "seed": 5}
+    config_path = tmp_path / "evolvekit.yaml"
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    config = build_config(raw, base_dir=tmp_path, source=config_path)
+    Driver(config, run_dir=tmp_path / "run").run()
+    comparison = confirm(config, tmp_path / "run", seeds=[101, 102], label="t", log=lambda _m: None)
+    written = json.loads((tmp_path / "run" / "confirm" / "t" / "comparison.json").read_text(encoding="utf-8"))
+    assert [level["kpi"] for level in written["levels"]] == ["dph", "wait"]
+    assert written["levels"][0]["tolerance"] == 0.05 and written["levels"][0]["relative"] is True
+    (best,) = comparison.candidates
+    result = written["per_candidate"][best]["levels"]
+    assert [row["kpi"] for row in result["levels"]] == ["dph", "wait"]
+    code = cli.main(["confirm", "--config", str(config_path), "--run-dir", str(tmp_path / "run"),
+                     "--seeds", "101,102", "--label", "t"])
+    assert code == (0 if result["confirmed"] else 1)
+
+def test_a_level_with_zeros_in_the_baseline_is_compared_in_its_own_units():
+    comparison = Comparison(
+        label="t", objective="dph", direction="maximize", stage="full", seeds=[1, 2], instances=["a", "b", "c"],
+        baseline_id="g000-c0001", candidates=["c1"],
+        levels=[DESCRIBED[0], LevelConfig("late", "minimize").describe()],
+    )
+    for instance, late_before, late_after in (("a", 0, 0), ("b", 2, 1), ("c", 4, 2)):
+        for seed in (1, 2):
+            for name, late in ((BASELINE, late_before), ("c1", late_after)):
+                comparison.runs.append({"configuration": name, "instance": instance, "seed": seed, "ok": True,
+                                        "cached": False, "kpis": {"dph": 10.0, "late": float(late)}, "failure": None})
+    _analyse(comparison)
+    first, second = comparison.per_candidate["c1"]["levels"]["levels"]
+    assert first["unit"] == "percent" and first["state"] == "equal"
+    assert second["unit"] == "absolute" and second["mean_difference"] == pytest.approx(1.0)
+    assert second["state"] == "better"
