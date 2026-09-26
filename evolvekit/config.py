@@ -1247,6 +1247,11 @@ class BudgetConfig:
     # Consecutive backend failures (rate limit, session cap, outage) before the
     # run halts instead of breeding children into a dead provider.
     max_consecutive_provider_errors: int = 3
+    max_hours: float | None = None
+    """The run's active time across sessions (`evolvekit/stopping.py`): no
+    generation is started that would not finish within it, and one still
+    running when it is reached is stopped and finished on resume. Off by
+    default."""
 
     @staticmethod
     def parse(raw: Any) -> "BudgetConfig":
@@ -1258,10 +1263,15 @@ class BudgetConfig:
                 "max_tokens",
                 "max_full_evals_per_day",
                 "max_consecutive_provider_errors",
+                "max_hours",
             },
             "budget",
         )
         return BudgetConfig(
+            max_hours=(
+                None if data.get("max_hours") is None
+                else _as_positive(data["max_hours"], "budget.max_hours")
+            ),
             max_usd=_as_positive(data.get("max_usd", 1.0), "budget.max_usd"),
             max_tokens=_as_int(
                 data.get("max_tokens", 1_000_000), "budget.max_tokens", minimum=1

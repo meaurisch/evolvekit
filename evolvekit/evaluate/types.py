@@ -61,6 +61,10 @@ class StageOutcome:
     cached: bool = False
     """Looked up in `work/cache/` rather than run: the same candidate, stage,
     instance and seed had already been evaluated (`evaluate/cache.py`)."""
+    abandoned: bool = False
+    """Stopped, or never started, because the run was stopped -- its time
+    limit or a stop request (`evolvekit/stopping.py`). Not a failure: nothing
+    went wrong, and the resumed run evaluates it again."""
     instance_names: tuple[str, ...] = ()
     """For a stage that runs per instance: the instances, in the order of every
     `<kpi>_per_instance` list in `vector_kpis`."""
@@ -107,6 +111,10 @@ class EvalResult:
     gated: str | None = None
     """The gate this candidate broke (`evaluate.gates`), as `"missed = 2 > 0"`.
     It keeps its score, is not promoted and does not compete; nothing failed."""
+    abandoned: str | None = None
+    """Why its evaluation did not finish, when the run was stopped in the
+    middle of it (`evolvekit/stopping.py`). The driver records nothing of such
+    a generation; the resumed run evaluates it again."""
     competes: bool = False
     """True once the candidate has finished the final stage -- hold-out
     included -- without a failure; see `cascade.finished_final_stage`. Only such

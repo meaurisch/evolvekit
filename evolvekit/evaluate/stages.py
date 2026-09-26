@@ -31,6 +31,7 @@ from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.hostload import HostLoad
 from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
+from evolvekit.stopping import AnyEvent
 
 __all__ = [
     "run_static_stage",
@@ -192,7 +193,8 @@ class UnitContext:
     """As people read it: `StageConfig.instance_names`."""
     attempt: int = 0
     cpus: tuple[int, ...] = ()
-    cancel: threading.Event | None = None
+    cancel: "threading.Event | AnyEvent | None" = None
+    """Set when the run is called off: Ctrl+C, or the run's own stop."""
 
     def labels(self) -> dict[str, Any]:
         return {"instance": self.name, "attempt": self.attempt}
@@ -321,6 +323,7 @@ def run_command_stage(
     observer: Observer | None = None,
     configuration: "Configuration | None" = None,
     cache: "EvalCache | None" = None,
+    cancel: "threading.Event | None" = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -334,8 +337,11 @@ def run_command_stage(
     is the more interesting fact anyway.
 
     `required_kpis` names scalar KPIs every run must report -- the caller passes
-    `evaluate.score.objective`. A run that leaves one out is a failed run, for
-    the reason spelled out in `_missing_required`.
+    `EvaluateConfig.required_kpis`. A run that leaves one out is a failed run,
+    for the reason spelled out in `_missing_required`.
+
+    `cancel`, once set, stops the run in flight and starts no other: the
+    outcome is then *abandoned*, not failed (`evolvekit/stopping.py`).
     """
     if stage.seeds <= 1:
         return _run_once(
@@ -350,6 +356,7 @@ def run_command_stage(
             observer=observer,
             configuration=configuration,
             cache=cache,
+            cancel=cancel,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -365,6 +372,7 @@ def run_command_stage(
             observer=observer,
             configuration=configuration,
             cache=cache,
+            cancel=cancel,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -456,6 +464,7 @@ def _run_once(
     configuration: "Configuration | None" = None,
     unit: "UnitContext | None" = None,
     cache: "EvalCache | None" = None,
+    cancel: "threading.Event | AnyEvent | None" = None,
 ) -> StageOutcome:
     """One evaluator run, announced to `observer` before and after.
 
@@ -463,7 +472,18 @@ def _run_once(
     can tell at any moment which run is in flight and for how long it has been.
     `unit` is what a per-instance stage adds: which instance this run is for,
     which attempt it is, where it is pinned and how it can be called off.
+    A run that is called off before it starts is not started, and says so
+    with an abandoned outcome and no events.
     """
+    halt = cancel if cancel is not None else (unit.cancel if unit is not None else None)
+    if halt is not None and halt.is_set():
+        return StageOutcome(
+            stage_id=stage.id,
+            ok=False,
+            failure="called off before it started: the run was stopped",
+            abandoned=True,
+            private=private,
+        )
     labels = unit.labels() if unit is not None else {}
     if observer is not None:
         observer("eval_started", seed=seed, timeout_s=stage.timeout, **labels)
@@ -499,6 +519,7 @@ def _run_once(
             required_kpis=required_kpis,
             configuration=configuration,
             unit=unit,
+            cancel=halt,
         )
         outcome.host_busy = load.stop()
     if cache is not None and key is not None and not outcome.cached:
@@ -526,6 +547,8 @@ def _run_once(
                 "failure": outcome.failure,
                 "stderr_tail": outcome.stderr,
                 "stdout_tail": outcome.stdout,
+                # Stopped with the run, not broken: `status` counts it apart.
+                **({"abandoned": True} if outcome.abandoned else {}),
             }
             if not outcome.ok
             else {}
@@ -560,6 +583,7 @@ def _execute_once(
     required_kpis: tuple[str, ...] = (),
     configuration: "Configuration | None" = None,
     unit: "UnitContext | None" = None,
+    cancel: "threading.Event | AnyEvent | None" = None,
 ) -> StageOutcome:
     """Run one external evaluator and read the KPI JSON it wrote to `{out}`."""
     started = time.perf_counter()
@@ -594,14 +618,15 @@ def _execute_once(
         stdout_path=stdout_log,
         stderr_path=stderr_log,
         cpus=unit.cpus if unit is not None else (),
-        cancel=unit.cancel if unit is not None else None,
+        cancel=cancel,
     )
     duration = time.perf_counter() - started
     if run.cancelled:
         return StageOutcome(
             stage_id=stage.id,
             ok=False,
-            failure="called off: the run was interrupted",
+            failure="called off: the run was stopped while this ran",
+            abandoned=True,
             duration_s=duration,
             private=private,
         )

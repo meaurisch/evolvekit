@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from pathlib import Path
 from statistics import fmean, quantiles
@@ -156,8 +157,13 @@ class Cascade:
         budget: BudgetGuard | None = None,
         signatures: BehaviourIndex | None = None,
         on_event: Callable[..., Any] | None = None,
+        stop: threading.Event | None = None,
     ) -> None:
         self.config = config
+        self.stop = stop
+        """The run's own stop (`evolvekit/stopping.py`): once set, evaluations
+        in flight are stopped, none is started, and what did not finish is
+        abandoned rather than failed."""
         self.on_event = on_event
         """`on_event(type, **fields)`, called for every evaluator run as it starts
         and ends. The driver points it at the run's event log."""
@@ -211,6 +217,12 @@ class Cascade:
         for index, stage in enumerate(stages):
             if not alive:
                 break
+            if self._stopping():
+                # The run's time limit, or a stop request: what has not
+                # finished is abandoned, not failed, and nothing more starts.
+                for cid in alive:
+                    results[cid].abandoned = "the run was stopped before this candidate finished"
+                break
             survivors: list[str] = []
             began = self._stage_started(stage, alive, private=False)
             outcomes = (
@@ -218,7 +230,7 @@ class Cascade:
                 if stage.fans_out
                 else None
             )
-            failed = raced_out = 0
+            failed = raced_out = abandoned = 0
             for cid in alive:
                 outcome = (
                     outcomes[cid]
@@ -226,9 +238,12 @@ class Cascade:
                     else self._run_stage(stage, by_id[cid], paths[cid])
                 )
                 # Raced out is not failed: nothing went wrong, the candidate
-                # was stopped because it was behind.
+                # was stopped because it was behind. Neither is abandoned: the
+                # run was stopped.
                 if outcome.raced_out:
                     raced_out += 1
+                elif outcome.abandoned:
+                    abandoned += 1
                 elif not outcome.ok:
                     failed += 1
                 self._absorb(results[cid], outcome, stage)
@@ -246,7 +261,9 @@ class Cascade:
                     continue
                 survivors.append(cid)
 
-            self._stage_finished(stage, began, len(alive), failed, private=False, raced_out=raced_out)
+            self._stage_finished(
+                stage, began, len(alive), failed, private=False, raced_out=raced_out, abandoned=abandoned
+            )
             is_final = index == len(stages) - 1
             if is_final:
                 self._run_private(stage, by_id, paths, results, survivors)
@@ -256,7 +273,7 @@ class Cascade:
             alive = select_promoted(scored, stage.promote, prior)
 
         for result in results.values():
-            result.competes = finished_final_stage(
+            result.competes = not result.abandoned and finished_final_stage(
                 self.config,
                 rejected=result.rejected,
                 last_failure=result.last_failure,
@@ -265,6 +282,9 @@ class Cascade:
                 gated=result.gated,
             )
         return results
+
+    def _stopping(self) -> bool:
+        return self.stop is not None and self.stop.is_set()
 
     # -- levels ----------------------------------------------------------
 
@@ -347,8 +367,9 @@ class Cascade:
             observer=self._observer(candidate.id, stage, private=False),
             configuration=self._configurations.get(candidate.id),
             cache=self.cache,
+            cancel=self.stop,
         )
-        if self._is_final(stage) and self.budget is not None:
+        if self._is_final(stage) and self.budget is not None and not outcome.abandoned:
             self.budget.record_full_eval()
         return outcome
 
@@ -369,7 +390,7 @@ class Cascade:
 
     def _stage_finished(
         self, stage: StageConfig, began: float, candidates: int, failed: int, *, private: bool,
-        raced_out: int = 0,
+        raced_out: int = 0, abandoned: int = 0,
     ) -> None:
         if self.on_event is not None and stage.kind == "command":
             self.on_event(
@@ -379,6 +400,7 @@ class Cascade:
                 candidates=candidates,
                 failed=failed,
                 raced_out=raced_out,
+                abandoned=abandoned,
                 duration_s=round(time.perf_counter() - began, 3),
             )
 
@@ -424,6 +446,7 @@ class Cascade:
                 required_kpis=self.config.evaluate.required_kpis,
                 cache=self.cache,
                 race=self._race_for(stage, admitted, private=private),
+                stop=self.stop,
             )
             if admitted
             else {}
@@ -626,6 +649,11 @@ class Cascade:
         self, result: EvalResult, outcome: StageOutcome, stage: StageConfig
     ) -> None:
         result.outcomes.append(outcome)
+        if outcome.abandoned:
+            # Not a failure either: the run was stopped. The driver records
+            # nothing of this generation, and the resumed run finishes it.
+            result.abandoned = outcome.failure or "the run was stopped before this candidate finished"
+            return
         if outcome.raced_out:
             # Not a failure: the candidate keeps the score of the stage before,
             # does not reach this one, and so does not compete.
@@ -678,6 +706,10 @@ class Cascade:
             return
         if not survivors:
             return
+        if self._stopping():
+            for cid in survivors:
+                results[cid].abandoned = "the run was stopped before its hold-out run"
+            return
         began, failed = self._stage_started(stage, survivors, private=True), 0
         held_out = (
             self._run_instances(stage, [by_id[cid] for cid in survivors], paths, private=True)
@@ -699,10 +731,14 @@ class Cascade:
                     observer=self._observer(cid, stage, private=True),
                     configuration=self._configurations.get(cid),
                     cache=self.cache,
+                    cancel=self.stop,
                 )
             )
             result = results[cid]
             result.outcomes.append(outcome)
+            if outcome.abandoned:
+                result.abandoned = outcome.failure or "the run was stopped during its hold-out run"
+                continue
             if not outcome.ok:
                 failed += 1
                 result.last_failure = _artefact(outcome)

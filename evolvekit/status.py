@@ -461,8 +461,10 @@ class _Run:
             state = {"run_finished": "finished", "run_interrupted": "interrupted"}.get(
                 kind, "crashed"
             )
+            reason = str(closing.get("stop_reason"))
             detail = {
-                "finished": f"stopped: {closing.get('stop_reason')}",
+                # "stopped on request" says it already; "stopped: stopped on request" stutters.
+                "finished": reason if reason.startswith("stopped") else f"stopped: {reason}",
                 "interrupted": "interrupted by the user (Ctrl+C); run the same command to resume",
                 "crashed": f"crashed: {closing.get('error')}",
             }[state]
@@ -498,6 +500,9 @@ class _Run:
 
         live = last_session if state in ("running", "stalled") else None
         finished = [e for e in self.events if e.get("type") == "eval_finished"]
+        # Stopped with the run (its time limit, a stop request) is not failed.
+        stopped = [e for e in finished if e.get("abandoned")]
+        finished = [e for e in finished if not e.get("abandoned")]
         by_stage: dict[str, dict[str, int]] = {}
         for event in finished:
             slot = by_stage.setdefault(str(event.get("stage")), {"done": 0, "failed": 0})
@@ -521,6 +526,7 @@ class _Run:
         stage_now = (
             self._stage_in_progress(last_items, in_flight) if closing is None and alive else None
         )
+        elapsed = self._elapsed(sessions, live)
         return {
             "state": state,
             "detail": detail,
@@ -534,7 +540,7 @@ class _Run:
             "resumed": len(sessions) > 1 or bool(self.described.get("resumed")),
             "started_at": self.events[0].get("ts") if self.events else None,
             "last_event_at": self.events[-1].get("ts") if self.events else None,
-            "elapsed_s": self._elapsed(sessions, live),
+            "elapsed_s": elapsed,
             "generation": {
                 "current": current,
                 "last_finished": max(done_generations, default=None),
@@ -545,7 +551,9 @@ class _Run:
                 "cached": sum(1 for e in finished if e.get("ok") and e.get("cached")),
                 "failed": sum(1 for e in finished if not e.get("ok")),
                 "in_flight": len(in_flight),
-                "abandoned": self._abandoned(sessions, live),
+                # Started and never finished: stopped with the run, or cut off
+                # by a session that ended without a word. Paid for, not failed.
+                "abandoned": self._abandoned(sessions, live) + len(stopped),
                 "by_stage": by_stage,
                 "failure_reasons": self._failure_reasons(finished),
             },
@@ -553,7 +561,7 @@ class _Run:
             "host": self._host_load(finished),
             "stage": stage_now,
             "eta": self._eta(last_planned, done_generations, live is not None, stage_now),
-            "limits": self._limits(last_planned, done_generations),
+            "limits": self._limits(last_planned, done_generations, elapsed),
         }
 
     def _stage_in_progress(
@@ -801,12 +809,15 @@ class _Run:
             "basis": basis + ". An upper bound on the plan: a stop rule can end it sooner",
         }
 
-    def _limits(self, last_planned: int | None, done: Sequence[int]) -> list[dict[str, Any]]:
+    def _limits(self, last_planned: int | None, done: Sequence[int], elapsed_s: float = 0.0) -> list[dict[str, Any]]:
         """How far along each stopping criterion is."""
         limits: list[dict[str, Any]] = []
         if last_planned is not None:
             limits.append({"name": "generations", "used": max(done, default=0), "cap": last_planned, "unit": ""})
         budget = self.described.get("budget") or {}
+        if _number(budget.get("max_hours")) is not None:
+            # Active time across sessions, as the run itself counts it.
+            limits.append({"name": "budget.max_hours", "used": elapsed_s / 3600.0, "cap": budget["max_hours"], "unit": "hours"})
         usd = sum(float(u.get("usd", 0.0) or 0.0) for u in self.usage)
         tokens = sum(int(u.get("input_tokens", 0) or 0) + int(u.get("output_tokens", 0) or 0) for u in self.usage)
         if _number(budget.get("max_usd")) is not None:
@@ -1250,7 +1261,7 @@ class _Run:
         }
         failed: dict[int, int] = {}
         for event in self.events:
-            if event.get("type") == "eval_finished" and not event.get("ok"):
+            if event.get("type") == "eval_finished" and not event.get("ok") and not event.get("abandoned"):
                 row = self.by_id.get(str(event.get("candidate_id")))
                 generation = (row or {}).get("generation")
                 if generation is None:  # not recorded yet: its id says which generation
@@ -1619,7 +1630,8 @@ class _Run:
         }
         found: list[dict[str, Any]] = []
         for event in self.events:
-            if event.get("type") == "eval_finished" and not event.get("ok"):
+            # An evaluation stopped with the run (`abandoned`) did not fail.
+            if event.get("type") == "eval_finished" and not event.get("ok") and not event.get("abandoned"):
                 row = self.by_id.get(str(event.get("candidate_id"))) or {}
                 found.append(
                     {
@@ -1917,7 +1929,11 @@ def render_text(document: Mapping[str, Any]) -> str:
         + (f" ({evaluations['cached']} looked up in the cache)" if evaluations.get("cached") else "")
         + f", {evaluations.get('in_flight', 0)} in flight, "
         f"{evaluations.get('failed', 0)} failed"
-        + (f", {evaluations['abandoned']} abandoned by a session that died" if evaluations.get("abandoned") else "")
+        + (
+            f", {evaluations['abandoned']} abandoned (the run was stopped, or a session ended, "
+            "before they finished)"
+            if evaluations.get("abandoned") else ""
+        )
     )
     lines.append(
         f"elapsed      : {_duration(health.get('elapsed_s'))}   eta: {_duration(eta.get('seconds'))}"
