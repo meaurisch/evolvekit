@@ -1,0 +1,17 @@
+title: Tune solver settings
+summary: >
+  Find the PyVRP settings that reach the lowest cost within your time limit. Starts with the eight
+  settings that mattered most in earlier tuning runs; the data stays as it is.
+vary:
+  settings: recommended
+kpis:
+  solver_cost: {from: harness}
+  real_cost: {from: harness}
+  distance_km: {from: harness}
+  routes_used: {from: harness}
+  feasible: {from: harness}
+goal:
+  levels:
+    - {kpi: solver_cost, direction: lower}
+# No guardrails: PyVRP's objective already prices a plan that breaks a rule
+# above every plan that keeps them all.

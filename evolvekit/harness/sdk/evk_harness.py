@@ -9,7 +9,8 @@ specific to one application:
     def read_case(path): ...                          # -> evk.Case(tables, native)
     def solve(case, settings, time_limit_s, seed): ...  # -> the application's solution
     def solution_tables(case, solution): ...          # -> {table: [row, ...]}
-    # optional: write_case, apply_lever, measure, discover, export
+    # optional: write_case, apply_lever (given `mode=` when it takes one),
+    # measure, discover, export
 
     if __name__ == "__main__":
         evk.main(globals())
@@ -41,6 +42,7 @@ import argparse
 import ast
 import copy
 import csv
+import inspect
 import json
 import math
 import os
@@ -283,7 +285,15 @@ def apply_levers(case, levers, values, hooks, declared=None):
             hook = hooks.get("apply_lever")
             if hook is None:
                 raise HarnessStop("the lever {!r} is applied in code, and runner.py has no apply_lever()".format(spec["lever"]))
-            hook(case, spec["lever"], [rows[i] for i in indices], value)
+            selected = [rows[i] for i in indices]
+            try:
+                takes_mode = "mode" in inspect.signature(hook).parameters
+            except (TypeError, ValueError):
+                takes_mode = False
+            if takes_mode:
+                hook(case, spec["lever"], selected, value, mode=spec.get("mode"))
+            else:
+                hook(case, spec["lever"], selected, value)
             continue
         column = spec["column"]
         for index in indices:

@@ -160,6 +160,22 @@ def test_a_code_lever_is_applied_by_the_runner(harness):
     assert rows == [(1, "", 2.0), (2, "boosted", 15.0), (3, "", 7.0)]
 
 
+def test_a_code_lever_hook_gets_the_mode_when_it_takes_one():
+    seen = []
+
+    def with_mode(case, name, rows, value, mode=None):
+        seen.append((name, [row["id"] for row in rows], value, mode))
+
+    def without_mode(case, name, rows, value):
+        seen.append((name, [row["id"] for row in rows], value))
+
+    case = evk.Case({"items": [dict(item) for item in CASE["items"]]})
+    levers = {"w": {"lever": "windows", "table": "items", "where": "kind = 'a'", "code": True, "mode": "add"}}
+    evk.apply_levers(case, levers, {"w": 2.0}, {"apply_lever": with_mode}, TABLES)
+    evk.apply_levers(case, levers, {"w": 3.0}, {"apply_lever": without_mode}, TABLES)
+    assert seen == [("windows", [1, 3], 2.0, "add"), ("windows", [1, 3], 3.0)]
+
+
 def test_a_lever_that_selects_nothing_on_this_case_changes_nothing_and_says_so(harness):
     study = _study(levers={"c": {"lever": "v", "table": "items", "column": "value", "where": "kind = 'c'", "mode": "set"}})
     result = _result(_solve(harness, study, {"factor": 1.0, "c": 0.0}))
@@ -282,4 +298,4 @@ def test_the_sdk_runs_on_the_standard_library_alone_and_on_python_3_9():
         for line in source.splitlines()
         if line.startswith(("import ", "from ")) and not line.startswith("from __future__")
     }
-    assert imported <= {"argparse", "ast", "copy", "csv", "json", "math", "os", "sqlite3", "sys", "time", "traceback"}
+    assert imported <= {"argparse", "ast", "copy", "csv", "inspect", "json", "math", "os", "sqlite3", "sys", "time", "traceback"}

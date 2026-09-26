@@ -41,7 +41,7 @@ def solve(case, settings, time_limit_s, seed): ... # -> the application's soluti
 def solution_tables(case, solution): ...           # -> {"table": [row, ...], ...}
 # optional:
 def write_case(case, path): ...          # the changed request (the "requests" export)
-def apply_lever(case, name, rows, value): ...   # levers declared with `code: true`
+def apply_lever(case, name, rows, value, mode=None): ...  # levers declared with `code: true`
 def measure(case, solution, tables): ...  # KPIs easier in Python than in SQL
 def discover(): ...                       # {"version": ..., "settings": {name: {"type", "default"}}}
 def export(format, values, out): ...      # exports beyond the built-in four
@@ -63,6 +63,11 @@ if __name__ == "__main__":
   when the tables you produce differ from the declaration.
 - **`solve` must build the problem from `case.tables`** for every column a
   lever can change: the SDK changes those cells, never your native object.
+- A lever with `code: true` is yours to apply: `apply_lever` gets the rows
+  (dicts) its `where` selected — change them in place — the value, and the
+  mode (`scale`, `set` or `add`) when it takes a `mode` argument. Raise
+  `evk.InvalidValues("…")` for a value it cannot take; that ends the run
+  before any solving.
 - **Errors are sentences.** Raise `evk.HarnessStop("…")` with a sentence a
   consultant can act on. `read_case` failures become "cannot read <file>: …"
   automatically.
