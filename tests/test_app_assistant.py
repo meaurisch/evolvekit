@@ -164,3 +164,25 @@ def test_the_model_knows_which_goal_wants_a_guardrail(tmp_path):
     assert catalogues["kpis"]["real_cost"]["guard"] == {"kpi": "feasible", "min": 1.0}
     assert "guard" not in catalogues["kpis"]["solver_cost"], "PyVRP's own cost prices broken rules already"
     assert 'A KPI with a "guard"' in assistant.SYSTEM
+
+
+class _Silent:
+    """A model that spends its whole budget thinking: empty, finish_reason=length."""
+
+    name = "silent"
+
+    def complete(self, messages, *, model, max_tokens, temperature):
+        raise RuntimeError("openrouter provider: response contained empty content (finish_reason=length)")
+
+
+def test_a_model_that_gives_no_answer_says_so_in_the_chat_and_is_not_asked_again(study):
+    home, root = study
+    answer = assistant.ask(home, root, "Trucks must stay dearer than vans", provider=_Silent())
+    assert answer["failed"] == "The model thought for too long and gave no answer. Ask again, perhaps in fewer words."
+    assert answer["cards"] == [] and assistant.history(root)["turns"][-1]["failed"] == answer["failed"], "kept for a reload"
+    provider = FakeProvider(responses=[json.dumps(GOOD)])
+    assistant.ask(home, root, "Try weights", provider=provider)
+    asked = [m["content"] for m in provider.calls[0]["messages"] if m["role"] == "user"]
+    assert "Trucks must stay dearer than vans" not in asked, "an unanswered question is not put to the model again"
+    assert asked[-1] == "Try weights"
+    assert assistant.MAX_TOKENS >= 16000, "room to think and still answer"

@@ -601,7 +601,7 @@ kpis:
     unit: per h
     direction: higher
     positive: true
-    help: Stops that hand goods over, per hour on the road; lateness counts at its real length.
+    help: Deliveries (stops that hand goods over) per hour on the road; time spent late counts as time on the road.
     sql: >
       SELECT (SELECT COUNT(*) FROM visits WHERE kind IN ('delivery', 'exchange', 'shipment_delivery'))
         / NULLIF((SELECT TOTAL(duration_s + time_warp_s) FROM routes) / 3600.0, 0)

@@ -563,6 +563,13 @@ async function renderSettings() {
   const assistantModel = h("input", { type: "text", id: "model-assistant", value: settings.models.assistant });
   const searchModel = h("input", { type: "text", id: "model-search", value: settings.models.search });
   const save = h("button", { class: "btn primary", type: "submit" }, "Save");
+  const checked = h("div", { "aria-live": "polite", style: "margin-top:10px" });
+  const check = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+    checked.replaceChildren(h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "Asking the model a one-line question…"));
+    const answer = await api("POST", "/api/settings/check");
+    checked.replaceChildren(answer.ok ? status("good", `The assistant answers: ${answer.model}, in ${fmt(answer.seconds, 1)} s.`)
+      : note("bad", h("p", { style: "margin:0" }, answer.reason)));
+  }, e.currentTarget) }, "Test the assistant");
   const form = h("form", { class: "card narrow", onsubmit: async (e) => {
     e.preventDefault();
     const keys = {};
@@ -580,7 +587,7 @@ async function renderSettings() {
       h("label", { class: "field", for: "model-assistant" }, h("span", { class: "label" }, "For the assistant"), assistantModel),
       h("label", { class: "field", for: "model-search" }, h("span", { class: "label" }, "For AI search help"), searchModel),
       h("span", { class: "hint" }, "The default, anthropic/claude-sonnet-5, costs about $2 per million words read and $10 per million written; an answer of the assistant costs a few cents.")),
-    h("div", { class: "row", style: "margin-top:16px" }, save));
+    h("div", { class: "row", style: "margin-top:16px" }, save, check), checked);
   view.replaceChildren(h("h1", {}, "Settings"), form,
     h("div", { class: "card narrow" }, h("h2", { style: "margin-top:0" }, "Your library"), h("p", { class: "mono" }, settings.home),
       h("p", { class: "muted small" }, "Studies, installed harnesses, and the keys live here. Start the app with another --home to keep a second library.")));
@@ -1155,7 +1162,7 @@ async function step4(box) {
         h("label", { class: "field", for: "dc-low" }, h("span", { class: "label" }, "From"), low),
         h("label", { class: "field", for: "dc-high" }, h("span", { class: "label" }, "To"), high),
         h("label", { class: "field", for: "dc-start" }, h("span", { class: "label" }, "Start at"), start)),
-      h("p", { class: "faint" }, "It is checked on the preview case before it is added: the condition must pick at least one row."), add);
+      h("p", { class: "faint" }, "It is checked on the smallest case before it is added: the condition must pick at least one row."), add);
   }
 
   function drawRules() {
@@ -1168,14 +1175,39 @@ async function step4(box) {
       const answer = await api("POST", studyPath("/cards"), { card: { kind: "constraint", expr: expr.value.trim(), says: says.value.trim() || expr.value.trim() } });
       current.doc = answer.study; toast("Added: it holds for the starting values."); drawAll();
     }, add));
+    const data = current.doc.study.vary.data || {};
+    const today = current.doc.data_today || {};
+    const labelOf = (n) => data[n] ? (data[n].says || `${data[n].column} where ${data[n].where || "all rows"}`) : n;
+    // "Keep one above another": in the values themselves, checked on the changed data of every case.
+    const comparable = Object.entries(data).filter(([, d]) => d.column && harness.levers[d.lever]);
+    let builder = null;
+    if (comparable.length >= 2) {
+      const pick = (id, at) => h("select", { id, class: "inline" }, comparable.map(([n], i) => h("option", { value: n, selected: i === at }, labelOf(n) + (today[n] ? ` (today ${today[n]})` : ""))));
+      const above = pick("rule-above", Math.min(2, comparable.length - 1)), below = pick("rule-below", 0);
+      const keep = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+        if (above.value === below.value) throw new Error("Pick two different values.");
+        const side = (n, fn) => { const d = data[n], table = harness.levers[d.lever].table;
+          return `(SELECT ${fn}("${d.column}") FROM "${table}" WHERE ${d.where || "1 = 1"})`; };
+        const card = { kind: "constraint", says: `${labelOf(above.value)} stays above ${labelOf(below.value)}`,
+          sql: `SELECT ${side(above.value, "MIN")} > ${side(below.value, "MAX")}` };
+        const answer = await api("POST", studyPath("/cards"), { card });
+        current.doc = answer.study; toast("Added: it holds today, and every combination has to keep it."); drawAll();
+      }, e.currentTarget) }, "Add this rule");
+      builder = h("details", { class: "card", style: "margin-top:12px", open: !rules.length }, h("summary", {}, "Keep one value above another"),
+        h("p", { class: "explain" }, "For rules like “trucks stay dearer than vans”: it compares the values themselves, after the change, in every case."),
+        h("div", { class: "row" }, above, h("span", {}, "stays above"), below), h("div", { style: "margin-top:10px" }, keep));
+    }
     fill(rulesBox, 
       rules.length ? h("div", { class: "card", style: "padding:4px 18px" }, rules.map((rule, i) => h("div", { class: "item" },
         h("div", { class: "body" }, h("div", { class: "what" }, sentence(rule.says)), h("div", { class: "faint" }, h("code", {}, rule.expr || rule.sql))),
         h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await patch({ constraints: rules.filter((_, j) => j !== i) }); drawAll(); }, e.currentTarget) }, "Remove"))))
         : h("p", { class: "muted" }, "No rules: every combination in the ranges above may be tried."),
-      names.length ? h("details", { class: "card", style: "margin-top:12px" }, h("summary", {}, "Add a rule"),
-        h("p", { class: "explain" }, "A rule the combinations must keep, written with the names of what is tuned: ", names.map((n, i) => [i ? ", " : "", h("code", {}, n)]),
-          ". Use + - * / and comparisons (>=, <=, <, >), for example ", h("code", {}, "max_penalty >= 100 * min_penalty"), "."),
+      builder,
+      names.length ? h("details", { class: "card", style: "margin-top:12px" }, h("summary", {}, builder ? "Write a rule yourself" : "Add a rule"),
+        h("p", { class: "explain" }, "A rule the combinations must keep, written with the names of what is tuned: ",
+          names.map((n, i) => [i ? ", " : "", h("code", {}, n), data[n] ? ` (${labelOf(n)}${today[n] ? ", today " + today[n] : ""})` : ""]),
+          ". Use + - * / and comparisons (>=, <=, <, >), for example ", h("code", {}, "max_penalty >= 100 * min_penalty"), ".",
+          Object.keys(data).length ? h("span", {}, " A data change's name stands for its factor (1 is today), not for the value: to compare values, multiply by today's.") : null),
         h("label", { class: "field", for: "rule-expr" }, h("span", { class: "label" }, "The rule"), expr),
         h("label", { class: "field", for: "rule-says" }, h("span", { class: "label" }, "In words"), says), add) : null);
   }
@@ -1237,7 +1269,7 @@ async function step5(box) {
       return h("div", { class: "item" }, h("div", { class: "body" },
         h("div", { class: "what" }, kpiLabel(name)),
         kpiHelp(name) ? h("div", { class: "small" }, kpiHelp(name)) : null,
-        h("div", { class: "muted small" }, `${kpiDirection(name) === "lower" ? "Lower" : "Higher"} is better. On the preview case today: `, valueEl),
+        h("div", { class: "muted small" }, `${kpiDirection(name) === "lower" ? "Lower" : "Higher"} is better. Today, on the smallest case: `, valueEl),
         kpi.sql ? h("details", {}, h("summary", {}, "How it is counted"), h("pre", { class: "mono small", style: "white-space:pre-wrap" }, kpi.sql)) : null, rowsBtn),
         used ? h("span", { class: "badge" }, "in use") : h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => {
           const next = { ...kpis }; delete next[name]; await patch({ kpis: next }); drawAll(); }, e.currentTarget) }, "Remove"));
@@ -1283,7 +1315,7 @@ async function step5(box) {
     const tried = h("div", { "aria-live": "polite" });
     const tryBtn = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
       const answer = await api("POST", studyPath("/kpis/try"), { sql: sql.value, rows_sql: rowsSql.value });
-      tried.replaceChildren(note("good", h("p", { style: "margin:0" }, `On the preview case: ${fmt(answer.value)}${answer.note ? " (" + answer.note + ")" : ""}${answer.rows ? `; ${plural(answer.rows.rows.length, "row")} counted` : ""}.`)));
+      tried.replaceChildren(note("good", h("p", { style: "margin:0" }, `On the smallest case: ${fmt(answer.value)}${answer.note ? " (" + answer.note + ")" : ""}${answer.rows ? `; ${plural(answer.rows.rows.length, "row")} counted` : ""}.`)));
     }, e.currentTarget) }, "Try it");
     const addSql = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
       const answer = await api("POST", studyPath("/cards"), { card: { kind: "kpi", name: sqlName.value.trim(), says: sqlSays.value.trim() || sqlName.value.trim(), direction: sqlDir.value, sql: sql.value, rows_sql: rowsSql.value || undefined } });
@@ -1420,7 +1452,7 @@ async function step5(box) {
         on.addEventListener("change", save); bound.addEventListener("change", () => { if (on.checked) save(); });
         return h("div", { class: "item" }, on, h("label", { for: `rail-${name}`, class: "body" }, h("div", { class: "what" }, kpiLabel(name)),
           kpiHelp(name) ? h("div", { class: "faint" }, kpiHelp(name)) : null,
-          h("div", { class: "muted small" }, "Today on the preview case: ", valueEl)), h("div", { class: "row small" }, lower ? "at most" : "at least", bound));
+          h("div", { class: "muted small" }, "Today, on the smallest case: ", valueEl)), h("div", { class: "row small" }, lower ? "at most" : "at least", bound));
       })));
   }
 
@@ -1603,10 +1635,17 @@ function assistantPanel() {
   const ask = h("button", { class: "btn primary", type: "button" }, "Ask");
   const cost = h("p", { class: "faint", style: "margin:6px 0 0" });
   panel.append(h("h3", { style: "margin-top:0" }, "Assistant"),
-    h("p", { class: "faint", style: "margin-top:0" }, "It sees the tables' structure and summaries of the preview case — never rows, names, addresses or coordinates."),
+    h("p", { class: "faint", style: "margin-top:0" }, "It sees the tables' structure and summaries of the smallest case — never rows, names, addresses or coordinates."),
     log, h("label", { for: "ask", class: "sr" }, "Ask the assistant"), input, h("div", { class: "row", style: "margin-top:8px" }, ask), cost);
 
   function bubble(text, me) { log.append(h("div", { class: "bubble" + (me ? " me" : "") }, text)); log.scrollTop = log.scrollHeight; }
+  function failed(reason, question) {
+    // Said in the chat, where the question is, and kept there after a reload.
+    const again = question ? h("button", { class: "btn small", type: "button", style: "margin-top:6px", onclick: () => { input.value = question; again.remove(); ask.click(); } }, "Ask again") : null;
+    log.append(h("div", { class: "bubble", role: "alert", style: "border:1px solid color-mix(in srgb, var(--critical) 45%, transparent)" },
+      h("strong", {}, "No answer. "), reason, again ? h("div", {}, again) : null));
+    log.scrollTop = log.scrollHeight;
+  }
   function proposal(card) {
     const kindText = { kpi: "A measure", data_change: "A data change", constraint: "A rule", setting: "A setting", weighted: "A combination", goal: "The goal", guardrail: "A guardrail" }[card.kind] || card.kind;
     const detail = card.sql || card.expr || (card.kind === "data_change" ? `${card.lever} · ${card.column || "in code"} · where ${card.where || "all rows"} · ${card.mode} ${card.low}–${card.high}` : "")
@@ -1614,7 +1653,7 @@ function assistantPanel() {
       || (card.kind === "guardrail" ? `${card.kpi} ${card.max !== undefined ? "≤ " + card.max : "≥ " + card.min}` : "")
       || (card.kind === "weighted" ? Object.entries(card.weighted || {}).map(([k, w]) => `${w} × ${k}`).join(" + ") : "")
       || (card.kind === "setting" ? `${card.name}: ${card.mode}` : "");
-    const facts = card.ok ? [card.value !== undefined ? `On the preview case: ${fmt(card.value)}.` : null, card.applies_to !== undefined ? `Applies to ${plural(card.applies_to, "row")}.` : null,
+    const facts = card.ok ? [card.value !== undefined ? `On the smallest case: ${fmt(card.value)}.` : null, card.applies_to !== undefined ? `Applies to ${plural(card.applies_to, "row")}.` : null,
       card.holds_today ? "Holds today." : null].filter(Boolean).join(" ") : "";
     const el = h("div", { class: "proposal" + (card.ok ? "" : " bad") },
       h("div", { class: "faint" }, card.ok ? `Proposed: ${kindText.toLowerCase()} — nothing changes until you apply it` : `${kindText}, not usable`), h("div", { class: "says" }, card.says || card.name || kindText),
@@ -1635,20 +1674,21 @@ function assistantPanel() {
   ask.addEventListener("click", () => guarded(async () => {
     const message = input.value.trim(); if (!message) return;
     bubble(message, true); input.value = "";
-    const thinking = h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "Thinking… (checking every proposal on the preview case)");
+    const thinking = h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "Thinking… this takes up to a minute (every proposal is tried on the smallest case first)");
     log.append(thinking);
     try {
       const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/assistant`, { message });
       thinking.remove();
       if (answer.needs_key) { log.append(note("info", h("p", { style: "margin:0" }, answer.say, " ", h("a", { href: "#/settings" }, "Settings")))); return; }
+      if (answer.failed) { failed(answer.failed, message); return; }
       if (answer.say) bubble(answer.say);
       for (const card of answer.cards) proposal(card);
       cost.textContent = `This answer cost $${fmt(answer.usd, 3)}; this study's assistant, $${fmt(answer.total_usd, 3)} so far.`;
-    } catch (err) { thinking.remove(); throw err; }
+    } catch (err) { thinking.remove(); failed(err.message, message); }
   }, ask));
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask.click(); });
   api("GET", `/api/studies/${encodeURIComponent(slug)}/assistant`).then((history) => {
-    for (const turn of history.turns.slice(-6)) turn.role === "user" ? bubble(turn.text, true) : (turn.say ? bubble(turn.say) : null);
+    for (const turn of history.turns.slice(-6)) turn.role === "user" ? bubble(turn.text, true) : turn.failed ? failed(turn.failed) : (turn.say ? bubble(turn.say) : null);
     if (history.total_usd) cost.textContent = `This study's assistant has cost $${fmt(history.total_usd, 3)} so far.`;
     if (!history.turns.length) log.append(h("p", { class: "muted small", style: "margin:0" }, "For example: “a measure for late deliveries to VIP customers”, or “try cheaper vans and dearer trucks, trucks must stay dearer”."));
   }).catch(() => {});
@@ -1756,9 +1796,18 @@ function caseTable(rows, goal) {
       h("td", { class: "n" }, change(c.change_pct, goal.direction)))))));
 }
 
-async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); toast("Copied."); }
-  catch (err) { toast("Select the text and copy it.", true); }
+async function copyText(text, shown) {
+  // The clipboard API first; where a browser refuses it, the old way; where
+  // that fails too, the text is selected, ready for Ctrl+C.
+  try { await navigator.clipboard.writeText(text); toast("Copied."); return; } catch (err) { /* next way */ }
+  const area = h("textarea", { style: "position:fixed; opacity:0; left:0; top:0" });
+  area.value = text; document.body.append(area); area.select();
+  let done = false;
+  try { done = document.execCommand("copy"); } catch (err) { done = false; }
+  area.remove();
+  if (done) { toast("Copied."); return; }
+  if (shown) { const range = document.createRange(); range.selectNodeContents(shown); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range); }
+  toast("The text is selected: press Ctrl+C to copy it.");
 }
 
 async function renderResults(slug, run) {
@@ -1798,11 +1847,12 @@ async function renderResults(slug, run) {
   if (r.by_case.learned.length) byCase.push(h("h3", {}, "Cases the search learned from"), caseTable(r.by_case.learned, r.goal));
   const shown = h("div");
   function show(title, text) {
-    shown.replaceChildren(h("p", { class: "small", style: "margin:12px 0 4px" }, title),
-      h("pre", { class: "mono", style: "white-space:pre-wrap; background:var(--sunken); padding:12px; border-radius:10px; max-height:360px; overflow:auto" }, text),
-      h("button", { class: "btn small", type: "button", onclick: () => copyText(text) }, "Copy"));
+    const pre = h("pre", { class: "mono", style: "white-space:pre-wrap; background:var(--sunken); padding:12px; border-radius:10px; max-height:360px; overflow:auto" }, text);
+    shown.replaceChildren(h("p", { class: "small", style: "margin:12px 0 4px" }, title), pre,
+      h("button", { class: "btn small", type: "button", onclick: () => copyText(text, pre) }, "Copy"));
+    return pre;
   }
-  const summary = h("button", { class: "btn", type: "button", onclick: () => { show("A summary for your message:", r.summary_text); copyText(r.summary_text); } }, "Copy a summary");
+  const summary = h("button", { class: "btn", type: "button", onclick: () => { const pre = show("A summary for your message:", r.summary_text); copyText(r.summary_text, pre); } }, "Copy a summary");
   const settingsButton = r.downloads.some((d) => d.name === "settings_json") ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
     const response = await fetch(`${studyPath("/download/settings_json")}${runQuery}`);
     if (!response.ok) throw new Error("The settings could not be read.");
@@ -1837,7 +1887,8 @@ async function renderResults(slug, run) {
     byCase.length ? h("h2", {}, `${capital(r.goal.label || r.goal.says)}, case by case`) : null,
     byCase.length ? h("div", { class: "card" }, byCase) : null,
     h("h2", {}, "Every measure"), h("div", { class: "card" }, kpiTable,
-      r.guardrails.length ? h("p", { class: "faint" }, "Rules every plan had to keep: ", r.guardrails.map((g) => `${kpiLabel(g.kpi)} ${g.max !== null && g.max !== undefined ? "at most " + fmt(g.max) : "at least " + fmt(g.min)}`).join("; "), ".") : null),
+      (r.rules || []).length ? h("p", { class: "faint" }, "Every combination kept these rules: ", r.rules.join("; "), ".") : null,
+      r.guardrails.length ? h("p", { class: "faint" }, "Every plan had to keep: ", r.guardrails.map((g) => `${kpiLabel(g.kpi)} ${g.max !== null && g.max !== undefined ? "at most " + fmt(g.max) : "at least " + fmt(g.min)}`).join("; "), ".") : null),
     h("h2", {}, "What changed"), h("div", { class: "card" }, r.is_seed ? h("p", { class: "muted" }, "Nothing: no combination beat the starting point.") : changed),
     h("h2", {}, "Hand it over"), h("div", { class: "card" },
       h("p", { class: "muted", style: "margin-top:0" }, "The summary says how the study was set up, what it found, how sure that is and what changed — ready to paste into a message. The report says the same on one page, with every number."),

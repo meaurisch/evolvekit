@@ -77,7 +77,11 @@ and you can always go back.
    fixed at …* or *Default*, with *Why would I tune this?*; the recommended
    ones come first, the one that matters most at the top), changes to the data (a harness decides which: for PyVRP
    vehicle costs, fleet, shifts, time windows, prizes, service times), and
-   rules every combination must keep ("trucks stay dearer per km than vans").
+   rules every combination must keep. *Keep one value above another* writes
+   the common one in the values themselves — "Box truck cost per km (today
+   0.5) stays above Van cost per km (today 0.3)" — checked on the changed data
+   of every case; a rule written by hand uses the names of what is tuned, and
+   a data change's name stands for its factor (1 is today).
    A file of the settings you use today can be imported: everything not tuned
    keeps its value from there.
 
@@ -113,7 +117,8 @@ marked on the rail, and both follow every change at once.
 
 The running page says where the study is: time used and left, the rounds
 done, the best improvement so far in plain words (with a chart), what runs
-right now, and failed runs grouped with what to do about them — a run that
+right now (and, while nothing has beaten the starting point, how close the
+best try came), and failed runs grouped with what to do about them — a run that
 did not come back in time is explained against the time per case you set.
 **Stop** ends it within seconds and keeps the best so far. *Detailed dashboard
 (for experts)* opens evolvekit's full dashboard for the run.
@@ -137,9 +142,12 @@ did not come back in time is explained against the time per case you set.
 3. **The goal, case by case**: every held-back case and every case the search
    learned from, starting point against best, with the change in words.
 4. **Every measure**, starting point against best, on both kinds of case.
-5. **What changed**, old value → new, with what each setting does.
-6. **Hand it over**: *Copy a summary* — how the study was set up, what it
-   found, how sure that is and what changed, ready to paste into a message;
+5. **What changed**, old value → new, with what each setting does; a data
+   change in the values it makes ("0.3 → 0.2817 (×0.939)", on the smallest
+   case), not only its factor.
+6. **Hand it over**: *Copy a summary* — the answer, how the study was set
+   up, what it found, how sure that is, what else moved on the held-back cases,
+   the rules it kept and what changed, ready to paste into a message;
    *Open the report* — the same on one page with every number and the settings
    file, to read in the browser or send as `report.html`; *Show the settings*;
    and the files: the settings for the application (and the same as
@@ -154,6 +162,9 @@ must stay dearer" — and answers with proposals as cards: a measure (with its
 SQL, the rows it counts, and its value on the preview case), a data change
 ("applies to 7 vehicle types"), a rule ("holds today"), a goal, a guardrail.
 Each card says it is a proposal: nothing changes until you press *Apply*.
+When the model gives no answer, the chat says why, keeps saying it after a
+reload, and offers *Ask again*; *Test the assistant* in Settings asks the
+model a one-line question to show that the key and the model work.
 
 Every proposal is checked on the preview case first: a measure must return a
 number, a data change must select rows, a rule must hold at the starting

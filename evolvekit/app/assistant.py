@@ -38,7 +38,10 @@ __all__ = ["apply_card", "ask", "history"]
 
 HISTORY = "assistant.jsonl"
 MAX_CORRECTIONS = 2
-MAX_TOKENS = 3000
+MAX_TOKENS = 16000
+"""The model thinks before it answers, and its thinking counts against this:
+the data-study review saw every answer spent on thinking at 3000 (empty,
+finish_reason=length). An answer is some 500 tokens; the thinking up to 4000."""
 TURNS = 6
 KINDS = ("setting", "data_change", "constraint", "kpi", "weighted", "goal", "guardrail")
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -105,6 +108,52 @@ def _entries(root: Path) -> list[dict[str, Any]]:
         except ValueError:
             continue
     return entries
+
+
+def _answered(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The conversation the model is shown again: each question with its
+    answer. A question that got none (the model failed) is left out, or the
+    next answer would have to deal with every one of them at once."""
+    kept = []
+    for at, entry in enumerate(entries):
+        reply = entries[at + 1] if at + 1 < len(entries) else None
+        if entry.get("role") == "user" and reply and reply.get("role") == "assistant" and not reply.get("failed"):
+            kept += [entry, reply]
+    return kept
+
+
+def failure_words(exc: BaseException) -> str:
+    """Why the model gave no answer, in words people can act on."""
+    text = str(exc)
+    low = text.lower()
+    if "finish_reason=length" in low:
+        return "The model thought for too long and gave no answer. Ask again, perhaps in fewer words."
+    if "401" in low or "unauthori" in low or "invalid api key" in low or "authentication" in low:
+        return "The model's service refused the API key. Check the key in Settings."
+    if "402" in low or "credit" in low or "insufficient" in low:
+        return "The model's service says the account has no credit left."
+    if "timeout" in low or "timed out" in low or "connection" in low:
+        return "The model did not answer in time. Check the internet connection and ask again."
+    return f"The model did not answer: {text[:200]}"
+
+
+def check_model(home: Any) -> dict[str, Any]:
+    """Settings' test: one tiny question to the assistant's model."""
+    import time
+
+    settings, keys = home.settings(), home.keys()
+    needed = {"openrouter": ["OPENROUTER_API_KEY"], "azure": ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"]}.get(settings["provider"], [])
+    if any(not keys.get(k) for k in needed):
+        return {"ok": False, "reason": "There is no key for this provider yet: paste it above and save."}
+    started = time.perf_counter()
+    try:
+        provider, config = _provider(home)
+        completion = provider.complete([{"role": "user", "content": 'Answer with the JSON {"ready": true} and nothing else.'}],
+                                       model=config.model, max_tokens=MAX_TOKENS, temperature=0.0)
+    except Exception as exc:  # noqa: BLE001 - the test says what went wrong
+        return {"ok": False, "reason": failure_words(exc)}
+    return {"ok": True, "model": config.model, "seconds": round(time.perf_counter() - started, 1),
+            "usd": round(_cost(completion, config), 6)}
 
 
 def history(root: Path) -> dict[str, Any]:
@@ -238,7 +287,7 @@ def check_card(card: Any, study: Study, harness: Harness, root: Path, proposed: 
             except sqlite3.Error as exc:
                 return fail(f"the rows condition does not run on {lever.table}: {exc}")
             if count == 0:
-                return fail(f"the condition selects no row of {lever.table} in the preview case")
+                return fail(f"the condition selects no row of {lever.table} in the smallest case")
             return {**out, "start": start, "applies_to": count, "table": lever.table}
         if kind == "constraint":
             says = str(card.get("says") or "").strip()
@@ -255,7 +304,7 @@ def check_card(card: Any, study: Study, harness: Harness, root: Path, proposed: 
                 return {**out, "holds_today": True}
             result = work.try_sql(root, str(card["sql"]), {})
             if not result["value"]:
-                return fail("it does not hold on the preview case today")
+                return fail("it does not hold today, on the smallest case")
             return {**out, "holds_today": True, "says": says}
         if kind == "kpi":
             name = str(card.get("name") or "")
@@ -388,7 +437,7 @@ def ask(home: Any, root: Path, message: str, provider: Any = None) -> dict[str, 
             provider, config = _provider(home)
         except Exception as exc:  # noqa: BLE001 - a provider that cannot be built is a sentence, not a crash
             raise AppError(f"the assistant cannot reach its model: {exc}", 502) from None
-    past = [e for e in _entries(root) if e.get("role") in ("user", "assistant")][-2 * TURNS:]
+    past = _answered(_entries(root))[-2 * TURNS:]
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": context(root, study, harness)}]
     messages.append({"role": "assistant", "content": '{"say": "I have read the tables, the catalogues and the study.", "cards": []}'})
     for entry in past:
@@ -404,8 +453,10 @@ def ask(home: Any, root: Path, message: str, provider: Any = None) -> dict[str, 
         try:
             completion = provider.complete(messages, model=config.model if config else "fake",
                                            max_tokens=MAX_TOKENS, temperature=0.2)
-        except Exception as exc:  # noqa: BLE001 - the model's failure is said, not raised
-            raise AppError(f"the assistant's model did not answer: {exc}", 502) from None
+        except Exception as exc:  # noqa: BLE001 - the model's failure is said in the chat, and kept there
+            reason = failure_words(exc)
+            _append(root, {"ts": _now(), "role": "assistant", "failed": reason, "usd": round(usd, 6)})
+            return {"failed": reason, "say": "", "cards": [], "usd": round(usd, 6), "total_usd": history(root)["total_usd"]}
         usd += _cost(completion, config)
         tokens += completion.input_tokens + completion.output_tokens
         try:

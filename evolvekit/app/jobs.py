@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import zipfile
@@ -357,6 +358,20 @@ def _failures_in_words(reasons: list[dict[str, Any]], limit_s: float) -> list[di
     return grouped
 
 
+def _closest(run_dir: Path, finished: bool = False) -> str:
+    """How close the tries came to the starting point when none beat it."""
+    rows = [r for r in _rows(run_dir) if _finite(r.get("score"))]
+    seed = next((r for r in rows if r.get("operator") == "human-seed"), None)
+    tried = [r for r in rows if r.get("operator") != "human-seed" and not r.get("rejected") and not r.get("gated")]
+    if seed is None or not tried or not seed["score"]:
+        return ""
+    best = max(float(r["score"]) for r in tried)  # a score is higher when better, whichever way the goal points
+    gap = (float(seed["score"]) - best) / abs(float(seed["score"])) * 100.0
+    so_far = "" if finished else " so far"
+    return (f" {len(tried)} tried{so_far}; the closest came within {gap:.1f} % of it." if gap > 0.05
+            else f" {len(tried)} tried{so_far}; the closest matched it.")
+
+
 def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     """Where a run is, in the words the Running screen uses."""
     run_dir = _run_dir(root, run)
@@ -388,7 +403,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
                f"({'one run' if runs == 1 else f'{runs} runs'} each)")
     if pct is None or verdict in ("none", None) or (pct or 0) <= 0:
         best_line = (f"No combination beat {start_words}." if finished
-                     else f"No combination has beaten {start_words} yet.")
+                     else f"No combination has beaten {start_words} yet.") + _closest(run_dir, finished)
     else:
         # Only the final check says whether it is better: the search picks
         # what did best on its own cases, which flatters it.
@@ -637,7 +652,40 @@ def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, 
                 else f"The study then takes about {_duration(after)}: more than its {_duration(budget)}.")
     return {"seeds": want, "seconds": seconds, "over": bool(time) and used_s + seconds > budget,
             "label": f"Check again with {_runs_word(want)} per case instead of {have} (about {_duration(seconds)})",
-            "why": (time + " " if time else "") + "More runs per case smooth out luck; the runs already done are kept."}
+            "why": (time + " " if time else "") + "More runs per case make each case's number steadier, and the runs "
+                   "already done are kept. The range can still widen: with a few cases, it is mostly how much they differ "
+                   "that sets it."}
+
+
+def _today(root: Path, harness: Harness, change: Any) -> list[float]:
+    """The values a data change starts from: its column in the rows it
+    selects, on the preview case (the smallest), untouched."""
+    lever = harness.levers.get(change.lever)
+    path = root / "preview" / "tables.sqlite"
+    if lever is None or not change.column or not path.is_file():
+        return []
+    db = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        table = f"orig_{lever.table}" if f"orig_{lever.table}" in tables else lever.table
+        column = '"' + change.column.replace('"', '""') + '"'
+        rows = db.execute(f'SELECT DISTINCT {column} FROM "{table}" WHERE {change.where or "1 = 1"} ORDER BY 1 LIMIT 50').fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+    return [float(r[0]) for r in rows if _finite(r[0])]
+
+
+def _changed_values(values: list[float], mode: str, value: Any) -> list[float]:
+    if not _finite(value):
+        return []
+    return sorted({v * value if mode == "scale" else v + value if mode == "add" else float(value) for v in values})
+
+
+def _span_text(values: list[float]) -> str:
+    texts = [f"{v:,.4g}" for v in (min(values), max(values))]
+    return texts[0] if texts[0] == texts[1] else f"{texts[0]}–{texts[1]}"
 
 
 def _describe_value(value: Any) -> str:
@@ -690,6 +738,21 @@ def _summary_text(data: dict[str, Any]) -> str:
         f"Search: {data['headline']}",
         f"Final check: {final['line']}",
     ]
+    side = []
+    for k in data.get("kpis") or []:
+        if k["name"] == data.get("goal", {}).get("kpi"):
+            continue
+        start, best = k["test"]["start"], k["test"]["best"]
+        pct = _improvement(start, best, k["direction"])
+        if pct is None:
+            continue
+        unit = f" {k['unit']}" if k.get("unit") else ""
+        way = "the same" if abs(pct) < 0.05 else f"{abs((best - start) / abs(start) * 100):.1f} % {'higher' if best > start else 'lower'}, {'better' if pct > 0 else 'worse'}"
+        side.append(f"{k['says']} {_number(start)}{unit} -> {_number(best)}{unit} ({way})")
+    if side:
+        lines.append("Other measures on the held-back cases: " + "; ".join(side) + ".")
+    if data.get("rules"):
+        lines.append("Rules every combination kept: " + "; ".join(data["rules"]) + ".")
     changed = [c for c in data["changed"] if c["changed"]]
     kept = [c for c in data["changed"] if not c["changed"]]
     if changed:
@@ -762,6 +825,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
             "test": {"start": held_start.get(name), "best": held_best.get(name)},
         })
     guardrails = [{"kpi": g.kpi, "max": g.max, "min": g.min} for g in study.guardrails]
+    rules = [c.says for c in study.constraints]
 
     changed = []
     starting = (seed or {}).get("params") or {}
@@ -774,8 +838,18 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         else:
             change = study.data[name]
             lever = harness.levers.get(change.lever)
-            label = change.says or f"{lever.label if lever else change.lever}: {change.column or 'in code'} where {change.where or 'all rows'} ({change.mode})"
+            column = (lever.columns.get(change.column) if lever and change.column else None) or change.column or "in code"
+            label = change.says or f"{lever.label if lever else change.lever}: {column} where {change.where or 'all rows'}"
             help_text = lever.help if lever else ""
+            today = _today(root, harness, change)
+            factor = {"scale": "×", "add": "+"}.get(change.mode, "=")
+            if today and _finite(new):
+                # The values it makes, not the factor: "3 → 2.82 (×0.939)".
+                changed.append({"name": name, "label": label, "old": old, "new": new, "changed": old != new,
+                                "help": f"{help_text} Today's value on the smallest case, and what the change makes of it.".strip(),
+                                "old_text": _span_text(today),
+                                "new_text": f"{_span_text(_changed_values(today, change.mode, new))} ({factor}{float(new):,.3g})"})
+                continue
         changed.append({"name": name, "label": label, "help": help_text, "old": old, "new": new,
                         "old_text": _describe_value(old), "new_text": _describe_value(new),
                         "changed": old != new})
@@ -797,7 +871,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     data = {
         "run": run, "phase": job.get("phase"), "study": study.name, "harness": harness.title,
         "headline": headline, "improvement_pct": pct, "goal": goal, "final": final, "kpis": kpis,
-        "guardrails": guardrails, "changed": changed, "downloads": downloads, "by_case": by_case,
+        "guardrails": guardrails, "rules": rules, "changed": changed, "downloads": downloads, "by_case": by_case,
         "context": context,
         "best_id": (best or {}).get("id"), "is_seed": bool(best and seed and best.get("id") == seed.get("id")),
         "cases": {"training": list(study.training), "test": list(study.test)},
@@ -936,6 +1010,8 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
     check_note = (f"<p class='help'>The best and the starting point, each run {'once' if seeds == 1 else f'{seeds} times'} on every "
                   "held-back case: cases the search never saw.</p>") if seeds else ""
     attached_html = (f"<h2>{esc(attached[0])}</h2><div class='card'><pre>{esc(attached[1])}</pre></div>" if attached else "")
+    rules_html = ("<h2>Rules every combination kept</h2><div class='card'><ul>"
+                  + "".join(f"<li>{esc(rule)}</li>" for rule in data.get("rules") or []) + "</ul></div>") if data.get("rules") else ""
     learned = ", ".join(Path(c).stem for c in data["cases"]["training"])
     held = ", ".join(Path(c).stem for c in data["cases"]["test"]) or "none"
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -979,6 +1055,7 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 <tbody>{kpi_rows}</tbody></table></div>
 <h2>What changed</h2>
 <div class="card wrap"><table><thead><tr><th>What</th><th>Before</th><th>Now</th></tr></thead><tbody>{changed_rows}</tbody></table></div>
+{rules_html}
 {attached_html}
 <p class="meta">The search learned from: {esc(learned)}. Held back for the final check: {esc(held)}.</p>
 </main></body></html>

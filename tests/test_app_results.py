@@ -131,3 +131,39 @@ def test_the_starting_point_is_named():
     assert jobs._baseline(study, harness, {"params": {"max_penalty": 5000.0}}) == "your starting settings"
     study.inputs = {"solver_settings": "inputs/today.json"}
     assert jobs._baseline(study, harness, {"params": {}}) == "the settings in today.json"
+
+
+def test_a_data_change_is_shown_in_the_values_it_makes_and_a_rule_compares_them(tmp_path):
+    import sqlite3
+
+    from evolvekit.app import assistant
+    from evolvekit.app.store import Home
+    from evolvekit.harness.execute import preview
+    from evolvekit.harness.manifest import load_harness
+    from evolvekit.harness.study import load_study
+
+    home = Home(tmp_path / "home")
+    slug = home.create_study("demo-tour", "tune", "Weights")
+    solver = Path(__file__).resolve().parents[1] / "examples" / "cli-solver" / "solver.py"
+    change = {"lever": "stop_weights", "column": "weight", "mode": "scale", "low": 0.5, "high": 2.0, "start": 1.0}
+    home.save_step(slug, {"application": {"path": str(solver), "version": ""},
+                          "limits": {"time_per_case_s": 0.5, "retries": 1, "runs_per_case": 1},
+                          "vary": {"settings": {}, "data": {"north": {**change, "where": "tag = 'north'"},
+                                                            "south": {**change, "where": "tag = 'south'"}}}})
+    home.use_samples(slug)
+    root = home.study_root(slug)
+    assert preview(root)["ok"]
+    study, harness = load_study(root), load_harness(root / "harness")
+    db = sqlite3.connect(root / "preview" / "tables.sqlite")
+    north = sorted({r[0] for r in db.execute("SELECT weight FROM orig_stops WHERE tag = 'north'")})
+    south = db.execute("SELECT MIN(weight), MAX(weight) FROM orig_stops WHERE tag = 'south'").fetchone()
+    db.close()
+    assert jobs._today(root, harness, study.data["north"]) == north, "the untouched values, on the smallest case"
+    assert jobs._changed_values([2.0, 3.0], "scale", 1.5) == [3.0, 4.5] and jobs._changed_values([2.0], "add", 1) == [3.0]
+    assert jobs._span_text([2.0, 3.0]) == "2–3" and jobs._span_text([2.5]) == "2.5"
+    # The rule "keep one value above another" is SQL over the changed data, as the page writes it.
+    rule = lambda a, b: {"kind": "constraint", "says": f"{a} above {b}", "sql":  # noqa: E731
+                         f"SELECT (SELECT MIN(\"weight\") FROM \"stops\" WHERE tag = '{a}') > (SELECT MAX(\"weight\") FROM \"stops\" WHERE tag = '{b}')"}
+    holds = min(north) > south[1]
+    checked = assistant.check_card(rule("north", "south"), study, harness, root, {})
+    assert checked["ok"] is holds, checked

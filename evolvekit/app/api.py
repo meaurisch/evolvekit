@@ -142,6 +142,10 @@ def get_settings(req: Request) -> dict[str, Any]:
     return {**req.home.settings(), "keys": req.home.keys(), "home": str(req.home.root)}
 
 
+def check_assistant(req: Request) -> dict[str, Any]:
+    return assistant.check_model(req.home)
+
+
 def put_settings(req: Request) -> dict[str, Any]:
     req.home.save_settings(req.json())
     return get_settings(req)
@@ -174,8 +178,12 @@ def harness(req: Request) -> dict[str, Any]:
 
 
 def _document(req: Request, slug: str) -> dict[str, Any]:
-    root, study, _ = req.home.load(slug)
+    root, study, pinned = req.home.load(slug)
     document = req.home.document(slug)
+    # What each data change starts from, on the preview case: rules and
+    # people think in rates, the search in factors.
+    document["data_today"] = {name: jobs._span_text(values) for name, change in study.data.items()  # noqa: SLF001
+                              if (values := jobs._today(root, pinned, change))}  # noqa: SLF001
     document["preview"] = work.preview_state(root, req.server)
     document["test_run"] = work.test_run_state(root, req.server)
     document["runs"] = jobs.runs(root)
@@ -503,6 +511,7 @@ ROUTES = [
     route("GET", "/api/home")(home),
     route("GET", "/api/settings")(get_settings),
     route("PUT", "/api/settings")(put_settings),
+    route("POST", "/api/settings/check")(check_assistant),
     route("POST", "/api/harnesses")(install),
     route("GET", "/api/harnesses/{harness}")(harness),
     route("GET", "/api/detect")(detect),

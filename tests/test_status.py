@@ -234,6 +234,20 @@ def test_the_eta_extrapolates_the_median_generation_and_says_so(tmp_path):
     assert "3 generation(s) to go" in eta["basis"] and "stop rule" in eta["basis"]
 
 
+def test_a_time_budget_that_ends_the_run_first_shortens_the_eta(tmp_path):
+    run = RunDir(tmp_path)
+    run.event("run_started", 100, objective="cost", direction="minimize", stages=STAGES, first_generation=1,
+              generations_planned=5, resumed=False, budget={"max_hours": 120 / 3600}, stop={"patience": 4, "epsilon": 0.0})
+    run.event("generation_finished", 95, generation=0, duration_s=5.0)
+    run.event("generation_finished", 70, generation=1, duration_s=10.0)
+    run.event("generation_finished", 40, generation=2, duration_s=30.0)
+    run.lock()
+    run.heartbeat(1, phase="breeding", generation=3)
+    eta = build_status(tmp_path, now=NOW)["health"]["eta"]
+    assert eta["seconds"] == pytest.approx(20.0, abs=2.0), "120 s of budget, 100 used: before the 60 s the generations need"
+    assert "time budget" in eta["basis"]
+
+
 def test_no_eta_is_invented_before_a_generation_has_finished(tmp_path):
     run = RunDir(tmp_path)
     run.started(100, planned=5)

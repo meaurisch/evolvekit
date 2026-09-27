@@ -148,3 +148,52 @@ app's own advice.
 - **Not changed.** The expert dashboard keeps the engine's words
   (generations, `budget.max_hours`); "Open the report" opens a new tab where
   the browser allows one.
+
+## After the gate: a data study through the assistant — 5/10 (not gating)
+
+| Getting started | Working with the assistant | Setting up | Confidence while it ran | Understanding the result | Handing it over |
+|---|---|---|---|---|---|
+| 8 | 1 | 6 | 6 | 7 | 5 |
+
+**The task.** The manager's note: cost rates per vehicle class (per km and
+per hour for vans, box trucks and evening vans) for more deliveries per hour
+on the road, no required delivery left out, trucks dearer than vans; use the
+assistant; 20 s per request, 30 minutes.
+
+**The run.** The assistant answered none of five requests, so the reviewer
+started from the template "Route cost sets → deliveries per hour" and wrote
+the truck rules by hand — after finding today's rates in the request files.
+43 combinations; 0.3 % more deliveries per hour on the requests it learned
+from, "somewhere between 3.3 % worse and 2.0 % better" on the three held
+back, with more kilometres and a higher real cost there. The answer: not
+better, keep today's rates — the app's own advice.
+
+**Frictions, and what changed.**
+
+- **(blocker for the assistant) It never answered.** The model thinks before
+  it answers, and its thinking counts against the answer's token limit: at
+  3000 every answer went on thinking (empty, `finish_reason=length`),
+  reproduced with the reviewer's own request. The limit is 16000 now (an
+  answer is some 500 tokens, the thinking up to 4000; this one came back in
+  11 s for $0.05). A question that got no answer is no longer put to the
+  model again with the next; a failure is said in the chat, in plain words,
+  kept after a reload, with *Ask again*; Settings has *Test the assistant*.
+- **(major) Rules in factors, not rates.** *Keep one value above another*
+  writes "Box truck cost per km (today 0.5) stays above Van cost per km
+  (today 0.3)" as a rule over the changed data of every case (a run that
+  breaks it is refused before solving); a hand-written rule shows today's
+  value beside each name and says that a data change's name is its factor.
+- **(major) Results in factors, not rates.** What changed shows the values
+  a data change makes — "0.3 → 0.2817 (×0.939)" — on the smallest case; the
+  template's data changes are named ("Van cost per km").
+- **(major) 25 minutes of "no combination has beaten the starting point".**
+  The running page says how many were tried and how close the best came; the
+  expert dashboard's time left is capped by the time budget, which is what
+  stops the run.
+- **The summary and the report.** They open with the answer and carry the
+  other measures on the held-back cases (real cost and distance went up) and
+  the rules every combination kept.
+- **Small ones.** "Check again" says that the range can still widen with few
+  cases; Copy falls back to the older clipboard way and then selects the text;
+  "preview case" became "the smallest case"; "Deliveries per hour" says what
+  it counts in plain words.

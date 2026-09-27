@@ -6,6 +6,7 @@ summary: >
 vary:
   data:
     van_per_km:
+      says: Van cost per km
       lever: vehicle_costs
       column: unit_distance_cost
       where: "class = 'van'"
@@ -14,6 +15,7 @@ vary:
       high: 2.0
       start: 1.0
     van_per_hour:
+      says: Van cost per hour
       lever: vehicle_costs
       column: unit_duration_cost
       where: "class = 'van'"
@@ -22,6 +24,7 @@ vary:
       high: 2.0
       start: 1.0
     truck_per_km:
+      says: Box truck cost per km
       lever: vehicle_costs
       column: unit_distance_cost
       where: "class = 'box_truck'"
@@ -30,6 +33,7 @@ vary:
       high: 2.0
       start: 1.0
     truck_per_hour:
+      says: Box truck cost per hour
       lever: vehicle_costs
       column: unit_duration_cost
       where: "class = 'box_truck'"
@@ -38,6 +42,7 @@ vary:
       high: 2.0
       start: 1.0
     evening_per_km:
+      says: Evening van cost per km
       lever: vehicle_costs
       column: unit_distance_cost
       where: "class = 'evening_van'"
@@ -46,6 +51,7 @@ vary:
       high: 2.0
       start: 1.0
     evening_per_hour:
+      says: Evening van cost per hour
       lever: vehicle_costs
       column: unit_duration_cost
       where: "class = 'evening_van'"
