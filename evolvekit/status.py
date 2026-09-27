@@ -44,6 +44,7 @@ from statistics import fmean, median, stdev
 from typing import Any, Callable, Mapping, Sequence
 
 from evolvekit.economics import DEFAULT_WINDOW, series
+from evolvekit.evaluate.levels import K as LEVEL_STEPS
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
 from evolvekit.leaderboard import competes, fitness_of, rank
 from evolvekit.ledger import read_jsonl
@@ -460,8 +461,10 @@ class _Run:
             state = {"run_finished": "finished", "run_interrupted": "interrupted"}.get(
                 kind, "crashed"
             )
+            reason = str(closing.get("stop_reason"))
             detail = {
-                "finished": f"stopped: {closing.get('stop_reason')}",
+                # "stopped on request" says it already; "stopped: stopped on request" stutters.
+                "finished": reason if reason.startswith("stopped") else f"stopped: {reason}",
                 "interrupted": "interrupted by the user (Ctrl+C); run the same command to resume",
                 "crashed": f"crashed: {closing.get('error')}",
             }[state]
@@ -497,6 +500,9 @@ class _Run:
 
         live = last_session if state in ("running", "stalled") else None
         finished = [e for e in self.events if e.get("type") == "eval_finished"]
+        # Stopped with the run (its time limit, a stop request) is not failed.
+        stopped = [e for e in finished if e.get("abandoned")]
+        finished = [e for e in finished if not e.get("abandoned")]
         by_stage: dict[str, dict[str, int]] = {}
         for event in finished:
             slot = by_stage.setdefault(str(event.get("stage")), {"done": 0, "failed": 0})
@@ -520,6 +526,7 @@ class _Run:
         stage_now = (
             self._stage_in_progress(last_items, in_flight) if closing is None and alive else None
         )
+        elapsed = self._elapsed(sessions, live)
         return {
             "state": state,
             "detail": detail,
@@ -533,7 +540,7 @@ class _Run:
             "resumed": len(sessions) > 1 or bool(self.described.get("resumed")),
             "started_at": self.events[0].get("ts") if self.events else None,
             "last_event_at": self.events[-1].get("ts") if self.events else None,
-            "elapsed_s": self._elapsed(sessions, live),
+            "elapsed_s": elapsed,
             "generation": {
                 "current": current,
                 "last_finished": max(done_generations, default=None),
@@ -544,16 +551,32 @@ class _Run:
                 "cached": sum(1 for e in finished if e.get("ok") and e.get("cached")),
                 "failed": sum(1 for e in finished if not e.get("ok")),
                 "in_flight": len(in_flight),
-                "abandoned": self._abandoned(sessions, live),
+                # Started and never finished: stopped with the run, or cut off
+                # by a session that ended without a word. Paid for, not failed.
+                "abandoned": self._abandoned(sessions, live) + len(stopped),
                 "by_stage": by_stage,
                 "failure_reasons": self._failure_reasons(finished),
             },
             "in_flight": in_flight,
             "host": self._host_load(finished),
             "stage": stage_now,
-            "eta": self._eta(last_planned, done_generations, live is not None, stage_now),
-            "limits": self._limits(last_planned, done_generations),
+            "eta": self._budget_capped(self._eta(last_planned, done_generations, live is not None, stage_now), elapsed),
+            "limits": self._limits(last_planned, done_generations, elapsed),
         }
+
+    def _budget_capped(self, eta: dict[str, Any], elapsed_s: float) -> dict[str, Any]:
+        """The generations' estimate, unless `budget.max_hours` ends the run
+        sooner -- which is how a time-planned run (the app's) stops."""
+        cap = _number((self.described.get("budget") or {}).get("max_hours"))
+        seconds = _number(eta.get("seconds"))
+        if cap is None or seconds is None:
+            return eta
+        left = max(0.0, cap * 3600.0 - elapsed_s)
+        if left >= seconds:
+            return eta
+        return {**eta, "seconds": left,
+                "at": datetime.fromtimestamp(self.now.timestamp() + left, timezone.utc).isoformat(timespec="seconds"),
+                "basis": f"the time budget (budget.max_hours, {cap:g} h) ends the run before its last planned generation"}
 
     def _stage_in_progress(
         self, items: Sequence[Mapping[str, Any]], in_flight: Sequence[Mapping[str, Any]]
@@ -800,12 +823,15 @@ class _Run:
             "basis": basis + ". An upper bound on the plan: a stop rule can end it sooner",
         }
 
-    def _limits(self, last_planned: int | None, done: Sequence[int]) -> list[dict[str, Any]]:
+    def _limits(self, last_planned: int | None, done: Sequence[int], elapsed_s: float = 0.0) -> list[dict[str, Any]]:
         """How far along each stopping criterion is."""
         limits: list[dict[str, Any]] = []
         if last_planned is not None:
             limits.append({"name": "generations", "used": max(done, default=0), "cap": last_planned, "unit": ""})
         budget = self.described.get("budget") or {}
+        if _number(budget.get("max_hours")) is not None:
+            # Active time across sessions, as the run itself counts it.
+            limits.append({"name": "budget.max_hours", "used": elapsed_s / 3600.0, "cap": budget["max_hours"], "unit": "hours"})
         usd = sum(float(u.get("usd", 0.0) or 0.0) for u in self.usage)
         tokens = sum(int(u.get("input_tokens", 0) or 0) + int(u.get("output_tokens", 0) or 0) for u in self.usage)
         if _number(budget.get("max_usd")) is not None:
@@ -1033,7 +1059,101 @@ class _Run:
             "generations": self._generation_ribbon(per_generation),
             "spread": self._spread_basis(),
             "screening": self._screening_agreement(),
+            "levels": self._levels(),
         }
+
+    def _levels(self) -> dict[str, Any]:
+        """`evaluate.score.levels`, level by level: the baseline against the
+        best, the difference in tolerance steps from the seed's value (the
+        steps the score counts), and which level decides. A run that ranks by
+        one objective says so."""
+        described = [
+            dict(item) for item in self.described.get("levels") or []
+            if isinstance(item, Mapping) and item.get("kpi")
+        ]
+        if not described:
+            return {
+                "available": False,
+                "levels": [],
+                "why": "the run ranks by one objective, not by goals in order of importance (evaluate.score.levels)",
+            }
+        anchor = (_read_json(self.directory / "work" / "levels.json") or {}).get(self._final_stage or "") or {}
+        tolerances = anchor.get("tolerances") or {}
+        base_kpis = (self.seed or {}).get("kpis") or {}
+        best_kpis = (self.best_row or {}).get("kpis") or {}
+        rows, deciding, parts = [], None, []
+        for index, level in enumerate(described):
+            kpi, last = str(level["kpi"]), index == len(described) - 1
+            sign = 1.0 if level.get("direction") == "maximize" else -1.0
+            base, best = _number(base_kpis.get(kpi)), _number(best_kpis.get(kpi))
+            difference = best - base if base is not None and best is not None else None
+            tolerance_abs = None if last else _number(tolerances.get(kpi))
+            steps = state = None
+            if difference is not None and last:
+                gain = sign * difference
+                state = "better" if gain > 0 else "worse" if gain < 0 else "equal"
+            elif difference is not None and tolerance_abs:
+                steps = int(max(-LEVEL_STEPS, min(LEVEL_STEPS, round(sign * difference / tolerance_abs))))
+                state = "better" if steps > 0 else "worse" if steps < 0 else "equal"
+            pct = _improvement_pct(base, best, str(level.get("direction")))
+            rows.append({
+                "level": index + 1, "kpi": kpi, "direction": level.get("direction"),
+                "tolerance": level.get("tolerance"), "relative": bool(level.get("relative")),
+                "tolerance_abs": tolerance_abs, "baseline": base, "best": best, "difference": difference,
+                "difference_pct": 100.0 * difference / abs(base) if difference is not None and base else None,
+                "improvement_pct": pct, "steps": steps, "state": state,
+            })
+            if deciding is None and state is not None:
+                if state == "equal" and not last:
+                    tolerance = level.get("tolerance")
+                    within = f"{100 * tolerance:g} %" if level.get("relative") else f"{tolerance:g}"
+                    parts.append(f"equal on level {index + 1} ({kpi}, within {within})")
+                elif state != "equal":
+                    deciding = index + 1
+                    change = f"{pct:+.2f} %" if pct is not None else f"{sign * difference:+.6g}"
+                    parts.append(f"{state} on level {index + 1} ({kpi}, {change})")
+                else:
+                    parts.append(f"equal on level {index + 1} ({kpi}) as well")
+        if self.best_row is None or self.seed is None:
+            verdict = "nothing has finished the final stage yet"
+        elif self.best_row.get("id") == self.seed.get("id"):
+            verdict = "the best candidate is the baseline"
+        else:
+            verdict = ", ".join(parts) or "not comparable: a level's value is missing"
+        saturated = self._saturated(described, anchor)
+        return {
+            "available": True,
+            "levels": rows,
+            "deciding": deciding,
+            "verdict": verdict,
+            "saturated": saturated,
+            "warning": (
+                f"{len(saturated)} candidate(s) differ from the seed by more than {LEVEL_STEPS:,} tolerance "
+                "steps on a level. Beyond that the steps saturate and such candidates can tie: widen that "
+                "level's tolerance"
+                if saturated else None
+            ),
+            "why": (
+                "a level is compared in steps of its tolerance, counted from the seed's value; the first "
+                "level that is not in the seed's step decides"
+            ),
+        }
+
+    def _saturated(self, described: Sequence[Mapping[str, Any]], anchor: Mapping[str, Any]) -> list[str]:
+        """Competing candidates more than K steps from the seed on some level."""
+        values, tolerances = anchor.get("values") or {}, anchor.get("tolerances") or {}
+        found = []
+        for row in self.rows:
+            if not competes(row):
+                continue
+            kpis = row.get("kpis") or {}
+            for level in described[:-1]:
+                kpi = str(level["kpi"])
+                tolerance, base, value = _number(tolerances.get(kpi)), _number(values.get(kpi)), _number(kpis.get(kpi))
+                if tolerance and base is not None and value is not None and abs(value - base) / tolerance >= LEVEL_STEPS:
+                    found.append(str(row.get("id")))
+                    break
+        return found
 
     def _elapsed_at_generation_end(self, generation: int) -> float | None:
         """Evaluation wall clock spent when `generation` finished: the sum of the
@@ -1155,7 +1275,7 @@ class _Run:
         }
         failed: dict[int, int] = {}
         for event in self.events:
-            if event.get("type") == "eval_finished" and not event.get("ok"):
+            if event.get("type") == "eval_finished" and not event.get("ok") and not event.get("abandoned"):
                 row = self.by_id.get(str(event.get("candidate_id")))
                 generation = (row or {}).get("generation")
                 if generation is None:  # not recorded yet: its id says which generation
@@ -1524,7 +1644,8 @@ class _Run:
         }
         found: list[dict[str, Any]] = []
         for event in self.events:
-            if event.get("type") == "eval_finished" and not event.get("ok"):
+            # An evaluation stopped with the run (`abandoned`) did not fail.
+            if event.get("type") == "eval_finished" and not event.get("ok") and not event.get("abandoned"):
                 row = self.by_id.get(str(event.get("candidate_id"))) or {}
                 found.append(
                     {
@@ -1610,6 +1731,9 @@ class _Run:
                     "novelty": row.get("novelty"),
                     "reason": row.get("reject_reason") or _first_line(row.get("last_failure")),
                     "raced_out": row.get("raced_out"),
+                    # Not in `reason`: a view reads a reason as "failed", and a
+                    # candidate that broke a gate did not fail -- it is not competing.
+                    "gated": row.get("gated"),
                     "deepest_stage": stages[-1] if stages else None,
                     "evaluation_s": durations.get(cid),
                     "usd": _number(row.get("usd")),
@@ -1738,6 +1862,7 @@ def _candidate_detail(
         "novelty": row.get("novelty"),
         "reject_reason": row.get("reject_reason"),
         "last_failure": row.get("last_failure"),
+        "gated": row.get("gated"),
         "stages_reached": row.get("stages_reached") or [],
         "stage_scores": row.get("stage_scores") or {},
         "kpis": row.get("kpis") or {},
@@ -1818,7 +1943,11 @@ def render_text(document: Mapping[str, Any]) -> str:
         + (f" ({evaluations['cached']} looked up in the cache)" if evaluations.get("cached") else "")
         + f", {evaluations.get('in_flight', 0)} in flight, "
         f"{evaluations.get('failed', 0)} failed"
-        + (f", {evaluations['abandoned']} abandoned by a session that died" if evaluations.get("abandoned") else "")
+        + (
+            f", {evaluations['abandoned']} abandoned (the run was stopped, or a session ended, "
+            "before they finished)"
+            if evaluations.get("abandoned") else ""
+        )
     )
     lines.append(
         f"elapsed      : {_duration(health.get('elapsed_s'))}   eta: {_duration(eta.get('seconds'))}"
@@ -1866,6 +1995,23 @@ def render_text(document: Mapping[str, Any]) -> str:
     lines.append(
         f"improvement  : {'n/a' if pct is None else f'{pct:+.2f} %'}  [{improvement.get('verdict', 'unknown')}] {improvement.get('why', '')}"
     )
+    levels = progress.get("levels") or {}
+    if levels.get("available"):
+        lines.append(f"levels       : {levels.get('verdict')}")
+        for level in levels.get("levels") or []:
+            change = _number(level.get("improvement_pct"))
+            lines.append(
+                f"  level {level.get('level')}    : {level.get('kpi')} ({level.get('direction')}) "
+                f"baseline {_fmt(level.get('baseline'))} best {_fmt(level.get('best'))}"
+                + (f" ({change:+.2f} %)" if change is not None else "")
+                + f" -- {level.get('state') or 'n/a'}"
+                + (
+                    f", {level['steps']:+d} step(s) of {_fmt(level.get('tolerance_abs'))}"
+                    if isinstance(level.get("steps"), int) else ""
+                )
+            )
+        if levels.get("warning"):
+            lines.append(f"  warning    : {levels['warning']}")
     failures = document.get("failures") or []
     lines.append(f"failures     : {len(failures)}" + ("" if not failures else "  (most recent first)"))
     for failure in failures[:5]:

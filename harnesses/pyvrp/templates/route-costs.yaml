@@ -1,0 +1,71 @@
+title: Route cost sets → deliveries per hour
+summary: >
+  Try other distance and time costs per vehicle class, and find the set that makes PyVRP plan the
+  most deliveries per hour on the road, without leaving a required task out. The solver settings
+  stay as they are.
+vary:
+  data:
+    van_per_km:
+      says: Van cost per km
+      lever: vehicle_costs
+      column: unit_distance_cost
+      where: "class = 'van'"
+      mode: scale
+      low: 0.5
+      high: 2.0
+      start: 1.0
+    van_per_hour:
+      says: Van cost per hour
+      lever: vehicle_costs
+      column: unit_duration_cost
+      where: "class = 'van'"
+      mode: scale
+      low: 0.5
+      high: 2.0
+      start: 1.0
+    truck_per_km:
+      says: Box truck cost per km
+      lever: vehicle_costs
+      column: unit_distance_cost
+      where: "class = 'box_truck'"
+      mode: scale
+      low: 0.5
+      high: 2.0
+      start: 1.0
+    truck_per_hour:
+      says: Box truck cost per hour
+      lever: vehicle_costs
+      column: unit_duration_cost
+      where: "class = 'box_truck'"
+      mode: scale
+      low: 0.5
+      high: 2.0
+      start: 1.0
+    evening_per_km:
+      says: Evening van cost per km
+      lever: vehicle_costs
+      column: unit_distance_cost
+      where: "class = 'evening_van'"
+      mode: scale
+      low: 0.5
+      high: 2.0
+      start: 1.0
+    evening_per_hour:
+      says: Evening van cost per hour
+      lever: vehicle_costs
+      column: unit_duration_cost
+      where: "class = 'evening_van'"
+      mode: scale
+      low: 0.5
+      high: 2.0
+      start: 1.0
+kpis:
+  deliveries_per_hour: {from: harness}
+  real_cost: {from: harness}
+  distance_km: {from: harness}
+  missed_required: {from: harness}
+goal:
+  levels:
+    - {kpi: deliveries_per_hour, direction: higher}
+guardrails:
+  - {kpi: missed_required, max: 0}

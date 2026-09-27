@@ -37,17 +37,67 @@ import json
 import math
 import random
 import re
-from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Mapping, Sequence
 
-__all__ = ["Parameter", "ParameterSpace", "SpaceError", "PARAMETER_TYPES"]
+from evolvekit.expressions import Expression, ExpressionError
+
+__all__ = [
+    "CONSTRAINT_ATTEMPTS",
+    "Constraint",
+    "Parameter",
+    "ParameterSpace",
+    "SpaceError",
+    "PARAMETER_TYPES",
+]
 
 PARAMETER_TYPES = ("int", "float", "bool", "choice")
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+CONSTRAINT_ATTEMPTS = 100
+"""How often a model-free operator draws a configuration before it gives up on
+`problem.parameter_constraints` and leaves its last draw for the static stage
+to refuse. Drawing is arithmetic on a dict; a hundred draws cost nothing next
+to one evaluation, and a constraint that a hundred draws cannot satisfy is one
+the search space should have been parametrised around."""
+
 
 class SpaceError(ValueError):
     """A parameter declaration, or a configuration, that cannot be used."""
+
+
+@dataclass(frozen=True)
+class Constraint:
+    """One condition a configuration has to meet before it is worth running.
+
+    `problem.parameter_constraints` holds rules the ranges alone cannot say --
+    "trucks stay at least as dear per metre as vans" is `truck >= van` -- and a
+    configuration that breaks one is refused by the static stage, in
+    milliseconds, instead of costing a solver run that answers a question
+    nobody asked.
+    """
+
+    text: str
+    """The expression, as written."""
+    says: str
+    """The sentence people read; the expression itself when none was given."""
+    expression: Expression
+
+    def _values(self, values: Mapping[str, Any]) -> str:
+        return ", ".join(f"{name}={values.get(name)!r}" for name in sorted(self.expression.names))
+
+    def broken_by(self, values: Mapping[str, Any]) -> str | None:
+        """Why `values` break this constraint, in one sentence, or `None`. A
+        constraint that cannot be computed for them counts as broken: a
+        configuration nobody can vouch for is not run."""
+        try:
+            if self.expression.holds(values):
+                return None
+        except ExpressionError as exc:
+            return f"cannot check the constraint `{self.text}` ({self._values(values)}): {exc}"
+        if self.says == self.text:
+            return f"breaks the constraint `{self.text}` ({self._values(values)})"
+        return f'breaks the constraint "{self.says}" (`{self.text}`: {self._values(values)})'
 
 
 def _is_number(value: Any) -> bool:
@@ -262,6 +312,8 @@ class Parameter:
 @dataclass(frozen=True)
 class ParameterSpace:
     parameters: tuple[Parameter, ...]
+    constraints: tuple[Constraint, ...] = ()
+    """`problem.parameter_constraints`: see `with_constraints`."""
 
     @staticmethod
     def parse(raw: Any, path: str = "problem.parameters") -> "ParameterSpace":
@@ -272,6 +324,77 @@ class ParameterSpace:
         return ParameterSpace(
             tuple(Parameter.parse(name, spec, f"{path}.{name}") for name, spec in raw.items())
         )
+
+    def with_constraints(self, raw: Any, path: str = "problem.parameter_constraints") -> "ParameterSpace":
+        """The space with its constraints: a list of conditions over parameter
+        names (`evolvekit/expressions.py`), each written as the expression or
+        as `{expr: ..., says: "a sentence"}`.
+
+        Refused here, before anything runs: an expression that cannot be read,
+        a name that is not a parameter, an expression that is not a condition,
+        and a constraint the *defaults* break -- every candidate is compared
+        with the defaults, so the starting point has to be a valid one.
+        """
+        if raw is None:
+            return self
+        if not isinstance(raw, (list, tuple)):
+            raise SpaceError(
+                f"{path}: expected a list of conditions such as `truck_cost >= van_cost`, "
+                f"got {type(raw).__name__}"
+            )
+        defaults = self.defaults()
+        constraints: list[Constraint] = []
+        for index, item in enumerate(raw):
+            where = f"{path}[{index}]"
+            says: Any = None
+            if isinstance(item, Mapping):
+                unknown = sorted(set(item) - {"expr", "says"})
+                if unknown:
+                    raise SpaceError(f"{where}: unknown key(s) {unknown}; known keys are ['expr', 'says']")
+                if "expr" not in item:
+                    raise SpaceError(
+                        f"{where}.expr: required -- the condition itself, such as `truck_cost >= van_cost`"
+                    )
+                text, says = item["expr"], item.get("says")
+                if says is not None and (not isinstance(says, str) or not says.strip()):
+                    raise SpaceError(f"{where}.says: expected a sentence, got {says!r}")
+            else:
+                text = item
+            if not isinstance(text, str):
+                raise SpaceError(
+                    f"{where}: expected an expression such as `truck_cost >= van_cost`, "
+                    f"or {{expr: ..., says: ...}}; got {text!r}"
+                )
+            try:
+                expression = Expression.parse(text)
+            except ExpressionError as exc:
+                raise SpaceError(f"{where}: {text!r}: {exc}") from None
+            unknown_names = sorted(expression.names - set(self.names))
+            if unknown_names:
+                raise SpaceError(
+                    f"{where}: {unknown_names[0]!r} is not a parameter; the parameters are {self.names}"
+                )
+            constraint = Constraint(
+                text=expression.text,
+                says=" ".join(says.split()) if says else expression.text,
+                expression=expression,
+            )
+            try:
+                result = expression.evaluate(defaults)
+            except ExpressionError as exc:
+                raise SpaceError(f"{where}: {text!r} cannot be computed at the defaults: {exc}") from None
+            if not isinstance(result, bool):
+                raise SpaceError(
+                    f"{where}: {text!r} is not a condition: it gives {result!r}, not true or false. "
+                    "Compare it with something (`a + b <= 10`)"
+                )
+            if not result:
+                raise SpaceError(
+                    f"{where}: the defaults break it ({constraint._values(defaults)}). Every candidate "
+                    "is compared with the defaults, so they have to satisfy every constraint"
+                )
+            constraints.append(constraint)
+        return replace(self, constraints=tuple(constraints))
 
     def __iter__(self):
         return iter(self.parameters)
@@ -312,6 +435,27 @@ class ParameterSpace:
             else:
                 resolved[parameter.name] = parameter.coerce(value)
         return resolved, problems
+
+    def violations(self, values: Mapping[str, Any]) -> list[str]:
+        """One sentence per constraint `values` break (see `Constraint.broken_by`)."""
+        return [broken for c in self.constraints if (broken := c.broken_by(values)) is not None]
+
+    def satisfies(self, values: Mapping[str, Any]) -> bool:
+        return all(c.broken_by(values) is None for c in self.constraints)
+
+    def draw(
+        self, propose: Callable[[], dict[str, Any]], attempts: int = CONSTRAINT_ATTEMPTS
+    ) -> dict[str, Any]:
+        """`propose()` until a configuration satisfies every constraint, at most
+        `attempts` times. The last proposal otherwise: the static stage refuses
+        it with the constraint's sentence, which is more use to whoever reads
+        the run than a child that silently never happened."""
+        values = propose()
+        for _ in range(attempts - 1):
+            if self.satisfies(values):
+                return values
+            values = propose()
+        return values
 
     # -- a configuration, written down -----------------------------------
 

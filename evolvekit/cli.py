@@ -1,4 +1,5 @@
-"""`python -m evolvekit init | preflight | run | status | dashboard | leaderboard`."""
+"""`python -m evolvekit init | preflight | run | status | dashboard | leaderboard | confirm | export | stop
+| harness new/check/pack/install/list | study new/preview/compile/run`."""
 
 from __future__ import annotations
 
@@ -6,12 +7,14 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
 from evolvekit.env import LoadedEnv, load_env_files
+from evolvekit.events import utc_now
 from evolvekit.leaderboard import (
     fitness_of,
     novelty_counts,
@@ -26,6 +29,7 @@ from evolvekit.preflight import run_preflight
 from evolvekit.scaffold import TUNE_FILES, TUNE_NEXT
 from evolvekit.search.driver import Driver
 from evolvekit.status import build_status, render_text
+from evolvekit.stopping import STOP_REQUEST
 
 __all__ = ["main", "build_parser"]
 
@@ -347,6 +351,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_board.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
     p_board.add_argument("--limit", type=int, default=20)
     p_board.add_argument("--html", metavar="PATH", help="also write an HTML dashboard")
+
+    p_stop = sub.add_parser(
+        "stop",
+        help="ask a running search to stop: what is in flight is stopped within seconds, "
+        "and the run can be resumed with the command that started it",
+    )
+    p_stop.add_argument("--run-dir", default=DEFAULT_RUN_DIR, help=f"default: {DEFAULT_RUN_DIR}")
+
+    p_harness = sub.add_parser("harness", help="write, check, pack, install and list harnesses")
+    harness = p_harness.add_subparsers(dest="harness_command", required=True)
+    h_new = harness.add_parser("new", help="a new harness: a copy of the closest one, or a runnable skeleton")
+    h_new.add_argument("directory")
+    h_new.add_argument("--from", dest="source", metavar="HARNESS", help="a harness folder, or the id of a known harness")
+    h_new.add_argument("--kind", choices=("python", "program"), default="python",
+                       help="for the skeleton: an application importable in Python, or a program (default: python)")
+    h_check = harness.add_parser("check", help="does the harness work, with this application? (exit 0 / 1 warnings / 2 failures)")
+    h_check.add_argument("directory")
+    h_check.add_argument("--app", help="the application: its Python (kind python) or the program (kind program)")
+    h_check.add_argument("--json", action="store_true", help='print {"ok", "checks": [...]} for a script or an AI coding tool')
+    h_check.add_argument("--samples", type=int, default=3, help="how many sample cases to solve (default 3)")
+    h_pack = harness.add_parser("pack", help="check the harness and write <id>-<version>.zip")
+    h_pack.add_argument("directory")
+    h_pack.add_argument("--out", help="the folder to write the zip to (default: next to the harness)")
+    h_install = harness.add_parser("install", help="install a harness .zip into the library home")
+    h_install.add_argument("archive")
+    h_install.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    h_list = harness.add_parser("list", help="the harnesses evolvekit can offer")
+    h_list.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+
+    p_app = sub.add_parser("app", help="the app: set up, run and read studies in the browser")
+    p_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    p_app.add_argument("--port", type=int, default=None, help="first port to try (default 8780)")
+    p_app.add_argument("--no-browser", action="store_true", help="print the address; do not open a browser")
+    p_app.add_argument("--shortcut", action="store_true",
+                       help="write evolvekit.cmd to the Windows desktop, which starts the app with a double-click")
+
+    p_study = sub.add_parser("study", help="make, preview, compile and run studies")
+    study = p_study.add_subparsers(dest="study_command", required=True)
+    s_new = study.add_parser("new", help="a new study folder from a harness (and a template)")
+    s_new.add_argument("directory")
+    s_new.add_argument("--harness", required=True, help="a harness folder, or the id of a known harness")
+    s_new.add_argument("--template", help="a template id of the harness (default: a blank study)")
+    s_new.add_argument("--name", help="the study's name (default: the folder's)")
+    s_new.add_argument("--home", help="the library home, to find harnesses by id")
+    for name, text in (("preview", "solve the smallest training case at the starting values"),
+                       ("compile", "compile the study into runs/<id>/evolvekit.yaml, with the automatic plan"),
+                       ("run", "compile, search, and check the best on the held-back cases")):
+        s_cmd = study.add_parser(name, help=text)
+        s_cmd.add_argument("directory")
+        if name != "preview":
+            s_cmd.add_argument("--run-id", help="the run's folder name (default: the time)")
     return parser
 
 
@@ -492,6 +547,52 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _desktop() -> Path:
+    """The Windows desktop, OneDrive's when it has taken the folder over."""
+    home = Path.home()
+    for candidate in (home / "OneDrive" / "Desktop", home / "Desktop"):
+        if candidate.is_dir():
+            return candidate
+    return home
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    """Serve the app for a library home until Ctrl+C. Runs started from it
+    carry on when it stops."""
+    from evolvekit.app.server import DEFAULT_PORT, AppServer
+    from evolvekit.dashboard import open_in_browser
+    from evolvekit.harness.library import default_home
+
+    home = Path(args.home).expanduser().resolve() if args.home else default_home()
+    if args.shortcut:
+        if os.name != "nt":
+            print("error: --shortcut writes a Windows .cmd file; elsewhere, start the app with "
+                  "`python -m evolvekit app`", file=sys.stderr)
+            return 1
+        target = _desktop() / "evolvekit.cmd"
+        target.write_text(
+            "@echo off\r\ntitle evolvekit\r\n"
+            f'"{sys.executable}" -m evolvekit app --home "{home}"\r\n'
+            "pause\r\n",
+            encoding="utf-8",
+        )
+        print(f"wrote {target}: double-click it to start the app, and keep its window open while you work")
+        return 0
+    server = AppServer(home, port=args.port or DEFAULT_PORT)
+    print(f"evolvekit app : {server.url}  (open it in your browser)", flush=True)
+    print(f"library home  : {server.home.root}", flush=True)
+    print("Keep this window open while you work. Runs carry on when it closes; Ctrl+C stops the app.", flush=True)
+    if not args.no_browser:
+        open_in_browser(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        server.stop()
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Exit 0 when there is a run to report on, 1 when there is none.
 
@@ -591,8 +692,11 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     )
     print(render_markdown(comparison))
     print(f"written to {Path(args.run_dir) / 'confirm' / args.label}")
+    # With evaluate.score.levels the claim is the lexicographic one: better,
+    # and clear, on the first level that is not equal.
     confirmed = all(
-        (result["summary"].get("ci95") or [0.0])[0] > 0 for result in comparison.per_candidate.values()
+        result["levels"]["confirmed"] if "levels" in result else (result["summary"].get("ci95") or [0.0])[0] > 0
+        for result in comparison.per_candidate.values()
     )
     return 0 if confirmed else 1
 
@@ -645,6 +749,112 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Write the run directory's `stop-request` (`evolvekit/stopping.py`)."""
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        print(f"error: there is no run directory at {run_dir.resolve()}", file=sys.stderr)
+        return 1
+    (run_dir / STOP_REQUEST).write_text(utc_now() + "\n", encoding="utf-8")
+    print(
+        f"asked the run in {run_dir} to stop. Evaluations in flight are stopped within seconds and "
+        "the run ends with `stopped on request`; the command that started it resumes it"
+    )
+    return 0
+
+
+def _harness_folder(value: str, home: str | None) -> Path:
+    """A harness given as a folder, or by the id of one evolvekit knows."""
+    from evolvekit.harness.library import find_harnesses
+
+    if Path(value).is_dir():
+        return Path(value)
+    known = [e for e in find_harnesses(Path(home) if home else None) if e.harness and e.harness.id == value]
+    if not known:
+        raise ValueError(f"{value!r} is neither a harness folder nor the id of a known harness; "
+                         "`python -m evolvekit harness list` shows them")
+    return max(known, key=lambda e: [int(p) for p in e.harness.version.split(".")]).path  # type: ignore[union-attr]
+
+
+def cmd_harness(args: argparse.Namespace) -> int:
+    from evolvekit.harness import library
+    from evolvekit.harness.check import check_harness, exit_code, render
+
+    command = args.harness_command
+    if command == "new":
+        source = _harness_folder(args.source, None) if args.source else None
+        folder = library.new_harness(args.directory, source=source, kind=args.kind)
+        print(f"wrote a new harness in {folder}" + (f", copied from {source}" if source else f" (a {args.kind} skeleton)"))
+        print("next: read AGENTS.md, then run  python -m evolvekit harness check "
+              f"{folder} --app PATH --json  until it passes")
+        return 0
+    if command == "check":
+        checks = check_harness(args.directory, args.app, samples=args.samples)
+        print(render(checks, as_json=args.json))
+        return exit_code(checks)
+    if command == "pack":
+        print(f"wrote {library.pack_harness(args.directory, args.out).resolve()}")
+        return 0
+    if command == "install":
+        harness = library.install_harness(args.archive, Path(args.home) if args.home else None)
+        print(f"installed {harness.title} {harness.version} in {harness.root}")
+        return 0
+    entries = library.find_harnesses(Path(args.home) if args.home else None)
+    if not entries:
+        print("no harnesses: install one with  python -m evolvekit harness install FILE.zip")
+    for entry in entries:
+        where = "built-in" if entry.built_in else "installed"
+        if entry.harness is None:
+            print(f"{entry.path.name:<24} {where:<9} does not load: {entry.problem}")
+        else:
+            print(f"{entry.harness.id:<16} {entry.harness.version:<8} {where:<9} {entry.harness.title}  ({entry.path})")
+    return 0
+
+
+def cmd_study(args: argparse.Namespace) -> int:
+    from evolvekit.harness import execute, library
+    from evolvekit.harness.compile import write_run
+    from evolvekit.harness.study import load_study, require_valid
+
+    command = args.study_command
+    if command == "new":
+        folder = Path(args.directory)
+        study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name or folder.name, args.template)
+        print(f"wrote {folder / 'study.yaml'} ({study.harness_id} {study.harness_version}"
+              + (f", template {study.template}" if study.template else "") + ")")
+        print("next: put the cases in cases/, fill in study.yaml, then  python -m evolvekit study run "
+              f"{folder}")
+        return 0
+    folder = Path(args.directory)
+    if command == "preview":
+        result = execute.preview(folder)
+        if not result["ok"]:
+            print(f"the preview failed on {result['case']}: {result['error']}", file=sys.stderr)
+            return 1
+        print(f"preview on {result['case']}: {result['wall_s']:.1f} s")
+        for name, value in sorted(result["kpis"].items()):
+            print(f"  {name:<24} {value:.6g}")
+        return 0
+    study, harness = load_study(folder), execute.study_harness(folder)
+    require_valid(study, harness, root=folder)
+    if command == "compile":
+        plan = execute.plan_for(study, harness, execute.measured(folder))
+        run_dir = write_run(study, harness, plan, folder, args.run_id or datetime.now().strftime("%Y%m%d-%H%M%S"))
+        print(f"compiled into {run_dir}: {plan.summary()}")
+        print(f"run it with  python -m evolvekit run --config {run_dir / 'evolvekit.yaml'} --run-dir {run_dir}")
+        return 0
+    job = execute.run_study(folder, args.run_id)
+    print(f"study run {job.get('run_id')}: {job['phase']}"
+          + (f" -- {job.get('error')}" if job.get("error") else ""))
+    final = job.get("final") or {}
+    if final.get("comparison"):
+        print(f"final check: {'confirmed' if final.get('confirmed') else 'not confirmed'}; see "
+              f"{folder / 'runs' / job['run_id'] / final['comparison']}")
+    elif final.get("skipped"):
+        print(f"final check: {final['skipped']}")
+    return 0 if job["phase"] in ("done", "stopped") else 1
+
+
 _COMMANDS = {
     "confirm": cmd_confirm,
     "export": cmd_export,
@@ -654,6 +864,10 @@ _COMMANDS = {
     "status": cmd_status,
     "dashboard": cmd_dashboard,
     "leaderboard": cmd_leaderboard,
+    "stop": cmd_stop,
+    "harness": cmd_harness,
+    "study": cmd_study,
+    "app": cmd_app,
 }
 
 

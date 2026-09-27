@@ -110,7 +110,7 @@ interrupted or dead.
 | Section | Answers |
 |---|---|
 | `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
-| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `within noise`, or `unknown` when each score is a single run. The verdict is a paired comparison over the seeds both candidates ran on, and says in words that those are the seeds the search selected on. |
+| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `within noise`, or `unknown` when each score is a single run. The verdict is a paired comparison over the seeds both candidates ran on, and says in words that those are the seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
 | `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
 | `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
 | `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
@@ -204,8 +204,9 @@ seed = the skeleton's EVOLVE-BLOCK
   ├─ economics: cumulative USD, best, USD since the last improvement,
   │             USD per unit of gain over a sliding window
   │
-  └─ stop on budget.max_usd / max_tokens, stop.patience, stop.target,
-     stop.max_usd_since_improvement or stop.min_gain_per_usd
+  └─ stop on budget.max_usd / max_tokens / max_hours, stop.patience,
+     stop.target, stop.max_usd_since_improvement, stop.min_gain_per_usd,
+     or a stop request
 ```
 
 Every score is a finite float. A gate violation is a penalty term; a crash
@@ -443,6 +444,116 @@ did print in the failure report.
 | A three-way choice: a slot per value, its mean dashed | A log-scale range, decade by decade |
 |---|---|
 | ![A choice parameter on the dashboard](docs/img/dashboard/parameters-choice-light.png) | ![A log-scale parameter on the dashboard, dark](docs/img/dashboard/parameters-log-dark.png) |
+
+### Constraints between parameters: `problem.parameter_constraints`
+
+A range says what each value may be on its own. A constraint says what the values must be
+together:
+
+```yaml
+problem:
+  parameters:
+    van_km_cost:   {type: float, low: 0.5, high: 2.0, default: 1.0}
+    truck_km_cost: {type: float, low: 0.5, high: 2.0, default: 1.2}
+    init:          {type: choice, choices: [greedy, savings], default: greedy}
+  parameter_constraints:
+    - truck_km_cost >= van_km_cost
+    - {expr: "init == 'savings' or van_km_cost < 1.5", says: Greedy starts only with cheap vans}
+```
+
+Each is an expression over parameter names: numbers, `'text'` for a choice, `+ - * / ** %`,
+comparisons (chained as in Python: `0 <= a - b <= 5`), `and or not`, and `abs min max round`. It is
+read with Python's `ast` against a whitelist and computed by walking the tree -- never `eval` -- so
+nothing can be called, imported or reached through an attribute (`evolvekit/expressions.py`).
+
+- **Checked before anything runs.** An expression that cannot be read, a name that is not a
+  parameter, one that is not a condition, and a constraint the *defaults* break are config errors:
+  the seed is the defaults, and every candidate is compared with it.
+- **Refused before any solving.** The static stage refuses a configuration that breaks a
+  constraint -- with its sentence (`says`) and the values -- and the command never starts. One that
+  cannot be computed for a configuration (a division by zero) counts as broken.
+- **Not proposed in the first place.** `param_lhs`, `param_local`, `param_cross` and `param_tpe` draw
+  again, up to 100 times, rather than propose a configuration that breaks one; after that the last
+  draw is left to the static stage. A model sees the constraints in the prompt, under the parameter
+  list.
+
+Prefer a space in which every value is valid: tune a truck *premium* of 0 or more rather than two
+costs that must stay ordered, a scale within ±20 % rather than "no more than 20 % from today". A
+constraint that most of the box breaks makes the samplers draw for nothing.
+
+### Gates: conditions every candidate has to meet (`evaluate.gates`)
+
+A penalty makes a violation expensive. A gate makes it disqualifying:
+
+```yaml
+evaluate:
+  gates:
+    - {kpi: missed_required, max: 0}
+    - {kpi: on_time_share, min: 0.95}
+```
+
+Every gate is checked after every command stage, on the stage's aggregated KPIs (and on the
+hold-out). A candidate that breaks one keeps its score in `runs.jsonl`, with the reason in `gated`
+(`"missed_required = 2 > 0"`); it is not promoted, never competes and is never the one a race is
+run against. It is not a failure either: `status` and the dashboard show it as *broke a gate*, never
+among the failures, and the model-free operators count it as the worst observation there is, so the
+region is not proposed again.
+
+- A gate's KPI has to be reported by every command-stage run, like the objective: a run that leaves
+  it out fails with a sentence naming it. A gate on a KPI nobody reports would pass everything.
+- A seed that breaks a gate aborts the run (exit code 4) with the gate and the value, before
+  anything is bred, and `preflight` reports it as a failure.
+- The gates are part of what a run directory is a run of: changing them on resume is refused.
+
+### Goals in order of importance: `evaluate.score.levels`
+
+"First the most deliveries per hour, two plans within 1 % counting as equal; then the least
+waiting; then the lowest cost":
+
+```yaml
+evaluate:
+  score:
+    levels:
+      - {kpi: deliveries_per_hour, direction: maximize, tolerance: 0.01, relative: true}
+      - {kpi: waiting_h, direction: minimize, tolerance: 0.5}
+      - {kpi: cost, direction: minimize}
+```
+
+*A is better than B if, at the first level where they differ by more than that level's tolerance, A
+is better.* A tolerance is required on every level but the last, which decides whatever the levels
+above it leave equal; `relative: true` makes it a fraction of the seed's value (used as an absolute
+one when that value is 0). `objective` and `direction` default to level 1's.
+
+The levels compile to one finite score, anchored at the seed, so everything that compares scores --
+ranking, the archive, promotion, parent sampling, patience, the estimator -- works unchanged. With
+the seed's values `b`, a candidate's `v`, `s` = +1 to maximise and −1 to minimise, and `t` a level's
+tolerance in its KPI's units (`evolvekit/evaluate/levels.py`):
+
+```
+q_i   = clamp(round(s_i · (v_i − b_i) / t_i), −K, K)       levels 1 … L−1, K = 10 000
+x_L   = 0.5 · tanh(s_L · (v_L − b_L) / scale_L)             scale_L = 10 % of |b_L|, or 1 when b_L = 0
+score = Σ q_i · (2K + 2)^(L−1−i)  +  x_L
+```
+
+The seed scores exactly 0, and its values are kept in `work/levels.json` (per stage, like
+`reference.json`), so a resumed run measures from the same anchor. What that means, precisely:
+
+- Values are compared in steps of the tolerance, counted from the seed's value. Two values in the
+  same step count as equal -- so two values just either side of a step boundary count as different,
+  however close they are.
+- A difference of more than K steps saturates; `status` warns when a candidate's does. Widen that
+  level's tolerance.
+- At most four levels: the integer part then stays exact in double precision, and the last level
+  keeps a resolution finer than a thousandth of its range. The weight between levels is 2K + 2
+  rather than 2K + 1 because `tanh` of a large difference is exactly 1.0 in floating point.
+- Levels do not combine with `weights`, `penalties` (make the penalised KPI a level, or a gate),
+  `stop.target`, or `race`. A per-instance stage compares plain means (`normalize: none`, the
+  default with levels): `baseline` would restate level 1 alone as a percentage.
+
+`status` reports each level's baseline, best, change and verdict and names the deciding level
+(`progress.levels`); the dashboard's Progress card shows a row per level instead of one
+percentage; [`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export) compares level by
+level.
 
 ### The problem description, in named sections
 
@@ -907,7 +1018,8 @@ from then on; commands are compared word by word, so spacing alone is no change.
 
 `0` the run ended as planned (generations exhausted, a stop rule, the budget — including
 `budget.max_full_evals_per_day`, which *stops* the run once no candidate can reach the final stage
-any more today; run the same command again tomorrow, or raise the cap). `1` an error.
+any more today; run the same command again tomorrow, or raise the cap — the time limit, or a stop
+request). `1` an error.
 `2` a config error. `3` the run directory is locked by a live run. `4` **aborted**: the seed
 failed its own evaluation (nothing was searched), or the model backend kept failing (the search
 stopped wherever it was, possibly mid-run) — a wrapper script, a CI step or an agent must not
@@ -953,6 +1065,41 @@ What is lost is what was in flight when the run died.
 `search.generations` is the plan for the run *directory*, not for the session: a twelve-generation
 run that died in generation 9 is resumed to finish the twelve, and a run directory that already
 holds them says so and does nothing. `run --generations K` means K *more*, whatever the plan was.
+
+### A time limit, and stopping on request
+
+```yaml
+budget:
+  max_hours: 2.0        # off unless set
+```
+
+`budget.max_hours` is the run's *active* time across sessions: a run resumed the next morning counts
+the hours it had already used, not the night in between (per session, from its first event to its
+last). It is enforced twice:
+
+- **Before each generation**, one that would not finish in time is not started: "time limit:
+  another round would not finish within 2 h". How long one takes is projected from the longest of
+  the last two; with only the seed done, from the seed's duration times the number of children --
+  an upper bound when a cheaper stage screens first.
+- **During a generation**, a watcher looks every second. When the limit is reached, evaluations in
+  flight are stopped and counted as *abandoned* -- not failed: nothing went wrong -- and none is
+  started. The generation is not recorded (its children stay in `pending.json`), and the run ends
+  with "time limit reached". The best so far is the answer.
+
+A file named `stop-request` in the run directory has the same effect, with the reason "stopped on
+request":
+
+```
+python -m evolvekit stop --run-dir runs/x
+```
+
+It is how a program that started the run as a detached process stops it -- on Windows such a
+process cannot be sent Ctrl+C reliably -- and the run removes it once it has acted on it. Either
+way the exit code is 0, and the run resumes cleanly: run the same command with more
+`--generations`, or with a larger `max_hours`, and the cut generation is finished first, its
+finished evaluations looked up in the cache. With the same `max_hours` a run that used them up stays
+stopped. `status` shows the limit under `health.limits` and counts abandoned evaluations apart from
+failed ones.
 
 ## Before you spend anything: `preflight`
 
@@ -1059,6 +1206,15 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   `comparison.json`, every run in `results.json`, all logs, and an event log
   and heartbeat of its own, so `status --run-dir <run-dir>/confirm/<label>` and
   the dashboard can watch a five-hour confirmation like any other run.
+
+With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels) every
+level is compared as well -- paired per (instance, seed), averaged over the seeds of an instance,
+with a 95 % interval per level. A level is compared in percent of the baseline, like the objective,
+unless some baseline value is 0 (a count of late tasks, say): then in the KPI's own units, and it
+says so. A level is *equal* when its mean difference lies within its tolerance; the first that is
+not decides: "equal on level 1 (deliveries_per_hour within 1 %), better on level 2 (waiting_h):
+clear". The exit code is then 0 only when every candidate is better, and clearly so, on its
+deciding level.
 
 Use seeds the search never saw (it uses `0 … seeds-1`). If you compare several
 candidates to *choose* one, spend other seeds on the choice than on the final
@@ -1293,6 +1449,131 @@ generation before the strong model would have been tried.
 **Stage timeouts.** At least 1.5× what `preflight` measured on the seed, and
 remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
 `timeout: 12000` is up to six and a half hours of wall clock for one candidate.
+
+## Harnesses and studies
+
+Everything above sets evolvekit up for one problem by hand. A **harness** does
+that work once for one application — a solver, a simulator, any program with
+settings — so that tuning it becomes a set of choices instead of a config
+file; a **study** is one such set of choices, in a folder of its own.
+`evolvekit study run` compiles a study into an ordinary run directory, so
+everything in this README applies to it.
+
+Two harnesses come with evolvekit:
+
+| Harness | Application | Study templates |
+|---|---|---|
+| [`pyvrp`](harnesses/pyvrp/README.md) | PyVRP 0.14: the Python that has it installed | Tune solver settings · Route cost sets → deliveries per hour |
+| [`demo-tour`](harnesses/demo-tour/README.md) | `examples/cli-solver/solver.py` | Tune solver settings · Stop weights → a shorter real tour |
+
+A harness shows every case, and every solution, as **tables** — for PyVRP
+`tasks`, `vehicle_types`, `routes`, `visits` and a few more — and everything a
+study says is written against them: a KPI is SQL that returns one number, a
+data change selects its rows with an SQL condition (`class = 'van'`), a
+constraint is an expression over the tuned values or SQL over the changed
+request. The harness declares its settings (plain help for people, a longer
+explanation for a model), its **levers** — the data changes a study may make,
+scaling, setting or adding to a column — ready KPIs and KPI templates, exports
+and study templates. [docs/harness-authoring.md](docs/harness-authoring.md) is
+how to write one.
+
+### A study from the command line
+
+```
+python -m evolvekit study new studies/depot-a --harness pyvrp --template tune --name "Depot A settings"
+```
+
+writes `studies/depot-a/`: `study.yaml`, the harness pinned in `harness/` (an
+updated harness never changes a study that already exists), and empty
+`cases/` and `inputs/`. Put the requests in `cases/`, then fill in
+`study.yaml`:
+
+```yaml
+application:
+  path: C:/work/.venv-pyvrp/Scripts/python.exe   # absolute: the one path that is not relative
+cases:
+  training: [cases/mon.json, cases/tue.json, cases/wed.json]   # what the search sees
+  test: [cases/thu.json]                                      # held back for the final check
+limits:
+  time_per_case_s: 20      # PyVRP's time limit on each case
+budget:
+  hours: 0.5               # the whole study, final check included
+```
+
+and go:
+
+```
+python -m evolvekit study preview studies/depot-a    # one solve at the starting values
+python -m evolvekit study compile studies/depot-a    # the automatic plan, and runs/<id>/evolvekit.yaml
+python -m evolvekit study run studies/depot-a        # search, then the final check
+```
+
+- **The preview** solves the smallest training case at the starting values,
+  and keeps its tables (`preview/tables.sqlite`, with `orig_*` copies of the
+  request tables) and its timing.
+- **The automatic plan** turns that timing and `budget.hours` into rounds and
+  combinations per round, keeping back the time the final check needs. When
+  the hours buy fewer than three rounds it says so, with three concrete ways
+  out: fewer cases, a shorter time limit, or more hours.
+  `plan: {auto: false, children: 4, generations: 6}` overrides it.
+- **The run** is an ordinary run directory, `runs/<id>/`, with
+  `study-run.json` (what the harness's runner reads) and `job.json`, which
+  says where the job is: `search`, `check`, `done`, `stopped` or `failed`.
+  `python -m evolvekit stop --run-dir studies/depot-a/runs/<id>` ends it
+  cleanly.
+- **The final check** runs the best configuration against the starting point
+  on the held-back test cases, on seeds 1001–1003, with the paired statistics
+  of [`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export), in
+  `runs/<id>/confirm/final/`.
+
+What `study.yaml` can say:
+
+| Key | Says |
+|---|---|
+| `vary.settings` | per setting: `tune` (within the harness's range), `{tune: true, low, high, start}`, `{fixed: value}`, or `default` |
+| `vary.data` | data changes: `{lever, column, where, mode: scale \| set \| add, low, high, start}` |
+| `constraints` | `{says, expr}` over the tuned values (`truck_per_km >= van_per_km`), which the search never breaks; `{says, sql}` over the changed request, checked on every case before solving |
+| `kpis` | `{from: harness}`, `{template, params}`, `{sql, direction}`, or `{weighted: {kpi: weight}}` |
+| `goal.levels` | one KPI; or up to four in order of importance, each but the last with `equal_within` (`"1 %"` or a number), as in [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels); or one weighted KPI |
+| `guardrails` | `{kpi, max}` or `{kpi, min}`: a candidate that breaks one is out of the running, as a [gate](#gates-conditions-every-candidate-has-to-meet-evaluategates) |
+| `inputs` | the extra files a harness asks for, such as PyVRP's `solver_settings` to start from |
+
+**The comparability trap.** A data change that alters what the solver *sees*
+— costs, weights, penalties — also alters every KPI computed from what it
+saw. The harness marks those KPIs (`changes_with_levers`: PyVRP's
+`solver_cost`), and a study that varies data must judge success by a KPI of
+the untouched request instead (`real_cost`, `deliveries_per_hour`).
+`harness check` warns when a study template gets this wrong.
+
+### Harness commands
+
+```
+python -m evolvekit harness list                         # the installed and built-in harnesses
+python -m evolvekit harness new my-solver --from pyvrp   # a copy of the closest harness
+python -m evolvekit harness new my-solver --kind program # or a runnable skeleton to start from
+python -m evolvekit harness check my-solver --app PATH   # does it work with this application?
+python -m evolvekit harness pack my-solver               # my-solver-<version>.zip, to share
+python -m evolvekit harness install pyvrp-1.0.0.zip      # into the library home
+```
+
+`check` exits 0 when everything passes, 1 with warnings, 2 with failures;
+`--json` prints every check with a `fix`, for an AI coding tool to work
+through. The library home is `EVOLVEKIT_HOME`, else `~/evolvekit`; the
+harnesses in this repository's `harnesses/` folder are found as built-ins.
+
+### The app
+
+```
+python -m evolvekit app
+```
+
+opens a local web app in which someone who is not a programmer does all of
+the above: picks the application (it finds the Python that has PyVRP), brings
+the cases, says what may change and what counts as better — with an optional
+AI assistant that proposes measures and data changes, each checked on a real
+solve before it is shown — starts the study, watches it, and reads the result
+in plain words, with the settings file and a report to hand on. Studies keep
+running when the app is closed. [docs/app.md](docs/app.md) is its manual.
 
 ## Adding a problem
 
@@ -1572,6 +1853,15 @@ stochastic, Azure-backed evaluators.
   lineage, cell coordinates, no-op/duplicate/behavioural/near counts, a
   hold-out flag, an archive grid drawn as 2-D slices when it has more than two
   axes, and an inline-SVG chart of best score against cumulative USD.
+- **Harnesses and studies** (`evolvekit/harness/`, `harnesses/`) — the
+  harness format and its loader, the SDK every harness carries
+  (`evk_harness.py`: tables in a read-only SQLite database, data changes on
+  SQL-selected rows, constraints before solving, KPIs, weighted sums and
+  guardrails, exit codes that mean something), studies and their compilation
+  into ordinary run directories with an automatic plan and a final check,
+  `harness check` with drift detection, the `harness` and `study` commands,
+  and two harnesses: PyVRP 0.14 (27 settings, six levers, twelve KPIs, ten
+  tagged samples) and the demo tour.
 - **Examples** — `examples/binpacking/` is a three-stage cascade that runs
   offline in about ten seconds and improves on its seed twice, exercising every
   operator, all three novelty verdicts, the near-duplicate flag and both

@@ -1,0 +1,176 @@
+# The demo harness: evolvekit's example command-line solver
+# (examples/cli-solver/solver.py), a small travelling-salesman tour, behind
+# the harness SDK. It needs nothing but Python, runs in seconds, and shows the
+# `kind: program` path end to end. See README.md.
+harness: 1
+id: demo-tour
+version: 1.0.0
+title: Demo tour
+summary: A small travelling-salesman solver with a command line, to try evolvekit on in minutes.
+
+application:
+  kind: program
+  label: The example solver (solver.py)
+  probe: "{app} --version"
+  expect: "cli-solver (\\d+\\.\\d+)"
+  help: >
+    It comes with evolvekit: examples/cli-solver/solver.py in the evolvekit folder.
+    A .py program is run with the Python that runs evolvekit.
+
+cases:
+  label: tour request
+  formats: [.json]
+  describe: >
+    A JSON file with the stops to visit, `"stops": [[x, y, weight], ...]` in kilometres, or a
+    `seed` and a number of `cities` to place at random.
+
+time_limit: {accepts: true, default_s: 2, min_s: 0.5}
+seeds: true
+
+settings:
+  neighbours:
+    type: int
+    low: 2
+    high: 30
+    default: 8
+    label: Candidate moves per stop
+    group: Search
+    help: How many nearby stops each stop considers when the solver tries a move.
+    explain: >
+      Size of the candidate list per stop. More candidates find better moves per step but make
+      each step slower, so within a time limit there is a sweet spot that depends on the tour's size.
+    recommended: true
+  restart_after:
+    type: int
+    low: 100
+    high: 50000
+    default: 2000
+    log: true
+    label: Stalled moves before a restart
+    group: Search
+    help: After this many moves without improvement, the solver goes back to its best tour.
+    explain: >
+      Moves without improvement before the search restarts from the best tour found. Small values
+      restart often (more exploitation), large values let the search wander further.
+    recommended: true
+  accept_worse:
+    type: float
+    low: 0.0
+    high: 0.05
+    default: 0.0
+    label: Chance to accept a worse move
+    group: Search
+    help: How often a move that makes the tour longer is taken anyway.
+    explain: >
+      Probability of accepting a worsening move. A little helps escape local optima; too much turns
+      the search into a random walk.
+    recommended: true
+  init:
+    type: choice
+    choices: [random, nearest]
+    default: random
+    label: Starting tour
+    group: Start
+    help: Start from a random tour, or from the nearest-neighbour tour.
+    explain: >
+      The first tour. `nearest` builds a greedy tour from stop 0 and is usually much better at the
+      start; `random` starts anywhere.
+    recommended: true
+  or_opt:
+    type: bool
+    default: false
+    label: Also move short segments
+    group: Moves
+    help: Besides reversing parts of the tour, also move pairs of stops elsewhere.
+    explain: >
+      Adds the or-opt move (relocating a segment of two stops). A richer neighbourhood, at the cost
+      of slower steps.
+
+tables:
+  stops:
+    source: request
+    describe: One row per stop of the tour.
+    columns:
+      stop_id: {type: int, describe: The stop's number within the case}
+      x: {type: float, unit: km, private: true, describe: East-west position}
+      y: {type: float, unit: km, private: true, describe: North-south position}
+      weight: {type: float, describe: How much the solver weighs the legs into this stop (1 is plain distance)}
+      tag: {type: text, categorical: true, describe: "The area the stop is in: north or south"}
+  tour:
+    source: solution
+    describe: One row per stop, in the order the tour visits them.
+    columns:
+      position: {type: int, describe: "Place in the tour, from 0"}
+      stop_id: {type: int, describe: The stop visited}
+      previous_id: {type: int, describe: The stop visited just before}
+      leg: {type: float, unit: km, describe: Distance from the previous stop}
+      weighted_leg: {type: float, describe: "The same leg as the solver counted it, weights included"}
+  summary:
+    source: solution
+    describe: One row about the whole tour.
+    columns:
+      length: {type: float, unit: km, describe: The tour's plain length}
+      weighted_length: {type: float, describe: "The length the solver minimised, weights included"}
+      iterations: {type: int, describe: Moves the solver tried}
+
+levers:
+  stop_weights:
+    label: Stop weights
+    table: stops
+    columns:
+      weight: {label: weight}
+    modes: [scale, set]
+    help: Make the solver care more (or less) about the legs into some stops.
+    explain: >
+      The solver minimises the weighted length. Changing weights changes which tour it prefers, not
+      how long the tour really is: measure success with tour_length, never with solver_length.
+
+kpis:
+  tour_length:
+    label: Tour length
+    unit: km
+    direction: lower
+    positive: true
+    help: The plain length of the tour.
+    sql: "SELECT length FROM summary"
+  solver_length:
+    label: Length the solver saw
+    direction: lower
+    positive: true
+    changes_with_levers: true
+    help: The weighted length the solver minimised; not comparable once weights change.
+    sql: "SELECT weighted_length FROM summary"
+  longest_leg:
+    label: Longest leg
+    unit: km
+    direction: lower
+    positive: true
+    help: The longest single leg of the tour.
+    sql: "SELECT MAX(leg) FROM tour"
+  iterations:
+    label: Moves tried
+    direction: higher
+    help: How many moves the solver tried within its time.
+    sql: "SELECT iterations FROM summary"
+
+kpi_templates:
+  legs_longer:
+    label: "Legs longer than {km} km"
+    direction: lower
+    help: How many legs are longer than a distance you choose.
+    params:
+      km: {type: number, label: kilometres}
+    sql: "SELECT COUNT(*) FROM tour WHERE leg > :km"
+
+exports:
+  settings_json: {label: Solver settings (JSON), for: settings}
+  settings_flags: {label: Solver settings as command-line flags, for: settings}
+  data_changes: {label: The data changes (JSON and CSV), for: data}
+  requests: {label: The changed requests (one file per case), for: data}
+
+defaults:
+  time_per_case_s: 2
+  retries: 1
+  budget_hours: 0.1
+  test_share: 0.3
+  runs_per_case: 1

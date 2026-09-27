@@ -1,0 +1,687 @@
+# The PyVRP reference harness: PyVRP 0.14 behind the harness SDK. Studies tune
+# its settings, or the data it is given (vehicle costs, fleet, shifts, time
+# windows, prizes, service times), and are judged on the plans it makes.
+# README.md says what everything means; the tables are in metres, seconds and
+# currency.
+harness: 1
+id: pyvrp
+version: 1.0.0
+title: PyVRP
+summary: "Vehicle routing with PyVRP 0.14: tune its settings, or the data you give it."
+
+application:
+  kind: python
+  label: Python with PyVRP installed
+  requires: {module: pyvrp, version: ">=0.14,<0.15"}
+  help: >
+    The Python program (python.exe) that has PyVRP installed. evolvekit looks in the usual places
+    and marks the one where it finds PyVRP: pick that one. If none is marked, ask whoever installed
+    PyVRP where its python.exe is (in a terminal where PyVRP works,
+    python -c "import sys; print(sys.executable)" prints it).
+
+cases:
+  label: delivery request
+  formats: [.json, .vrp, .txt]
+  describe: >
+    Each is one day's delivery request: a .json file with the tasks, vehicles and depots (optionally
+    with tags on tasks and vehicle types), or a .vrp or .txt file in VRPLIB, a format from research.
+    VRPLIB files suit settings studies only: they have no vehicle classes or tags for a data change
+    to pick.
+
+inputs:
+  solver_settings:
+    label: Solver settings to start from
+    formats: [.json]
+    provides: settings
+    describe: >
+      A JSON object of PyVRP settings, such as {"num_neighbours": 40}, for example the settings file
+      of an earlier study. Every setting a study does not tune keeps its value from here, and PyVRP's
+      own default otherwise.
+
+time_limit: {accepts: true, default_s: 60, min_s: 1}
+seeds: true
+
+settings:
+  # -- iterated local search
+  num_iters_no_improvement:
+    type: int
+    low: 1000
+    high: 1000000
+    default: 150000
+    log: true
+    label: Attempts before going back to the best plan
+    group: Search
+    help: After this many attempts without a better plan, PyVRP goes back to its best plan and carries on from there.
+    explain: >
+      Restart trigger of PyVRP's iterated local search: after this many iterations without
+      improvement the search restarts from the best solution. Small values return often
+      (intensification), large values let the search drift further (diversification). Within a short
+      time limit on a large request the search may never reach the default of 150,000, so the
+      setting matters mainly when iterations are plentiful (small requests, long limits).
+  history_length:
+    type: int
+    low: 10
+    high: 3000
+    default: 300
+    log: true
+    label: Memory for accepting a worse plan
+    group: Search
+    help: How far back PyVRP looks when it decides whether to accept a plan that is a little worse.
+    explain: >
+      Late-acceptance hill climbing: a candidate is accepted when it beats the solution of this many
+      iterations ago. Longer histories accept more worsening moves (more exploration, slower
+      convergence); short ones converge fast and may stall.
+  exhaustive_on_best:
+    type: bool
+    default: true
+    label: Search hard around every new best plan
+    group: Search
+    help: When PyVRP finds a new best plan, it tries every possible improvement on it, not only nearby ones.
+    explain: >
+      With this on, every new best solution gets a local search over all tasks instead of only the
+      perturbed neighbourhood. It costs time on every improvement and pays off when improvements are
+      rare and valuable; off leaves more iterations for exploration. Off was better in both
+      benchmark tuning runs.
+    recommended: 5
+  # -- penalties for plans that break a rule
+  solutions_between_updates:
+    type: int
+    low: 50
+    high: 5000
+    default: 500
+    log: true
+    label: Plans between penalty adjustments
+    group: Penalties
+    help: How many plans PyVRP looks at before it adjusts its penalties for broken rules (late, overloaded, too long).
+    explain: >
+      PyVRP searches through infeasible solutions too, priced with a penalty per unit of violation
+      (time warp, excess load, excess distance). After this many solutions it raises or lowers each
+      penalty depending on how many were feasible. Small values adapt quickly but react to noise;
+      large values are stable but slow to find the right level. The most important setting in the
+      benchmark tuning runs; matters most with tight windows or capacities.
+    recommended: 1
+  penalty_increase:
+    type: float
+    low: 1.05
+    high: 5.0
+    default: 1.5
+    log: true
+    label: Penalty rise
+    group: Penalties
+    help: How strongly the penalties rise when too few plans keep the rules.
+    explain: >
+      Factor applied to a violation penalty when the share of feasible solutions is below
+      target_feasible. Large values drive the search back to feasibility fast, at the cost of
+      exploring less through infeasible space.
+  penalty_decrease:
+    type: float
+    low: 0.3
+    high: 0.99
+    default: 0.9
+    label: Penalty fall
+    group: Penalties
+    help: How strongly the penalties fall when enough plans keep the rules.
+    explain: >
+      Factor applied to a violation penalty when the share of feasible solutions is above
+      target_feasible. Close to 1 keeps penalties high, so the search stays feasible and explores
+      less; low values let it cross infeasible regions to reach better feasible plans.
+    recommended: 6
+  target_feasible:
+    type: float
+    low: 0.2
+    high: 0.95
+    default: 0.65
+    label: Share of plans that keep the rules
+    group: Penalties
+    help: The share of plans PyVRP aims to keep within the rules while it searches.
+    explain: >
+      The penalty manager steers towards this share of feasible solutions. High targets keep the
+      search on feasible ground; low targets let it roam through infeasible solutions, which can
+      connect good feasible regions. Works together with penalty_increase and penalty_decrease.
+    recommended: 3
+  feas_tolerance:
+    type: float
+    low: 0.0
+    high: 0.2
+    default: 0.05
+    label: Tolerance around that share
+    group: Penalties
+    help: How far the share of plans within the rules may drift from the target before penalties change.
+    explain: >
+      A dead band around target_feasible: while the feasible share is within this distance of the
+      target, penalties stay as they are.
+  min_penalty:
+    type: float
+    low: 0.01
+    high: 10.0
+    default: 0.1
+    log: true
+    label: Lowest penalty
+    group: Penalties
+    help: The lowest penalty PyVRP charges for breaking a rule.
+    explain: >
+      Lower clamp of every violation penalty, in the request's cost units per unit of violation.
+      Too low and infeasible solutions look cheap; rarely the clamp that binds.
+  max_penalty:
+    type: float
+    low: 1000.0
+    high: 10000000.0
+    default: 100000.0
+    log: true
+    label: Highest penalty
+    group: Penalties
+    help: The highest penalty PyVRP charges for breaking a rule; it also sets how hard the search starts.
+    explain: >
+      Upper clamp of every violation penalty, in the request's cost units per unit of violation.
+      PyVRP starts every penalty at the midpoint of min_penalty and max_penalty, so this also sets the
+      starting pressure towards feasibility. Too low and the search trades lateness for cost; too
+      high and it becomes timid. At most 1e7, which keeps PyVRP's integer arithmetic safe.
+    recommended: 2
+  # -- which tasks count as neighbours
+  weight_wait_time:
+    type: float
+    low: 0.0
+    high: 2.0
+    default: 0.2
+    label: Weight of waiting in closeness
+    group: Neighbourhood
+    help: How much the waiting between two tasks counts when PyVRP decides which tasks are close to each other.
+    explain: >
+      The proximity of two tasks is the cost of travelling between them plus this weight times the
+      waiting that edge implies (their windows do not fit). Higher weights make tasks with
+      incompatible windows less likely neighbours. In the request's cost units per second of
+      waiting.
+  num_neighbours:
+    type: int
+    low: 10
+    high: 150
+    default: 50
+    label: Candidate moves per task
+    group: Neighbourhood
+    help: How many nearby tasks each task considers when PyVRP tries a move.
+    explain: >
+      Size of the granular neighbourhood. Larger values let the local search consider more moves
+      per task (better plans per iteration, fewer iterations per second); smaller values speed up
+      iterations but may miss improving moves. The best size depends on the request size and the
+      time limit.
+    recommended: 8
+  symmetric_proximity:
+    type: bool
+    default: true
+    label: Closeness both ways
+    group: Neighbourhood
+    help: Treat two tasks as equally close in both directions.
+    explain: >
+      Symmetrises the proximity measure, so (i, j) and (j, i) weigh the same. Off can help when
+      travel is strongly one-way (asymmetric times or distances).
+  # -- perturbation
+  min_perturbations:
+    type: int
+    low: 0
+    high: 10
+    default: 1
+    label: Fewest random changes per step
+    group: Perturbation
+    help: The fewest random changes PyVRP makes to a plan before it improves it again.
+    explain: >
+      Each iteration perturbs the current solution with between min_perturbations and
+      max_perturbations random moves, then runs the local search. Higher minimums diversify more per
+      iteration. The ranges of the two settings do not overlap, so the minimum never exceeds the
+      maximum. The most important setting in the first benchmark tuning run (best value 0).
+    recommended: 7
+  max_perturbations:
+    type: int
+    low: 10
+    high: 100
+    default: 25
+    label: Most random changes per step
+    group: Perturbation
+    help: The most random changes PyVRP makes to a plan in one step.
+    explain: >
+      Upper bound on the perturbation strength. Large values jump further and escape deep local
+      optima, but spend local-search time repairing the damage.
+  # -- local-search moves the model does not depend on
+  use_relocate2:
+    type: bool
+    default: true
+    label: Move two tasks together
+    group: Moves
+    help: Try moving two consecutive tasks to another place in the plan.
+    explain: Operator Relocate2. On by default.
+  use_relocate3:
+    type: bool
+    default: false
+    label: Move three tasks together
+    group: Moves
+    help: Try moving three consecutive tasks to another place in the plan.
+    explain: Operator Relocate3. Off by default; a richer neighbourhood at the cost of slower iterations.
+  use_swap11:
+    type: bool
+    default: true
+    label: Swap two tasks
+    group: Moves
+    help: Try exchanging two tasks between places in the plan.
+    explain: Operator Swap11. On by default.
+  use_swap21:
+    type: bool
+    default: true
+    label: Swap two tasks with one
+    group: Moves
+    help: Try exchanging two consecutive tasks with a single task elsewhere.
+    explain: >
+      Operator Swap21. On by default; off was better in both benchmark tuning runs, where it ranked
+      among the four most important settings.
+    recommended: 4
+  use_swap22:
+    type: bool
+    default: true
+    label: Swap two tasks with two
+    group: Moves
+    help: Try exchanging two consecutive tasks with two elsewhere.
+    explain: Operator Swap22. On by default.
+  use_swap31:
+    type: bool
+    default: false
+    label: Swap three tasks with one
+    group: Moves
+    help: Try exchanging three consecutive tasks with a single task elsewhere.
+    explain: Operator Swap31. Off by default.
+  use_swap32:
+    type: bool
+    default: false
+    label: Swap three tasks with two
+    group: Moves
+    help: Try exchanging three consecutive tasks with two elsewhere.
+    explain: Operator Swap32. Off by default.
+  use_swap33:
+    type: bool
+    default: false
+    label: Swap three tasks with three
+    group: Moves
+    help: Try exchanging three consecutive tasks with three elsewhere.
+    explain: Operator Swap33. Off by default.
+  use_swap_tails:
+    type: bool
+    default: true
+    label: Swap the ends of two routes
+    group: Moves
+    help: Try exchanging the last parts of two routes.
+    explain: Operator SwapTails (2-opt*). On by default.
+  use_relocate_alternative:
+    type: bool
+    default: true
+    label: Switch to another option of a group
+    group: Moves
+    help: For tasks that come as alternatives (a group), try serving another alternative at a better place.
+    explain: >
+      Operator RelocateAlternative. On by default; the always-on ReplaceGroup and Relocate1 can reach
+      the same plan in two steps, so it is a shortcut, not a necessity.
+  use_replace_optional_client:
+    type: bool
+    default: true
+    label: Swap an optional task for another
+    group: Moves
+    help: Try serving one optional task instead of another in a single step.
+    explain: >
+      Operator ReplaceOptionalClient. On by default; RemoveOptionalClient followed by
+      InsertOptionalClient (both always on) reach the same in two steps.
+  use_replace_optional_shipment:
+    type: bool
+    default: true
+    label: Swap an optional shipment for another
+    group: Moves
+    help: Try carrying one optional shipment instead of another in a single step.
+    explain: >
+      Operator ReplaceOptionalShipment. On by default; the always-on remove and insert moves reach
+      the same in two steps.
+
+tables:
+  request:
+    source: request
+    describe: One row about the request itself.
+    columns:
+      name: {type: text, describe: The request's name}
+      format: {type: text, categorical: true, describe: "pyvrp-hard/1, pyvrp-request/1 or vrplib"}
+      time_zero_h: {type: float, unit: h, describe: "The clock time of second 0, in hours (6.0 is 06:00); every _s time counts from it"}
+      load_dims: {type: int, describe: "How many load dimensions the request uses: kg, dm3, cold boxes"}
+  tasks:
+    source: request
+    describe: >
+      One row per stop that must (or may) be served. Clients keep their number from the request;
+      shipment j is two tasks, its pickup (C + 2j) and its delivery (C + 2j + 1), C being the number
+      of clients.
+    columns:
+      task_id: {type: int, describe: The task's number within the request}
+      kind: {type: text, categorical: true, describe: "delivery, pickup, exchange (both), visit (neither), shipment_pickup or shipment_delivery"}
+      location: {type: int, describe: "The location's number; tasks at the same address share it"}
+      x_m: {type: int, unit: m, private: true, describe: East-west position}
+      y_m: {type: int, unit: m, private: true, describe: North-south position}
+      tw_early_s: {type: int, unit: s, describe: "Earliest start of service, seconds after the time zero"}
+      tw_late_s: {type: int, unit: s, describe: "Latest start of service, seconds after the time zero (NULL: no limit)"}
+      release_s: {type: int, unit: s, describe: "When the goods are ready at the depot, seconds after the time zero"}
+      service_s: {type: int, unit: s, describe: How long the stop takes}
+      delivery_kg: {type: int, unit: kg, describe: Weight handed over at the stop}
+      delivery_dm3: {type: int, unit: dm3, describe: Volume handed over at the stop}
+      delivery_boxes: {type: int, unit: boxes, describe: Cold boxes handed over at the stop (0 when the request has no third dimension)}
+      pickup_kg: {type: int, unit: kg, describe: Weight taken on at the stop}
+      pickup_dm3: {type: int, unit: dm3, describe: Volume taken on at the stop}
+      pickup_boxes: {type: int, unit: boxes, describe: Cold boxes taken on at the stop}
+      prize: {type: float, unit: currency, describe: "What serving an optional task earns (a shipment's prize sits on its delivery task)"}
+      required: {type: bool, describe: "Must be served (a task in a group is one of alternatives: see group_id)"}
+      group_id: {type: int, describe: "The group of alternatives the task belongs to, of which one is served (NULL: none)"}
+      shipment_id: {type: int, describe: "The shipment the task is half of (NULL: a client)"}
+  task_tags:
+    source: request
+    describe: One row per tag on a task (from the request's `tags`).
+    columns:
+      task_id: {type: int, describe: The task}
+      tag: {type: text, categorical: true, describe: "A word the request attaches to the task: vip, frozen, ..."}
+  vehicle_types:
+    source: request
+    describe: One row per vehicle type of the fleet.
+    columns:
+      type_id: {type: int, describe: The type's number within the request}
+      name: {type: text, describe: "The type's name, such as van@D0"}
+      class: {type: text, categorical: true, describe: "The vehicle class: van, box_truck, evening_van, ..."}
+      profile: {type: text, categorical: true, describe: "The routing profile it drives on (light, heavy, ...)"}
+      num_available: {type: int, describe: How many vehicles of this type there are}
+      capacity_kg: {type: int, unit: kg, describe: Weight it carries}
+      capacity_dm3: {type: int, unit: dm3, describe: Volume it carries}
+      capacity_boxes: {type: int, unit: boxes, describe: Cold boxes it carries}
+      initial_kg: {type: int, unit: kg, describe: Weight already on board at the start (dropped at the first depot visit)}
+      start_depot: {type: int, describe: The depot its routes start at}
+      end_depot: {type: int, describe: The depot its routes end at}
+      fixed_cost: {type: float, unit: currency, describe: Cost of using one vehicle of this type for the day}
+      unit_distance_cost: {type: float, unit: currency per km, describe: Cost per kilometre driven}
+      unit_duration_cost: {type: float, unit: currency per h, describe: Cost per hour on the road}
+      unit_overtime_cost: {type: float, unit: currency per h, describe: Extra cost per hour beyond the shift}
+      tw_early_s: {type: int, unit: s, describe: "Earliest start of its shift, seconds after the time zero"}
+      tw_late_s: {type: int, unit: s, describe: "Latest end of its shift (NULL: no limit)"}
+      start_late_s: {type: int, unit: s, describe: "Latest start of its shift (NULL: no limit)"}
+      shift_duration_s: {type: int, unit: s, describe: "Shift length before overtime (NULL: no limit)"}
+      max_overtime_s: {type: int, unit: s, describe: Overtime allowed on top of the shift}
+      max_distance_m: {type: int, unit: m, describe: "Longest route allowed (NULL: no limit)"}
+      max_reloads: {type: int, describe: "How often a route may go back to a depot to reload (NULL: no limit)"}
+  vehicle_tags:
+    source: request
+    describe: One row per tag on a vehicle type (from the request's `tags`).
+    columns:
+      type_id: {type: int, describe: The vehicle type}
+      tag: {type: text, categorical: true, describe: "A word the request attaches to the vehicle type: electric, rented, ..."}
+  depots:
+    source: request
+    describe: One row per depot.
+    columns:
+      depot_id: {type: int, describe: The depot's number}
+      name: {type: text, describe: The depot's name}
+      x_m: {type: int, unit: m, private: true, describe: East-west position}
+      y_m: {type: int, unit: m, private: true, describe: North-south position}
+      tw_early_s: {type: int, unit: s, describe: "Opening time, seconds after the time zero"}
+      tw_late_s: {type: int, unit: s, describe: "Closing time, seconds after the time zero (NULL: no limit)"}
+      service_s: {type: int, unit: s, describe: Loading time at every depot visit}
+  routes:
+    source: solution
+    describe: One row per route of the plan.
+    columns:
+      route_id: {type: int, describe: "The route's number, from 1"}
+      type_id: {type: int, describe: The vehicle type that drives it}
+      class: {type: text, categorical: true, describe: The vehicle class that drives it}
+      start_s: {type: int, unit: s, describe: When it leaves the depot}
+      end_s: {type: int, unit: s, describe: When it is back}
+      duration_s: {type: int, unit: s, describe: "Time on the road: travel, service and waiting"}
+      distance_m: {type: int, unit: m, describe: Distance driven}
+      overtime_s: {type: int, unit: s, describe: Time beyond the shift length}
+      travel_s: {type: int, unit: s, describe: Time driving}
+      service_s: {type: int, unit: s, describe: Time serving stops and loading at depots}
+      wait_s: {type: int, unit: s, describe: Time waiting for windows to open}
+      time_warp_s: {type: int, unit: s, describe: "Lateness: time the plan would need to go back in time (0 in a feasible plan)"}
+      trips: {type: int, describe: "Trips from a depot (more than 1: it reloads)"}
+      stops: {type: int, describe: Tasks served}
+      cost: {type: float, unit: currency, describe: What the route costs at the untouched request's rates}
+      solver_cost: {type: float, unit: currency, describe: What it cost at the rates PyVRP saw (after the study's data changes)}
+  visits:
+    source: solution
+    describe: One row per task served, in route order.
+    columns:
+      route_id: {type: int, describe: The route}
+      seq: {type: int, describe: "Place in the route, from 1"}
+      trip: {type: int, describe: "Trip of the route, from 1"}
+      task_id: {type: int, describe: The task served}
+      kind: {type: text, categorical: true, describe: "The task's kind (see tasks.kind)"}
+      start_s: {type: int, unit: s, describe: Start of service}
+      end_s: {type: int, unit: s, describe: End of service}
+      wait_s: {type: int, unit: s, describe: Waiting before the service could start}
+      late_s: {type: int, unit: s, describe: "Lateness at this stop, as time warp (0 in a feasible plan)"}
+      load_kg: {type: int, unit: kg, describe: Weight on board when leaving the stop}
+      prev_task_id: {type: int, describe: "The task served just before on this trip (NULL: the depot)"}
+      next_task_id: {type: int, describe: "The task served just after on this trip (NULL: the depot)"}
+  unassigned:
+    source: solution
+    describe: One row per task the plan does not serve.
+    columns:
+      task_id: {type: int, describe: The task}
+      kind: {type: text, categorical: true, describe: "The task's kind (see tasks.kind)"}
+      required: {type: bool, describe: "It had to be served (a group member: see group_id)"}
+      group_id: {type: int, describe: "Its group of alternatives, if any (another member may be served)"}
+      prize: {type: float, unit: currency, describe: "The prize forgone, at the untouched request's value"}
+  summary:
+    source: solution
+    describe: One row about the whole plan.
+    columns:
+      solver_objective: {type: float, unit: currency, describe: "What PyVRP minimised, at the rates it saw; an infeasible plan is priced above every feasible one"}
+      feasible: {type: bool, describe: "The plan keeps every rule: nobody late, overloaded or too far, nothing required left out"}
+      missed_required: {type: int, describe: Required tasks (and groups) left out}
+      iterations: {type: int, describe: Iterations PyVRP ran within the time limit}
+      runtime_s: {type: float, unit: s, describe: Time PyVRP took}
+      stopped: {type: bool, describe: "PyVRP had not come back after the time limit and was stopped; the plan is the best it had found by then"}
+
+levers:
+  vehicle_costs:
+    label: Vehicle costs
+    table: vehicle_types
+    columns:
+      fixed_cost: {label: cost per vehicle used}
+      unit_distance_cost: {label: cost per km}
+      unit_duration_cost: {label: cost per hour}
+      unit_overtime_cost: {label: cost per hour of overtime}
+    modes: [scale, set, add]
+    help: Change the costs PyVRP sees for some vehicle types.
+    explain: >
+      PyVRP minimises the sum of these costs plus the prizes of the tasks it leaves out. Changing
+      them changes which plans it prefers (how many vehicles, shorter or quicker routes, which
+      class serves what), not what the plans really cost. Measure success with real_cost,
+      deliveries_per_hour or another KPI of the untouched request, never with solver_cost.
+  fleet_size:
+    label: Fleet size
+    table: vehicle_types
+    columns:
+      num_available: {label: vehicles available}
+    modes: [scale, add, set]
+    help: Change how many vehicles of some types are available.
+    explain: >
+      The number of vehicles of each selected type, rounded to whole vehicles; 0 takes the type out
+      of the fleet. Fewer vehicles force longer routes, reloads or overtime, or leave optional tasks
+      out; more give PyVRP room. This changes the real problem, so every KPI stays comparable.
+  shifts:
+    label: Shifts
+    table: vehicle_types
+    columns:
+      shift_duration_s: {label: shift length (s)}
+      max_overtime_s: {label: overtime allowed (s)}
+    modes: [scale, add, set]
+    help: Make the shifts of some vehicle types longer or shorter, or allow more overtime.
+    explain: >
+      The shift length before overtime and the overtime allowed on top, in seconds. Longer shifts
+      and more overtime let fewer vehicles do the work, at the overtime rate. A real change to the
+      problem, so every KPI stays comparable.
+  time_windows:
+    label: Time windows
+    table: tasks
+    code: true
+    modes: [scale, add]
+    help: Widen (scale) or move (add, in seconds) the time windows of some tasks.
+    explain: >
+      scale multiplies the width of each selected task's window around its middle (1.5 makes it half
+      as wide again, 0.5 half as wide); add moves the whole window by that many seconds. A window
+      never opens before the time zero. Wider windows usually allow shorter routes and less waiting;
+      a study finds out by how much, and which tasks it pays to ask.
+  prizes:
+    label: Prizes
+    table: tasks
+    columns:
+      prize: {label: prize}
+    modes: [scale, set, add]
+    help: Change what serving an optional task earns.
+    explain: >
+      PyVRP leaves an optional task out when serving it costs more than its prize, so higher prizes
+      make it serve more of them. A shipment's prize sits on its delivery task. Prizes are part of
+      what PyVRP minimises: judge a prize study with real_cost or served_tasks (both use the
+      untouched request's prizes), not solver_cost.
+  service_times:
+    label: Service times
+    table: tasks
+    columns:
+      service_s: {label: service time (s)}
+    modes: [scale, add, set]
+    help: Change how long the stop takes at some tasks.
+    explain: >
+      The time spent at each selected stop, in seconds (a faster handover, a second person on the
+      van). A real change to the problem, so every KPI stays comparable.
+
+kpis:
+  solver_cost:
+    label: Cost as PyVRP counts it
+    direction: lower
+    positive: true
+    changes_with_levers: true
+    help: >
+      The plan's cost at the rates PyVRP was given (your real rates, unless the study changes them),
+      where a plan that breaks a rule counts as dearer than any plan that keeps them all. It is what
+      PyVRP itself makes as low as it can. When the study changes no rates, it equals Real cost for
+      every plan that keeps the rules.
+    sql: "SELECT solver_objective FROM summary"
+  real_cost:
+    label: Real cost
+    direction: lower
+    positive: true
+    help: >
+      What the plan costs at your real rates, plus the prizes of the optional tasks it leaves out. A
+      plan that breaks a rule is not made dearer: as the goal, pair it with the guardrail "Feasible at
+      least 1".
+    guard: {kpi: feasible, min: 1}
+    sql: "SELECT (SELECT TOTAL(cost) FROM routes) + (SELECT TOTAL(prize) FROM unassigned)"
+  distance_km:
+    label: Distance
+    unit: km
+    direction: lower
+    positive: true
+    help: Kilometres driven by all routes.
+    sql: "SELECT TOTAL(distance_m) / 1000.0 FROM routes"
+  duration_h:
+    label: Time on the road
+    unit: h
+    direction: lower
+    positive: true
+    help: Hours on the road, all routes together (driving, serving, waiting).
+    sql: "SELECT TOTAL(duration_s) / 3600.0 FROM routes"
+  routes_used:
+    label: Routes
+    direction: lower
+    positive: true
+    help: How many vehicles go out.
+    sql: "SELECT COUNT(*) FROM routes"
+  served_tasks:
+    label: Tasks served
+    direction: higher
+    positive: true
+    help: How many tasks the plan serves (a shipment counts twice, pickup and delivery).
+    sql: "SELECT COUNT(*) FROM visits"
+  deliveries_per_hour:
+    label: Deliveries per hour
+    unit: per h
+    direction: higher
+    positive: true
+    help: Deliveries (stops that hand goods over) per hour on the road; time spent late counts as time on the road.
+    sql: >
+      SELECT (SELECT COUNT(*) FROM visits WHERE kind IN ('delivery', 'exchange', 'shipment_delivery'))
+        / NULLIF((SELECT TOTAL(duration_s + time_warp_s) FROM routes) / 3600.0, 0)
+  late_tasks:
+    label: Late tasks
+    direction: lower
+    help: Tasks served after their window closes (0 in a feasible plan).
+    sql: "SELECT COUNT(*) FROM visits WHERE late_s > 0"
+  late_h:
+    label: Hours late
+    unit: h
+    direction: lower
+    help: Lateness of all routes together, in hours (0 in a feasible plan).
+    sql: "SELECT TOTAL(time_warp_s) / 3600.0 FROM routes"
+  wait_h:
+    label: Hours of waiting
+    unit: h
+    direction: lower
+    help: Time vehicles spend waiting for windows to open, all routes together.
+    sql: "SELECT TOTAL(wait_s) / 3600.0 FROM routes"
+  missed_required:
+    label: Required tasks left out
+    direction: lower
+    help: Required tasks (and groups of alternatives) the plan does not serve.
+    sql: "SELECT missed_required FROM summary"
+  feasible:
+    label: Feasible
+    direction: higher
+    help: 1 when the plan keeps every rule, 0 when it does not.
+    sql: "SELECT feasible FROM summary"
+
+kpi_templates:
+  late_with_tag:
+    label: "Late tasks with tag {tag}"
+    direction: lower
+    help: How many tasks carrying a tag you choose are served after their window closes.
+    params:
+      tag: {type: choice, from: "SELECT DISTINCT tag FROM task_tags ORDER BY tag", label: tag}
+    sql: >
+      SELECT COUNT(*) FROM visits v JOIN task_tags t ON t.task_id = v.task_id
+      WHERE t.tag = :tag AND v.late_s > 0
+  wait_by_opening:
+    label: "Hours of waiting at tasks whose window opens between {from_h} and {to_h} o'clock"
+    direction: lower
+    unit: h
+    help: Waiting at the tasks whose window opens in a stretch of the day you choose (clock hours, 9.5 is 09:30).
+    params:
+      from_h: {type: number, label: from (clock hour)}
+      to_h: {type: number, label: to (clock hour)}
+    sql: >
+      SELECT TOTAL(v.wait_s) / 3600.0 FROM visits v JOIN tasks t ON t.task_id = v.task_id
+      WHERE t.tw_early_s >= (:from_h - (SELECT time_zero_h FROM request)) * 3600
+        AND t.tw_early_s < (:to_h - (SELECT time_zero_h FROM request)) * 3600
+  share_by_class:
+    label: "Share of served tasks done by {vehicle_class} vehicles"
+    direction: higher
+    unit: share
+    help: The share of the served tasks that a vehicle class you choose serves.
+    params:
+      vehicle_class: {type: choice, from: "SELECT DISTINCT class FROM vehicle_types ORDER BY class", label: vehicle class}
+    sql: >
+      SELECT 1.0 * COUNT(*) / NULLIF((SELECT COUNT(*) FROM visits), 0)
+      FROM visits v JOIN routes r ON r.route_id = v.route_id WHERE r.class = :vehicle_class
+  routes_longer:
+    label: "Routes longer than {hours} hours"
+    direction: lower
+    help: How many routes are on the road longer than a number of hours you choose.
+    params:
+      hours: {type: number, label: hours}
+    sql: "SELECT COUNT(*) FROM routes WHERE duration_s > :hours * 3600"
+
+exports:
+  settings_json: {label: PyVRP settings (JSON), for: settings}
+  settings_flags: {label: PyVRP settings as command-line flags, for: settings}
+  data_changes: {label: The data changes (JSON and CSV), for: data}
+  requests: {label: "The changed requests (one file per case)", for: data}
+
+defaults:
+  time_per_case_s: 60
+  retries: 1
+  budget_hours: 2
+  test_share: 0.3
+  runs_per_case: 1
