@@ -257,8 +257,11 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
   .wizard.with-side { grid-template-columns: 210px minmax(0, 1fr); }
   .wizard.with-side .side { grid-column: 2; position: static; max-height: none; }
 }
+#view:focus { outline: none; }  /* focus moves here for screen readers; a ring round the whole page helps nobody */
+.btn { max-width: 100%; }
 @media (max-width: 760px) {
   main { padding: 16px 14px 80px; }
+  .btn { white-space: normal; text-align: center; }
   .top-in { padding: 8px 14px; }
   .wizard, .wizard.with-side { grid-template-columns: 1fr; gap: 14px; }
   .wizard.with-side .side { grid-column: 1; }

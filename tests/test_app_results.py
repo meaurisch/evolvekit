@@ -87,6 +87,8 @@ def test_runs_that_overran_are_explained_against_the_time_limit():
     assert said["count"] == 13
     assert said["message"] == "Did not come back in time: each case gets 20 s, and a run still going at 60 s is stopped"
     assert said["todo"].startswith("Your time limit is applied")
+    (refused,) = jobs._failures_in_words([{"failure": "exit code 2", "count": 2, "stage": "full"}], 20.0)
+    assert refused["message"] == "Broke a rule of the study" and refused["todo"].endswith("Nothing to do.")
 
 
 def test_a_summary_to_paste():

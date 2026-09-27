@@ -349,7 +349,9 @@ def _failures_in_words(reasons: list[dict[str, Any]], limit_s: float) -> list[di
                     "such a run counts as failed and the search moves on, so the best result is not affected. "
                     "If most runs do this, the application itself needs a look.")
         elif "exit code 2" in low or "constraint" in low or "invalid" in low:
-            todo = "These combinations broke a rule of the study before solving; the search simply skips them."
+            if low.strip(". ") == "exit code 2":
+                text = "Broke a rule of the study"
+            todo = "These combinations broke a rule of the study before solving; the search simply skips them. Nothing to do."
         elif "exit code 3" in low or "cannot read" in low:
             todo = "A case could not be read. Check the cases in step 3."
         else:

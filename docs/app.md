@@ -94,6 +94,8 @@ and you can always go back.
    every case must meet ("no required task left out"). A goal that does not
    count broken rules — PyVRP's *Real cost* — comes with an offer to add the
    guardrail it needs, *Feasible at least 1*, in one click.
+
+   ![The goal](app/goal-light.png)
 6. **Limits and budget** — the time per case (the application stops itself
    then; a run still going at 1.5 × that + 30 s counts as failed), retries,
    runs per case, the total time, and optional AI search help with a dollar
@@ -126,6 +128,13 @@ did not come back in time is explained against the time per case you set.
 ## The results
 
 ![Results](app/results-light.png)
+
+The app follows the computer's light or dark setting, and works on a phone's
+width:
+
+| Dark | Phone |
+|---|---|
+| ![Results in dark](app/results-dark.png) | ![Results on a phone](app/results-phone-light.png) |
 
 1. **The headline**: "The best settings found give 4.2 % lower real cost
    than your starting point on the cases the search learned from" — and under
