@@ -579,9 +579,9 @@ def cmd_app(args: argparse.Namespace) -> int:
         print(f"wrote {target}: double-click it to start the app, and keep its window open while you work")
         return 0
     server = AppServer(home, port=args.port or DEFAULT_PORT)
-    print(f"evolvekit app : {server.url}")
-    print(f"library home  : {server.home.root}")
-    print("Keep this window open while you work. Runs carry on when it closes; Ctrl+C stops the app.")
+    print(f"evolvekit app : {server.url}  (open it in your browser)", flush=True)
+    print(f"library home  : {server.home.root}", flush=True)
+    print("Keep this window open while you work. Runs carry on when it closes; Ctrl+C stops the app.", flush=True)
     if not args.no_browser:
         open_in_browser(server.url)
     try:

@@ -47,7 +47,7 @@ from evolvekit.harness.compile import (
     write_run,
 )
 from evolvekit.harness.manifest import Harness, load_harness
-from evolvekit.harness.plan import CHECK_SEEDS, Plan, make_plan
+from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS, Plan, make_plan
 from evolvekit.harness.sql import schema_database, sql_problem
 from evolvekit.harness.study import Study, load_study, require_valid, resolve_kpi
 from evolvekit.leaderboard import rank
@@ -57,6 +57,8 @@ from evolvekit.stopping import STOP_REQUEST, RunStop
 __all__ = [
     "JOB",
     "PREVIEW",
+    "PREVIEW_TIME_LIMIT_S",
+    "preview_time_limit",
     "Job",
     "final_check",
     "plan_for",
@@ -71,6 +73,9 @@ __all__ = [
 ]
 
 PREVIEW = "preview"
+PREVIEW_TIME_LIMIT_S = 10.0
+"""The preview's time limit, at most: it shows what the application reports
+and measures its overhead, and neither needs the study's full time per case."""
 JOB = "job.json"
 
 
@@ -171,9 +176,17 @@ def _solve_once(
             "text_feedback": printed.get("text_feedback") or ""}
 
 
+def preview_time_limit(study: Study, harness: Harness) -> float:
+    """The preview's time limit: the study's, at most PREVIEW_TIME_LIMIT_S
+    when the application takes a time limit at all."""
+    limit = float(study.limits.time_per_case_s)
+    return min(limit, PREVIEW_TIME_LIMIT_S) if harness.time_limit.accepts else limit
+
+
 def preview(root: str | Path) -> dict[str, Any]:
-    """Solve the smallest training case at the starting values; keep the
-    tables and the timing in `preview/`. Returns what `preview/preview.json` holds."""
+    """Solve the smallest training case at the starting values, within
+    `preview_time_limit`; keep the tables and the timing in `preview/`.
+    Returns what `preview/preview.json` holds."""
     root = Path(root)
     study = load_study(root)
     harness = study_harness(root)
@@ -183,7 +196,7 @@ def preview(root: str | Path) -> dict[str, Any]:
     study_run = runner_input(kept, harness, base, kpis=_preview_kpis(study, harness), guardrails=False, up="..")
     result = _solve_once(
         root, study, harness, root / PREVIEW, case=case, values=_starting_values(study, base),
-        study_run=study_run, time_limit=float(study.limits.time_per_case_s), tables_out=True, up="..",
+        study_run=study_run, time_limit=preview_time_limit(study, harness), tables_out=True, up="..",
     )
     if result["ok"] and harness.time_limit.accepts:
         result["overhead_s"] = round(max(0.0, result["wall_s"] - result["time_limit_s"]), 3)
@@ -334,10 +347,12 @@ def run_study(
     return job.state
 
 
-def final_check(root: str | Path, run_id: str, *, log: Callable[[str], None] = print) -> dict[str, Any]:
+def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
+                log: Callable[[str], None] = print) -> dict[str, Any]:
     """The final check of a search that has finished, run again: after a stop
-    during the check, or a crash in it. `confirm` keeps what it measured, so
-    the runs already done are not repeated. Returns the final `job.json`."""
+    during the check, or a crash in it, or with more `seeds` (runs per case)
+    for a firmer answer. `confirm` keeps what it measured, so the runs
+    already done are not repeated. Returns the final `job.json`."""
     root = Path(root)
     run_dir = root / "runs" / run_id
     state = read_job(run_dir)
@@ -346,7 +361,10 @@ def final_check(root: str | Path, run_id: str, *, log: Callable[[str], None] = p
     if (state.get("search") or {}).get("aborted"):
         raise HarnessError(f"runs/{run_id}: the search was aborted: {state['search'].get('stop_reason')}")
     study = load_study(root)
-    checks = int((state.get("plan") or {}).get("check_seeds") or len(CHECK_SEEDS))
+    checks = int(seeds or (state.get("plan") or {}).get("check_seeds") or DEFAULT_CHECK_SEEDS)
+    if not 1 <= checks <= len(CHECK_SEEDS):
+        raise HarnessError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case, not {checks}")
+    state = {**state, "plan": {**(state.get("plan") or {}), "check_seeds": checks}}
     (run_dir / STOP_REQUEST).unlink(missing_ok=True)
     job = Job.resume(run_dir, state, "check")
     try:
@@ -360,7 +378,7 @@ def final_check(root: str | Path, run_id: str, *, log: Callable[[str], None] = p
 
 def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None]) -> None:
     if not study.test:
-        job.finish("done", final={"skipped": "no test cases were held back, so there is no final check"})
+        job.finish("done", final={"skipped": "no cases were held back, so there is no final check"})
         return
     rows = list(read_jsonl(run_dir / "runs.jsonl"))
     best = rank(rows, 1)

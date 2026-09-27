@@ -23,7 +23,8 @@ from typing import Any
 
 from evolvekit.app import AppError
 from evolvekit.harness import HarnessError
-from evolvekit.harness.execute import PREVIEW, preview, read_preview, run_test
+from evolvekit.harness.execute import PREVIEW, preview, preview_time_limit, read_preview, run_test, study_harness
+from evolvekit.harness.study import load_study
 from evolvekit.harness.manifest import Harness
 from evolvekit.harness.sdk import evk_harness as evk
 from evolvekit.ledger import _atomic_write
@@ -72,14 +73,14 @@ def _pid_alive(pid: Any) -> bool:
         return False
 
 
-def _start(server: Any, root: Path, what: str, work: Any) -> dict[str, Any]:
+def _start(server: Any, root: Path, what: str, work: Any, **extra: Any) -> dict[str, Any]:
     key = f"{what}:{root}"
     path = _state_path(root, what)
     with server.lock:
         current = _state(server, root, what)
         if current.get("state") == "running":
             return current
-        state = {"state": "running", "pid": os.getpid(), "started_at": time.time()}
+        state = {"state": "running", "pid": os.getpid(), "started_at": time.time(), **extra}
         _write_state(path, state)
 
         def body() -> None:
@@ -108,7 +109,13 @@ def _start(server: Any, root: Path, what: str, work: Any) -> dict[str, Any]:
 
 
 def start_preview(server: Any, root: Path) -> dict[str, Any]:
-    return _start(server, root, "preview", lambda: preview(root))
+    try:
+        study, harness = load_study(root), study_harness(root)
+        # What it usually takes: the limit, and a few seconds to start and to write the tables.
+        expected = preview_time_limit(study, harness) + 5.0 if harness.time_limit.accepts else None
+    except Exception:  # noqa: BLE001 - an estimate is a courtesy; the preview itself says what is wrong
+        expected = None
+    return _start(server, root, "preview", lambda: preview(root), expected_s=expected)
 
 
 def preview_state(root: Path, server: Any | None = None) -> dict[str, Any]:

@@ -46,8 +46,9 @@ PRICES = {"anthropic/claude-sonnet-5": (2.0, 10.0)}
 
 SYSTEM = """\
 You help a consultant set up a study in evolvekit's app. A study tunes an application's settings, or
-the data it is given, and judges the result with KPIs. The consultant is not a programmer: keep every
-sentence plain.
+the data it is given, and judges the result with measures (KPIs). The consultant is not a programmer:
+keep every sentence plain, say "measure" rather than "KPI", and remember that your cards are
+proposals the consultant applies or dismisses -- say "I propose", never "I added" or "I changed".
 
 Answer with ONE JSON object and nothing else:
 {"say": "one to three plain sentences", "cards": [ ... ]}

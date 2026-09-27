@@ -30,10 +30,13 @@ from typing import Any, Mapping
 
 from evolvekit.cpus import plan_workers
 
-__all__ = ["Plan", "make_plan", "CHECK_SEEDS"]
+__all__ = ["Plan", "make_plan", "CHECK_SEEDS", "DEFAULT_CHECK_SEEDS"]
 
-CHECK_SEEDS = (1001, 1002, 1003)
-"""The seeds of the final check: never among the search's own (0 .. r-1)."""
+CHECK_SEEDS = tuple(range(1001, 1013))
+"""The seeds of the final check: never among the search's own (0 .. r-1).
+A plan uses the first k (DEFAULT_CHECK_SEEDS, or 2 if those do not fit); a
+final check run again with more takes the next ones."""
+DEFAULT_CHECK_SEEDS = 3
 
 MIN_ROUNDS, GOOD_ROUNDS = 3, 6
 CHILDREN = range(4, 13)
@@ -91,7 +94,7 @@ class Plan:
         check = (
             f"a final check on {self.test_cases} held-back case{'s' if self.test_cases != 1 else ''} "
             f"(≈ {_minutes(self.final_check_s)})"
-            if self.test_cases else "no final check (no test cases)"
+            if self.test_cases else "no final check (no case is held back)"
         )
         return (
             f"about {self.rounds} round{'s' if self.rounds != 1 else ''}, about {self.combinations} combinations "
@@ -191,7 +194,7 @@ def make_plan(
     if "screening" in overrides:
         screening = bool(overrides["screening"]) and n >= 2 and accepts_time_limit
     chosen = None
-    for check_seeds in (3, 2):
+    for check_seeds in (DEFAULT_CHECK_SEEDS, 2):
         for enough in (GOOD_ROUNDS, MIN_ROUNDS):
             for children in reversed(CHILDREN):
                 layout = _layout(shape, children, check_seeds, screening)
@@ -218,11 +221,18 @@ def make_plan(
         adjusted.append("children")
     rounds = max(0, math.floor(layout["rounds"]))
     generations = max(1, math.ceil(max(0.0, layout["search"] - layout["seed"]) / layout["round"]) + 2) if layout["round"] > 0 else 3
-    if "generations" in overrides:
+    if "rounds" in overrides:
+        # The rounds people are shown; the engine gets the same headroom as
+        # an automatic plan, and the hours still stop it.
+        rounds = max(1, int(overrides["rounds"]))
+        generations = rounds + 2
+        adjusted.append("rounds")
+        blocked, ways_out = "", ()  # an expert who sets the rounds has decided
+    elif "generations" in overrides:
         generations = max(1, int(overrides["generations"]))
         rounds = generations
         adjusted.append("generations")
-        blocked, ways_out = "", ()  # an expert who sets the rounds has decided
+        blocked, ways_out = "", ()
     if "workers" in overrides:
         adjusted.append("workers")
     plan = Plan(
@@ -246,14 +256,14 @@ def _ways_out(shape: _Shape, screening: bool) -> tuple[str, ...]:
     for n in range(shape.n - 1, 0, -1):
         trial = replace(shape, n=n, workers=max(1, min(shape.workers, n * shape.r)))
         if _layout(trial, min(CHILDREN), 3, screening and n >= 6)["rounds"] >= MIN_ROUNDS:
-            ways.append(f"Use at most {n} training case{'s' if n != 1 else ''}.")
+            ways.append(f"Let the search learn from at most {n} case{'s' if n != 1 else ''}.")
             break
     else:
         # No number of training cases helps: the final check alone is too
         # long. Fewer held-back cases shorten it.
         for m in range(shape.m - 1, -1, -1):
             if _layout(replace(shape, m=m), min(CHILDREN), 3, screening)["rounds"] >= MIN_ROUNDS:
-                ways.append(f"Hold back at most {m} test case{'s' if m != 1 else ''} for the final check.")
+                ways.append(f"Hold back at most {m} case{'s' if m != 1 else ''} for the final check.")
                 break
     if shape.accepts_time_limit:
         limit = shape.time_limit_s

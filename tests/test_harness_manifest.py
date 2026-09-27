@@ -85,11 +85,30 @@ DELETE = object()
         ({"exports__settings_json__for": "everything"}, r"exports\.settings_json\.for: must be 'settings' or 'data'"),
         ({"defaults__test_share": 1.5}, r"defaults\.test_share: a share in \[0, 1\)"),
         ({"time_limit__default_s": 0.5}, r"time_limit\.default_s: 0.5 is below min_s 1"),
+        ({"settings__factor__recommended": 0}, r"settings\.factor\.recommended: true, false, or a rank"),
+        ({"kpis__total__guard": {"kpi": "picked_count"}}, r"kpis\.total\.guard: give the other KPI and exactly one of min or max"),
+        ({"kpis__total__guard": {"kpi": "feasible", "min": 1}}, r"kpis\.total\.guard\.kpi: 'feasible' is not one of the harness's KPIs"),
     ],
 )
 def test_a_mistake_is_one_sentence_naming_its_key(tmp_path, changes, message):
     with pytest.raises(HarnessError, match=message):
         load_harness(write_toy_harness(tmp_path / "toy", manifest=_broken(**changes)))
+
+
+def test_recommended_settings_come_most_important_first(tmp_path):
+    manifest = copy.deepcopy(MANIFEST)
+    manifest["settings"]["threshold"]["recommended"] = 2
+    manifest["settings"]["factor"]["recommended"] = 1
+    harness = load_harness(write_toy_harness(tmp_path / "toy", manifest=manifest))
+    assert harness.recommended == ["factor", "threshold"], "by rank, not by the order they are declared in"
+    assert harness.settings["factor"].recommended and harness.settings["factor"].rank == 1
+
+
+def test_a_kpi_names_the_guardrail_it_wants_as_a_goal(tmp_path):
+    manifest = copy.deepcopy(MANIFEST)
+    manifest["kpis"]["total"]["guard"] = {"kpi": "picked_count", "min": 1}
+    harness = load_harness(write_toy_harness(tmp_path / "toy", manifest=manifest))
+    assert harness.kpis["total"].guard == {"kpi": "picked_count", "min": 1.0} and harness.kpis["picked_count"].guard is None
 
 
 def test_a_study_template_that_does_not_compile_is_refused(tmp_path):

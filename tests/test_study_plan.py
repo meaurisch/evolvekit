@@ -67,7 +67,7 @@ def test_a_plan_with_fewer_than_three_rounds_is_blocked_with_three_ways_out():
     plan = _plan(training=10, time_limit_s=120, hours=1)
     # T = 121, C = 726 (k = 2: 484), B = 484, R(4) = 6 * 31 + 7 * 121 = 1033: 2.1 (2.4) rounds.
     assert plan.blocked.startswith("With these choices the search gets fewer than 3 rounds")
-    assert plan.ways_out[0] == "Use at most 7 training cases."
+    assert plan.ways_out[0] == "Let the search learn from at most 7 cases."
     assert plan.ways_out[1].startswith("Give each case at most ") and plan.ways_out[2].startswith("Allow at least ")
     assert len(plan.ways_out) == 3 and plan.summary() == plan.blocked
 
@@ -90,7 +90,7 @@ def test_when_the_final_check_alone_is_too_long_the_way_out_is_fewer_test_cases(
     # Two workers; the final check alone is ceil(60/2) x 61 s = 30.5 min, more
     # than the half hour: no number of training cases can help. With 5 test
     # cases it is 15 x 61 s, which leaves (795 - 61) / 244 = 3.0 rounds.
-    assert plan.blocked and plan.ways_out[0] == "Hold back at most 5 test cases for the final check."
+    assert plan.blocked and plan.ways_out[0] == "Hold back at most 5 cases for the final check."
     assert not any(way.startswith("Use at most ") for way in plan.ways_out)
 
 

@@ -20,7 +20,7 @@ from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import plan_for, read_preview
 from evolvekit.harness.manifest import Harness
 from evolvekit.harness.probe import probe_application
-from evolvekit.harness.study import save_study
+from evolvekit.harness.study import SettingChoice, save_study
 
 __all__ = ["ROUTES", "describe_harness"]
 
@@ -78,7 +78,8 @@ def describe_harness(harness: Harness) -> dict[str, Any]:
                           "help": lv.help, "explain": lv.explain, "code": lv.code}
                    for name, lv in harness.levers.items()},
         "kpis": {name: {"label": k.label, "direction": k.direction, "unit": k.unit, "help": k.help, "sql": k.sql,
-                        "measure": k.measure, "positive": k.positive, "changes_with_levers": k.changes_with_levers}
+                        "measure": k.measure, "positive": k.positive, "changes_with_levers": k.changes_with_levers,
+                        "guard": k.guard}
                  for name, k in harness.kpis.items()},
         "kpi_templates": {name: {"label": t.label, "direction": t.direction, "unit": t.unit, "help": t.help, "sql": t.sql,
                                  "params": {p.name: {"type": p.type, "label": p.label, "choices": list(p.choices),
@@ -148,6 +149,7 @@ def put_settings(req: Request) -> dict[str, Any]:
 def install(req: Request) -> dict[str, Any]:
     """A harness from the .zip in the body -- or, as JSON `{path}`, from a
     .zip on this computer."""
+    had = {(e.harness.id, e.harness.version): e.built_in for e in req.home.harness_entries() if e.harness is not None}
     if (req.headers.get("Content-Type") or "").startswith("application/json"):
         raw = str(req.json().get("path") or "").strip().strip('"')
         path = Path(raw).expanduser()
@@ -156,7 +158,8 @@ def install(req: Request) -> dict[str, Any]:
         harness = req.home.install(path.read_bytes(), path.name)
     else:
         harness = req.home.install(req.body, req.query.get("name") or "harness.zip")
-    return describe_harness(harness)
+    before = had.get((harness.id, harness.version))
+    return {**describe_harness(harness), "already": None if before is None else "built in" if before else "installed"}
 
 
 def harness(req: Request) -> dict[str, Any]:
@@ -316,13 +319,68 @@ def plan(req: Request) -> dict[str, Any]:
     except (HarnessError, ValueError, ZeroDivisionError) as exc:
         raise AppError(f"no plan yet: {exc}") from None
     tunables = len(study.tunables())
-    warning = ""
-    if tunables and chosen.combinations < 6 * tunables and not chosen.blocked:
-        recommended = len(pinned.recommended)
-        warning = (f"{tunables} things to tune in about {chosen.rounds} rounds will not learn much"
-                   + (f"; the {recommended} recommended settings are a good start" if recommended and recommended < tunables else "")
-                   + ".")
-    return {"summary": chosen.summary(), "estimated": estimated, "warning": warning, "tunables": tunables, **chosen.to_json()}
+    warning, fixes = "", []
+    if tunables and chosen.combinations < THIN * tunables and not chosen.blocked:
+        warning = (f"About {chosen.combinations} combinations for {tunables} things to tune is thin: the search may find "
+                   "a better combination, but it will likely miss the best one.")
+        tuned = study.tuned_settings()
+        if not study.data and len(tuned) > 2:
+            ranked = [n for n in pinned.recommended if n in tuned] + [n for n in tuned if n not in pinned.recommended]
+            keep = max(2, min(len(tuned) - 1, chosen.combinations // GOOD))
+            fixes.append({
+                "kind": "fewer", "keep": ranked[:keep], "label": f"Tune only the {keep} that matter most",
+                "detail": (", ".join(pinned.settings[n].label for n in ranked[:keep] if n in pinned.settings)
+                           + f": about {chosen.combinations // keep} tries each. The others keep their starting values."),
+            })
+        hours = _hours_for(study, pinned, timing, GOOD * tunables)
+        if hours is not None and hours > study.budget.hours:
+            fixes.append({"kind": "time", "hours": hours, "label": f"Allow {_hours_words(hours)} in total",
+                          "detail": f"About {GOOD * tunables} combinations for all {tunables}."})
+    return {"summary": chosen.summary(), "estimated": estimated, "warning": warning, "fixes": fixes,
+            "tunables": tunables, **chosen.to_json()}
+
+
+THIN, GOOD = 6, 10
+"""Combinations per thing tuned: below THIN the plan is thin; GOOD is what a fix aims for."""
+
+
+def _hours_for(study: Any, harness: Any, timing: dict[str, Any], combinations: int) -> float | None:
+    """The least total time, in quarter hours up to two days, whose plan tries `combinations`."""
+    import dataclasses
+
+    for quarters in range(1, 193):
+        hours = quarters / 4
+        trial = dataclasses.replace(study, budget=dataclasses.replace(study.budget, hours=hours))
+        try:
+            if plan_for(trial, harness, timing).combinations >= combinations:
+                return hours
+        except (HarnessError, ValueError, ZeroDivisionError):
+            return None
+    return None
+
+
+def _hours_words(hours: float) -> str:
+    whole, minutes = divmod(round(hours * 60), 60)
+    if not whole:
+        return f"{minutes} minutes"
+    return f"{whole} h {minutes} min" if minutes else f"{whole} hour{'s' if whole != 1 else ''}"
+
+
+def tune_only(req: Request) -> dict[str, Any]:
+    """Tune only `keep` of the settings the study tunes; the others keep their starting values."""
+    slug = req.params["slug"]
+    root, study, _ = req.home.load(slug)
+    if jobs.running(root):
+        raise AppError("the study is running; stop it before changing it", 409)
+    keep = [str(name) for name in (req.json().get("keep") or [])]
+    tuned = study.tuned_settings()
+    if not keep or any(name not in tuned for name in keep):
+        raise AppError("keep: name some of the settings the study tunes")
+    for name in tuned:
+        if name not in keep:
+            study.settings[name] = SettingChoice("default")
+    save_study(study, root)
+    return _document(req, slug)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +468,8 @@ def stop(req: Request) -> dict[str, Any]:
 
 def final_check(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
-    return jobs.resume_final_check(req.home, root, _run(req, root))
+    seeds = req.json().get("seeds")
+    return jobs.resume_final_check(req.home, root, _run(req, root), int(seeds) if seeds is not None else None)
 
 
 def status(req: Request) -> dict[str, Any]:
@@ -425,8 +484,11 @@ def results(req: Request) -> dict[str, Any]:
 
 def download(req: Request) -> FileResponse:
     root, _, _ = req.home.load(req.params["slug"])
-    body, content_type, filename = jobs.download(root, _run(req, root), req.params["export"], req.server.status_document)
-    return FileResponse(body, content_type, filename)
+    export = req.params["export"]
+    body, content_type, filename = jobs.download(root, _run(req, root), export, req.server.status_document)
+    # The report opens in the browser with ?view=1; everything else is a file to save.
+    inline = export == "report" and req.query.get("view") == "1"
+    return FileResponse(body, content_type, None if inline else filename)
 
 
 def next_study(req: Request) -> dict[str, Any]:
@@ -458,6 +520,7 @@ ROUTES = [
     route("PUT", "/api/studies/{slug}/inputs/{input}/{name}")(put_input),
     route("DELETE", "/api/studies/{slug}/inputs/{input}")(remove_input),
     route("GET", "/api/studies/{slug}/plan")(plan),
+    route("POST", "/api/studies/{slug}/tune-only")(tune_only),
     route("POST", "/api/studies/{slug}/preview")(start_preview),
     route("GET", "/api/studies/{slug}/preview")(preview),
     route("POST", "/api/studies/{slug}/kpis/try")(try_kpi),

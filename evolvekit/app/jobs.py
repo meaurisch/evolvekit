@@ -30,6 +30,7 @@ from evolvekit.app import AppError
 from evolvekit.confirm import BASELINE
 from evolvekit.harness.compile import STUDY_RUN
 from evolvekit.harness.execute import read_job, runner_command
+from evolvekit.harness.plan import CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
 from evolvekit.ledger import read_jsonl
@@ -223,7 +224,7 @@ def stop(root: Path, run: str) -> dict[str, Any]:
     return {"stopping": True, "run": run}
 
 
-def resume_final_check(home: Any, root: Path, run: str) -> dict[str, Any]:
+def resume_final_check(home: Any, root: Path, run: str, seeds: int | None = None) -> dict[str, Any]:
     run_dir = _run_dir(root, run)
     if running(root):
         raise AppError("the study is running", 409)
@@ -232,7 +233,9 @@ def resume_final_check(home: Any, root: Path, run: str) -> dict[str, Any]:
         raise AppError("the search of this run did not finish, so there is nothing to check", 409)
     if not load_study(root).test:
         raise AppError("the study holds no cases back, so there is no final check", 409)
-    _launch(home, root, run_dir, ["--check"])
+    if seeds is not None and not 1 <= int(seeds) <= len(CHECK_SEEDS):
+        raise AppError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case", 400)
+    _launch(home, root, run_dir, ["--check"] + (["--seeds", str(int(seeds))] if seeds is not None else []))
     return {"run": run}
 
 
@@ -265,7 +268,15 @@ def _goal(study: Study, harness: Harness) -> dict[str, Any]:
         says = resolve_kpi(study, harness, level.kpi).get("says") or level.kpi
     except KeyError:
         says = level.kpi
-    return {"kpi": level.kpi, "says": says, "direction": level.direction}
+    return {"kpi": level.kpi, "says": _in_sentence(says), "label": says, "direction": level.direction}
+
+
+def _in_sentence(label: str) -> str:
+    """A label inside a sentence: "Real cost" -> "real cost"; "PyVRP's objective" and "KPI" stay."""
+    first = label.split(" ", 1)[0]
+    if first[:1].isupper() and first[1:] == first[1:].lower():
+        return label[0].lower() + label[1:]
+    return label
 
 
 def _better_word(direction: str) -> str:
@@ -285,6 +296,13 @@ def _plan(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
     return job.get("plan") or _read(run_dir / "plan.json") or {}
 
 
+def _moment(raw: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(raw)) if raw else None
+    except ValueError:
+        return None
+
+
 def _started(job: dict[str, Any], run_dir: Path) -> datetime | None:
     raw = job.get("started_at") or (_read(run_dir / LAUNCH) or {}).get("started_at")
     try:
@@ -293,13 +311,18 @@ def _started(job: dict[str, Any], run_dir: Path) -> datetime | None:
         return None
 
 
-def _failures_in_words(reasons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _failures_in_words(reasons: list[dict[str, Any]], limit_s: float) -> list[dict[str, Any]]:
     grouped = []
+    stopped_at = limit_s * 1.5 + 30  # the stage timeout of a harness run (compile.py)
     for reason in reasons:
         text, count = str(reason.get("failure") or "failed"), int(reason.get("count") or 0)
         low = text.lower()
         if "timed out" in low or "timeout" in low or "no result after" in low:
-            todo = "These runs took longer than allowed. If it happens often, give each case more time, or check the application."
+            text = (f"Did not come back in time: each case gets {_duration(limit_s)}, and a run still going at "
+                    f"{_duration(stopped_at)} is stopped")
+            todo = ("Your time limit is applied; the application did not keep to it on these runs. A combination with "
+                    "such a run counts as failed and the search moves on, so the best result is not affected. "
+                    "If most runs do this, the application itself needs a look.")
         elif "exit code 2" in low or "constraint" in low or "invalid" in low:
             todo = "These combinations broke a rule of the study before solving; the search simply skips them."
         elif "exit code 3" in low or "cannot read" in low:
@@ -321,8 +344,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     goal = _goal(study, harness)
     started = _started(job, run_dir)
     hours = float(plan.get("hours") or study.budget.hours)
-    used = (_now() - started).total_seconds() if started else None
     finished = job.get("phase") in ("done", "stopped", "failed")
+    ended = _moment(job.get("finished_at") or job.get("updated_at")) if finished else None
+    used = ((ended or _now()) - started).total_seconds() if started else None
     left = None if used is None or finished else max(0.0, hours * 3600 - used)
     finish_at = (started + timedelta(hours=hours)).astimezone().strftime("%H:%M") if started and not finished else None
 
@@ -384,7 +408,8 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
                  "levels_verdict": levels.get("verdict") if levels.get("available") else None},
         "series": series,
         "now": now_line,
-        "failures": _failures_in_words((health.get("evaluations") or {}).get("failure_reasons") or []),
+        "failures": _failures_in_words((health.get("evaluations") or {}).get("failure_reasons") or [],
+                                       float((_read(run_dir / STUDY_RUN) or {}).get("time_limit_s") or study.limits.time_per_case_s)),
         "gated": gated,
         "gated_line": (f"{gated} combination{'s' if gated != 1 else ''} broke a guardrail and {'do' if gated != 1 else 'does'} not count."
                        if gated else ""),
@@ -407,56 +432,166 @@ def _seed_and_best(run_dir: Path, document: dict[str, Any]) -> tuple[dict[str, A
     return seed, best
 
 
-def _test_kpis(comparison: dict[str, Any], candidate: str) -> dict[str, dict[str, float]]:
-    """The mean of every KPI over the held-back cases and seeds, per side."""
-    sums: dict[str, dict[str, list[float]]] = {BASELINE: {}, candidate: {}}
-    for run in comparison.get("runs") or []:
-        side = run.get("configuration")
-        if side not in sums or not run.get("ok"):
-            continue
-        for name, value in (run.get("kpis") or {}).items():
-            if isinstance(value, (int, float)) and math.isfinite(value):
-                sums[side].setdefault(name, []).append(float(value))
-    return {side: {k: fmean(v) for k, v in kpis.items() if v} for side, kpis in sums.items()}
+def _read_list(path: Path) -> list[dict[str, Any]]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [item for item in loaded if isinstance(item, dict)] if isinstance(loaded, list) else []
 
 
-def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any]) -> dict[str, Any]:
+def _search_evals(run_dir: Path, ids: set[str]) -> list[dict[str, Any]]:
+    """The final stage's runs of the candidates `ids` during the search, in
+    the shape of the final check's `results.json`."""
+    final_stage, evals = None, []
+    for event in read_jsonl(run_dir / "events.jsonl"):
+        kind = event.get("type")
+        if kind == "run_started" and event.get("stages"):
+            final_stage = (event["stages"][-1] or {}).get("id")
+        elif kind == "eval_finished" and event.get("candidate_id") in ids and event.get("instance"):
+            evals.append(event)
+    return [{"configuration": e["candidate_id"], "instance": e["instance"], "seed": e.get("seed"), "ok": bool(e.get("ok")),
+             "kpis": e.get("kpis") or {}} for e in evals if final_stage is None or e.get("stage") == final_stage]
+
+
+def _paired(runs: list[dict[str, Any]], start: str, best: str) -> dict[tuple[Any, Any], tuple[dict[str, Any], dict[str, Any]]]:
+    """(case, seed) -> the KPIs of the starting point and of the best, where both finished."""
+    sides: dict[tuple[Any, Any], dict[str, dict[str, Any]]] = {}
+    for run in runs:
+        if run.get("ok") and run.get("configuration") in (start, best):
+            sides.setdefault((run.get("instance"), run.get("seed")), {})[str(run["configuration"])] = run.get("kpis") or {}
+    return {key: (both[start], both[best]) for key, both in sides.items() if start in both and best in both}
+
+
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _means(pairs: dict[Any, tuple[dict[str, Any], dict[str, Any]]]) -> tuple[dict[str, float], dict[str, float]]:
+    """Every KPI's mean over the pairs, for the starting point and the best."""
+    start: dict[str, list[float]] = {}
+    best: dict[str, list[float]] = {}
+    for before, after in pairs.values():
+        for name, value in before.items():
+            if _finite(value) and _finite(after.get(name)):
+                start.setdefault(name, []).append(float(value))
+                best.setdefault(name, []).append(float(after[name]))
+    return {k: fmean(v) for k, v in start.items()}, {k: fmean(v) for k, v in best.items()}
+
+
+def _improvement(start: float | None, best: float | None, direction: str) -> float | None:
+    """By how many percent `best` is better than `start`; negative when worse."""
+    if not _finite(start) or not _finite(best) or start == 0:
+        return None
+    change = (best - start) / abs(start) * 100.0
+    return -change if direction == "lower" else change
+
+
+def _by_case(runs: list[dict[str, Any]], start: str, best: str, kpi: str, direction: str) -> list[dict[str, Any]]:
+    """The goal per case: the starting point against the best, over the runs where both finished."""
+    per_case: dict[str, list[tuple[float, float]]] = {}
+    failed: dict[str, int] = {}
+    for (case, _seed), (before, after) in _paired(runs, start, best).items():
+        if _finite(before.get(kpi)) and _finite(after.get(kpi)):
+            per_case.setdefault(str(case), []).append((float(before[kpi]), float(after[kpi])))
+    for run in runs:
+        if not run.get("ok") and run.get("configuration") in (start, best):
+            failed[str(run.get("instance"))] = failed.get(str(run.get("instance")), 0) + 1
+    rows = []
+    for case in sorted(set(per_case) | set(failed)):
+        pairs = per_case.get(case) or []
+        before = fmean(p[0] for p in pairs) if pairs else None
+        after = fmean(p[1] for p in pairs) if pairs else None
+        rows.append({"case": case, "start": before, "best": after, "runs": len(pairs), "failed": failed.get(case, 0),
+                     "change_pct": _improvement(before, after, direction)})
+    return rows
+
+
+def _span(low: float, high: float) -> str:
+    """A 95 % interval of an improvement in percent, in words."""
+    if low > 0:
+        return f"likely between {low:.1f} % and {high:.1f} % better"
+    if high < 0:
+        return f"likely between {-high:.1f} % and {-low:.1f} % worse"
+    return f"somewhere between {-low:.1f} % worse and {high:.1f} % better"
+
+
+def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str) -> dict[str, Any]:
+    """The final check in a sentence, and what to do about it in another."""
     final = job.get("final") or {}
+    new = f"the new {what}"
+    they = "it is" if what.startswith("combination") else "they are"
+    keep = {"settings": "Keep your current settings", "data changes": "Keep your data as it is"}.get(
+        what, "Keep your current settings and data")
     if final.get("skipped"):
-        return {"state": "skipped", "line": final["skipped"][0].upper() + final["skipped"][1:] + "."}
+        reason = str(final["skipped"])
+        advice = (f"{keep}: the search found nothing better." if "starting point stayed the best" in reason else
+                  f"Not sure: nothing was held back to check {new} on. A study that holds back a few cases can tell.")
+        return {"state": "skipped", "line": reason[0].upper() + reason[1:] + ".", "advice": advice}
     if final.get("stopped"):
-        return {"state": "stopped", "line": "The final check was stopped before it finished; it can be run again."}
+        return {"state": "stopped", "line": "The final check was stopped before it finished.",
+                "advice": "Run the final check to get an answer; the runs it already did are kept."}
     if comparison is None:
-        return {"state": "missing", "line": "There is no final check for this run."}
+        return {"state": "missing", "line": "There is no final check for this run.", "advice": ""}
     candidate = final.get("candidate") or next(iter(comparison.get("per_candidate") or {}), None)
     result = (comparison.get("per_candidate") or {}).get(candidate) or {}
     summary = result.get("summary") or {}
     n, mean, ci = summary.get("n") or 0, summary.get("mean"), summary.get("ci95")
+    seeds = len(comparison.get("seeds") or [])
     better = _better_word(goal["direction"])
     worse = "higher" if better == "lower" else "lower"
-    cases = f"{n} case{'s' if n != 1 else ''} the search never saw"
+    cases = f"{n} held-back case{'s' if n != 1 else ''}"
+    base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci}
     if "levels" in result:
         levels = result["levels"]
-        state = "confirmed" if levels.get("confirmed") else "unclear"
-        return {"state": state, "line": ("Confirmed on " if levels.get("confirmed") else "Not clear on ") + cases + ": "
-                + str(levels.get("verdict")) + ".", "levels": levels.get("levels"), "n": n}
+        if levels.get("confirmed"):
+            return {**base, "state": "confirmed", "levels": levels.get("levels"),
+                    "line": f"Confirmed on {cases}: {levels.get('verdict')}.",
+                    "advice": f"Use {new}: {they} better on cases the search never saw."}
+        return {**base, "state": "unclear", "levels": levels.get("levels"),
+                "line": f"Not clear on {cases}: {levels.get('verdict')}.",
+                "advice": f"{keep} for now: the gain is not proven."}
     if mean is None:
-        return {"state": "unclear", "line": "The final check has no comparable results.", "n": n}
+        return {**base, "state": "unclear", "line": "The final check has no comparable results.",
+                "advice": f"{keep} for now: the gain is not proven."}
     word = better if mean >= 0 else worse
     if ci is None:
-        return {"state": "single", "n": n, "mean": mean,
-                "line": f"On the one held-back case: {_pct(mean)} {word} {goal['says']}. One case gives no interval: "
-                        "hold back more cases for an answer to rely on."}
+        return {**base, "state": "single",
+                "line": f"On the one held-back case: {_pct(mean)} {word} {goal['says']}.",
+                "advice": "Not sure: one held-back case is too few to tell. A study that holds back three or more can."}
     low, high = ci
-    span = f"likely between {low:+.1f} % and {high:+.1f} % better"
     if low > 0:
-        return {"state": "confirmed", "n": n, "mean": mean, "ci95": ci,
-                "line": f"Confirmed: {_pct(mean)} {better} {goal['says']} on {cases} ({span})."}
+        return {**base, "state": "confirmed",
+                "line": f"Confirmed: {_pct(mean)} {better} {goal['says']} on {cases} ({_span(low, high)}).",
+                "advice": f"Use {new}: {they} better on cases the search never saw."}
     if high < 0:
-        return {"state": "worse", "n": n, "mean": mean, "ci95": ci,
-                "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']} ({span})."}
-    return {"state": "unclear", "n": n, "mean": mean, "ci95": ci,
-            "line": f"Not distinguishable from your starting point on {cases} ({span})."}
+        return {**base, "state": "worse",
+                "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']} ({_span(low, high)}).",
+                "advice": f"{keep}: {new} did worse on cases the search never saw."}
+    return {**base, "state": "unclear",
+            "line": f"Not distinguishable from your starting point on {cases} ({_span(low, high)}).",
+            "advice": f"{keep} for now: the gain is not proven."}
+
+
+def _runs_word(count: int) -> str:
+    return f"{count} run{'s' if count != 1 else ''}"
+
+
+def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A final check with twice the runs per case, where that could still
+    settle an open answer. The runs done are kept, so it only adds runs."""
+    if comparison is None or final.get("state") not in ("unclear", "worse"):
+        return None
+    have = len(comparison.get("seeds") or [])
+    want = min(2 * have, len(CHECK_SEEDS))
+    if want <= have:
+        return None
+    runs = 2 * len(comparison.get("instances") or []) * (want - have)
+    seconds = math.ceil(runs / max(1, int(plan.get("workers") or 1))) * float(plan.get("run_s") or 60.0)
+    return {"seeds": want, "seconds": seconds,
+            "label": f"Check again with {_runs_word(want)} per case instead of {have} (about {_duration(seconds)})",
+            "why": "More runs per case smooth out luck; the runs already done are kept. "
+                   "Only more held-back cases make the answer firmer than that."}
 
 
 def _describe_value(value: Any) -> str:
@@ -467,28 +602,87 @@ def _describe_value(value: Any) -> str:
     return str(value)
 
 
+def _number(value: Any) -> str:
+    """A number as the page shows it: grouped thousands, a few digits."""
+    if not _finite(value):
+        return "–"
+    value = float(value)
+    if value == int(value) and abs(value) < 1e15:
+        return f"{int(value):,}"
+    if abs(value) >= 1000:
+        return f"{value:,.1f}"
+    return f"{value:.4g}"
+
+
+def _kpi_help(study: Study, harness: Harness, name: str) -> str:
+    """What a KPI means, in the harness's words; a study's own SQL KPI says it in its name."""
+    kpi = study.kpis[name]
+    if kpi.kind == "harness" and name in harness.kpis:
+        return harness.kpis[name].help
+    if kpi.kind == "template" and kpi.template in harness.kpi_templates:
+        return harness.kpi_templates[kpi.template].help
+    return ""
+
+
+def _summary_text(data: dict[str, Any]) -> str:
+    """The result as plain text to paste into a message."""
+    context, final = data["context"], data["final"]
+    learned, held = data["cases"]["training"], data["cases"]["test"]
+    lines = [
+        f"{data['study']} ({data['harness']}), run {data['run']}",
+        f"Set-up: {_number(context['time_per_case_s'])} s per case, {_duration(context['hours'] * 3600)} in total; "
+        f"the search learned from {len(learned)} case{'s' if len(learned) != 1 else ''}"
+        + (f" and was checked on {len(held)} held-back case{'s' if len(held) != 1 else ''}" if held else "") + ".",
+        f"Result: {data['headline']}",
+        f"Final check: {final['line']}",
+    ]
+    if final.get("advice"):
+        lines.append(f"Advice: {final['advice']}")
+    changed = [c for c in data["changed"] if c["changed"]]
+    kept = [c for c in data["changed"] if not c["changed"]]
+    if changed:
+        lines.append("What changed:")
+        lines += [f"- {c['label']} ({c['name']}): {c['old_text']} -> {c['new_text']}" for c in changed]
+    if kept:
+        lines.append("Tried, and kept as they were: " + ", ".join(c["name"] for c in kept) + ".")
+    return "\n".join(lines) + "\n"
+
+
 def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     run_dir = _run_dir(root, run)
     study, harness = load_study(root), load_harness(root / "harness")
     job = phase(run_dir)
+    plan = _plan(run_dir, job)
     document = document_of(run_dir) if (run_dir / "events.jsonl").exists() else {}
     goal = _goal(study, harness)
     seed, best = _seed_and_best(run_dir, document)
     improvement = ((document.get("progress") or {}).get("improvement") or {})
     pct = improvement.get("pct")
     what = _what(study)
+    learned = "on the cases the search learned from"
     if best is None or seed is None:
         headline = "The search has no finished result yet."
     elif best.get("id") == seed.get("id") or not pct or pct <= 0:
-        headline = f"No {what} found beat your starting point on the training cases."
+        headline = f"No {what} found beat your starting point {learned}."
     else:
         headline = (f"The best {what} found give{'s' if what.startswith('combination') else ''} {_pct(pct)} "
-                    f"{_better_word(goal['direction'])} {goal['says']} than your starting point on the training cases.")
-    comparison = None
-    if (job.get("final") or {}).get("comparison"):
-        comparison = _read(run_dir / job["final"]["comparison"])
-    final = _final_words(job, comparison, goal)
-    test = _test_kpis(comparison, (job.get("final") or {}).get("candidate") or "") if comparison else {}
+                    f"{_better_word(goal['direction'])} {goal['says']} than your starting point {learned}.")
+    final_state = job.get("final") or {}
+    comparison, check_runs = None, []
+    if final_state.get("comparison"):
+        comparison = _read(run_dir / final_state["comparison"])
+        check_runs = _read_list((run_dir / final_state["comparison"]).parent / "results.json")
+    final = _final_words(job, comparison, goal, what)
+    final["recheck"] = _recheck(final, plan, comparison) if job.get("phase") == "done" else None
+    candidate = str(final_state.get("candidate") or "")
+    held_start, held_best = _means(_paired(check_runs, BASELINE, candidate)) if candidate else ({}, {})
+    seed_id, best_id = str((seed or {}).get("id") or ""), str((best or {}).get("id") or "")
+    by_case: dict[str, list[dict[str, Any]]] = {"learned": [], "held": []}
+    if goal["kpi"] and seed_id and best_id and seed_id != best_id:
+        by_case["learned"] = _by_case(_search_evals(run_dir, {seed_id, best_id}), seed_id, best_id,
+                                      goal["kpi"], goal["direction"])
+    if goal["kpi"] and candidate:
+        by_case["held"] = _by_case(check_runs, BASELINE, candidate, goal["kpi"], goal["direction"])
 
     kpis = []
     for name in study.kpis:
@@ -504,9 +698,9 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
 
         kpis.append({
             "name": name, "says": resolved.get("says") or name, "unit": resolved.get("unit") or "",
-            "direction": resolved.get("direction", "lower"),
+            "help": _kpi_help(study, harness, name), "direction": resolved.get("direction", "lower"),
             "training": {"start": value(seed), "best": value(best)},
-            "test": {"start": test.get(BASELINE, {}).get(name), "best": test.get((job.get("final") or {}).get("candidate") or "", {}).get(name)},
+            "test": {"start": held_start.get(name), "best": held_best.get(name)},
         })
     guardrails = [{"kpi": g.kpi, "max": g.max, "min": g.min} for g in study.guardrails]
 
@@ -530,14 +724,27 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     if study.data:
         kinds.add("data")
     downloads = [{"name": name, "label": export.label} for name, export in harness.exports.items() if export.applies_to in kinds]
-    downloads.append({"name": "report", "label": "The report (report.html), for sharing"})
-    return {
+    downloads.append({"name": "report", "label": "The report as a file (report.html)"})
+    compiled = _read(run_dir / STUDY_RUN) or {}
+    started, finished = _started(job, run_dir), job.get("finished_at")
+    context = {
+        "time_per_case_s": float(compiled.get("time_limit_s") or study.limits.time_per_case_s),
+        "hours": float(plan.get("hours") or study.budget.hours),
+        "runs_per_case": study.limits.runs_per_case,
+        "tried": sum(1 for r in _rows(run_dir) if not r.get("rejected")),
+        "started_at": started.astimezone().strftime("%Y-%m-%d %H:%M") if started else None,
+        "took": _duration((datetime.fromisoformat(finished) - started).total_seconds()) if started and finished else None,
+    }
+    data = {
         "run": run, "phase": job.get("phase"), "study": study.name, "harness": harness.title,
         "headline": headline, "improvement_pct": pct, "goal": goal, "final": final, "kpis": kpis,
-        "guardrails": guardrails, "changed": changed, "downloads": downloads,
+        "guardrails": guardrails, "changed": changed, "downloads": downloads, "by_case": by_case,
+        "context": context,
         "best_id": (best or {}).get("id"), "is_seed": bool(best and seed and best.get("id") == seed.get("id")),
         "cases": {"training": list(study.training), "test": list(study.test)},
     }
+    data["summary_text"] = _summary_text(data)
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -577,10 +784,20 @@ def download(root: Path, run: str, export: str, document_of: DocumentOf) -> tupl
     """`(bytes, content type, file name)` of a download."""
     run_dir = _run_dir(root, run)
     slug = root.name
+    harness = load_harness(root / "harness")
     if export == "report":
         data = results(root, run, document_of)
-        return report_html(data).encode("utf-8"), "text/html; charset=utf-8", f"{slug}-report.html"
-    harness = load_harness(root / "harness")
+        # The file the result is used through, in the report: the first
+        # export that is one file (not the per-case requests).
+        attached = None
+        if not data["is_seed"]:
+            primary = next((d["name"] for d in data["downloads"] if d["name"] not in ("report", "requests")), None)
+            if primary:
+                try:
+                    attached = (harness.exports[primary].label, _export(root, run_dir, primary, _best_values(run_dir, document_of)).decode("utf-8", "replace"))
+                except AppError:
+                    attached = None
+        return report_html(data, attached).encode("utf-8"), "text/html; charset=utf-8", f"{slug}-report.html"
     if export not in harness.exports:
         raise AppError(f"the harness offers no download {export!r}", 404)
     values = _best_values(run_dir, document_of)
@@ -606,60 +823,105 @@ def download(root: Path, run: str, export: str, document_of: DocumentOf) -> tupl
     return body, content_type, filename
 
 
-def report_html(data: dict[str, Any]) -> str:
-    """The results as one self-contained page, for sharing."""
+def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -> str:
+    """The results as one self-contained page, for sharing; `attached` is
+    (label, text) of the file the result is used through."""
     esc = html.escape
+    goal, final, context = data["goal"], data["final"], data["context"]
 
-    def number(value: Any) -> str:
-        if value is None:
+    def change(pct: float | None) -> str:
+        if pct is None:
             return "–"
-        if isinstance(value, float):
-            return f"{value:,.4g}" if abs(value) < 1e4 else f"{value:,.0f}"
-        return esc(str(value))
+        if abs(pct) < 0.05:
+            return "the same"
+        word = "lower" if (pct > 0) == (goal["direction"] == "lower") else "higher"
+        return f"<span class='{'up' if pct > 0 else 'down'}'>{abs(pct):.1f} % {word}</span>"
+
+    def case_table(rows: list[dict[str, Any]]) -> str:
+        body = "".join(
+            f"<tr><td>{esc(str(c['case']))}"
+            + (f"<div class='help'>{c['failed']} run{'s' if c['failed'] != 1 else ''} did not finish</div>" if c["failed"] else "")
+            + f"</td><td class='n'>{_number(c['start'])}</td><td class='n'>{_number(c['best'])}</td><td class='n'>{change(c['change_pct'])}</td></tr>"
+            for c in rows)
+        return ("<div class='card wrap'><table><thead><tr><th>Case</th><th class='n'>Start</th><th class='n'>Best</th>"
+                f"<th class='n'>Change</th></tr></thead><tbody>{body}</tbody></table></div>")
 
     kpi_rows = "".join(
-        f"<tr><td>{esc(k['says'])}{' (' + esc(k['unit']) + ')' if k['unit'] else ''}</td>"
-        f"<td>{number(k['training']['start'])}</td><td>{number(k['training']['best'])}</td>"
-        f"<td>{number(k['test']['start'])}</td><td>{number(k['test']['best'])}</td></tr>"
+        f"<tr><td>{esc(k['says'])}{' (' + esc(k['unit']) + ')' if k['unit'] else ''}"
+        f"<div class='help'>{esc(k.get('help') or '')} {'Lower' if k['direction'] == 'lower' else 'Higher'} is better.</div></td>"
+        f"<td class='n'>{_number(k['training']['start'])}</td><td class='n'>{_number(k['training']['best'])}</td>"
+        f"<td class='n'>{_number(k['test']['start'])}</td><td class='n'>{_number(k['test']['best'])}</td></tr>"
         for k in data["kpis"]
     )
     changed_rows = "".join(
-        f"<tr><td>{esc(c['label'])}<div class='help'>{esc(c['help'])}</div></td><td>{esc(c['old_text'])}</td>"
+        f"<tr><td>{esc(c['label'])} <code>{esc(c['name'])}</code><div class='help'>{esc(c['help'])}</div></td><td>{esc(c['old_text'])}</td>"
         f"<td>{'<b>' if c['changed'] else ''}{esc(c['new_text'])}{'</b>' if c['changed'] else ''}</td></tr>"
         for c in data["changed"]
     )
+    by_case = ""
+    if data["by_case"]["held"]:
+        by_case += "<h3>Held-back cases</h3>" + case_table(data["by_case"]["held"])
+    if data["by_case"]["learned"]:
+        by_case += "<h3>Cases the search learned from</h3>" + case_table(data["by_case"]["learned"])
+    if by_case:
+        label = goal.get("label") or goal["says"]
+        by_case = f"<h2>{esc(label[:1].upper() + label[1:])}, case by case</h2>" + by_case
+    facts = [("Time per case", _duration(context["time_per_case_s"])), ("Time for the study", _duration(context["hours"] * 3600)),
+             ("Combinations tried", str(context["tried"]))]
+    if context.get("took"):
+        facts.append(("It took", context["took"]))
+    if context.get("started_at"):
+        facts.append(("Started", context["started_at"]))
+    facts_html = "".join(f"<div><div class='k'>{esc(k)}</div><div class='v'>{esc(v)}</div></div>" for k, v in facts)
+    seeds = final.get("seeds")
+    check_note = (f"<p class='help'>The best and the starting point, each run {'once' if seeds == 1 else f'{seeds} times'} on every "
+                  "held-back case: cases the search never saw.</p>") if seeds else ""
+    attached_html = (f"<h2>{esc(attached[0])}</h2><div class='card'><pre>{esc(attached[1])}</pre></div>" if attached else "")
+    learned = ", ".join(Path(c).stem for c in data["cases"]["training"])
+    held = ", ".join(Path(c).stem for c in data["cases"]["test"]) or "none"
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(data['study'])}: results</title>
 <style>
-:root {{ color-scheme: light dark; --ink:#0b0b0b; --ink-2:#52514e; --page:#f6f6f3; --surface:#fff; --hair:rgba(11,11,11,.12); --good:#006300; --bad:#b42525; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --ink:#fff; --ink-2:#c3c2b7; --page:#0d0d0d; --surface:#1a1a19; --hair:rgba(255,255,255,.14); --good:#4fd14f; --bad:#ef6a6a; }} }}
+:root {{ color-scheme: light dark; --ink:#0b0b0b; --ink-2:#52514e; --page:#f6f6f3; --surface:#fff; --hair:rgba(11,11,11,.12); --good:#006300; --bad:#b42525; --warn:#9a6600; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --ink:#fff; --ink-2:#c3c2b7; --page:#0d0d0d; --surface:#1a1a19; --hair:rgba(255,255,255,.14); --good:#4fd14f; --bad:#ef6a6a; --warn:#fab219; }} }}
 body {{ margin:0; background:var(--page); color:var(--ink); font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }}
 main {{ max-width:880px; margin:0 auto; padding:32px 20px 64px; }}
-h1 {{ font-size:24px; margin:0 0 4px; }} h2 {{ font-size:17px; margin:32px 0 8px; }}
+h1 {{ font-size:24px; margin:0 0 4px; }} h2 {{ font-size:17px; margin:32px 0 8px; }} h3 {{ font-size:15px; margin:18px 0 6px; }}
 .meta {{ color:var(--ink-2); font-size:13px; }}
 .card {{ background:var(--surface); border:1px solid var(--hair); border-radius:12px; padding:16px 18px; margin-top:12px; }}
 .headline {{ font-size:18px; font-weight:600; }}
+.advice {{ margin-top:10px; font-weight:600; }}
+.advice[data-state=confirmed] {{ color:var(--good); }} .advice[data-state=worse] {{ color:var(--bad); }} .advice[data-state=unclear], .advice[data-state=single] {{ color:var(--warn); }}
 .final[data-state=confirmed] {{ border-left:4px solid var(--good); }} .final[data-state=worse] {{ border-left:4px solid var(--bad); }}
+.final[data-state=unclear], .final[data-state=single] {{ border-left:4px solid var(--warn); }}
+.facts {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); margin-top:14px; }}
+.facts .k {{ color:var(--ink-2); font-size:13px; }} .facts .v {{ font-size:18px; font-weight:650; }}
 table {{ width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }}
 th, td {{ text-align:left; padding:8px 6px; border-bottom:1px solid var(--hair); vertical-align:top; }}
-th {{ font-size:12px; color:var(--ink-2); font-weight:600; }}
+th {{ font-size:12px; color:var(--ink-2); font-weight:600; }} .n {{ text-align:right; }} th.group {{ text-align:center; border-bottom:0; }}
 .help {{ color:var(--ink-2); font-size:12px; }}
+.up {{ color:var(--good); font-weight:600; }} .down {{ color:var(--bad); font-weight:600; }}
 .wrap {{ overflow-x:auto; }}
+pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-monospace,Consolas,monospace; }}
 </style></head><body><main>
 <h1>{esc(data['study'])}</h1>
 <div class="meta">{esc(data['harness'])} · run {esc(data['run'])} · report made {generated}</div>
-<div class="card"><div class="headline">{esc(data['headline'])}</div></div>
+<div class="card"><div class="headline">{esc(data['headline'])}</div>
+<div class="advice" data-state="{esc(str(final.get('state')))}">{esc(final.get('advice') or '')}</div></div>
+<div class="facts">{facts_html}</div>
 <h2>The final check</h2>
-<div class="card final" data-state="{esc(str(data['final'].get('state')))}">{esc(data['final']['line'])}</div>
+<div class="card final" data-state="{esc(str(final.get('state')))}">{esc(final['line'])}{check_note}</div>
+{by_case}
 <h2>Every measure</h2>
-<div class="card wrap"><table><thead><tr><th>Measure</th><th>Start (training)</th><th>Best (training)</th><th>Start (test)</th><th>Best (test)</th></tr></thead>
+<div class="card wrap"><table><thead><tr><th rowspan="2">Measure</th><th class="n group" colspan="2">Cases the search learned from</th><th class="n group" colspan="2">Held-back cases</th></tr>
+<tr><th class="n">Start</th><th class="n">Best</th><th class="n">Start</th><th class="n">Best</th></tr></thead>
 <tbody>{kpi_rows}</tbody></table></div>
 <h2>What changed</h2>
 <div class="card wrap"><table><thead><tr><th>What</th><th>Before</th><th>Now</th></tr></thead><tbody>{changed_rows}</tbody></table></div>
-<p class="meta">Training cases: {esc(', '.join(Path(c).name for c in data['cases']['training']))}.
-Held back for the final check: {esc(', '.join(Path(c).name for c in data['cases']['test']) or 'none')}.</p>
+{attached_html}
+<p class="meta">The search learned from: {esc(learned)}. Held back for the final check: {esc(held)}.</p>
 </main></body></html>
 """
 

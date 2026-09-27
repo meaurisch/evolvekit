@@ -89,7 +89,8 @@ The check's "three random settings vectors" step finds ranges that break.
 
 Every setting has `label` and `help` (for people: plain words, one sentence)
 and `explain` (for the model: what it does, which way it trades off, when it
-matters). Mark about eight as `recommended: true` — the ones that matter most.
+matters). Mark about eight as `recommended` — the ones that matter most —
+with a rank (`recommended: 1` for the most important, `2` next, …), or `true`.
 
 ## When the application's API changes
 

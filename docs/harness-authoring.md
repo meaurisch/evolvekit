@@ -90,8 +90,10 @@ seeds: true                 # it takes a seed
 `log: true` where a range spans orders of magnitude, `bool`, `choice`), each
 with a `label` and a one-sentence `help` in plain words for people, a longer
 `explain` for a model — what it does, which way it trades off, when it
-matters — a `group`, and `recommended: true` on the six to ten that matter
-most. Every default lies in its range.
+matters — a `group`, and `recommended` on the six to ten that matter most — `true`,
+or better a rank (`1` for the one that matters most, `2` next, …): when a
+study has too little time for all of them, the app offers to tune only the
+top few. Every default lies in its range.
 
 **Tables** are the vocabulary of every study (next section). Each column has
 a `type` (`int`, `float`, `text`, `bool`), a `unit`, a one-line `describe`,
@@ -111,7 +113,9 @@ as widening a time window around its middle.
 `NULL` counts as 0 and is noted), or `measure: true` for the runner's
 `measure` hook. `direction` is `lower` or `higher`; `positive: true` when every
 sensible solution has a value above 0; `changes_with_levers: true` when a
-data change alters what it measures (see the comparability trap below).
+data change alters what it measures (see the comparability trap below);
+`guard: {kpi: feasible, min: 1}` when, as a goal, it needs a guardrail beside
+it — a cost that does not count broken rules — and the app offers to add it.
 
 **KPI templates** are KPIs with blanks, for studies without an AI assistant:
 

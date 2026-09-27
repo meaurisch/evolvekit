@@ -5,6 +5,7 @@ test run, start, status, results, every download, a study from the result."""
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 from pathlib import Path
@@ -35,6 +36,15 @@ def _until(app: AppServer, path: str, done, timeout: float = 180.0) -> dict:
             return body
         assert time.monotonic() < deadline, f"{path} did not get there: {body}"
         time.sleep(0.3)
+
+
+def _disposition(app: AppServer, path: str) -> str:
+    connection = http.client.HTTPConnection("127.0.0.1", app.port, timeout=120)
+    connection.request("GET", path, headers={"Host": f"127.0.0.1:{app.port}"})
+    response = connection.getresponse()
+    response.read()
+    connection.close()
+    return response.getheader("Content-Disposition") or ""
 
 
 def _ready_study(app: AppServer, name: str = "Tours") -> str:
@@ -112,6 +122,14 @@ def test_a_run_from_start_to_results_and_downloads(app, tmp_path):
     assert status == 200 and b"--neighbours" in flags
     status, report = call(app, "GET", f"/api/studies/{slug}/download/report")
     assert status == 200 and results["headline"].encode() in report and b"</html>" in report
+    assert _disposition(app, f"/api/studies/{slug}/download/report").startswith("attachment;")
+    assert _disposition(app, f"/api/studies/{slug}/download/report?view=1") == "", "?view=1 opens it in the browser"
+    assert results["summary_text"].startswith("Tours (") and results["headline"] in results["summary_text"]
+    assert results["context"]["time_per_case_s"] == 0.5 and results["context"]["tried"] >= 1
+    if results["final"]["state"] == "single":  # the check ran: its one case, side by side
+        assert [c["case"] for c in results["by_case"]["held"]] == ["county-50"]
+        tour = next(k for k in results["kpis"] if k["name"] == "tour_length")
+        assert tour["test"]["start"] is not None and tour["test"]["best"] is not None
     status, body = call(app, "GET", f"/api/studies/{slug}/download/requests")
     assert status == 404 or status == 200
 

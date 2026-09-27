@@ -14,16 +14,19 @@ application:
   label: Python with PyVRP installed
   requires: {module: pyvrp, version: ">=0.14,<0.15"}
   help: >
-    The Python in which `import pyvrp` works. In a terminal where PyVRP runs,
-    `python -c "import sys, pyvrp; print(sys.executable)"` prints its path.
+    The Python program (python.exe) that has PyVRP installed. evolvekit looks in the usual places
+    and marks the one where it finds PyVRP: pick that one. If none is marked, ask whoever installed
+    PyVRP where its python.exe is (in a terminal where PyVRP works,
+    python -c "import sys; print(sys.executable)" prints it).
 
 cases:
   label: delivery request
   formats: [.json, .vrp, .txt]
   describe: >
-    A PyVRP request in JSON (the pyvrp_hard benchmark's format, optionally with tags on tasks and
-    vehicle types) or a VRPLIB instance file. VRPLIB files suit settings
-    studies only: they have no vehicle classes or tags for a data change to select by.
+    Each is one day's delivery request: a .json file with the tasks, vehicles and depots (optionally
+    with tags on tasks and vehicle types), or a .vrp or .txt file in VRPLIB, a format from research.
+    VRPLIB files suit settings studies only: they have no vehicle classes or tags for a data change
+    to pick.
 
 inputs:
   solver_settings:
@@ -79,7 +82,7 @@ settings:
       perturbed neighbourhood. It costs time on every improvement and pays off when improvements are
       rare and valuable; off leaves more iterations for exploration. Off was better in both
       benchmark tuning runs.
-    recommended: true
+    recommended: 5
   # -- penalties for plans that break a rule
   solutions_between_updates:
     type: int
@@ -96,7 +99,7 @@ settings:
       penalty depending on how many were feasible. Small values adapt quickly but react to noise;
       large values are stable but slow to find the right level. The most important setting in the
       benchmark tuning runs; matters most with tight windows or capacities.
-    recommended: true
+    recommended: 1
   penalty_increase:
     type: float
     low: 1.05
@@ -122,7 +125,7 @@ settings:
       Factor applied to a violation penalty when the share of feasible solutions is above
       target_feasible. Close to 1 keeps penalties high, so the search stays feasible and explores
       less; low values let it cross infeasible regions to reach better feasible plans.
-    recommended: true
+    recommended: 6
   target_feasible:
     type: float
     low: 0.2
@@ -135,7 +138,7 @@ settings:
       The penalty manager steers towards this share of feasible solutions. High targets keep the
       search on feasible ground; low targets let it roam through infeasible solutions, which can
       connect good feasible regions. Works together with penalty_increase and penalty_decrease.
-    recommended: true
+    recommended: 3
   feas_tolerance:
     type: float
     low: 0.0
@@ -173,7 +176,7 @@ settings:
       PyVRP starts every penalty at the midpoint of min_penalty and max_penalty, so this also sets the
       starting pressure towards feasibility. Too low and the search trades lateness for cost; too
       high and it becomes timid. At most 1e7, which keeps PyVRP's integer arithmetic safe.
-    recommended: true
+    recommended: 2
   # -- which tasks count as neighbours
   weight_wait_time:
     type: float
@@ -201,7 +204,7 @@ settings:
       per task (better plans per iteration, fewer iterations per second); smaller values speed up
       iterations but may miss improving moves. The best size depends on the request size and the
       time limit.
-    recommended: true
+    recommended: 8
   symmetric_proximity:
     type: bool
     default: true
@@ -225,7 +228,7 @@ settings:
       max_perturbations random moves, then runs the local search. Higher minimums diversify more per
       iteration. The ranges of the two settings do not overlap, so the minimum never exceeds the
       maximum. The most important setting in the first benchmark tuning run (best value 0).
-    recommended: true
+    recommended: 7
   max_perturbations:
     type: int
     low: 10
@@ -268,7 +271,7 @@ settings:
     explain: >
       Operator Swap21. On by default; off was better in both benchmark tuning runs, where it ranked
       among the four most important settings.
-    recommended: true
+    recommended: 4
   use_swap22:
     type: bool
     default: true
@@ -547,19 +550,26 @@ levers:
 
 kpis:
   solver_cost:
-    label: PyVRP's objective
+    label: Cost as PyVRP counts it
     unit: currency
     direction: lower
     positive: true
     changes_with_levers: true
-    help: What PyVRP minimised, at the rates it saw; a plan that breaks a rule is priced above every plan that does not.
+    help: >
+      The plan's cost at the rates PyVRP was given (your real rates, unless the study changes them),
+      where a plan that breaks a rule counts as dearer than any plan that keeps them all. It is what
+      PyVRP itself makes as low as it can.
     sql: "SELECT solver_objective FROM summary"
   real_cost:
     label: Real cost
     unit: currency
     direction: lower
     positive: true
-    help: What the plan costs at the untouched request's rates, plus the prizes of the optional tasks it leaves out.
+    help: >
+      What the plan costs at your real rates, plus the prizes of the optional tasks it leaves out. A
+      plan that breaks a rule is not made dearer: as the goal, pair it with the guardrail "Feasible at
+      least 1".
+    guard: {kpi: feasible, min: 1}
     sql: "SELECT (SELECT TOTAL(cost) FROM routes) + (SELECT TOTAL(prize) FROM unassigned)"
   distance_km:
     label: Distance
@@ -666,9 +676,9 @@ kpi_templates:
 
 exports:
   settings_json: {label: PyVRP settings (JSON), for: settings}
-  settings_flags: {label: "PyVRP settings as command-line flags (the benchmark's solve.py)", for: settings}
+  settings_flags: {label: PyVRP settings as command-line flags, for: settings}
   data_changes: {label: The data changes (JSON and CSV), for: data}
-  requests: {label: "The changed requests (one pyvrp-request/1 file per case)", for: data}
+  requests: {label: "The changed requests (one file per case)", for: data}
 
 defaults:
   time_per_case_s: 60

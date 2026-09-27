@@ -180,6 +180,9 @@ table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nu
 th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--hair); vertical-align: top; }
 th { font-size: 12px; font-weight: 650; color: var(--ink-2); text-transform: uppercase; letter-spacing: .04em; }
 td.n, th.n { text-align: right; }
+th.group { text-align: center; border-bottom: 0; padding-bottom: 0; }
+.up { color: var(--good-ink); font-weight: 600; } .down { color: var(--critical-ink); font-weight: 600; }
+h3 { font-size: 15px; margin: 18px 0 6px; } .card > h3:first-child { margin-top: 0; }
 
 /* ------------------------------------------------------------------ home */
 .study-card { display: flex; flex-direction: column; gap: 8px; text-decoration: none; color: var(--ink); min-height: 132px; }
@@ -339,9 +342,31 @@ function fmt(value, digits = 4) {
   if (typeof value === "boolean") return value ? "on" : "off";
   if (typeof value !== "number") return String(value);
   if (!isFinite(value)) return "–";
+  // One format everywhere, the page's own: 1,270.5 -- never the browser's
+  // locale (1.270,5 beside a sentence that says 1,270.5) or 1.00e+7.
   const abs = Math.abs(value);
-  if (abs !== 0 && (abs >= 1e6 || abs < 1e-3)) return value.toPrecision(3);
-  return value.toLocaleString(undefined, { maximumFractionDigits: abs >= 100 ? 1 : digits });
+  if (abs !== 0 && abs < 1e-3) return String(Number(value.toPrecision(2)));
+  return value.toLocaleString("en-US", { maximumFractionDigits: abs >= 100 ? 1 : digits });
+}
+// A box for a number with decimals: text, so it shows 1270.5 as the page
+// writes numbers whatever the browser's locale (a number box shows 1270,5),
+// and reads both 1270.5 and 1270,5 back.
+function numberBox(attrs) {
+  const value = attrs.value === undefined || attrs.value === null || attrs.value === "" ? "" : plainNumber(Number(attrs.value));
+  return h("input", { type: "text", inputmode: "decimal", autocomplete: "off", spellcheck: "false", ...attrs, value });
+}
+function plainNumber(value) {
+  if (typeof value !== "number" || !isFinite(value)) return "";
+  const abs = Math.abs(value);
+  if (abs !== 0 && abs < 1e-3) return String(Number(value.toPrecision(3)));
+  return value.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: abs >= 100 ? 2 : 6 });
+}
+function readNumber(el) {
+  let text = String(el.value).trim().replace(/[\s_']/g, "");
+  if (text === "") return NaN;
+  if (/^-?\d{1,3}(,\d{3})+(\.\d*)?$/.test(text)) text = text.replace(/,/g, "");  // 1,270.5
+  else if (!text.includes(".") && (text.match(/,/g) || []).length === 1) text = text.replace(",", ".");  // 1270,5
+  return Number(text);
 }
 function duration(seconds) {
   if (seconds === null || seconds === undefined) return "–";
@@ -442,11 +467,12 @@ async function renderHome() {
   const zipPath = h("input", { type: "text", id: "harness-path", placeholder: "C:\\...\\pyvrp-1.0.0.zip" });
   const zipAdd = h("button", { class: "btn small", type: "button", onclick: () => guarded(async () => {
     const harness = await api("POST", "/api/harnesses", { path: zipPath.value.trim() });
-    toast(`${harness.title} ${harness.version} is installed.`); renderHome();
+    toast(installedWords(harness)); renderHome();
   }, zipAdd) }, "Install");
   const harnesses = h("div", { class: "grid" }, home.harnesses.map((x) => h("div", { class: "card" },
     h("div", { class: "row between" }, h("strong", {}, x.title || x.id), h("span", { class: "badge" + (x.built_in ? "" : " accent") }, x.problem ? "cannot be read" : (x.built_in ? "built in" : "installed") + (x.version ? " · " + x.version : ""))),
-    h("p", { class: "muted small" }, x.problem || x.summary || ""))));
+    h("p", { class: "muted small" }, x.problem || x.summary || ""),
+    x.problem ? null : h("p", { class: "small", style: "margin:0" }, status("good", "Ready to use: start a new study with it.")))));
   const drop = h("div", { class: "drop", tabindex: "0" },
     h("p", { style: "margin:0 0 8px" }, "Add a harness: drop its .zip file here, or"),
     h("label", { class: "btn small", for: "harness-zip" }, "Choose a .zip file"), upload,
@@ -493,11 +519,16 @@ async function droppedFiles(transfer) {
   return files;
 }
 
+function installedWords(harness) {
+  if (harness.already === "built in") return `${harness.title} ${harness.version} was already built in, so it was ready to use: there was nothing to install.`;
+  if (harness.already === "installed") return `${harness.title} ${harness.version} was already installed; it is installed again.`;
+  return `${harness.title} ${harness.version} is installed and ready to use.`;
+}
 async function installHarness(file) {
   if (!file) return;
   await guarded(async () => {
     const harness = await api("POST", `/api/harnesses?name=${encodeURIComponent(file.name)}`, await file.arrayBuffer());
-    toast(`${harness.title} ${harness.version} is installed.`);
+    toast(installedWords(harness));
     renderHome();
   });
 }
@@ -566,7 +597,11 @@ async function renderNew() {
   const create = h("button", { class: "btn primary", type: "submit" }, "Create the study");
   function drawTemplates() {
     templatesBox.replaceChildren();
-    if (!harnessId) return;
+    if (!harnessId) {
+      templatesBox.append(h("fieldset", { disabled: true }, h("legend", {}, "2. What do you want to find out?"),
+        h("p", { class: "muted small", style: "margin:4px 0 0" }, "Choose the application first: what you can find out depends on it.")));
+      return;
+    }
     const harness = usable.find((x) => x.id === harnessId);
     const entries = harness.templates || [];
     if (template === null) template = entries.length ? entries[0].id : "";
@@ -615,10 +650,25 @@ async function renderNew() {
 const STEPS = ["Question", "Application", "Cases", "What may change", "Goal", "Limits and budget", "Review and start"];
 let current = null;  // {slug, doc, harness, chat}
 
+// The open study. Whatever replaces its document -- a saved step, a case
+// added, a card applied -- also redraws the rail and "Still to do", so
+// neither ever shows how things were before.
+function studyState(slug, doc, harness, chat) {
+  const state = { slug, harness, chat, step: null };
+  let held = doc;
+  Object.defineProperty(state, "doc", { enumerable: true, get: () => held, set: (value) => { held = value; refreshChecks(); } });
+  return state;
+}
+function refreshChecks() {
+  if (!current || !current.doc || !current.doc.problems) return;
+  for (const box of document.querySelectorAll(".problems[data-step]")) fillProblems(box, Number(box.dataset.step));
+  const rail = document.querySelector("nav.rail");
+  if (rail && current.step) rail.replaceWith(railFor(current.step));
+}
 async function loadStudy(slug, fresh = false) {
   if (!current || current.slug !== slug || fresh) {
     const [doc, harness] = await Promise.all([api("GET", `/api/studies/${encodeURIComponent(slug)}`), api("GET", `/api/studies/${encodeURIComponent(slug)}/harness`)]);
-    current = { slug, doc, harness, chat: current && current.slug === slug ? current.chat : null };
+    current = studyState(slug, doc, harness, current && current.slug === slug ? current.chat : null);
   }
   return current;
 }
@@ -646,6 +696,13 @@ function kpiDirection(name) {
   if (study.template) return current.harness.kpi_templates[study.template]?.direction || "lower";
   return study.direction || "lower";
 }
+function kpiHelp(name) {
+  const study = current.doc.study.kpis[name] || {};
+  if (current.harness.kpis[name]) return current.harness.kpis[name].help || "";
+  if (study.template) return (current.harness.kpi_templates[study.template] || {}).help || "";
+  if (study.weighted) return "A mix of the measures below, weighted as you chose.";
+  return study.help || "";
+}
 function kpiUnit(name) {
   const study = current.doc.study.kpis[name] || {};
   return (current.harness.kpis[name] || {}).unit || study.unit || (current.harness.kpi_templates[study.template] || {}).unit || "";
@@ -656,6 +713,7 @@ async function renderStep(slug, step) {
   const { doc } = current;
   if (studyRunning(doc)) { location.hash = `#/study/${slug}/running`; return; }
   crumbs({ href: "#/", text: "Your studies", small: true }, { text: doc.study.name });
+  current.step = step;
   const content = h("div", { class: "step" });
   const withSide = step === 4 || step === 5 || (step === 1 && !doc.study.template);
   const layout = h("div", { class: "wizard" + (withSide ? " with-side" : "") }, railFor(step), content, withSide ? assistantPanel() : null);
@@ -690,9 +748,14 @@ function stepFoot(step, { next, nextLabel, beforeNext } = {}) {
 }
 
 function problemsOf(step) {
+  const box = h("div", { class: "problems", "data-step": String(step), "aria-live": "polite" });
+  fillProblems(box, step);
+  return box;
+}
+function fillProblems(box, step) {
   const list = current.doc.problems.filter((p) => p.step === step);
-  return list.length ? note("warn", h("p", { style: "margin:0 0 4px", class: "small" }, "Still to do on this step:"),
-    h("ul", { style: "margin:0; padding-left:18px" }, list.map((p) => h("li", { class: "small" }, sentence(p.text))))) : null;
+  fill(box, list.length ? note("warn", h("p", { style: "margin:0 0 4px", class: "small" }, "Still to do on this step:"),
+    h("ul", { style: "margin:0; padding-left:18px" }, list.map((p) => h("li", { class: "small" }, sentence(p.text))))) : null);
 }
 
 // ------------------------------------------------------------ 1. question
@@ -778,7 +841,29 @@ function smallestTraining(doc) {
 }
 function previewLine(doc) {
   const p = doc.preview || {};
-  if (p.state === "running") return h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "The preview is running: the smallest case is being solved once at the starting values.");
+  if (p.state === "running") {
+    // It keeps itself current: the time so far, and the step redrawn once the preview is in.
+    const text = h("span");
+    const line = h("div", { class: "row muted small", "aria-live": "polite" }, h("span", { class: "spinner" }), text);
+    const say = (started, expected) => {
+      const so = Math.max(0, Date.now() / 1000 - started);
+      text.textContent = `The preview is running: the smallest case is solved once with the starting values, so every measure can show today's value. ${duration(so)} so far` + (expected ? `, usually about ${duration(expected)}.` : ".");
+    };
+    say(p.started_at || Date.now() / 1000, p.expected_s);
+    const slug = current.slug;
+    const id = every(1000, async () => {
+      if (!line.isConnected || current.slug !== slug) { clearInterval(id); timers.delete(id); return; }
+      let now;
+      try { now = await api("GET", studyPath("/preview")); } catch (err) { return; }
+      if (now.state === "running") { say(now.started_at || p.started_at, now.expected_s); return; }
+      clearInterval(id); timers.delete(id);
+      current.doc.preview = now;
+      const next = previewLine(current.doc);
+      if (next) line.replaceWith(next); else line.remove();
+      if (current.redraw) current.redraw();
+    });
+    return line;
+  }
   if (p.state === "failed" || p.state === "interrupted") return note("bad", h("p", { style: "margin:0" }, `The preview did not work: ${sentence(p.error || (p.result || {}).error || "no reason given")}`));
   if (p.result && p.result.ok) return status("good", `Preview done: ${p.result.case.replace("cases/", "")} solved in ${fmt(p.result.wall_s, 1)} s.`);
   return null;
@@ -903,9 +988,9 @@ async function step3(box) {
     h("p", { class: "lede" }, `The ${harness.cases.label}s the study works on. ${harness.cases.describe || ""}`),
     drop, progress,
     h("h2", {}, "Your cases"), list,
-    h("h2", {}, "A test set"),
-    h("p", { class: "lede" }, "The search learns from most of the cases. A few are held back: at the end, the best result is checked on them — cases the search never saw — to see whether it really is better."),
-    h("div", { class: "row" }, h("label", { for: "test-count" }, "How many cases do you want to keep as a test set?"), testCount, apply),
+    h("h2", {}, "Held-back cases"),
+    h("p", { class: "lede" }, "The search learns from most of the cases. A few are held back: at the end, the best result is checked on them — cases the search never saw — to see whether it really is better. This is the final check."),
+    h("div", { class: "row" }, h("label", { for: "test-count" }, "How many cases do you want to hold back?"), testCount, apply),
     h("p", { class: "faint" }, "evolvekit picks cases of different sizes, and keeps the smallest one for the search. Swap any case with the buttons in the list."),
     warnings, problemsOf(3),
     stepFoot(3, { beforeNext: async () => { await ensurePreview(); } }));
@@ -930,10 +1015,10 @@ function settingControl(setting, choice, onChange) {
     let input;
     if (setting.type === "bool") input = h("select", { id: `${id}-fixed`, class: "inline" }, h("option", { value: "true", selected: value === true }, "on"), h("option", { value: "false", selected: value === false }, "off"));
     else if (setting.type === "choice") input = h("select", { id: `${id}-fixed`, class: "inline" }, setting.choices.map((c) => h("option", { value: JSON.stringify(c), selected: c === value }, String(c))));
-    else input = h("input", { type: "number", id: `${id}-fixed`, class: "inline", style: "width:150px", value: String(value), step: setting.type === "int" ? "1" : "any", min: setting.low, max: setting.high });
+    else input = numberBox({ id: `${id}-fixed`, class: "inline", style: "width:150px", value });
     input.addEventListener("change", () => {
       const raw = input.value;
-      const parsed = setting.type === "bool" ? raw === "true" : setting.type === "choice" ? JSON.parse(raw) : Number(raw);
+      const parsed = setting.type === "bool" ? raw === "true" : setting.type === "choice" ? JSON.parse(raw) : readNumber(input);
       onChange("fixed", parsed);
     });
     details.append(h("div", { class: "row small", style: "margin-top:6px" }, h("label", { for: `${id}-fixed` }, "Keep it at"), input,
@@ -941,9 +1026,9 @@ function settingControl(setting, choice, onChange) {
   }
   if (mode === "tune" && (setting.type === "int" || setting.type === "float")) {
     const range = typeof choice === "object" && choice ? choice : {};
-    const low = h("input", { type: "number", id: `${id}-low`, value: range.low ?? setting.low, step: "any" });
-    const high = h("input", { type: "number", id: `${id}-high`, value: range.high ?? setting.high, step: "any" });
-    const save = () => onChange("tune", null, { low: Number(low.value), high: Number(high.value) });
+    const low = numberBox({ id: `${id}-low`, value: range.low ?? setting.low });
+    const high = numberBox({ id: `${id}-high`, value: range.high ?? setting.high });
+    const save = () => onChange("tune", null, { low: readNumber(low), high: readNumber(high) });
     low.addEventListener("change", save); high.addEventListener("change", save);
     details.append(h("details", { style: "margin-top:6px" }, h("summary", {}, `Search between ${fmt(range.low ?? setting.low)} and ${fmt(range.high ?? setting.high)}`),
       h("div", { class: "more" }, h("label", { for: `${id}-low`, class: "small" }, "From", low), h("label", { for: `${id}-high`, class: "small" }, "To", high))));
@@ -1029,9 +1114,9 @@ async function step4(box) {
     const columnSel = h("select", { id: "dc-column" });
     const modeSel = h("select", { id: "dc-mode" });
     const where = h("input", { type: "text", id: "dc-where", placeholder: "all rows, or e.g. class = 'van'" });
-    const low = h("input", { type: "number", id: "dc-low", value: "0.5", step: "any" });
-    const high = h("input", { type: "number", id: "dc-high", value: "2", step: "any" });
-    const start = h("input", { type: "number", id: "dc-start", value: "1", step: "any" });
+    const low = numberBox({ id: "dc-low", value: 0.5 });
+    const high = numberBox({ id: "dc-high", value: 2 });
+    const start = numberBox({ id: "dc-start", value: 1 });
     const name = h("input", { type: "text", id: "dc-name", placeholder: "e.g. van_km_cost" });
     const help = h("p", { class: "explain" });
     const values = h("div", { class: "faint" });
@@ -1047,7 +1132,7 @@ async function step4(box) {
     const add = h("button", { class: "btn", type: "button" }, "Add this data change");
     add.addEventListener("click", () => guarded(async () => {
       const card = { kind: "data_change", name: name.value.trim(), lever: leverSel.value, column: columnSel.value, where: where.value.trim(), mode: modeSel.value,
-        low: Number(low.value), high: Number(high.value), start: Number(start.value) };
+        low: readNumber(low), high: readNumber(high), start: readNumber(start) };
       const answer = await api("POST", studyPath("/cards"), { card });
       current.doc = answer.study; toast(`Added: it applies to ${plural(answer.card.applies_to, "row")}.`); drawAll();
     }, add));
@@ -1117,7 +1202,7 @@ async function step5(box) {
   const today = {};
 
   async function valueOf(name) {
-    if (name in today) return today[name];
+    if (name in today && today[name] !== null) return today[name];  // an answer from before the preview may be in by now
     const doc = current.doc;
     const kpi = doc.study.kpis[name] || {};
     const preview = (doc.preview || {}).result || {};
@@ -1144,6 +1229,7 @@ async function step5(box) {
         || Object.values(kpis).some((k) => k.weighted && name in k.weighted);
       return h("div", { class: "item" }, h("div", { class: "body" },
         h("div", { class: "what" }, kpiLabel(name)),
+        kpiHelp(name) ? h("div", { class: "small" }, kpiHelp(name)) : null,
         h("div", { class: "muted small" }, `${kpiDirection(name) === "lower" ? "Lower" : "Higher"} is better. On the preview case today: `, valueEl),
         kpi.sql ? h("details", {}, h("summary", {}, "How it is counted"), h("pre", { class: "mono small", style: "white-space:pre-wrap" }, kpi.sql)) : null, rowsBtn),
         used ? h("span", { class: "badge" }, "in use") : h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => {
@@ -1165,7 +1251,8 @@ async function step5(box) {
       tplParams.replaceChildren(...Object.entries(t.params).map(([p, spec]) => {
         const options = (choices[tplSel.value] || {})[p] || spec.choices || [];
         const input = options.length ? h("select", { "data-param": p, id: `tp-${p}`, class: "inline" }, options.map((o) => h("option", { value: String(o) }, String(o))))
-          : h("input", { type: spec.type === "text" ? "text" : "number", "data-param": p, id: `tp-${p}`, class: "inline", style: "width:120px", step: "any" });
+          : spec.type === "text" ? h("input", { type: "text", "data-param": p, id: `tp-${p}`, class: "inline", style: "width:120px" })
+          : numberBox({ "data-param": p, id: `tp-${p}`, class: "inline", style: "width:120px" });
         return h("label", { for: `tp-${p}`, class: "small" }, `${spec.label || p} `, input);
       }));
     }
@@ -1175,7 +1262,7 @@ async function step5(box) {
       const params = {};
       for (const el of tplParams.querySelectorAll("[data-param]")) {
         const spec = t.params[el.dataset.param];
-        params[el.dataset.param] = spec.type === "number" || spec.type === "int" ? Number(el.value) : el.value;
+        params[el.dataset.param] = spec.type === "number" || spec.type === "int" ? readNumber(el) : el.value;
         if (el.value === "") throw new Error("Fill in every blank of the measure.");
       }
       const name = (tplSel.value + "_" + Object.values(params).join("_")).toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
@@ -1229,22 +1316,24 @@ async function step5(box) {
         const dir = h("select", { id: "goal-dir", class: "inline" }, h("option", { value: "lower", selected: first.direction === "lower" }, "as low as possible"), h("option", { value: "higher", selected: first.direction === "higher" }, "as high as possible"));
         sel.addEventListener("change", () => { dir.value = kpiDirection(sel.value); saveLevels([{ kpi: sel.value, direction: dir.value }]); });
         dir.addEventListener("change", () => saveLevels([{ kpi: sel.value, direction: dir.value }]));
-        fill(box, h("div", { class: "row" }, h("label", { for: "goal-kpi" }, "Make"), sel, dir));
+        fill(box, h("div", { class: "row" }, h("label", { for: "goal-kpi" }, "Make"), sel, dir),
+          kpiHelp(sel.value) ? h("p", { class: "explain", style: "margin:6px 0 0" }, kpiHelp(sel.value)) : null,
+          guardFor(sel.value));
         if (!levels.length || weighted || levels.length > 1) saveLevels([{ kpi: sel.value, direction: dir.value }]);
       } else if (mode === "mix") {
         const parts = weighted ? { ...study.kpis[levels[0].kpi].weighted } : {};
         const plain = names.filter((n) => !study.kpis[n].weighted);
         const inputs = plain.map((n) => {
-          const input = h("input", { type: "number", step: "any", min: "0", id: `w-${n}`, class: "inline", style: "width:100px", value: parts[n] ?? "" });
+          const input = numberBox({ id: `w-${n}`, class: "inline", style: "width:100px", value: parts[n] ?? "" });
           return [n, input];
         });
         const rates = h("div", { class: "explain" });
         function describe() {
-          const w = inputs.map(([n, i]) => [n, Number(i.value)]).filter(([, v]) => v > 0);
+          const w = inputs.map(([n, i]) => [n, readNumber(i)]).filter(([, v]) => v > 0);
           rates.replaceChildren(...(w.length > 1 ? w.slice(1).map(([n, v]) => h("p", { style: "margin:4px 0" }, `1 ${kpiUnit(n) || "unit"} of “${kpiLabel(n)}” counts as much as ${fmt(v / w[0][1])} ${kpiUnit(w[0][0]) || "units"} of “${kpiLabel(w[0][0])}”.`)) : [h("p", {}, "Give two or more measures a weight.")]));
         }
         const save = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
-          const w = Object.fromEntries(inputs.map(([n, i]) => [n, Number(i.value)]).filter(([, v]) => v > 0));
+          const w = Object.fromEntries(inputs.map(([n, i]) => [n, readNumber(i)]).filter(([, v]) => v > 0));
           if (Object.keys(w).length < 2) throw new Error("Give two or more measures a weight.");
           const says = "Combined: " + Object.entries(w).map(([n, v]) => `${fmt(v)} × ${kpiLabel(n)}`).join(" + ");
           await patch({ kpis: { ...study.kpis, combined: { says, direction: "lower", weighted: w } }, goal: { levels: [{ kpi: "combined", direction: "lower" }] } });
@@ -1261,10 +1350,10 @@ async function step5(box) {
           const sel = h("select", { class: "inline", "aria-label": `Level ${i + 1}: measure` }, names.filter((n) => !study.kpis[n].weighted || n === level.kpi).map((n) => h("option", { value: n, selected: n === level.kpi }, kpiLabel(n))));
           const dir = h("select", { class: "inline", "aria-label": `Level ${i + 1}: direction` }, h("option", { value: "lower", selected: level.direction === "lower" }, "lower"), h("option", { value: "higher", selected: level.direction === "higher" }, "higher"));
           const within = String(level.equal_within ?? "");
-          const amount = h("input", { type: "number", step: "any", min: "0", class: "inline", style: "width:90px", "aria-label": `Level ${i + 1}: counts as equal within`, value: within.replace("%", "").trim() });
+          const amount = numberBox({ class: "inline", style: "width:90px", "aria-label": `Level ${i + 1}: counts as equal within`, value: within.replace("%", "").trim() });
           const unit = h("select", { class: "inline", "aria-label": "in percent or in the measure's unit" }, h("option", { value: "%", selected: within.includes("%") || !within }, "%"), h("option", { value: "abs", selected: within && !within.includes("%") }, kpiUnit(level.kpi) || "units"));
           const last = i === list.length - 1;
-          const read = () => ({ kpi: sel.value, direction: dir.value, ...(last ? {} : { equal_within: unit.value === "%" ? `${amount.value || 1} %` : Number(amount.value || 0) }) });
+          const read = () => ({ kpi: sel.value, direction: dir.value, ...(last ? {} : { equal_within: unit.value === "%" ? `${isFinite(readNumber(amount)) ? readNumber(amount) : 1} %` : (isFinite(readNumber(amount)) ? readNumber(amount) : 0) }) });
           for (const el of [sel, dir, amount, unit]) el.addEventListener("change", () => { list[i] = read(); saveLevels(list.map((l, j) => j === list.length - 1 ? { kpi: l.kpi, direction: l.direction } : l)); });
           return h("div", { class: "item" }, h("span", { class: "badge" }, String(i + 1)), h("div", { class: "body" },
             h("div", { class: "row" }, sel, dir, "is better"),
@@ -1283,6 +1372,20 @@ async function step5(box) {
     goalBox.replaceChildren(modes, h("div", { style: "margin-top:12px" }, box));
     drawMode();
   }
+  function guardFor(name) {
+    // A goal that does not count broken rules brings its guardrail: offered, one click.
+    const guard = (harness.kpis[name] || {}).guard;
+    if (!guard || (current.doc.study.guardrails || []).some((g) => g.kpi === guard.kpi)) return null;
+    const words = `${kpiLabel(guard.kpi)} ${guard.max !== undefined ? "at most " + fmt(guard.max) : "at least " + fmt(guard.min)}`;
+    return note("warn", h("p", { style: "margin:0" }, `${kpiLabel(name)} does not count broken rules, so a plan that breaks one could look best. Add the guardrail “${words}”, so that every plan must keep them?`),
+      h("button", { class: "btn small", type: "button", style: "margin-top:8px", onclick: (e) => guarded(async () => {
+        const kpis = { ...current.doc.study.kpis };
+        if (!(guard.kpi in kpis)) kpis[guard.kpi] = { from: "harness" };
+        const rail = guard.max !== undefined ? { kpi: guard.kpi, max: guard.max } : { kpi: guard.kpi, min: guard.min };
+        await patch({ kpis, guardrails: [...(current.doc.study.guardrails || []), rail] });
+        toast("Guardrail added."); drawAll();
+      }, e.currentTarget) }, `Add “${words}”`));
+  }
   function fixLevels(list) { return list.map((l, i) => i === list.length - 1 ? { kpi: l.kpi, direction: l.direction } : { ...l, equal_within: l.equal_within ?? "1 %" }); }
 
   function drawRails() {
@@ -1294,21 +1397,22 @@ async function step5(box) {
         const rail = rails.find((g) => g.kpi === name);
         const lower = kpiDirection(name) === "lower";
         const on = h("input", { type: "checkbox", id: `rail-${name}`, checked: !!rail });
-        const bound = h("input", { type: "number", step: "any", class: "inline", style: "width:110px", "aria-label": `${kpiLabel(name)}: ${lower ? "at most" : "at least"}`, value: rail ? (rail.max ?? rail.min) : "0" });
+        const bound = numberBox({ class: "inline", style: "width:110px", "aria-label": `${kpiLabel(name)}: ${lower ? "at most" : "at least"}`, value: rail ? (rail.max ?? rail.min) : 0 });
         const valueEl = h("span", { class: "num" }, "…");
         valueOf(name).then((v) => {
           valueEl.textContent = v === null || v === undefined ? "–" : fmt(v);
-          if (!rail && typeof v === "number") bound.value = String(Math.round(v * 1000) / 1000);  // a bound at today's value
+          if (!rail && typeof v === "number") bound.value = plainNumber(Number(v.toPrecision(5)));  // a bound at today's value
         });
         const save = () => guarded(async () => {
           let next = rails.filter((g) => g.kpi !== name);
-          if (on.checked) next = [...next, lower ? { kpi: name, max: Number(bound.value) } : { kpi: name, min: Number(bound.value) }];
+          if (on.checked) next = [...next, lower ? { kpi: name, max: readNumber(bound) } : { kpi: name, min: readNumber(bound) }];
           const kpis = { ...study.kpis };
           if (on.checked && !(name in kpis)) kpis[name] = { from: "harness" };
           await patch({ kpis, guardrails: next }); drawAll();
         });
         on.addEventListener("change", save); bound.addEventListener("change", () => { if (on.checked) save(); });
         return h("div", { class: "item" }, on, h("label", { for: `rail-${name}`, class: "body" }, h("div", { class: "what" }, kpiLabel(name)),
+          kpiHelp(name) ? h("div", { class: "faint" }, kpiHelp(name)) : null,
           h("div", { class: "muted small" }, "Today on the preview case: ", valueEl)), h("div", { class: "row small" }, lower ? "at most" : "at least", bound));
       })));
   }
@@ -1334,25 +1438,25 @@ async function step6(box) {
   const study = current.doc.study;
   const settings = await api("GET", "/api/settings");
   const hasKey = settings.provider === "claude-cli" || Object.entries(settings.keys).some(([k, v]) => v && (settings.provider === "openrouter" ? k.startsWith("OPENROUTER") : k.startsWith("AZURE")));
-  const time = h("input", { type: "number", id: "time", min: String(harness.time_limit.min_s), step: "any", class: "inline", style: "width:110px", value: String(study.limits.time_per_case_s) });
+  const time = numberBox({ id: "time", class: "inline", style: "width:110px", value: study.limits.time_per_case_s });
   const retries = h("select", { id: "retries", class: "inline" }, [0, 1, 2, 3].map((n) => h("option", { value: String(n), selected: n === study.limits.retries }, String(n))));
   const runs = h("select", { id: "runs", class: "inline" }, [1, 2, 3, 5].map((n) => h("option", { value: String(n), selected: n === study.limits.runs_per_case }, String(n))));
   const hours = h("input", { type: "number", id: "hours", min: "0", step: "1", class: "inline", style: "width:80px", value: String(Math.floor(study.budget.hours)) });
   const minutes = h("input", { type: "number", id: "minutes", min: "0", max: "59", step: "5", class: "inline", style: "width:80px", value: String(Math.round((study.budget.hours % 1) * 60)) });
   const ai = h("input", { type: "checkbox", id: "ai", checked: study.budget.ai.enabled, disabled: !hasKey && !study.budget.ai.enabled });
-  const usd = h("input", { type: "number", id: "usd", min: "0", step: "0.5", class: "inline", style: "width:90px", value: String(study.budget.ai.max_usd) });
+  const usd = numberBox({ id: "usd", class: "inline", style: "width:90px", value: study.budget.ai.max_usd });
   const consequence = h("p", { class: "hint" });
   const planBox = h("div", { "aria-live": "polite" });
   function explain() {
-    const t = Number(time.value) || 0;
+    const t = readNumber(time) || 0;
     consequence.textContent = harness.time_limit.accepts
       ? `${harness.title} stops itself after ${fmt(t)} s; a run still going after ${fmt(t * 1.5 + 30)} s is stopped and counts as failed.`
       : `${harness.title} does not stop itself: a run still going after ${fmt(t)} s is stopped and counts as failed.`;
   }
   async function save() {
     const total = Math.max(0, Number(hours.value) || 0) + Math.max(0, Math.min(59, Number(minutes.value) || 0)) / 60;
-    await patch({ limits: { time_per_case_s: Number(time.value), retries: Number(retries.value), runs_per_case: Number(runs.value) },
-      budget: { hours: Math.round(total * 10000) / 10000, ai: { enabled: ai.checked, max_usd: Number(usd.value) } } });
+    await patch({ limits: { time_per_case_s: readNumber(time), retries: Number(retries.value), runs_per_case: Number(runs.value) },
+      budget: { hours: Math.round(total * 10000) / 10000, ai: { enabled: ai.checked, max_usd: readNumber(usd) } } });
     await drawPlan();
   }
   for (const el of [time, retries, runs, hours, minutes, ai, usd]) el.addEventListener("change", () => guarded(save));
@@ -1365,18 +1469,32 @@ async function step6(box) {
       plan.blocked ? note("bad", h("p", { style: "margin:0 0 6px" }, "With these choices the search gets fewer than 3 rounds, too few to learn anything. Any one of these would fix it:"),
         h("ul", { style: "margin:0; padding-left:18px" }, (plan.ways_out || []).map((w) => h("li", {}, w))))
         : note("info", h("p", { style: "margin:0" }, h("strong", {}, sentence(plan.summary))), plan.estimated ? h("p", { class: "small", style: "margin:4px 0 0" }, "An estimate: the preview has not measured a run yet.") : null),
-      plan.warning ? note("warn", h("p", { style: "margin:0" }, plan.warning)) : "",
+      plan.warning ? note("warn", h("p", { style: "margin:0" }, plan.warning),
+        (plan.fixes || []).length ? h("p", { style: "margin:8px 0 4px" }, (plan.fixes || []).length > 1 ? "Either of these helps:" : "This helps:") : null,
+        (plan.fixes || []).map((fix) => h("div", { class: "row", style: "margin-top:6px; flex-wrap:nowrap; align-items:flex-start" },
+          h("button", { class: "btn small", type: "button", style: "flex:none", onclick: (e) => guarded(async () => {
+            if (fix.kind === "fewer") {
+              current.doc = await api("POST", studyPath("/tune-only"), { keep: fix.keep });
+              toast(`Now tuning ${plural(fix.keep.length, "setting")}.`);
+            } else {
+              hours.value = String(Math.floor(fix.hours)); minutes.value = String(Math.round((fix.hours % 1) * 60));
+              await save(); return;
+            }
+            await drawPlan();
+          }, e.currentTarget) }, fix.label),
+          h("span", { class: "small" }, fix.detail)))) : "",
       adjust);
   }
   function adjustForm(plan) {
     const children = h("input", { type: "number", min: "1", class: "inline", style: "width:80px", id: "adj-children", value: String(plan.children) });
-    const generations = h("input", { type: "number", min: "1", class: "inline", style: "width:80px", id: "adj-generations", value: String(plan.generations) });
+    const rounds = h("input", { type: "number", min: "1", class: "inline", style: "width:80px", id: "adj-rounds", value: String(plan.rounds) });
     const auto = (current.doc.study.plan || {}).auto !== false;
     return h("div", { class: "stack small" },
       h("p", { class: "muted" }, `${plural(plan.workers, "run")} at a time. Each round tries ${plural(plan.children, "combination")}${plan.screening ? `, first on ${plural(plan.screen_cases, "case")} at a quarter of the time` : ""}.`),
-      h("div", { class: "row" }, h("label", { for: "adj-children" }, "Combinations per round"), children, h("label", { for: "adj-generations" }, "Rounds (the engine's generations)"), generations),
+      h("div", { class: "row" }, h("label", { for: "adj-children" }, "Combinations per round"), children, h("label", { for: "adj-rounds" }, "Rounds"), rounds),
+      h("p", { class: "faint", style: "margin:0" }, "The total time still stops the search: more rounds than fit are not run."),
       h("div", { class: "row" },
-        h("button", { class: "btn small", type: "button", onclick: (e) => guarded(async () => { await patch({ plan: { auto: false, children: Number(children.value), generations: Number(generations.value) } }); drawPlan(); }, e.currentTarget) }, "Use these numbers"),
+        h("button", { class: "btn small", type: "button", onclick: (e) => guarded(async () => { await patch({ plan: { auto: false, children: Number(children.value), rounds: Number(rounds.value) } }); drawPlan(); }, e.currentTarget) }, "Use these numbers"),
         auto ? null : h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await patch({ plan: { auto: true } }); drawPlan(); }, e.currentTarget) }, "Back to automatic")));
   }
   explain();
@@ -1432,7 +1550,7 @@ async function step7(box) {
   const testBtn = h("button", { class: "btn", type: "button" }, "Test run");
   const start = h("button", { class: "btn primary", type: "button", disabled: problems.length > 0 || Boolean(plan && plan.blocked) }, "Start the study");
   function drawTest(state) {
-    if (!state || state.state === "none") { testResult.replaceChildren(h("p", { class: "muted small" }, "Runs the compiled study once on the smallest case: everything works together, and the starting point keeps the guardrails. Takes about one run.")); return; }
+    if (!state || state.state === "none") { testResult.replaceChildren(h("p", { class: "muted small" }, "Runs the study once, on the smallest case, before the real thing: it shows that everything works together and that your starting point keeps the guardrails. It takes about as long as one case.")); return; }
     if (state.state === "running") { testResult.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), "The test run is running…")); return; }
     const r = state.result || {};
     if (state.state === "done" && r.ok) {
@@ -1488,15 +1606,15 @@ function assistantPanel() {
     const facts = card.ok ? [card.value !== undefined ? `On the preview case: ${fmt(card.value)}.` : null, card.applies_to !== undefined ? `Applies to ${plural(card.applies_to, "row")}.` : null,
       card.holds_today ? "Holds today." : null].filter(Boolean).join(" ") : "";
     const el = h("div", { class: "proposal" + (card.ok ? "" : " bad") },
-      h("div", { class: "faint" }, kindText), h("div", { class: "says" }, card.says || card.name || kindText),
+      h("div", { class: "faint" }, card.ok ? `Proposed: ${kindText.toLowerCase()} — nothing changes until you apply it` : `${kindText}, not usable`), h("div", { class: "says" }, card.says || card.name || kindText),
       detail ? h("pre", { class: "mono" }, detail) : null,
       card.ok ? (facts ? h("p", { class: "small", style: "margin:6px 0 0" }, facts) : null) : h("p", { class: "small", style: "margin:6px 0 0; color: var(--critical-ink)" }, card.problem));
     if (card.ok) {
       const add = h("button", { class: "btn small primary", type: "button", onclick: () => guarded(async () => {
         const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/cards`, { card });
-        current.doc = answer.study; add.replaceWith(status("good", "Added")); edit.remove(); dismiss.remove();
+        current.doc = answer.study; add.replaceWith(status("good", "Applied to the study")); edit.remove(); dismiss.remove();
         if (current.redraw) current.redraw();
-      }, add) }, "Add");
+      }, add) }, "Apply");
       const edit = card.kind === "kpi" && current.fillSql ? h("button", { class: "btn small", type: "button", onclick: () => current.fillSql(card) }, "Edit") : h("span");
       const dismiss = h("button", { class: "btn small quiet", type: "button", onclick: () => el.remove() }, "Dismiss");
       el.append(h("div", { class: "row", style: "margin-top:8px" }, add, edit, dismiss));
@@ -1557,6 +1675,8 @@ async function renderRunning(slug) {
     try { s = await api("GET", studyPath("/status")); }
     catch (err) { fill(box, note("bad", h("p", {}, err.message))); return; }
     const running = ["starting", "search", "check"].includes(s.phase);
+    const $here = $("#crumbs .here");
+    if ($here) $here.textContent = running ? "Running" : s.phase === "done" ? "Finished" : s.phase === "stopped" ? "Stopped" : "Failed";
     const pill = running ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.phase === "check" ? "Final check" : "Running"))
       : s.phase === "done" ? status("good", "Finished") : s.phase === "stopped" ? status("warn", "Stopped") : status("bad", "Failed");
     const planned = Math.max(s.rounds.planned, s.rounds.done, 1);
@@ -1587,7 +1707,7 @@ async function renderRunning(slug) {
       s.gated_line ? note("info", h("p", { style: "margin:0" }, s.gated_line)) : null,
       s.failures.length ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Runs that failed"),
         s.failures.map((f) => h("div", { class: "item" }, h("span", { class: "badge" }, `${f.count}×`), h("div", { class: "body" }, h("div", { class: "what small" }, sentence(f.message)), h("div", { class: "muted small" }, f.todo))))) : null,
-      h("div", { class: "step-foot" }, h("a", { class: "btn", href: s.dashboard, target: "_blank", rel: "noopener" }, "Detailed dashboard"),
+      h("div", { class: "step-foot" }, h("a", { class: "btn", href: s.dashboard, target: "_blank", rel: "noopener", title: "Every number the engine keeps, in its own words: for experts" }, "Detailed dashboard (for experts)"),
         running ? stop : h("div", { class: "row" },
           s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check")); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
           s.phase === "failed" ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start")); toast("Started again."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Start it again") : null,
@@ -1599,6 +1719,29 @@ async function renderRunning(slug) {
 }
 
 // ================================================================ results
+function change(pct, direction) {
+  // pct: how much better (positive) or worse (negative) than the start, in percent
+  if (pct === null || pct === undefined) return h("span", { class: "faint" }, "–");
+  if (Math.abs(pct) < 0.05) return h("span", { class: "muted" }, "the same");
+  const word = (pct > 0) === (direction === "lower") ? "lower" : "higher";
+  return h("span", { class: pct > 0 ? "up" : "down" }, `${fmt(Math.abs(pct), 1)} % ${word}`);
+}
+
+function caseTable(rows, goal) {
+  return h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "Case"), h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"), h("th", { class: "n" }, "Change"))),
+    h("tbody", {}, rows.map((c) => h("tr", {},
+      h("td", {}, c.case, c.runs > 1 ? h("div", { class: "faint" }, `mean of ${plural(c.runs, "run")}`) : null,
+        c.failed ? h("div", { class: "faint" }, `${plural(c.failed, "run")} did not finish`) : null),
+      h("td", { class: "n" }, fmt(c.start, 2)), h("td", { class: "n" }, fmt(c.best, 2)),
+      h("td", { class: "n" }, change(c.change_pct, goal.direction)))))));
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast("Copied."); }
+  catch (err) { toast("Select the text and copy it.", true); }
+}
+
 async function renderResults(slug, run) {
   await loadStudy(slug, true);
   crumbs({ href: "#/", text: "Your studies", small: true }, { href: `#/study/${slug}/7`, text: current.doc.study.name, small: true }, { text: "Results" });
@@ -1609,41 +1752,73 @@ async function renderResults(slug, run) {
     throw err;
   }
   const running = ["starting", "search", "check"].includes(r.phase);
-  const finalKind = { confirmed: "good", worse: "bad", unclear: "warn", single: "info", skipped: "info", stopped: "warn", missing: "info" }[r.final.state] || "info";
-  const unitOf = (k) => k.unit ? ` ${k.unit}` : "";
+  const runQuery = `?run=${encodeURIComponent(r.run)}`;
+  const finalKind = { confirmed: "good", worse: "bad", unclear: "warn", single: "warn", skipped: "info", stopped: "warn", missing: "info" }[r.final.state] || "info";
+  const finalWord = { good: "Confirmed", bad: "Worse", warn: r.final.state === "stopped" ? "Not finished" : "Not clear", info: "Note" }[finalKind];
+  const unitOf = (k) => k.unit ? ` · in ${k.unit}` : "";
   const kpiTable = h("div", { class: "table-wrap" }, h("table", {},
-    h("thead", {}, h("tr", {}, h("th", {}, "Measure"), h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"), h("th", { class: "n" }, "Start, held back"), h("th", { class: "n" }, "Best, held back"))),
-    h("tbody", {}, r.kpis.map((k) => h("tr", {}, h("td", {}, k.says, h("div", { class: "faint" }, `${k.direction === "lower" ? "lower" : "higher"} is better${unitOf(k) ? " ·" + unitOf(k) : ""}`)),
-      h("td", { class: "n" }, fmt(k.training.start, 2)), h("td", { class: "n" }, h("strong", {}, fmt(k.training.best, 2))), h("td", { class: "n" }, fmt(k.test.start, 2)), h("td", { class: "n" }, h("strong", {}, fmt(k.test.best, 2))))))));
+    h("thead", {},
+      h("tr", {}, h("th", { rowspan: "2" }, "Measure"), h("th", { class: "n group", colspan: "2" }, "Cases the search learned from"), h("th", { class: "n group", colspan: "2" }, "Held-back cases")),
+      h("tr", {}, h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"), h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"))),
+    h("tbody", {}, r.kpis.map((k) => h("tr", {},
+      h("td", {}, k.says, k.help ? h("div", { class: "faint" }, k.help) : null, h("div", { class: "faint" }, `${k.direction === "lower" ? "lower" : "higher"} is better${unitOf(k)}`)),
+      h("td", { class: "n" }, fmt(k.training.start, 2)), h("td", { class: "n" }, h("strong", {}, fmt(k.training.best, 2))),
+      h("td", { class: "n" }, fmt(k.test.start, 2)), h("td", { class: "n" }, h("strong", {}, fmt(k.test.best, 2))))))));
   const changed = h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {}, h("tr", {}, h("th", {}, "What"), h("th", {}, "Before"), h("th", {}, "Now"))),
     h("tbody", {}, r.changed.map((c) => h("tr", {}, h("td", {}, c.label, h("div", { class: "faint" }, c.help)), h("td", { class: "num" }, c.old_text), h("td", { class: "num" }, c.changed ? h("strong", {}, c.new_text) : c.new_text))))));
-  const downloads = h("div", { class: "row" }, r.downloads.map((d) => h("a", { class: "btn" + (d.name === "settings_json" || d.name === "data_changes" ? " primary" : ""), href: `${studyPath("/download/" + d.name)}?run=${encodeURIComponent(r.run)}`, download: "" }, d.label)));
+  const recheck = r.final.recheck ? h("div", { style: "margin-top:12px" },
+    h("button", { class: "btn primary", type: "button", onclick: (e) => guarded(async () => {
+      await api("POST", studyPath("/final-check" + runQuery), { seeds: r.final.recheck.seeds });
+      toast("The final check runs again."); location.hash = `#/study/${slug}/running`;
+    }, e.currentTarget) }, r.final.recheck.label),
+    h("p", { class: "faint", style: "margin:6px 0 0" }, r.final.recheck.why)) : null;
+  const byCase = [];
+  if (r.by_case.held.length) byCase.push(h("h3", {}, "Held-back cases"), caseTable(r.by_case.held, r.goal));
+  if (r.by_case.learned.length) byCase.push(h("h3", {}, "Cases the search learned from"), caseTable(r.by_case.learned, r.goal));
   const shown = h("div");
-  const showSettings = r.downloads.some((d) => d.name === "settings_json") ? h("button", { class: "btn quiet small", type: "button", onclick: (e) => { const button = e.currentTarget; return guarded(async () => {
-    const response = await fetch(`${studyPath("/download/settings_json")}?run=${encodeURIComponent(r.run)}`);
+  function show(title, text) {
+    shown.replaceChildren(h("p", { class: "small", style: "margin:12px 0 4px" }, title),
+      h("pre", { class: "mono", style: "white-space:pre-wrap; background:var(--sunken); padding:12px; border-radius:10px; max-height:360px; overflow:auto" }, text),
+      h("button", { class: "btn small", type: "button", onclick: () => copyText(text) }, "Copy"));
+  }
+  const summary = h("button", { class: "btn", type: "button", onclick: () => { show("A summary for your message:", r.summary_text); copyText(r.summary_text); } }, "Copy a summary");
+  const settingsButton = r.downloads.some((d) => d.name === "settings_json") ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+    const response = await fetch(`${studyPath("/download/settings_json")}${runQuery}`);
     if (!response.ok) throw new Error("The settings could not be read.");
-    const text = await response.text();
-    const pre = h("pre", { class: "mono", style: "white-space:pre-wrap; background:var(--sunken); padding:12px; border-radius:10px; max-height:360px; overflow:auto" }, text);
-    const copy = h("button", { class: "btn small", type: "button", onclick: async () => { try { await navigator.clipboard.writeText(text); toast("Copied."); } catch (err) { toast("Select the text and copy it.", true); } } }, "Copy");
-    shown.replaceChildren(h("p", { class: "small", style: "margin:10px 0 4px" }, "The settings file, ready for the application:"), pre, copy);
-    button.remove();
-  }, button); } }, "Show the settings here") : null;
+    show("The settings file, ready for the application:", await response.text());
+  }, e.currentTarget) }, "Show the settings") : null;
+  const report = h("a", { class: "btn", href: `${studyPath("/download/report")}${runQuery}&view=1`, target: "_blank", rel: "noopener" }, "Open the report");
+  const downloads = h("div", { class: "row" }, r.downloads.map((d) => h("a", { class: "btn small" + (d.name === "settings_json" || d.name === "data_changes" ? " primary" : ""), href: `${studyPath("/download/" + d.name)}${runQuery}`, download: "" }, d.label)));
   const next = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
-    const doc = await api("POST", studyPath(`/next?run=${encodeURIComponent(r.run)}`), { name: `${current.doc.study.name} (next)` });
+    const doc = await api("POST", studyPath(`/next${runQuery}`), { name: `${current.doc.study.name} (next)` });
     location.hash = `#/study/${doc.slug}/4`;
   }, e.currentTarget) }, "Start a new study from this result");
+  const ctx = r.context;
   view.replaceChildren(h("div", { class: "narrow" },
     h("h1", {}, r.study),
     running ? note("info", h("p", { style: "margin:0" }, "The study is still running; these are the results so far. ", h("a", { href: `#/study/${slug}/running` }, "See it run"))) : null,
-    h("div", { class: "card" }, h("p", { class: "big", style: "margin:0" }, r.headline)),
+    h("div", { class: "card" }, h("p", { class: "big", style: "margin:0" }, r.headline),
+      r.final.advice ? h("div", { style: "margin-top:12px" }, status(finalKind === "info" ? "info" : finalKind, r.final.advice)) : null),
+    h("div", { class: "facts", style: "margin-top:14px" },
+      h("div", { class: "fact" }, h("div", { class: "k" }, "Time per case"), h("div", { class: "v" }, duration(ctx.time_per_case_s))),
+      h("div", { class: "fact" }, h("div", { class: "k" }, "Time for the study"), h("div", { class: "v" }, duration(ctx.hours * 3600))),
+      h("div", { class: "fact" }, h("div", { class: "k" }, "Combinations tried"), h("div", { class: "v" }, String(ctx.tried))),
+      ctx.took ? h("div", { class: "fact" }, h("div", { class: "k" }, "It took"), h("div", { class: "v" }, ctx.took)) : null),
     h("h2", {}, "The final check"),
-    h("div", { class: "card" }, status(finalKind, { good: "Confirmed", bad: "Worse", warn: "Not clear", info: "Note" }[finalKind]), h("p", { style: "margin:8px 0 0" }, r.final.line),
-      r.final.levels ? h("ul", { class: "small" }, r.final.levels.map((l) => h("li", {}, `${kpiLabel(l.kpi)}: ${l.verdict || l.state || ""}`))) : null),
+    h("div", { class: "card" }, status(finalKind, finalWord), h("p", { style: "margin:8px 0 0" }, r.final.line),
+      r.final.levels ? h("ul", { class: "small" }, r.final.levels.map((l) => h("li", {}, `${kpiLabel(l.kpi)}: ${l.verdict || l.state || ""}`))) : null,
+      r.final.seeds ? h("p", { class: "faint", style: "margin:6px 0 0" }, `The best and your starting point, each run ${r.final.seeds === 1 ? "once" : r.final.seeds + " times"} on every held-back case — cases the search never saw.`) : null,
+      recheck),
+    byCase.length ? h("h2", {}, `${capital(r.goal.label || r.goal.says)}, case by case`) : null,
+    byCase.length ? h("div", { class: "card" }, byCase) : null,
     h("h2", {}, "Every measure"), h("div", { class: "card" }, kpiTable,
-      r.guardrails.length ? h("p", { class: "faint" }, "Guardrails: ", r.guardrails.map((g) => `${kpiLabel(g.kpi)} ${g.max !== null && g.max !== undefined ? "at most " + fmt(g.max) : "at least " + fmt(g.min)}`).join("; "), ".") : null),
+      r.guardrails.length ? h("p", { class: "faint" }, "Rules every plan had to keep: ", r.guardrails.map((g) => `${kpiLabel(g.kpi)} ${g.max !== null && g.max !== undefined ? "at most " + fmt(g.max) : "at least " + fmt(g.min)}`).join("; "), ".") : null),
     h("h2", {}, "What changed"), h("div", { class: "card" }, r.is_seed ? h("p", { class: "muted" }, "Nothing: no combination beat the starting point.") : changed),
-    h("h2", {}, "Take it with you"), h("div", { class: "card" }, downloads, h("p", { class: "faint" }, "The settings file holds every setting, the tuned ones included, ready for the application."), showSettings, shown),
+    h("h2", {}, "Hand it over"), h("div", { class: "card" },
+      h("p", { class: "muted", style: "margin-top:0" }, "The summary says how the study was set up, what it found, how sure that is and what changed — ready to paste into a message. The report says the same on one page, with every number."),
+      h("div", { class: "row" }, summary, report, settingsButton), shown,
+      h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads),
     h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), next)));
 }
 

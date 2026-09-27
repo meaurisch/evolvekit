@@ -160,6 +160,24 @@ def test_a_study_through_its_steps(app):
     assert [s["slug"] for s in home["studies"]] == ["tours"] and home["studies"][0]["line"] == "draft · step 6 of 7"
 
 
+def test_a_thin_plan_offers_to_tune_only_what_matters_most(app):
+    call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Thin"})
+    call(app, "POST", "/api/studies/thin/application", {"path": str(SOLVER)})
+    call(app, "POST", "/api/studies/thin/samples")
+    call(app, "PATCH", "/api/studies/thin", {"plan": {"auto": False, "children": 2, "rounds": 2}})
+    status, plan = call(app, "GET", "/api/studies/thin/plan")
+    assert status == 200 and plan["rounds"] == 2 and plan["generations"] == 4, "rounds as shown; the engine gets headroom"
+    assert plan["warning"].startswith("About 4 combinations for 4 things to tune is thin")
+    (fewer,) = [fix for fix in plan["fixes"] if fix["kind"] == "fewer"]
+    assert fewer["label"] == "Tune only the 2 that matter most" and len(fewer["keep"]) == 2
+    status, document = call(app, "POST", "/api/studies/thin/tune-only", {"keep": fewer["keep"]})
+    assert status == 200
+    tuned = [name for name, choice in document["study"]["vary"]["settings"].items() if choice == "tune" or (isinstance(choice, dict) and choice.get("tune"))]
+    assert tuned == fewer["keep"]
+    status, body = call(app, "POST", "/api/studies/thin/tune-only", {"keep": ["not_a_setting"]})
+    assert status == 400 and "name some of the settings the study tunes" in body["error"]
+
+
 def test_cases_come_from_a_folder_on_this_computer(app, tmp_path):
     call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Folder"})
     call(app, "POST", "/api/studies/folder/application", {"path": str(SOLVER)})
