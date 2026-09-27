@@ -98,3 +98,53 @@ defaults.
 - **(l) Small things.** The terminal prints the address at once; a zip that is
   already built in says so; question 2 shows before an application is chosen;
   a finished run says "Finished" and its time used stops.
+
+## Round 2 — 8/10, no blocker: the gate is passed
+
+| Getting started | Knowing what to do next | Setting up | Confidence while it ran | Understanding the result | Handing it over |
+|---|---|---|---|---|---|
+| 8 | 8 | 8 | 7 | 8 | 9 |
+
+**The run.** Set up in about three minutes; the plan's warning taken at its
+word — "Tune only the 4 that matter most"; 20 s per request, 30 minutes, 42
+combinations, no failed run. 1.8 % lower cost on the five requests the
+search learned from (lower on all five); on the three held back, checked
+again with 6 runs per case, "somewhere between 1.8 % worse and 1.7 %
+better". The reviewer's answer: not proven, keep PyVRP's defaults — the
+app's own advice.
+
+**Frictions, and what changed.**
+
+- **(major) Two stories about "better".** The running page said "1.8 % lower
+  … (clearly better)" for 25 minutes; the results said "not proven" in a
+  small line under a big "1.8 % lower". Now the running page says "so far,
+  on the 5 cases the search learns from (one run each)" and that the final
+  check decides; the results open with the answer, the search's figure
+  under it.
+- **"Starting point" never named.** The answer, the headline, the summary and
+  the report say what it is: "PyVRP's own defaults", "the settings in
+  today.json" or "your starting settings".
+- **The re-check ignored the time limit, and "only more held-back cases"
+  left no next step.** The offer says what the study then takes against its
+  total ("about 32 min: more than its 30 min", and is then no longer the
+  primary button); an open answer names the next step.
+- **"1.24892e+06", "100000".** Values as people write them: 1,248,920.
+- **The step bar showed numbers only at narrow width.** Every step is named
+  (short names).
+- **"Keep fixed" or "Default"?** Said once above the settings; the two cost
+  measures say when they are equal; no "currency" unit.
+- **A false "fewer than 3 rounds" while typing 0 hours.** A total of zero is
+  not saved; the plan asks for a total instead.
+- **Installing the .zip said nothing lasting.** A note stays on the home page:
+  installed, and that the same version was built in.
+- **The plan did not say what "Tune only the 4" did.** It now does, above the
+  plan.
+- **Small ones.** The home card says "PyVRP · Tune solver settings" and a
+  result that was not confirmed is amber, not a green tick; the best column
+  is green or red by which way it went, not bold; the test run's "20.5 s"
+  is explained; the running page says in plain words when other programs
+  kept the computer busy; the expert dashboard no longer says "0 of 56 runs
+  shared it" when it means "busier throughout".
+- **Not changed.** The expert dashboard keeps the engine's words
+  (generations, `budget.max_hours`); "Open the report" opens a new tab where
+  the browser allows one.

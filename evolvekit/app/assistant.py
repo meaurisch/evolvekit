@@ -77,6 +77,8 @@ Rules:
 - A data change that alters what the solver sees (a lever over costs, weights or prizes) makes every
   KPI marked "changes_with_levers" meaningless: judge such a study by a KPI of the untouched request.
 - Names: lower case letters, digits and underscores; new names must not clash with existing ones.
+- A KPI with a "guard" does not count broken rules: when you propose it as the goal, also propose
+  its guard as a guardrail, unless the study has it already.
 - A goal has at most four levels in order of importance; every level but the last needs
   "equal_within" ("1 %" relative to the starting point, or a number in the KPI's unit).
 - When the request cannot be expressed with these tables, say so and return no cards.
@@ -132,7 +134,8 @@ def context(root: Path, study: Study, harness: Harness) -> str:
         "levers": {n: {"table": lv.table, "columns": dict(lv.columns), "modes": list(lv.modes), "code": lv.code,
                        "explain": lv.explain or lv.help} for n, lv in harness.levers.items()},
         "kpis": {n: {"label": k.label, "direction": k.direction, "unit": k.unit, "sql": k.sql,
-                     "changes_with_levers": k.changes_with_levers, "help": k.help} for n, k in harness.kpis.items()},
+                     "changes_with_levers": k.changes_with_levers, "help": k.help,
+                     **({"guard": k.guard} if k.guard else {})} for n, k in harness.kpis.items()},
         "kpi_templates": {n: {"label": t.label, "sql": t.sql, "params": list(t.params)} for n, t in harness.kpi_templates.items()},
     }
     so_far = study.to_yaml()

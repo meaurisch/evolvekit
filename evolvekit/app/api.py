@@ -104,12 +104,13 @@ def home(req: Request) -> dict[str, Any]:
     studies = []
     for slug in req.home.slugs():
         try:
-            root, study, _ = req.home.load(slug)
+            root, study, pinned = req.home.load(slug)
         except AppError as exc:
             studies.append({"slug": slug, "name": slug, "harness": "", "kind": "broken", "line": str(exc)})
             continue
         state = jobs.state_line(root, study, req.server.status_document)
-        studies.append({"slug": slug, "name": study.name, "harness": f"{study.harness_id} {study.harness_version}",
+        template = (pinned.templates.get(study.template) or {}).get("title") if study.template else None
+        studies.append({"slug": slug, "name": study.name, "harness": pinned.title + (f" · {template}" if template else ""),
                         **state, "updated_at": (root / "study.yaml").stat().st_mtime})
     studies.sort(key=lambda s: -float(s.get("updated_at") or 0))
     harnesses = []

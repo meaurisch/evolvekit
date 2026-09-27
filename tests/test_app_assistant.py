@@ -152,3 +152,15 @@ def test_cards_are_added_to_the_study_through_the_api(study):
         assert status == 200 and answer["cards"]
     finally:
         server.stop()
+
+
+def test_the_model_knows_which_goal_wants_a_guardrail(tmp_path):
+    home = Home(tmp_path / "home")
+    root = home.study_root(home.create_study("pyvrp", "tune", "Costs"))
+    from evolvekit.harness.manifest import load_harness
+
+    sent = assistant.context(root, load_study(root), load_harness(root / "harness"))
+    catalogues = json.loads(sent.split("## Catalogues\n")[1].split("\n\n## ")[0])
+    assert catalogues["kpis"]["real_cost"]["guard"] == {"kpi": "feasible", "min": 1.0}
+    assert "guard" not in catalogues["kpis"]["solver_cost"], "PyVRP's own cost prices broken rules already"
+    assert 'A KPI with a "guard"' in assistant.SYSTEM

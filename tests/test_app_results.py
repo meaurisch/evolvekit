@@ -4,6 +4,8 @@ failures, and a summary to paste -- on made-up runs, without running any."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from evolvekit.app import jobs
@@ -17,8 +19,8 @@ def comparison(ci, mean=2.0, cases=3, seeds=3):
             "per_candidate": {"c1": {"summary": {"n": cases, "mean": mean, "ci95": ci}}}}
 
 
-def words(ci, mean=2.0, what="settings", **job):
-    return jobs._final_words({"final": {"candidate": "c1", **job}}, comparison(ci, mean), GOAL, what)
+def words(ci, mean=2.0, what="settings", baseline="", **job):
+    return jobs._final_words({"final": {"candidate": "c1", **job}}, comparison(ci, mean), GOAL, what, baseline)
 
 
 def test_the_final_check_says_what_to_do():
@@ -35,6 +37,8 @@ def test_the_final_check_says_what_to_do():
     assert worse["advice"] == "Keep your current settings: the new settings did worse on cases the search never saw."
     assert words(None, 2.0)["advice"].startswith("Not sure: one held-back case is too few")
     assert words([-1.0, 2.0], what="data changes")["advice"].startswith("Keep your data as it is")
+    assert words([-1.0, 2.0], baseline="PyVRP's own defaults")["advice"] == \
+        "Keep your current settings (PyVRP's own defaults) for now: the gain is not proven.", "named, when it is known"
     kept = jobs._final_words({"final": {"skipped": "the starting point stayed the best: there is nothing to check"}},
                              None, GOAL, "settings")
     assert kept["advice"] == "Keep your current settings: the search found nothing better."
@@ -45,6 +49,11 @@ def test_an_open_answer_can_be_checked_again_with_twice_the_runs():
     assert offer["seeds"] == 6
     assert offer["seconds"] == pytest.approx(6 * 20.4), "2 sides x 3 cases x 3 more seeds, 3 at a time"
     assert offer["label"] == "Check again with 6 runs per case instead of 3 (about 2 min)"
+    budget = {**PLAN, "hours": 0.5}
+    within = jobs._recheck({"state": "unclear"}, budget, comparison([-1.0, 2.0]), used_s=25 * 60)
+    assert within["why"].startswith("The study then takes about 27 min of its 30 min.") and not within["over"]
+    over = jobs._recheck({"state": "unclear"}, budget, comparison([-1.0, 2.0]), used_s=29 * 60)
+    assert over["why"].startswith("The study then takes about 31 min: more than its 30 min.") and over["over"]
     assert jobs._recheck({"state": "confirmed"}, PLAN, comparison([1.0, 2.0])) is None, "a settled answer"
     assert jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=12)) is None, "no seeds left"
 
@@ -92,13 +101,33 @@ def test_a_summary_to_paste():
             {"name": "num_neighbours", "label": "Neighbours", "old_text": "50", "new_text": "50", "changed": False},
         ],
     }
+    data["context"]["compared_with"] = "PyVRP's own defaults"
     assert jobs._summary_text(data).splitlines() == [
         "PyVRP: tune solver settings (PyVRP), run 20260927-005503",
-        "Set-up: 20 s per case, 30 min in total; the search learned from 2 cases and was checked on 1 held-back case.",
-        "Result: " + data["headline"],
+        "Answer: Keep your current settings for now: the gain is not proven.",
+        "Set-up: 20 s per case, 30 min in total; the search learned from 2 cases and was checked on 1 held-back case."
+        " Compared with PyVRP's own defaults.",
+        "Search: " + data["headline"],
         "Final check: " + data["final"]["line"],
-        "Advice: Keep your current settings for now: the gain is not proven.",
         "What changed:",
         "- Highest penalty (max_penalty): 100000 -> 1087.78",
         "Tried, and kept as they were: num_neighbours.",
     ]
+
+
+def test_values_are_written_as_people_write_them():
+    assert [jobs._describe_value(v) for v in (1248920.0, 100000, 2455, 0.923184, 1087.78, True, False, 0.00001234)] == \
+        ["1,248,920", "100,000", "2,455", "0.923184", "1,087.78", "on", "off", "1.23e-05"]
+
+
+def test_the_starting_point_is_named():
+    from evolvekit.harness.manifest import load_harness
+    from evolvekit.harness.study import SettingChoice, Study
+
+    harness = load_harness(Path(__file__).resolve().parents[1] / "harnesses" / "pyvrp")
+    study = Study(name="x", harness_id="pyvrp", harness_version=harness.version)
+    study.settings = {"max_penalty": SettingChoice("tune")}
+    assert jobs._baseline(study, harness, {"params": {"max_penalty": 100000.0}}) == "PyVRP's own defaults"
+    assert jobs._baseline(study, harness, {"params": {"max_penalty": 5000.0}}) == "your starting settings"
+    study.inputs = {"solver_settings": "inputs/today.json"}
+    assert jobs._baseline(study, harness, {"params": {}}) == "the settings in today.json"

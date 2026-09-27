@@ -181,6 +181,8 @@ th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--hair
 th { font-size: 12px; font-weight: 650; color: var(--ink-2); text-transform: uppercase; letter-spacing: .04em; }
 td.n, th.n { text-align: right; }
 th.group { text-align: center; border-bottom: 0; padding-bottom: 0; }
+.answer { border-left: 4px solid var(--accent); } .answer[data-kind="good"] { border-left-color: var(--good); }
+.answer[data-kind="warn"] { border-left-color: var(--warning-fill); } .answer[data-kind="bad"] { border-left-color: var(--critical); }
 .up { color: var(--good-ink); font-weight: 600; } .down { color: var(--critical-ink); font-weight: 600; }
 h3 { font-size: 15px; margin: 18px 0 6px; } .card > h3:first-child { margin-top: 0; }
 
@@ -208,6 +210,7 @@ h3 { font-size: 15px; margin: 18px 0 6px; } .card > h3:first-child { margin-top:
 }
 .rail li a:hover { background: var(--surface); color: var(--ink); }
 .rail li a[aria-current="step"] { background: var(--accent-wash); color: var(--accent-ink); font-weight: 650; }
+.rail li a .ts { display: none; }
 .rail .dot { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; border: 1px solid var(--hair-strong); background: var(--surface); flex: none; }
 .rail .dot.ok { background: var(--good-wash); border-color: transparent; color: var(--good-ink); }
 .rail .dot.todo { background: var(--warning-wash); border-color: transparent; color: var(--warning); }
@@ -263,7 +266,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
   .rail ol { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
   .rail li a { white-space: nowrap; padding: 6px 8px; }
   .rail li a .t { display: none; }
-  .rail li a[aria-current="step"] .t { display: inline; }
+  .rail li a .ts { display: inline; font-size: 13px; }
   h1 { font-size: 22px; }
   .card { padding: 14px; }
   .crumbs .hide-small { display: none; }
@@ -453,7 +456,7 @@ async function renderHome() {
   const home = await api("GET", "/api/home");
   const hasKey = Object.values(home.keys || {}).some(Boolean);
   const studies = home.studies.length ? h("div", { class: "grid" }, home.studies.map((s) => {
-    const [kind, sym] = STATE_ICON[s.kind] || ["none", "info"];
+    const [kind, sym] = s.tone === "warn" ? ["warn", "warn"] : STATE_ICON[s.kind] || ["none", "info"];
     const stateEl = sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
       : h("span", { class: `status ${kind}` }, icon(sym), h("span", {}, s.line));
     return h("a", { class: "card study-card", href: studyLink(s) },
@@ -467,7 +470,7 @@ async function renderHome() {
   const zipPath = h("input", { type: "text", id: "harness-path", placeholder: "C:\\...\\pyvrp-1.0.0.zip" });
   const zipAdd = h("button", { class: "btn small", type: "button", onclick: () => guarded(async () => {
     const harness = await api("POST", "/api/harnesses", { path: zipPath.value.trim() });
-    toast(installedWords(harness)); renderHome();
+    installed = installedWords(harness); renderHome();
   }, zipAdd) }, "Install");
   const harnesses = h("div", { class: "grid" }, home.harnesses.map((x) => h("div", { class: "card" },
     h("div", { class: "row between" }, h("strong", {}, x.title || x.id), h("span", { class: "badge" + (x.built_in ? "" : " accent") }, x.problem ? "cannot be read" : (x.built_in ? "built in" : "installed") + (x.version ? " · " + x.version : ""))),
@@ -485,6 +488,7 @@ async function renderHome() {
     studies,
     h("h2", {}, "Applications you can tune"),
     h("p", { class: "lede" }, "A harness connects evolvekit to one application. Your colleagues who build them send them as .zip files."),
+    installed ? note("good", h("p", { style: "margin:0" }, installed)) : "",
     harnesses, h("div", { style: "margin-top:12px" }, drop),
     h("h2", {}, "The AI assistant"),
     hasKey ? note("good", h("p", { style: "margin:0" }, "A key is set: the assistant can help you write measures and data changes. ", h("a", { href: "#/settings" }, "Settings"))) :
@@ -519,16 +523,17 @@ async function droppedFiles(transfer) {
   return files;
 }
 
+let installed = "";  // what the last install did, said on the home page until the next one
 function installedWords(harness) {
-  if (harness.already === "built in") return `${harness.title} ${harness.version} was already built in, so it was ready to use: there was nothing to install.`;
-  if (harness.already === "installed") return `${harness.title} ${harness.version} was already installed; it is installed again.`;
-  return `${harness.title} ${harness.version} is installed and ready to use.`;
+  if (harness.already === "built in") return `Installed ${harness.title} ${harness.version} from the .zip. The same version was built in already; from now on your studies use the installed copy. Nothing else to do.`;
+  if (harness.already === "installed") return `${harness.title} ${harness.version} was installed already; it is installed again from the .zip. Nothing else to do.`;
+  return `Installed ${harness.title} ${harness.version}: it is ready to use.`;
 }
 async function installHarness(file) {
   if (!file) return;
   await guarded(async () => {
     const harness = await api("POST", `/api/harnesses?name=${encodeURIComponent(file.name)}`, await file.arrayBuffer());
-    toast(installedWords(harness));
+    installed = installedWords(harness);
     renderHome();
   });
 }
@@ -648,6 +653,7 @@ async function renderNew() {
 
 // ================================================================= a study
 const STEPS = ["Question", "Application", "Cases", "What may change", "Goal", "Limits and budget", "Review and start"];
+const STEPS_SHORT = ["Question", "Application", "Cases", "Changes", "Goal", "Limits", "Start"];
 let current = null;  // {slug, doc, harness, chat}
 
 // The open study. Whatever replaces its document -- a saved step, a case
@@ -732,7 +738,7 @@ function railFor(step) {
     const dot = h("span", { class: "dot" + (n === step ? "" : problems && n <= reached ? " todo" : done ? " ok" : "") },
       n !== step && problems && n <= reached ? "!" : done && n !== step ? "✓" : String(n));
     return h("li", {}, h("a", { href: `#/study/${slug}/${n}`, "aria-current": n === step ? "step" : null,
-      "aria-label": `Step ${n}: ${title}${problems && n <= reached ? ", needs attention" : done ? ", done" : ""}` }, dot, h("span", { class: "t" }, title)));
+      "aria-label": `Step ${n}: ${title}${problems && n <= reached ? ", needs attention" : done ? ", done" : ""}` }, dot, h("span", { class: "t" }, title), h("span", { class: "ts", "aria-hidden": "true" }, STEPS_SHORT[i])));
   })));
 }
 
@@ -1070,6 +1076,7 @@ async function step4(box) {
         h("div", { class: "row" },
           h("button", { class: "btn small", type: "button", onclick: (e) => guarded(() => saveVary(Object.fromEntries(harness.settings.filter((s) => s.recommended).map((s) => [s.name, "tune"]))), e.currentTarget) }, "Tune the recommended ones"),
           h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(() => saveVary({}), e.currentTarget) }, "Tune none"))),
+      h("p", { class: "faint", style: "margin:6px 0 0" }, `For each setting: Tune — the search tries values in its range. Keep fixed — always the value you give. Default — its value from your settings file, or else ${harness.title}'s own.`),
       input ? h("div", { class: "card", style: "margin-top:12px" },
         imported ? h("div", { class: "row between" }, status("good", `Starting from ${imported.replace("inputs/", "")}`),
           h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { current.doc = await api("DELETE", studyPath(`/inputs/${input}`)); drawAll(); }, e.currentTarget) }, "Remove"))
@@ -1455,17 +1462,21 @@ async function step6(box) {
   }
   async function save() {
     const total = Math.max(0, Number(hours.value) || 0) + Math.max(0, Math.min(59, Number(minutes.value) || 0)) / 60;
+    if (total <= 0) { planBox.replaceChildren(note("info", h("p", { style: "margin:0" }, "Give the study a total time: hours, minutes, or both."))); return; }
     await patch({ limits: { time_per_case_s: readNumber(time), retries: Number(retries.value), runs_per_case: Number(runs.value) },
       budget: { hours: Math.round(total * 10000) / 10000, ai: { enabled: ai.checked, max_usd: readNumber(usd) } } });
     await drawPlan();
   }
   for (const el of [time, retries, runs, hours, minutes, ai, usd]) el.addEventListener("change", () => guarded(save));
   time.addEventListener("input", explain);
+  let applied = "";  // what the last fix did, said above the plan
   async function drawPlan() {
     let plan;
     try { plan = await api("GET", studyPath("/plan")); } catch (err) { planBox.replaceChildren(note("warn", h("p", { style: "margin:0" }, err.message))); return; }
     const adjust = h("details", { style: "margin-top:10px" }, h("summary", {}, "Adjust (for experts)"), adjustForm(plan));
+    const said = applied; applied = "";
     planBox.replaceChildren(
+      said ? note("good", h("p", { style: "margin:0" }, said)) : "",
       plan.blocked ? note("bad", h("p", { style: "margin:0 0 6px" }, "With these choices the search gets fewer than 3 rounds, too few to learn anything. Any one of these would fix it:"),
         h("ul", { style: "margin:0; padding-left:18px" }, (plan.ways_out || []).map((w) => h("li", {}, w))))
         : note("info", h("p", { style: "margin:0" }, h("strong", {}, sentence(plan.summary))), plan.estimated ? h("p", { class: "small", style: "margin:4px 0 0" }, "An estimate: the preview has not measured a run yet.") : null),
@@ -1475,7 +1486,7 @@ async function step6(box) {
           h("button", { class: "btn small", type: "button", style: "flex:none", onclick: (e) => guarded(async () => {
             if (fix.kind === "fewer") {
               current.doc = await api("POST", studyPath("/tune-only"), { keep: fix.keep });
-              toast(`Now tuning ${plural(fix.keep.length, "setting")}.`);
+              applied = `Now tuning ${plural(fix.keep.length, "setting")}: ${fix.detail.split(":")[0]}. The others keep their starting values; step 4 shows them all.`;
             } else {
               hours.value = String(Math.floor(fix.hours)); minutes.value = String(Math.round((fix.hours % 1) * 60));
               await save(); return;
@@ -1555,7 +1566,7 @@ async function step7(box) {
     const r = state.result || {};
     if (state.state === "done" && r.ok) {
       testResult.replaceChildren(note(r.guardrails_hold ? "good" : "warn",
-        h("p", { style: "margin:0 0 4px" }, h("strong", {}, r.guardrails_hold ? "The test run worked." : "The test run worked, and the starting point breaks a guardrail."), ` ${r.case.replace("cases/", "")}, ${fmt(r.duration_s, 1)} s.`),
+        h("p", { style: "margin:0 0 4px" }, h("strong", {}, r.guardrails_hold ? "The test run worked." : "The test run worked, and the starting point breaks a guardrail."), ` ${r.case.replace("cases/", "")}, ${fmt(r.duration_s, 1)} s` + (harness.time_limit.accepts && r.duration_s > current.doc.study.limits.time_per_case_s ? ` — ${fmt(current.doc.study.limits.time_per_case_s)} s for ${harness.title} and a little more to start it and read the case.` : ".")),
         h("ul", { style: "margin:0; padding-left:18px" }, Object.entries(r.kpis || {}).filter(([k]) => current.doc.study.kpis[k]).map(([k, v]) => h("li", { class: "small" }, `${kpiLabel(k)}: ${fmt(v)} ${kpiUnit(k)}`)))));
     } else {
       testResult.replaceChildren(note("bad", h("p", { style: "margin:0 0 4px" }, h("strong", {}, "The test run found a problem:")),
@@ -1705,6 +1716,7 @@ async function renderRunning(slug) {
         chart(s.series)),
       s.now ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Right now"), h("p", {}, s.now)) : null,
       s.gated_line ? note("info", h("p", { style: "margin:0" }, s.gated_line)) : null,
+      s.busy_line ? note("info", h("p", { style: "margin:0" }, s.busy_line)) : null,
       s.failures.length ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Runs that failed"),
         s.failures.map((f) => h("div", { class: "item" }, h("span", { class: "badge" }, `${f.count}×`), h("div", { class: "body" }, h("div", { class: "what small" }, sentence(f.message)), h("div", { class: "muted small" }, f.todo))))) : null,
       h("div", { class: "step-foot" }, h("a", { class: "btn", href: s.dashboard, target: "_blank", rel: "noopener", title: "Every number the engine keeps, in its own words: for experts" }, "Detailed dashboard (for experts)"),
@@ -1725,6 +1737,13 @@ function change(pct, direction) {
   if (Math.abs(pct) < 0.05) return h("span", { class: "muted" }, "the same");
   const word = (pct > 0) === (direction === "lower") ? "lower" : "higher";
   return h("span", { class: pct > 0 ? "up" : "down" }, `${fmt(Math.abs(pct), 1)} % ${word}`);
+}
+
+function moved(start, best, direction) {
+  // The best value, green where it is better than the start and red where worse.
+  const text = fmt(best, 2);
+  if (typeof start !== "number" || typeof best !== "number" || fmt(start, 2) === text) return text;
+  return h("span", { class: (best < start) === (direction === "lower") ? "up" : "down" }, text);
 }
 
 function caseTable(rows, goal) {
@@ -1762,17 +1781,18 @@ async function renderResults(slug, run) {
       h("tr", {}, h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"), h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"))),
     h("tbody", {}, r.kpis.map((k) => h("tr", {},
       h("td", {}, k.says, k.help ? h("div", { class: "faint" }, k.help) : null, h("div", { class: "faint" }, `${k.direction === "lower" ? "lower" : "higher"} is better${unitOf(k)}`)),
-      h("td", { class: "n" }, fmt(k.training.start, 2)), h("td", { class: "n" }, h("strong", {}, fmt(k.training.best, 2))),
-      h("td", { class: "n" }, fmt(k.test.start, 2)), h("td", { class: "n" }, h("strong", {}, fmt(k.test.best, 2))))))));
+      h("td", { class: "n" }, fmt(k.training.start, 2)), h("td", { class: "n" }, moved(k.training.start, k.training.best, k.direction)),
+      h("td", { class: "n" }, fmt(k.test.start, 2)), h("td", { class: "n" }, moved(k.test.start, k.test.best, k.direction)))))));
   const changed = h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {}, h("tr", {}, h("th", {}, "What"), h("th", {}, "Before"), h("th", {}, "Now"))),
     h("tbody", {}, r.changed.map((c) => h("tr", {}, h("td", {}, c.label, h("div", { class: "faint" }, c.help)), h("td", { class: "num" }, c.old_text), h("td", { class: "num" }, c.changed ? h("strong", {}, c.new_text) : c.new_text))))));
   const recheck = r.final.recheck ? h("div", { style: "margin-top:12px" },
-    h("button", { class: "btn primary", type: "button", onclick: (e) => guarded(async () => {
+    h("button", { class: "btn" + (r.final.recheck.over ? "" : " primary"), type: "button", onclick: (e) => guarded(async () => {
       await api("POST", studyPath("/final-check" + runQuery), { seeds: r.final.recheck.seeds });
       toast("The final check runs again."); location.hash = `#/study/${slug}/running`;
     }, e.currentTarget) }, r.final.recheck.label),
     h("p", { class: "faint", style: "margin:6px 0 0" }, r.final.recheck.why)) : null;
+  const next = r.final.next ? h("p", { class: "small", style: "margin:10px 0 0" }, r.final.next) : null;
   const byCase = [];
   if (r.by_case.held.length) byCase.push(h("h3", {}, "Held-back cases"), caseTable(r.by_case.held, r.goal));
   if (r.by_case.learned.length) byCase.push(h("h3", {}, "Cases the search learned from"), caseTable(r.by_case.learned, r.goal));
@@ -1790,7 +1810,7 @@ async function renderResults(slug, run) {
   }, e.currentTarget) }, "Show the settings") : null;
   const report = h("a", { class: "btn", href: `${studyPath("/download/report")}${runQuery}&view=1`, target: "_blank", rel: "noopener" }, "Open the report");
   const downloads = h("div", { class: "row" }, r.downloads.map((d) => h("a", { class: "btn small" + (d.name === "settings_json" || d.name === "data_changes" ? " primary" : ""), href: `${studyPath("/download/" + d.name)}${runQuery}`, download: "" }, d.label)));
-  const next = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
+  const again = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
     const doc = await api("POST", studyPath(`/next${runQuery}`), { name: `${current.doc.study.name} (next)` });
     location.hash = `#/study/${doc.slug}/4`;
   }, e.currentTarget) }, "Start a new study from this result");
@@ -1798,18 +1818,22 @@ async function renderResults(slug, run) {
   view.replaceChildren(h("div", { class: "narrow" },
     h("h1", {}, r.study),
     running ? note("info", h("p", { style: "margin:0" }, "The study is still running; these are the results so far. ", h("a", { href: `#/study/${slug}/running` }, "See it run"))) : null,
-    h("div", { class: "card" }, h("p", { class: "big", style: "margin:0" }, r.headline),
-      r.final.advice ? h("div", { style: "margin-top:12px" }, status(finalKind === "info" ? "info" : finalKind, r.final.advice)) : null),
+    r.final.advice ? h("div", { class: "card answer", "data-kind": finalKind },
+      h("div", { class: "faint" }, "The answer"),
+      h("p", { class: "big", style: "margin:4px 0 0" }, r.final.advice),
+      h("p", { class: "muted", style: "margin:10px 0 0" }, r.headline))
+      : h("div", { class: "card" }, h("p", { class: "big", style: "margin:0" }, r.headline)),
     h("div", { class: "facts", style: "margin-top:14px" },
       h("div", { class: "fact" }, h("div", { class: "k" }, "Time per case"), h("div", { class: "v" }, duration(ctx.time_per_case_s))),
       h("div", { class: "fact" }, h("div", { class: "k" }, "Time for the study"), h("div", { class: "v" }, duration(ctx.hours * 3600))),
       h("div", { class: "fact" }, h("div", { class: "k" }, "Combinations tried"), h("div", { class: "v" }, String(ctx.tried))),
+      ctx.compared_with ? h("div", { class: "fact" }, h("div", { class: "k" }, "Compared with"), h("div", { class: "v", style: "font-size:16px" }, capital(ctx.compared_with))) : null,
       ctx.took ? h("div", { class: "fact" }, h("div", { class: "k" }, "It took"), h("div", { class: "v" }, ctx.took)) : null),
     h("h2", {}, "The final check"),
     h("div", { class: "card" }, status(finalKind, finalWord), h("p", { style: "margin:8px 0 0" }, r.final.line),
       r.final.levels ? h("ul", { class: "small" }, r.final.levels.map((l) => h("li", {}, `${kpiLabel(l.kpi)}: ${l.verdict || l.state || ""}`))) : null,
       r.final.seeds ? h("p", { class: "faint", style: "margin:6px 0 0" }, `The best and your starting point, each run ${r.final.seeds === 1 ? "once" : r.final.seeds + " times"} on every held-back case — cases the search never saw.`) : null,
-      recheck),
+      recheck, next),
     byCase.length ? h("h2", {}, `${capital(r.goal.label || r.goal.says)}, case by case`) : null,
     byCase.length ? h("div", { class: "card" }, byCase) : null,
     h("h2", {}, "Every measure"), h("div", { class: "card" }, kpiTable,
@@ -1819,7 +1843,7 @@ async function renderResults(slug, run) {
       h("p", { class: "muted", style: "margin-top:0" }, "The summary says how the study was set up, what it found, how sure that is and what changed — ready to paste into a message. The report says the same on one page, with every number."),
       h("div", { class: "row" }, summary, report, settingsButton), shown,
       h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads),
-    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), next)));
+    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again)));
 }
 
 route();

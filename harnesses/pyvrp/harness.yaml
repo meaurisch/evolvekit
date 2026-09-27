@@ -551,18 +551,17 @@ levers:
 kpis:
   solver_cost:
     label: Cost as PyVRP counts it
-    unit: currency
     direction: lower
     positive: true
     changes_with_levers: true
     help: >
       The plan's cost at the rates PyVRP was given (your real rates, unless the study changes them),
       where a plan that breaks a rule counts as dearer than any plan that keeps them all. It is what
-      PyVRP itself makes as low as it can.
+      PyVRP itself makes as low as it can. When the study changes no rates, it equals Real cost for
+      every plan that keeps the rules.
     sql: "SELECT solver_objective FROM summary"
   real_cost:
     label: Real cost
-    unit: currency
     direction: lower
     positive: true
     help: >

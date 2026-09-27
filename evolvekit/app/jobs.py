@@ -288,6 +288,30 @@ def _what(study: Study) -> str:
     return "combination of settings and data changes" if settings and data else "data changes" if data else "settings"
 
 
+def _baseline(study: Study, harness: Harness, seed: dict[str, Any] | None) -> str:
+    """What the starting point is, in words: "PyVRP's own defaults", "the
+    settings in today.json", "the data as it is", or both."""
+    parts = []
+    settings_input = next((n for n, s in harness.inputs.items() if s.provides == "settings"), None)
+    params = (seed or {}).get("params") or {}
+    if study.tuned_settings() or not study.data:
+        if settings_input and study.inputs.get(settings_input):
+            parts.append(f"the settings in {Path(study.inputs[settings_input]).name}")
+        elif any(c.mode == "fixed" for c in study.settings.values()) or any(
+                name in harness.settings and value != harness.settings[name].parameter.default
+                for name, value in params.items()):
+            parts.append("your starting settings")
+        else:
+            parts.append(f"{harness.title}'s own defaults")
+    if study.data:
+        neutral = all(
+            (change.mode == "scale" and params.get(name, change.start) == 1)
+            or (change.mode == "add" and params.get(name, change.start) == 0)
+            for name, change in study.data.items())
+        parts.append("the data as it is" if neutral else "your starting data changes")
+    return " and ".join(parts)
+
+
 def _rows(run_dir: Path) -> list[dict[str, Any]]:
     return list(read_jsonl(run_dir / "runs.jsonl"))
 
@@ -357,12 +381,20 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     improvement = (progress.get("improvement") or {})
     pct, verdict = improvement.get("pct"), improvement.get("verdict")
     better = _better_word(goal["direction"])
+    seed, _ = _seed_and_best(run_dir, document) if document else (None, None)
+    start_words = f"the starting point ({_baseline(study, harness, seed)})"
+    runs = study.limits.runs_per_case
+    learned = (f"on the {len(study.training)} case{'s' if len(study.training) != 1 else ''} the search learns from "
+               f"({'one run' if runs == 1 else f'{runs} runs'} each)")
     if pct is None or verdict in ("none", None) or (pct or 0) <= 0:
-        best_line = "No combination beat the starting point." if finished else "No combination has beaten the starting point yet."
+        best_line = (f"No combination beat {start_words}." if finished
+                     else f"No combination has beaten {start_words} yet.")
     else:
-        noise = {"clear": "clearly better", "within noise": "within the noise so far", "worse": "worse",
-                 "unknown": "too early to tell"}.get(str(verdict), str(verdict))
-        best_line = f"{_pct(pct)} {better} {goal['says']} than the starting point ({noise})."
+        # Only the final check says whether it is better: the search picks
+        # what did best on its own cases, which flatters it.
+        best_line = (f"So far {_pct(pct)} {better} {goal['says']} than {start_words}, {learned}. "
+                     + ("Whether that holds on cases the search never saw, the final check tells."
+                        if not finished else "The results say whether it held on the cases the search never saw."))
     levels = (progress.get("levels") or {})
     series = [[s.get("elapsed_s"), s.get("improvement_pct")] for s in progress.get("series") or []
               if s.get("elapsed_s") is not None]
@@ -394,6 +426,8 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "failed": "It failed: " + str(job.get("error") or "no reason recorded") + ".",
     }
     gated = sum(1 for r in _rows(run_dir) if r.get("gated"))
+    host = health.get("host") or {}
+    busy = host.get("available") and any(s.get("flagged") or s.get("busier_throughout") for s in host.get("stages") or [])
     return {
         "run": run,
         "phase": job.get("phase"),
@@ -413,6 +447,8 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "gated": gated,
         "gated_line": (f"{gated} combination{'s' if gated != 1 else ''} broke a guardrail and {'do' if gated != 1 else 'does'} not count."
                        if gated else ""),
+        "busy_line": ("Other programs kept this computer busy during the study. A run with a time limit then finds a "
+                      "little less than it would alone, so close heavy programs while a study runs." if busy else ""),
         "final": job.get("final"),
         "can_check": bool(job.get("search")) and job.get("phase") in ("stopped", "failed") and bool(study.test),
         "dashboard": f"/studies/{root.name}/runs/{run}/dashboard/",
@@ -516,13 +552,16 @@ def _span(low: float, high: float) -> str:
     return f"somewhere between {-low:.1f} % worse and {high:.1f} % better"
 
 
-def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str) -> dict[str, Any]:
+def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str,
+                 baseline: str = "") -> dict[str, Any]:
     """The final check in a sentence, and what to do about it in another."""
     final = job.get("final") or {}
     new = f"the new {what}"
     they = "it is" if what.startswith("combination") else "they are"
     keep = {"settings": "Keep your current settings", "data changes": "Keep your data as it is"}.get(
         what, "Keep your current settings and data")
+    if baseline and what != "data changes":
+        keep += f" ({baseline})"
     if final.get("skipped"):
         reason = str(final["skipped"])
         advice = (f"{keep}: the search found nothing better." if "starting point stayed the best" in reason else
@@ -577,9 +616,11 @@ def _runs_word(count: int) -> str:
     return f"{count} run{'s' if count != 1 else ''}"
 
 
-def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, Any] | None) -> dict[str, Any] | None:
+def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, Any] | None,
+             used_s: float | None = None) -> dict[str, Any] | None:
     """A final check with twice the runs per case, where that could still
-    settle an open answer. The runs done are kept, so it only adds runs."""
+    settle an open answer. The runs done are kept, so it only adds runs; what
+    it adds is said against the study's total time."""
     if comparison is None or final.get("state") not in ("unclear", "worse"):
         return None
     have = len(comparison.get("seeds") or [])
@@ -588,17 +629,27 @@ def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, 
         return None
     runs = 2 * len(comparison.get("instances") or []) * (want - have)
     seconds = math.ceil(runs / max(1, int(plan.get("workers") or 1))) * float(plan.get("run_s") or 60.0)
-    return {"seeds": want, "seconds": seconds,
+    budget = float(plan.get("hours") or 0) * 3600
+    time = ""
+    if used_s is not None and budget:
+        after = used_s + seconds
+        time = (f"The study then takes about {_duration(after)} of its {_duration(budget)}." if after <= budget
+                else f"The study then takes about {_duration(after)}: more than its {_duration(budget)}.")
+    return {"seeds": want, "seconds": seconds, "over": bool(time) and used_s + seconds > budget,
             "label": f"Check again with {_runs_word(want)} per case instead of {have} (about {_duration(seconds)})",
-            "why": "More runs per case smooth out luck; the runs already done are kept. "
-                   "Only more held-back cases make the answer firmer than that."}
+            "why": (time + " " if time else "") + "More runs per case smooth out luck; the runs already done are kept."}
 
 
 def _describe_value(value: Any) -> str:
+    """A setting's value as people write it: on/off, 1,248,920, 0.923184."""
     if isinstance(value, bool):
         return "on" if value else "off"
-    if isinstance(value, float):
-        return f"{value:.6g}"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float) and math.isfinite(value):
+        if value == int(value) and abs(value) < 1e15:
+            return f"{int(value):,}"
+        return f"{value:,.6g}" if abs(value) >= 1e-4 else f"{value:.3g}"
     return str(value)
 
 
@@ -628,16 +679,17 @@ def _summary_text(data: dict[str, Any]) -> str:
     """The result as plain text to paste into a message."""
     context, final = data["context"], data["final"]
     learned, held = data["cases"]["training"], data["cases"]["test"]
-    lines = [
-        f"{data['study']} ({data['harness']}), run {data['run']}",
+    lines = [f"{data['study']} ({data['harness']}), run {data['run']}"]
+    if final.get("advice"):
+        lines.append(f"Answer: {final['advice']}")
+    lines += [
         f"Set-up: {_number(context['time_per_case_s'])} s per case, {_duration(context['hours'] * 3600)} in total; "
         f"the search learned from {len(learned)} case{'s' if len(learned) != 1 else ''}"
-        + (f" and was checked on {len(held)} held-back case{'s' if len(held) != 1 else ''}" if held else "") + ".",
-        f"Result: {data['headline']}",
+        + (f" and was checked on {len(held)} held-back case{'s' if len(held) != 1 else ''}" if held else "") + "."
+        + (f" Compared with {context['compared_with']}." if context.get("compared_with") else ""),
+        f"Search: {data['headline']}",
         f"Final check: {final['line']}",
     ]
-    if final.get("advice"):
-        lines.append(f"Advice: {final['advice']}")
     changed = [c for c in data["changed"] if c["changed"]]
     kept = [c for c in data["changed"] if not c["changed"]]
     if changed:
@@ -660,20 +712,27 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     pct = improvement.get("pct")
     what = _what(study)
     learned = "on the cases the search learned from"
+    start_words = f"your starting point ({_baseline(study, harness, seed)})"
     if best is None or seed is None:
         headline = "The search has no finished result yet."
     elif best.get("id") == seed.get("id") or not pct or pct <= 0:
-        headline = f"No {what} found beat your starting point {learned}."
+        headline = f"No {what} found beat {start_words} {learned}."
     else:
         headline = (f"The best {what} found give{'s' if what.startswith('combination') else ''} {_pct(pct)} "
-                    f"{_better_word(goal['direction'])} {goal['says']} than your starting point {learned}.")
+                    f"{_better_word(goal['direction'])} {goal['says']} than {start_words} {learned}.")
     final_state = job.get("final") or {}
     comparison, check_runs = None, []
     if final_state.get("comparison"):
         comparison = _read(run_dir / final_state["comparison"])
         check_runs = _read_list((run_dir / final_state["comparison"]).parent / "results.json")
-    final = _final_words(job, comparison, goal, what)
-    final["recheck"] = _recheck(final, plan, comparison) if job.get("phase") == "done" else None
+    baseline = _baseline(study, harness, seed)
+    started, finished = _started(job, run_dir), job.get("finished_at")
+    used_s = (datetime.fromisoformat(finished) - started).total_seconds() if started and finished else None
+    final = _final_words(job, comparison, goal, what, baseline)
+    final["recheck"] = _recheck(final, plan, comparison, used_s) if job.get("phase") == "done" else None
+    if final.get("state") in ("unclear", "worse", "single"):
+        final["next"] = ("For a firmer answer: bring more cases (other days or weeks) and start a new study from "
+                         "this result that holds more of them back.")
     candidate = str(final_state.get("candidate") or "")
     held_start, held_best = _means(_paired(check_runs, BASELINE, candidate)) if candidate else ({}, {})
     seed_id, best_id = str((seed or {}).get("id") or ""), str((best or {}).get("id") or "")
@@ -726,14 +785,14 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     downloads = [{"name": name, "label": export.label} for name, export in harness.exports.items() if export.applies_to in kinds]
     downloads.append({"name": "report", "label": "The report as a file (report.html)"})
     compiled = _read(run_dir / STUDY_RUN) or {}
-    started, finished = _started(job, run_dir), job.get("finished_at")
     context = {
         "time_per_case_s": float(compiled.get("time_limit_s") or study.limits.time_per_case_s),
         "hours": float(plan.get("hours") or study.budget.hours),
         "runs_per_case": study.limits.runs_per_case,
         "tried": sum(1 for r in _rows(run_dir) if not r.get("rejected")),
         "started_at": started.astimezone().strftime("%Y-%m-%d %H:%M") if started else None,
-        "took": _duration((datetime.fromisoformat(finished) - started).total_seconds()) if started and finished else None,
+        "took": _duration(used_s) if used_s is not None else None,
+        "compared_with": baseline,
     }
     data = {
         "run": run, "phase": job.get("phase"), "study": study.name, "harness": harness.title,
@@ -966,7 +1025,7 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
         if final.get("confirmed"):
             amount = f" {_pct(mean)} {_better_word(goal['direction'])} {goal['says']}" if isinstance(mean, (int, float)) else ""
             return {"kind": "finished", "run": run_dir.name, "line": "finished · confirmed" + amount}
-        return {"kind": "finished", "run": run_dir.name, "line": "finished · not confirmed on the held-back cases"}
+        return {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not confirmed on the held-back cases"}
     if state == "stopped":
         return {"kind": "stopped", "run": run_dir.name, "line": "stopped"}
     return {"kind": "failed", "run": run_dir.name, "line": "failed · " + str(job.get("error") or "see the run")[:80]}

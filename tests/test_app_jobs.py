@@ -5,6 +5,7 @@ test run, start, status, results, every download, a study from the result."""
 
 from __future__ import annotations
 
+import html
 import http.client
 import json
 import time
@@ -121,7 +122,7 @@ def test_a_run_from_start_to_results_and_downloads(app, tmp_path):
     status, flags = call(app, "GET", f"/api/studies/{slug}/download/settings_flags")
     assert status == 200 and b"--neighbours" in flags
     status, report = call(app, "GET", f"/api/studies/{slug}/download/report")
-    assert status == 200 and results["headline"].encode() in report and b"</html>" in report
+    assert status == 200 and html.escape(results["headline"]).encode() in report and b"</html>" in report
     assert _disposition(app, f"/api/studies/{slug}/download/report").startswith("attachment;")
     assert _disposition(app, f"/api/studies/{slug}/download/report?view=1") == "", "?view=1 opens it in the browser"
     assert results["summary_text"].startswith("Tours (") and results["headline"] in results["summary_text"]
