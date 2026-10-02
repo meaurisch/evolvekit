@@ -17,7 +17,7 @@ dependencies = [
 entra = ["azure-identity>=1.25.3"]
 # ruff is bounded: a new release may add findings to the checked rules, and
 # CI should not turn red without a code change. Raise the bound on purpose.
-dev = ["pytest>=9.1.1", "ruff>=0.6,<0.17"]
+dev = ["pytest>=9.1.1", "ruff>=0.16.9,<0.17"]
 # The PyVRP configuration-search example only. The core suite never imports
 # pyvrp: tests/test_pyvrp_example.py is skipped when it is absent.
 pyvrp = ["pyvrp>=0.14"]
