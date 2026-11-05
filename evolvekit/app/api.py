@@ -466,8 +466,12 @@ def _run(req: Request, root: Path) -> str:
 
 
 def start(req: Request) -> dict[str, Any]:
+    """A new run; with a body `{"resume": "<run>"}`, that run again from where it stopped."""
     root, _, _ = req.home.load(req.params["slug"])
-    return jobs.start(req.home, root)
+    resume = req.json().get("resume")
+    if resume is not None and not isinstance(resume, str):
+        raise AppError("resume: the name of a run")
+    return jobs.start(req.home, root, resume=resume)
 
 
 def stop(req: Request) -> dict[str, Any]:

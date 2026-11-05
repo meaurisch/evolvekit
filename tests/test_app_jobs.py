@@ -248,3 +248,45 @@ def test_a_run_stopped_before_it_began_offers_no_final_check(app):
     status, answer = call(app, "GET", f"/api/studies/{slug}/status")
     assert status == 200 and answer["phase"] == "stopped" and answer["can_check"] is False, answer
     assert answer["sentence"] == "Stopped. stopped on request before the search began."
+    assert answer["can_resume"] is False, "nothing was searched: there is nothing to continue from"
+
+
+# -- a run that died resumes where it was
+
+
+@pytest.mark.slow
+def test_the_app_offers_to_continue_a_run_that_died(app):
+    slug = _ready_study(app, "Continue me")
+    call(app, "PATCH", f"/api/studies/{slug}", {"plan": {"auto": False, "children": 2, "generations": 4}})
+    status, started = call(app, "POST", f"/api/studies/{slug}/start")
+    assert status == 200 and "resumed" not in started
+    _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] == "search" and b["rounds"]["done"] >= 1, timeout=120)
+    call(app, "POST", f"/api/studies/{slug}/stop")
+    s = _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] in ("done", "failed", "stopped"), timeout=120)
+    assert s["phase"] == "stopped" and s["can_resume"] is True, s
+    status, body = call(app, "POST", f"/api/studies/{slug}/start", {"resume": s["run"]})
+    assert status == 200 and body == {"run": s["run"], "resumed": True}
+    status, again = call(app, "POST", f"/api/studies/{slug}/start", {"resume": s["run"]})
+    assert status == 409, "it is running again: not twice"
+    final = _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] in ("done", "failed"), timeout=180)
+    assert final["phase"] == "done" and final["can_resume"] is False, final
+    assert final["rounds"]["done"] == 4 and final["time"]["used_s"] > 0
+    listed = call(app, "GET", f"/api/studies/{slug}")[1]["runs"]
+    assert [r["id"] for r in listed] == [s["run"]], "the same run, continued: not a second one"
+
+
+def test_a_resumed_run_is_starting_while_its_job_is_still_the_old_one(tmp_path):
+    # Between the launch of the resume and the first word of the new process,
+    # job.json still says the old run ended; the live, younger launch says it
+    # is starting again -- so nothing launches it twice meanwhile.
+    run_dir = tmp_path / "runs" / "r"; run_dir.mkdir(parents=True)
+    now = utc_now()
+    (run_dir / "job.json").write_text(json.dumps({"phase": "stopped", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00",
+                                                   "finished_at": "2026-01-01T00:10:00+00:00", "search": {"generations": 1}}), encoding="utf-8")
+    (run_dir / "launch.json").write_text(json.dumps({"pid": os.getpid(), "started_at": now, "host": socket.gethostname()}), encoding="utf-8")
+    seen = jobs.phase(run_dir)
+    assert seen["phase"] == "starting" and seen["started_at"] == "2026-01-01T00:00:00+00:00", seen
+    assert jobs.running(tmp_path) is True
+    # The launch that wrote the old job is the old process itself: not a resume.
+    (run_dir / "launch.json").write_text(json.dumps({"pid": 2 ** 22 + 7, "started_at": now, "host": socket.gethostname()}), encoding="utf-8")
+    assert jobs.phase(run_dir)["phase"] == "stopped"

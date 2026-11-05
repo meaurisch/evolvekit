@@ -1769,7 +1769,9 @@ async function renderRunning(slug) {
         running ? stop : h("div", { class: "row" },
           s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check")); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
           s.phase === "failed" ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start")); toast("Started again."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Start it again") : null,
-          s.phase === "failed" && !s.rounds.done ? null : h("a", { class: "btn primary", href: `#/study/${slug}/results` }, "See the results"))));
+          // A run that stopped or died with rounds of its plan left goes on from where it was: the same run, nothing done twice.
+          s.can_resume ? h("button", { class: "btn primary", type: "button", title: "The rounds already done are kept; the search finishes the rest, then the final check runs", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start"), { resume: s.run }); toast("Continuing where it stopped."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Continue where it stopped") : null,
+          s.phase === "failed" && !s.rounds.done ? null : h("a", { class: s.can_resume ? "btn" : "btn primary", href: `#/study/${slug}/results` }, "See the results"))));
     if (!running) clearTimers();
   }
   await draw();

@@ -40,8 +40,8 @@ from evolvekit.ledger import read_jsonl
 from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
-__all__ = ["download", "latest_run", "next_study", "phase", "report_html", "results", "resume_final_check",
-           "run_alive", "running", "runs", "start", "state_line", "status", "stop"]
+__all__ = ["can_resume", "download", "latest_run", "next_study", "phase", "report_html", "results",
+           "resume_final_check", "run_alive", "running", "runs", "start", "state_line", "status", "stop"]
 
 LAUNCH = "launch.json"
 MODELS = "models.json"
@@ -154,6 +154,11 @@ def phase(run_dir: Path) -> dict[str, Any]:
         return {**job, "phase": "failed",
                 "error": "the run's process ended without finishing: it was ended from outside, or the computer "
                          f"restarted. The last thing it wrote: {_log_tail(run_dir, 1)}"}
+    if (job.get("phase") in ("done", "stopped", "failed") and launch.get("pid") and launch.get("pid") != job.get("pid")
+            and run_alive(run_dir, launch.get("pid"), launch.get("started_at"), launch.get("host"))):
+        # Resumed (the search, or the final check): a younger process than the
+        # one that wrote the job is up, and has not written its first word yet.
+        return {"phase": "starting", "started_at": job.get("started_at"), "plan": job.get("plan")}
     return job
 
 
@@ -232,9 +237,32 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str]) -> int:
     return pid
 
 
-def start(home: Any, root: Path) -> dict[str, Any]:
+def can_resume(run_dir: Path, job: dict[str, Any]) -> bool:
+    """Whether a run can go on where it stopped: it ended (stopped, or its
+    process died) with a search on record that has rounds of its plan left.
+    A run that never searched, or searched to the end, starts again instead;
+    a check that stopped is `resume_final_check`'s."""
+    if job.get("phase") not in ("failed", "stopped") or not (run_dir / "runs.jsonl").is_file():
+        return False
+    search = job.get("search") or {}
+    planned = int(_plan(run_dir, job).get("generations") or 0)
+    return not search or int(search.get("generations") or 0) < planned
+
+
+def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]:
+    """Start the study: a new run, or with `resume` the run of that name
+    again from where it stopped (`job.py --resume`). A stop request left in
+    the run directory is removed first: it was answered, and the resume is
+    not to answer it again."""
     if running(root):
         raise AppError("the study is already running", 409)
+    if resume is not None:
+        run_dir = _run_dir(root, resume)
+        if not can_resume(run_dir, phase(run_dir)):
+            raise AppError("this run cannot be continued: start the study again", 409)
+        (run_dir / STOP_REQUEST).unlink(missing_ok=True)
+        _launch(home, root, run_dir, ["--resume"])
+        return {"run": resume, "resumed": True}
     study, harness = load_study(root), load_harness(root / "harness")
     problems = study_problems(study, harness, root=root)
     if problems:
@@ -480,7 +508,8 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
 
     sentences = {
         "starting": "Starting.",
-        "search": "Searching for better " + _what(study) + ".",
+        "search": ("Searching again, from where it stopped." if job.get("resumed_at")
+                   else "Searching for better " + _what(study) + "."),
         "check": "Checking the best on the cases the search never saw.",
         "done": "Finished.",
         "stopped": "Stopped." + (f" {job['search'].get('stop_reason')}." if (job.get("search") or {}).get("stop_reason") else ""),
@@ -514,6 +543,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         # A run stopped before its search began has a `search` but no runs, and nothing to check.
         "can_check": (bool(job.get("search")) and job.get("phase") in ("stopped", "failed") and bool(study.test)
                       and (run_dir / "runs.jsonl").is_file()),
+        "can_resume": can_resume(run_dir, job),
         "dashboard": f"/studies/{root.name}/runs/{run}/dashboard/",
     }
 

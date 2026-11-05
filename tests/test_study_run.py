@@ -15,10 +15,13 @@ from types import SimpleNamespace
 import pytest
 
 from evolvekit.confirm import paired_summary
-from evolvekit.harness.execute import Job, _extend_check, final_check, preview, read_job, read_preview, run_study, run_test
+from evolvekit.harness.execute import (
+    Job, _extend_check, final_check, preview, read_job, read_preview, resume_study, run_study, run_test,
+)
 from evolvekit.harness.library import create_study
 from evolvekit.harness.plan import CHECK_SEEDS, Plan
 from evolvekit.harness.study import Guardrail, load_study, save_study
+from evolvekit.ledger import read_jsonl
 from evolvekit.stopping import STOP_REQUEST
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,6 +172,37 @@ def test_a_stop_before_the_run_began_ends_it_without_a_search(tmp_path):
     job = run_study(folder, "r3", log=lambda _m: None)
     assert job["phase"] == "stopped" and job["search"]["stop_reason"] == "stopped on request before the search began"
     assert not (run_dir / "runs.jsonl").exists() and time.monotonic() - began < 5
+
+
+@pytest.mark.slow
+def test_a_stopped_search_is_resumed_to_the_end_of_its_plan(tmp_path):
+    folder = _study(tmp_path, hours=0.05)
+    _fix_plan(folder, generations=4)
+    run_dir = folder / "runs" / "r4"
+
+    def request_stop() -> None:
+        # Once a round after the starting point is on record, so the stop lands
+        # in the middle of the next one: that is what a resume picks up from.
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            rows = list(read_jsonl(run_dir / "runs.jsonl"))
+            if any(int(r.get("generation") or 0) >= 1 for r in rows):
+                (run_dir / STOP_REQUEST).write_text("stop", encoding="utf-8")
+                return
+            time.sleep(0.1)
+
+    stopper = threading.Thread(target=request_stop)
+    stopper.start()
+    job = run_study(folder, "r4", log=lambda _m: None)
+    stopper.join()
+    assert job["phase"] == "stopped" and job["search"]["stop_reason"] == "stopped on request", job
+    assert 1 <= job["search"]["generations"] < 4, job["search"]
+    resumed = resume_study(folder, "r4", log=lambda _m: None)
+    assert resumed["phase"] == "done", resumed
+    assert resumed["search"]["generations"] == 4, "the plan's rounds in all, not the rounds of the second session"
+    assert resumed["resumed_at"] and resumed["final"]
+    assert resumed["started_at"] == job["started_at"], "the time budget counts from the first start"
+    assert read_job(run_dir) == resumed
 
 
 # -- the check adds runs on its own ----------------------------------------

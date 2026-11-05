@@ -67,6 +67,7 @@ __all__ = [
     "preview",
     "read_job",
     "read_preview",
+    "resume_study",
     "run_study",
     "run_study_of",
     "runner_command",
@@ -390,10 +391,7 @@ def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
     job = Job.resume(run_dir, state, "check")
     # The run's own numbers, so a resumed check adds runs by the same measure
     # the run did; with explicit `seeds` the check does exactly that many.
-    plan = replace(
-        Plan.fixed(), check_seeds=checks, workers=max(1, int(stored.get("workers") or 1)),
-        run_s=float(stored.get("run_s") or 1.0), hours=float(stored.get("hours") or 0.0), test_cases=len(study.test),
-    )
+    plan = _check_plan(stored, study, check_seeds=checks)
     try:
         config = load_config(run_dir / CONFIG)
         _final_check(study, plan, config, run_dir, job, log, extend=seeds is None)
@@ -401,6 +399,82 @@ def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
         job.finish("failed", error=f"{type(exc).__name__}: {exc}")
         raise
     return job.state
+
+
+def _check_plan(stored: dict[str, Any], study: Study, *, check_seeds: int | None = None) -> Plan:
+    """The plan a run was started with, as far as the final check reads it
+    (`plan.json`, or the copy in `job.json`): its runs per case, workers,
+    time per run and hours. The rest of the plan is the search's, and the
+    compiled `evolvekit.yaml` already holds that."""
+    seeds = int(check_seeds or stored.get("check_seeds") or DEFAULT_CHECK_SEEDS)
+    return replace(
+        Plan.fixed(), check_seeds=seeds, workers=max(1, int(stored.get("workers") or 1)),
+        run_s=float(stored.get("run_s") or 1.0), hours=float(stored.get("hours") or 0.0), test_cases=len(study.test),
+    )
+
+
+def resume_study(
+    root: str | Path,
+    run_id: str,
+    *,
+    models: dict[str, Any] | None = None,
+    log: Callable[[str], None] = print,
+) -> dict[str, Any]:
+    """A run that stopped or died during its search, continued on the same
+    directory: the engine rebuilds its archive from `runs.jsonl`, charges
+    what the run already spent, and finishes the generations the plan holds
+    -- the ones it did are not done again; then the final check, exactly as
+    `run_study` does it. `job.json` keeps the run's first `started_at` (the
+    study's hours count from there) and gains `resumed_at`.
+
+    `models` is accepted as `run_study` takes it, and is not needed: the run
+    was compiled with the models it was started with, and the compiled
+    `evolvekit.yaml` in the run directory is what resumes. Returns the final
+    `job.json`."""
+    from evolvekit.search.driver import Driver
+
+    root = Path(root)
+    run_dir = root / "runs" / run_id
+    state = read_job(run_dir) or {}
+    # Not the phase in `job.json`: a run that died still says `search` there;
+    # whether its process lives is for whoever starts the resume to judge.
+    if not (run_dir / CONFIG).is_file() or not (run_dir / "runs.jsonl").is_file():
+        raise HarnessError(f"runs/{run_id}: the search never began, so there is nothing to continue; start the study again")
+    study = run_study_of(root, run_dir)
+    stored = state.get("plan") or _read_plan(run_dir)
+    # The generations on record: the engine reports the ones *this* session
+    # finishes, and the run's count is the plan's in all.
+    before = max((int(r.get("generation") or 0) for r in read_jsonl(run_dir / "runs.jsonl")), default=0)
+    (run_dir / STOP_REQUEST).unlink(missing_ok=True)
+    job = Job.resume(run_dir, {**state, "plan": stored, "run_id": run_id, "study": study.name}, "search")
+    for old in ("error", "final", "check"):  # how the last session ended; this one says anew
+        job.state.pop(old, None)
+    try:
+        config = load_config(run_dir / CONFIG)
+        summary = Driver(config, run_dir=run_dir, log=log).run()
+        job.update(search={
+            "stop_reason": summary.stop_reason, "generations": before + summary.generations,
+            "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
+        })
+        if summary.aborted:
+            job.finish("failed", error=summary.stop_reason)
+            return job.state
+        if summary.stop_reason == "stopped on request":
+            job.finish("stopped")
+            return job.state
+        _final_check(study, _check_plan(stored, study), config, run_dir, job, log)
+    except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
+        job.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    return job.state
+
+
+def _read_plan(run_dir: Path) -> dict[str, Any]:
+    try:
+        loaded = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _decision(result: dict[str, Any]) -> str:
