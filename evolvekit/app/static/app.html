@@ -459,7 +459,7 @@ async function renderHome() {
   const home = await api("GET", "/api/home");
   const hasKey = Object.values(home.keys || {}).some(Boolean);
   const studies = home.studies.length ? h("div", { class: "grid" }, home.studies.map((s) => {
-    const [kind, sym] = s.tone === "warn" ? ["warn", "warn"] : STATE_ICON[s.kind] || ["none", "info"];
+    const [kind, sym] = s.tone === "warn" ? ["warn", "warn"] : s.tone === "bad" ? ["bad", "bad"] : STATE_ICON[s.kind] || ["none", "info"];
     const stateEl = sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
       : h("span", { class: `status ${kind}` }, icon(sym), h("span", {}, s.line));
     return h("a", { class: "card study-card", href: studyLink(s) },
@@ -1825,7 +1825,7 @@ async function renderResults(slug, run) {
   const running = ["starting", "search", "check"].includes(r.phase);
   const runQuery = `?run=${encodeURIComponent(r.run)}`;
   const finalKind = { confirmed: "good", worse: "bad", unclear: "warn", single: "warn", skipped: "info", stopped: "warn", missing: "info" }[r.final.state] || "info";
-  const finalWord = { good: "Confirmed", bad: "Worse", warn: r.final.state === "stopped" ? "Not finished" : "Not clear", info: "Note" }[finalKind];
+  const finalWord = { good: "Probably better", bad: "Worse", warn: r.final.state === "stopped" ? "Not finished" : "Not clear", info: "Note" }[finalKind];
   const unitOf = (k) => k.unit ? ` · in ${k.unit}` : "";
   const kpiTable = h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {},
@@ -1884,6 +1884,7 @@ async function renderResults(slug, run) {
       ctx.took ? h("div", { class: "fact" }, h("div", { class: "k" }, "It took"), h("div", { class: "v" }, ctx.took)) : null),
     h("h2", {}, "The final check"),
     h("div", { class: "card" }, status(finalKind, finalWord), h("p", { style: "margin:8px 0 0" }, r.final.line),
+      r.final.rule ? h("p", { class: "faint", style: "margin:6px 0 0" }, r.final.rule) : null,
       r.final.levels ? h("ul", { class: "small" }, r.final.levels.map((l) => h("li", {}, `${kpiLabel(l.kpi)}: ${l.verdict || l.state || ""}`))) : null,
       r.final.seeds ? h("p", { class: "faint", style: "margin:6px 0 0" }, `The best and your starting point, each run ${r.final.seeds === 1 ? "once" : r.final.seeds + " times"} on every held-back case — cases the search never saw.`) : null,
       recheck, next),

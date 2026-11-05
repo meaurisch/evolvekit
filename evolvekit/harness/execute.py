@@ -33,7 +33,7 @@ from typing import Any, Callable
 import yaml
 
 from evolvekit.config import load_config
-from evolvekit.confirm import ConfirmStopped, confirm
+from evolvekit.confirm import ConfirmStopped, confirm, decide
 from evolvekit.evaluate.process import read_tail, run_bounded
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import (
@@ -399,6 +399,9 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     finally:
         stop.close()
     (cid, result), = comparison.per_candidate.items()
-    confirmed = result["levels"]["confirmed"] if "levels" in result else bool((result["summary"].get("ci95") or [0.0])[0] > 0)
-    job.finish("done", final={"candidate": cid, "confirmed": confirmed,
+    if "levels" in result:
+        decision = "use" if result["levels"]["confirmed"] else "keep"
+    else:
+        decision = decide(result["summary"])
+    job.finish("done", final={"candidate": cid, "confirmed": decision == "use", "decision": decision,
                               "comparison": "confirm/final/comparison.json"})

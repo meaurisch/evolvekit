@@ -113,6 +113,8 @@ def test_a_run_from_start_to_results_and_downloads(app, tmp_path):
     assert status == 200, results
     assert results["headline"].startswith(("The best settings found give", "No settings found beat"))
     assert results["final"]["state"] in ("single", "confirmed", "unclear", "worse", "skipped")
+    if results["final"]["state"] != "skipped":
+        assert results["final"]["decision"] in ("use", "keep", "worse", "single")
     assert {k["name"] for k in results["kpis"]} == {"tour_length", "longest_leg"}
     assert [c["name"] for c in results["changed"]] == ["neighbours", "restart_after", "accept_worse", "init"]
     assert [d["name"] for d in results["downloads"]] == ["settings_json", "settings_flags", "report"]

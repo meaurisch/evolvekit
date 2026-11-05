@@ -28,7 +28,7 @@ from statistics import fmean
 from typing import Any, Callable
 
 from evolvekit.app import AppError
-from evolvekit.confirm import BASELINE
+from evolvekit.confirm import BASELINE, RULE_WORDS, decide, t_cdf
 from evolvekit.harness.compile import STUDY_RUN
 from evolvekit.harness.execute import read_job, runner_command
 from evolvekit.harness.plan import CHECK_SEEDS
@@ -569,9 +569,52 @@ def _span(low: float, high: float) -> str:
     return f"somewhere between {-low:.1f} % worse and {high:.1f} % better"
 
 
+def _chance_words(p: float | None) -> str:
+    """A chance of a gain in twentieths: "about 19 in 20", with "almost
+    certain" and "1 in 20 or less" at the ends; nothing for no chance."""
+    if p is None:
+        return ""
+    if p >= 0.995:
+        return "almost certain"
+    if p <= 0.05:
+        return "1 in 20 or less"
+    return f"about {round(p * 20)} in 20"
+
+
+def _chance_of(summary: dict[str, Any]) -> float | None:
+    """The chance of a gain as the comparison says it -- or, for a comparison
+    written before it said so, from its mean and spread as `paired_summary`
+    finds it. None without two cases, or without a spread to go by."""
+    if summary.get("chance") is not None:
+        return float(summary["chance"])
+    n, mean, sd = int(summary.get("n") or 0), summary.get("mean"), summary.get("sd")
+    if n < 2 or mean is None or sd is None:
+        return None
+    if sd > 0:
+        return t_cdf(mean / (sd / math.sqrt(n)), n - 1)
+    return 1.0 if mean > 0 else 0.0 if mean < 0 else 0.5
+
+
+def _decision_of(final: dict[str, Any], summary: dict[str, Any]) -> str:
+    """The run's decision; a run made before runs decided gets it from the
+    comparison by the same rule, or from the interval when the comparison
+    gives no chance to apply the rule to."""
+    if final.get("decision"):
+        return str(final["decision"])
+    n, ci, chance = int(summary.get("n") or 0), summary.get("ci95"), _chance_of(summary)
+    if n >= 2 and chance is not None and ci:
+        return decide({**summary, "chance": chance, "worst": summary.get("worst", ci[0])})
+    if n == 0 or summary.get("mean") is None:
+        return "none"
+    if n == 1 or not ci:
+        return "single"
+    return "use" if ci[0] > 0 else "worse" if ci[1] < 0 else "keep"
+
+
 def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str,
                  baseline: str = "") -> dict[str, Any]:
-    """The final check in a sentence, and what to do about it in another."""
+    """The final check in a sentence, what to do about it in another, and the
+    rule that decided in a third: the app says "use it" only by `decide`."""
     final = job.get("final") or {}
     new = f"the new {what}"
     they = "it is" if what.startswith("combination") else "they are"
@@ -594,38 +637,52 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     summary = result.get("summary") or {}
     n, mean, ci = summary.get("n") or 0, summary.get("mean"), summary.get("ci95")
     seeds = len(comparison.get("seeds") or [])
+    chance = _chance_of(summary)
+    worst = summary.get("worst") if summary.get("worst") is not None else (ci[0] if ci else None)
+    decision = _decision_of(final, summary)
     better = _better_word(goal["direction"])
     worse = "higher" if better == "lower" else "lower"
     cases = f"{n} held-back case{'s' if n != 1 else ''}"
-    base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci}
+    base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "decision": decision, "chance": chance,
+            "chance_words": _chance_words(chance), "worst_pct": worst, "rule": RULE_WORDS}
+    use_advice = f"Use {new}: {they} probably better on cases the search never saw."
     if "levels" in result:
         levels = result["levels"]
-        if levels.get("confirmed"):
+        decision = final.get("decision") or ("use" if levels.get("confirmed") else "keep")
+        base["decision"] = decision
+        if decision == "use":
             return {**base, "state": "confirmed", "levels": levels.get("levels"),
-                    "line": f"Confirmed on {cases}: {levels.get('verdict')}.",
-                    "advice": f"Use {new}: {they} better on cases the search never saw."}
+                    "line": f"Probably better on {cases}: {levels.get('verdict')}.", "advice": use_advice}
         return {**base, "state": "unclear", "levels": levels.get("levels"),
-                "line": f"Not clear on {cases}: {levels.get('verdict')}.",
+                "line": f"Not proven on {cases}: {levels.get('verdict')}.",
                 "advice": f"{keep} for now: the gain is not proven."}
     if mean is None:
         return {**base, "state": "unclear", "line": "The final check has no comparable results.",
                 "advice": f"{keep} for now: the gain is not proven."}
     word = better if mean >= 0 else worse
-    if ci is None:
+    if ci is None or decision == "single":
         return {**base, "state": "single",
                 "line": f"On the one held-back case: {_pct(mean)} {word} {goal['says']}.",
                 "advice": "Not sure: one held-back case is too few to tell. A study that holds back three or more can."}
     low, high = ci
-    if low > 0:
+    words = _chance_words(chance)
+    sure = words == "almost certain"
+    of_gain = "" if not words else "a gain almost certain" if sure else f"a chance of {words} of a gain"
+    if decision == "use":
+        start = "your starting point" + (f" ({baseline})" if baseline and what != "data changes" else "")
+        edge = (f"at least {_pct(worst)} better than {start}" if worst is not None and worst > 0
+                else f"at worst {_pct(worst)} worse than {start}")
+        how_sure = "" if not words else ", almost certain" if sure else f", a chance of {words}"
         return {**base, "state": "confirmed",
-                "line": f"Confirmed: {_pct(mean)} {better} {goal['says']} on {cases} ({_span(low, high)}).",
-                "advice": f"Use {new}: {they} better on cases the search never saw."}
-    if high < 0:
+                "line": f"Probably better: {_pct(mean)} {better} {goal['says']} on {cases}{how_sure}; {edge}.",
+                "advice": use_advice}
+    if decision == "worse":
         return {**base, "state": "worse",
-                "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']} ({_span(low, high)}).",
+                "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']}{', ' + of_gain if of_gain else ''} "
+                        f"({_span(low, high)}).",
                 "advice": f"{keep}: {new} did worse on cases the search never saw."}
-    return {**base, "state": "unclear",
-            "line": f"Not distinguishable from your starting point on {cases} ({_span(low, high)}).",
+    parts = ([of_gain] if of_gain else []) + [f"at worst {_pct(worst)} worse ({_span(low, high)})"]
+    return {**base, "state": "unclear", "line": f"Not proven on {cases}: {'; '.join(parts)}.",
             "advice": f"{keep} for now: the gain is not proven."}
 
 
@@ -732,6 +789,8 @@ def _summary_text(data: dict[str, Any]) -> str:
     lines = [f"{data['study']} ({data['harness']}), run {data['run']}"]
     if final.get("advice"):
         lines.append(f"Answer: {final['advice']}")
+    if final.get("rule"):
+        lines.append(str(final["rule"]))
     lines += [
         f"Set-up: {_number(context['time_per_case_s'])} s per case, {_duration(context['hours'] * 3600)} in total; "
         f"the search learned from {len(learned)} case{'s' if len(learned) != 1 else ''}"
@@ -1009,6 +1068,7 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
         facts.append(("Started", context["started_at"]))
     facts_html = "".join(f"<div><div class='k'>{esc(k)}</div><div class='v'>{esc(v)}</div></div>" for k, v in facts)
     seeds = final.get("seeds")
+    rule_note = f"<div class='help' style='margin-top:6px'>{esc(str(final['rule']))}</div>" if final.get("rule") else ""
     check_note = (f"<p class='help'>The best and the starting point, each run {'once' if seeds == 1 else f'{seeds} times'} on every "
                   "held-back case: cases the search never saw.</p>") if seeds else ""
     attached_html = (f"<h2>{esc(attached[0])}</h2><div class='card'><pre>{esc(attached[1])}</pre></div>" if attached else "")
@@ -1046,7 +1106,7 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 <h1>{esc(data['study'])}</h1>
 <div class="meta">{esc(data['harness'])} · run {esc(data['run'])} · report made {generated}</div>
 <div class="card"><div class="headline">{esc(data['headline'])}</div>
-<div class="advice" data-state="{esc(str(final.get('state')))}">{esc(final.get('advice') or '')}</div></div>
+<div class="advice" data-state="{esc(str(final.get('state')))}">{esc(final.get('advice') or '')}</div>{rule_note}</div>
 <div class="facts">{facts_html}</div>
 <h2>The final check</h2>
 <div class="card final" data-state="{esc(str(final.get('state')))}">{esc(final['line'])}{check_note}</div>
@@ -1071,8 +1131,8 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 
 def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) -> dict[str, Any]:
     """The home card's state in a few words: "draft · step 4 of 7", "running ·
-    1 h 10 min left · 3.2 % better so far", "finished · confirmed 3.1 % lower
-    real cost"."""
+    1 h 10 min left · 3.2 % better so far", "finished · probably better: 3.1 %
+    lower real cost", "finished · not proven on the held-back cases"."""
     dirs = _run_dirs(root)
     if not dirs:
         return {"kind": "draft", "line": f"draft · step {max(1, min(study.step, 7))} of 7"}
@@ -1101,10 +1161,13 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
         comparison = _read(run_dir / final["comparison"]) if final.get("comparison") else None
         summary = (((comparison or {}).get("per_candidate") or {}).get(final.get("candidate") or "") or {}).get("summary") or {}
         mean = summary.get("mean")
-        if final.get("confirmed"):
-            amount = f" {_pct(mean)} {_better_word(goal['direction'])} {goal['says']}" if isinstance(mean, (int, float)) else ""
-            return {"kind": "finished", "run": run_dir.name, "line": "finished · confirmed" + amount}
-        return {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not confirmed on the held-back cases"}
+        decision = _decision_of(final, summary) if summary else ("use" if final.get("confirmed") else "keep")
+        if decision == "use":
+            amount = f": {_pct(mean)} {_better_word(goal['direction'])} {goal['says']}" if isinstance(mean, (int, float)) else ""
+            return {"kind": "finished", "run": run_dir.name, "line": "finished · probably better" + amount}
+        if decision == "worse":
+            return {"kind": "finished", "tone": "bad", "run": run_dir.name, "line": "finished · worse on the held-back cases"}
+        return {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not proven on the held-back cases"}
     if state == "stopped":
         return {"kind": "stopped", "run": run_dir.name, "line": "stopped"}
     return {"kind": "failed", "run": run_dir.name, "line": "failed · " + str(job.get("error") or "see the run")[:80]}
