@@ -31,7 +31,7 @@ from evolvekit.app import AppError
 from evolvekit.confirm import BASELINE, RULE_WORDS, decide, t_cdf
 from evolvekit.harness.compile import STUDY_RUN
 from evolvekit.harness.execute import read_job, run_study_of, runner_command
-from evolvekit.harness.plan import CHECK_SEEDS
+from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
 from evolvekit.ledger import read_jsonl
@@ -422,7 +422,11 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     # starting point alone.
     current = done_rounds + 1 if isinstance(done_rounds, int) else (0 if stage else None)
     if job.get("phase") == "check":
-        now_line = "The final check: the best against the starting point on the held-back cases."
+        # The check adds a run per case at a time while the answer is open
+        # (`execute._extend_check`); `check.seeds` says how many it is on.
+        on = int((job.get("check") or {}).get("seeds") or plan.get("check_seeds") or DEFAULT_CHECK_SEEDS)
+        now_line = (f"The final check: {_runs_word(on)} per case so far on the held-back cases; "
+                    "it adds runs while time remains and the answer is open.")
     elif stage and isinstance(current, int):
         cases = len(study.training)
         on = f"on {cases} case{'s' if cases != 1 else ''}"

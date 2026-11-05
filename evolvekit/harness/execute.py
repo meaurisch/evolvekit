@@ -22,8 +22,10 @@ Everything reads and writes inside the study folder.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -371,22 +373,77 @@ def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
     if (state.get("search") or {}).get("aborted"):
         raise HarnessError(f"runs/{run_id}: the search was aborted: {state['search'].get('stop_reason')}")
     study = run_study_of(root, run_dir)
-    checks = int(seeds or (state.get("plan") or {}).get("check_seeds") or DEFAULT_CHECK_SEEDS)
+    stored = state.get("plan") or {}
+    checks = int(seeds or stored.get("check_seeds") or DEFAULT_CHECK_SEEDS)
     if not 1 <= checks <= len(CHECK_SEEDS):
         raise HarnessError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case, not {checks}")
-    state = {**state, "plan": {**(state.get("plan") or {}), "check_seeds": checks}}
+    state = {**state, "plan": {**stored, "check_seeds": checks}}
     (run_dir / STOP_REQUEST).unlink(missing_ok=True)
     job = Job.resume(run_dir, state, "check")
+    # The run's own numbers, so a resumed check adds runs by the same measure
+    # the run did; with explicit `seeds` the check does exactly that many.
+    plan = replace(
+        Plan.fixed(), check_seeds=checks, workers=max(1, int(stored.get("workers") or 1)),
+        run_s=float(stored.get("run_s") or 1.0), hours=float(stored.get("hours") or 0.0), test_cases=len(study.test),
+    )
     try:
         config = load_config(run_dir / CONFIG)
-        _final_check(study, replace(Plan.fixed(), check_seeds=checks), config, run_dir, job, log)
+        _final_check(study, plan, config, run_dir, job, log, extend=seeds is None)
     except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
         job.finish("failed", error=f"{type(exc).__name__}: {exc}")
         raise
     return job.state
 
 
-def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None]) -> None:
+def _decision(result: dict[str, Any]) -> str:
+    """What one candidate's comparison says: by the levels when the study
+    scores by levels, else by `decide` on the paired summary."""
+    if "levels" in result:
+        return "use" if result["levels"]["confirmed"] else "keep"
+    return decide(result["summary"])
+
+
+def _extend_check(
+    study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,
+    stop: threading.Event, time_left_s: Callable[[], float], confirm: Callable[..., Any] = confirm,
+) -> tuple[Any, int]:
+    """The final check with `plan.check_seeds` runs per case, then one more
+    run per case at a time while the answer is still open (`keep`), seeds
+    remain, the time left pays for another and nothing asked for a stop.
+    `confirm` keeps the runs it did, so every call names the whole seed list
+    and only the new seed is run. Returns the last comparison and its runs
+    per case; `job.json` says how many it is on (`check.seeds`)."""
+    m = len(study.test)
+    seed_cost_s = math.ceil(2 * m / max(1, plan.workers)) * float(plan.run_s)
+    instances = [f"{UP}/{case}" for case in study.test]
+    seeds = max(1, min(int(plan.check_seeds), len(CHECK_SEEDS)))
+    while True:
+        job.update(check={"seeds": seeds})
+        comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:seeds]), instances=instances, label="final",
+                             log=log, stop=stop)
+        (_cid, result), = comparison.per_candidate.items()
+        if _decision(result) != "keep" or seeds >= len(CHECK_SEEDS) or time_left_s() < seed_cost_s or stop.is_set():
+            return comparison, seeds
+        seeds += 1
+        log(f"final check: the answer is still open, adding a run per case ({seeds} so far)")
+
+
+def _time_left(job: Job, plan: Plan) -> Callable[[], float]:
+    """Seconds of the study's hours left, counted from the run's start: the
+    extension of the check stays inside the time the study was given."""
+    try:
+        started = datetime.fromisoformat(str(job.state["started_at"]))
+    except (KeyError, ValueError, TypeError):
+        return lambda: 0.0
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return lambda: float(plan.hours) * 3600.0 - (datetime.now(timezone.utc) - started).total_seconds()
+
+
+def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,
+                 extend: bool = True) -> None:
+    """The best against the starting point on the held-back cases; with
+    `extend`, more runs per case while time remains and the answer is open."""
     if not study.test:
         job.finish("done", final={"skipped": "no cases were held back, so there is no final check"})
         return
@@ -399,9 +456,9 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     stop = RunStop(run_dir)
     stop.start(0.0)
     try:
-        comparison = confirm(
-            config, run_dir, seeds=list(CHECK_SEEDS[: plan.check_seeds]),
-            instances=[f"{UP}/{case}" for case in study.test], label="final", log=log, stop=stop.event,
+        comparison, seeds = _extend_check(
+            study, plan, config, run_dir, job, log, stop=stop.event,
+            time_left_s=_time_left(job, plan) if extend else (lambda: 0.0),
         )
     except ConfirmStopped:
         job.finish("stopped", final={"stopped": True})
@@ -409,9 +466,6 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     finally:
         stop.close()
     (cid, result), = comparison.per_candidate.items()
-    if "levels" in result:
-        decision = "use" if result["levels"]["confirmed"] else "keep"
-    else:
-        decision = decide(result["summary"])
+    decision = _decision(result)
     job.finish("done", final={"candidate": cid, "confirmed": decision == "use", "decision": decision,
-                              "comparison": "confirm/final/comparison.json"})
+                              "seeds": seeds, "comparison": "confirm/final/comparison.json"})

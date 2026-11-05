@@ -98,6 +98,10 @@ def test_an_open_answer_can_be_checked_again_with_twice_the_runs():
     assert within["why"].startswith("The study then takes about 27 min of its 30 min.") and not within["over"]
     over = jobs._recheck({"state": "unclear"}, budget, comparison([-1.0, 2.0]), used_s=29 * 60)
     assert over["why"].startswith("The study then takes about 31 min: more than its 30 min.") and over["over"]
+    # A check that added runs on its own is offered more from where it got to, and nothing past the 12 seeds there are.
+    grown = jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=7))
+    assert grown["seeds"] == 12 and grown["label"].startswith("Check again with 12 runs per case instead of 7")
+    assert jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=12)) is None
     assert jobs._recheck({"state": "confirmed"}, PLAN, comparison([1.0, 2.0])) is None, "a settled answer"
     assert jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=12)) is None, "no seeds left"
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import http.client
 import json
+import re
 import time
 from pathlib import Path
 
@@ -100,8 +101,18 @@ def test_a_run_from_start_to_results_and_downloads(app, tmp_path):
     status, body = call(app, "PATCH", f"/api/studies/{slug}", {"step": 3})
     assert status == 409, "a running study does not change"
 
-    final = _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] in ("done", "failed", "stopped"))
+    checking: list[str] = []
+
+    def ended(body: dict) -> bool:
+        if body["phase"] == "check":
+            checking.append(body["now"])
+        return body["phase"] in ("done", "failed", "stopped")
+
+    final = _until(app, f"/api/studies/{slug}/status", ended)
     assert final["phase"] == "done", final
+    # While the check runs, the page says how many runs per case it is on and that it may add more.
+    assert all(re.fullmatch(r"The final check: \d+ runs? per case so far on the held-back cases; "
+                            r"it adds runs while time remains and the answer is open\.", now) for now in checking), checking
     assert final["sentence"] == "Finished." and final["goal"]["kpi"] == "tour_length"
     assert final["dashboard"] == f"/studies/{slug}/runs/{run}/dashboard/"
     status, page = call(app, "GET", final["dashboard"])
