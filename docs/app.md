@@ -125,6 +125,12 @@ did not come back in time is explained against the time per case you set.
 **Stop** ends it within seconds and keeps the best so far. *Detailed dashboard
 (for experts)* opens evolvekit's full dashboard for the run.
 
+The app runs one study at a time. A study started while another runs says
+*Waiting for '…' to finish* and starts by itself when its turn comes; **Stop**
+takes it out of the line. A run that was continued after it died says
+*Searching again, from where it stopped* and goes on with the rounds it had
+left.
+
 ## The results
 
 ![Results](app/results-light.png)
@@ -208,7 +214,8 @@ and templates, the forms and the SQL box still do everything it does.
 | *fewer than 3 rounds* | take one of the three ways out the plan offers |
 | *Not proven on the held-back cases* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
 | *the starting point breaks a guardrail* | the guardrail is stricter than today's plans: loosen it, or give the application more time per case |
-| *It failed* | the message says why; after a restart of the computer, *Start it again* |
+| *It failed* after a restart of the computer | *Continue where it stopped*: the run goes on from its last round |
+| *It failed* | the message says why; fix that, then *Start it again* |
 
 ## For developers
 
@@ -216,9 +223,11 @@ The page uses nothing but a JSON API (`evolvekit/app/api.py`), so a server
 can take the app's place later: `/api/home`, `/api/settings`,
 `/api/harnesses`, `/api/studies/{name}` and its `application`, `cases`,
 `import`, `samples`, `split`, `inputs`, `preview`, `kpis/try`, `choices`,
-`assistant`, `cards`, `plan`, `tune-only`, `test-run`, `start`, `stop`,
-`final-check` (with `{"seeds": N}`: again, with N runs per case), `status`,
-`results`, `download/{export}` (`download/report?view=1` opens the report in
-the browser) and `next`; and each run's dashboard
-at `/studies/{name}/runs/{run}/dashboard/`. A run is `python -m
-evolvekit.app.job STUDY RUN`, started so that it outlives the app.
+`assistant`, `cards`, `plan`, `tune-only`, `test-run`, `start` (with
+`{"resume": RUN}`: that run goes on where it stopped; while another study
+runs, the run is queued and the server starts it later), `stop` (on a queued
+run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,
+with N runs per case), `status`, `results`, `download/{export}`
+(`download/report?view=1` opens the report in the browser) and `next`; and
+each run's dashboard at `/studies/{name}/runs/{run}/dashboard/`. A run is
+`python -m evolvekit.app.job STUDY RUN`, started so that it outlives the app.

@@ -530,9 +530,10 @@ def _failures_in_words(reasons: list[dict[str, Any]], limit_s: float) -> list[di
     return grouped
 
 
-def _closest(run_dir: Path, finished: bool = False) -> str:
-    """How close the tries came to the starting point when none beat it."""
-    rows = [r for r in _rows(run_dir) if _finite(r.get("score"))]
+def _closest(run_dir: Path, finished: bool = False, rows: list[dict[str, Any]] | None = None) -> str:
+    """How close the tries came to the starting point when none beat it.
+    `rows` are the run's `runs.jsonl` rows when the caller read them already."""
+    rows = [r for r in (_rows(run_dir) if rows is None else rows) if _finite(r.get("score"))]
     seed = next((r for r in rows if r.get("operator") == "human-seed"), None)
     tried = [r for r in rows if r.get("operator") != "human-seed" and not r.get("rejected") and not r.get("gated")]
     if seed is None or not tried or not seed["score"]:
@@ -553,6 +554,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     plan = _plan(run_dir, job)
     document = document_of(run_dir) if (run_dir / "events.jsonl").exists() else {}
     health, progress = document.get("health") or {}, document.get("progress") or {}
+    rows = _rows(run_dir)  # read once: the seed, the closest try and the gated count all come from here
     goal = _goal(study, harness)
     started = _started(job, run_dir)
     hours = float(plan.get("hours") or study.budget.hours)
@@ -569,14 +571,14 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     improvement = (progress.get("improvement") or {})
     pct, verdict = improvement.get("pct"), improvement.get("verdict")
     better = _better_word(goal["direction"])
-    seed, _ = _seed_and_best(run_dir, document) if document else (None, None)
+    seed, _ = _seed_and_best(run_dir, document, rows) if document else (None, None)
     start_words = f"the starting point ({_baseline(study, harness, seed)})"
     runs = study.limits.runs_per_case
     learned = (f"on the {len(study.training)} case{'s' if len(study.training) != 1 else ''} the search learns from "
                f"({'one run' if runs == 1 else f'{runs} runs'} each)")
     if pct is None or verdict in ("none", None) or (pct or 0) <= 0:
         best_line = (f"No combination beat {start_words}." if finished
-                     else f"No combination has beaten {start_words} yet.") + _closest(run_dir, finished)
+                     else f"No combination has beaten {start_words} yet.") + _closest(run_dir, finished, rows)
     else:
         # Only the final check says whether it is better: the search picks
         # what did best on its own cases, which flatters it.
@@ -620,7 +622,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "stopped": "Stopped." + (f" {job['search'].get('stop_reason')}." if (job.get("search") or {}).get("stop_reason") else ""),
         "failed": "It failed: " + str(job.get("error") or "no reason recorded") + ".",
     }
-    gated = sum(1 for r in _rows(run_dir) if r.get("gated"))
+    gated = sum(1 for r in rows if r.get("gated"))
     host = health.get("host") or {}
     busy = host.get("available") and any(s.get("flagged") or s.get("busier_throughout") for s in host.get("stages") or [])
     return {
@@ -658,8 +660,11 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _seed_and_best(run_dir: Path, document: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    rows = _rows(run_dir)
+def _seed_and_best(run_dir: Path, document: dict[str, Any],
+                   rows: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The starting point's row and the best candidate's; `rows` are the run's
+    `runs.jsonl` rows when the caller read them already."""
+    rows = _rows(run_dir) if rows is None else rows
     seed = next((r for r in rows if r.get("operator") == "human-seed"), None)
     best_id = ((document.get("progress") or {}).get("best") or {}).get("id")
     best = next((r for r in rows if r.get("id") == best_id), None) if best_id else None

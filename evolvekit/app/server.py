@@ -23,7 +23,6 @@ import json
 import re
 import sys
 import threading
-import time
 import traceback
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +43,24 @@ PAGE = Path(__file__).with_name("static") / "app.html"
 CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DASHBOARD = re.compile(r"^/studies/(?P<slug>[^/]+)/runs/(?P<run>[^/]+)/dashboard/(?P<rest>.*)$")
+STATUS_FILES = ("events.jsonl", "runs.jsonl", "heartbeat.json")
+"""The files of a run the status document is built from; a change to any
+of them is a reason to build it again."""
+
+RunStamp = tuple[tuple[int, int] | None, ...]
+"""`(size, mtime_ns)` of each of `STATUS_FILES`, or `None` where the file is missing."""
+
+
+def _run_stamp(run_dir: Path) -> RunStamp:
+    stamp: list[tuple[int, int] | None] = []
+    for name in STATUS_FILES:
+        try:
+            found = (run_dir / name).stat()
+        except OSError:
+            stamp.append(None)
+        else:
+            stamp.append((found.st_size, found.st_mtime_ns))
+    return tuple(stamp)
 
 
 @dataclass
@@ -251,7 +268,7 @@ class AppServer:
         self.assistant_provider: Any = None
         """A provider object to use instead of the one Settings name: for tests."""
         self.lock = threading.Lock()
-        self._status_cache: dict[str, tuple[float, Any]] = {}
+        self._status_cache: dict[str, tuple[RunStamp, Any]] = {}
         self._server = self._bind(host, port)
         self._thread: threading.Thread | None = None
         self._ticker: threading.Thread | None = None
@@ -276,17 +293,19 @@ class AppServer:
         return f"http://127.0.0.1:{self.port}/"
 
     def status_document(self, run_dir: Path) -> Any:
-        """`build_status`, rebuilt at most once a second per run."""
+        """`build_status`, rebuilt only when a file of the run changed: a page
+        that polls a run that waits, or one that ended, costs no more than
+        three `stat` calls."""
         from evolvekit.status import build_status
 
-        key = str(run_dir)
+        key, stamp = str(run_dir), _run_stamp(run_dir)
         with self.lock:
             cached = self._status_cache.get(key)
-            if cached and time.monotonic() - cached[0] < 1.0:
+            if cached and cached[0] == stamp:
                 return cached[1]
         document = build_status(run_dir)
         with self.lock:
-            self._status_cache[key] = (time.monotonic(), document)
+            self._status_cache[key] = (stamp, document)
         return document
 
     def _tick(self) -> None:

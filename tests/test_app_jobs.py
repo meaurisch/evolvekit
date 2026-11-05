@@ -365,3 +365,31 @@ def test_two_starts_in_one_second_get_two_visible_run_ids(app, monkeypatch):
     assert [r["id"] for r in listed] == [one["run"], two["run"]] and [r["phase"] for r in listed] == ["done", "queued"]
     assert all(jobs._RUN.match(r["id"]) and "~" not in r["id"] for r in listed)  # noqa: SLF001
     assert jobs.latest_run(app.home.study_root(slug)) == two["run"]
+
+
+# -- the running page costs nothing while it waits
+
+
+def test_the_status_reads_the_runs_file_once(app, monkeypatch):
+    slug = _ready_study(app, "Once")
+    root = app.home.study_root(slug)
+    run_dir = root / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "job.json").write_text(json.dumps({
+        "phase": "stopped", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00", "finished_at": "2026-01-01T00:10:00+00:00",
+        "plan": {"generations": 2, "rounds": 2, "hours": 0.05},
+        "search": {"stop_reason": "stopped on request", "generations": 1, "aborted": False}}), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"id": "seed", "operator": "human-seed", "score": 100.0},
+        {"id": "c1", "operator": "mutate", "score": 90.0},
+        {"id": "c2", "operator": "mutate", "score": 120.0, "gated": True},
+    ]) + "\n", encoding="utf-8")
+    reads = []
+    read_rows = jobs._rows  # noqa: SLF001
+    monkeypatch.setattr(jobs, "_rows", lambda run_dir: reads.append(run_dir) or read_rows(run_dir))
+    # No improvement on record: the sentence about the closest try, the seed and the gated count all need the rows.
+    answer = jobs.status(root, "20260101-000000", lambda _run_dir: {"progress": {"improvement": {"pct": None}}})
+    assert reads == [run_dir], "runs.jsonl is read once per status"
+    assert answer["gated"] == 1 and "1 tried; the closest came within 10.0 % of it." in answer["best"]["line"]
+    assert answer["phase"] == "stopped" and answer["can_resume"] is True
