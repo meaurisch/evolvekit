@@ -8,13 +8,18 @@ from __future__ import annotations
 import html
 import http.client
 import json
+import os
 import re
+import socket
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from evolvekit.app import jobs
 from evolvekit.app.server import AppServer
+from evolvekit.events import utc_now
 from test_app_server import call
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -202,3 +207,44 @@ def test_a_run_whose_process_died_without_a_word_is_reported_from_its_log(app, t
     (run_dir / "job.log").write_text("Traceback ...\nModuleNotFoundError: No module named 'yaml'\n")
     status, answer = call(app, "GET", f"/api/studies/{slug}/status")
     assert answer["phase"] == "failed" and "No module named 'yaml'" in answer["error"]
+
+
+# -- a run is alive when its process is, and that process is the one we started
+
+
+def test_a_recycled_pid_is_not_a_running_run(tmp_path):
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+    assert jobs.run_alive(tmp_path, os.getpid(), long_ago, socket.gethostname()) is False, "this process is younger than the launch"
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    assert jobs.run_alive(tmp_path, os.getpid(), now, socket.gethostname()) is True
+    assert jobs.run_alive(tmp_path, None, now, None) is False
+
+
+def test_a_run_from_another_computer_is_judged_by_its_heartbeat(tmp_path):
+    (tmp_path / "heartbeat.json").write_text(json.dumps({"ts": utc_now()}), encoding="utf-8")
+    assert jobs.run_alive(tmp_path, 1, utc_now(), "elsewhere") is True
+    old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="milliseconds")
+    (tmp_path / "heartbeat.json").write_text(json.dumps({"ts": old}), encoding="utf-8")
+    assert jobs.run_alive(tmp_path, 1, utc_now(), "elsewhere") is False
+    (tmp_path / "heartbeat.json").unlink()
+    assert jobs.run_alive(tmp_path, 1, utc_now(), "elsewhere") is False, "no beat at all is not alive"
+
+
+def test_a_dead_run_reads_as_failed_with_the_last_thing_it_wrote(tmp_path):
+    run_dir = tmp_path / "runs" / "r"; run_dir.mkdir(parents=True)
+    (run_dir / "launch.json").write_text(json.dumps({"pid": os.getpid(), "started_at": "2020-01-01T00:00:00+00:00",
+                                                      "host": socket.gethostname()}), encoding="utf-8")
+    (run_dir / "job.json").write_text(json.dumps({"phase": "search", "pid": os.getpid(), "started_at": "2020-01-01T00:00:00+00:00"}), encoding="utf-8")
+    assert jobs.phase(run_dir)["phase"] == "failed"
+
+
+def test_a_run_stopped_before_it_began_offers_no_final_check(app):
+    slug = _ready_study(app, "Early stop")
+    run_dir = app.home.study_root(slug) / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "job.json").write_text(json.dumps({
+        "phase": "stopped", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00", "finished_at": "2026-01-01T00:00:01+00:00",
+        "search": {"stop_reason": "stopped on request before the search began", "generations": 0, "aborted": False}}), encoding="utf-8")
+    status, answer = call(app, "GET", f"/api/studies/{slug}/status")
+    assert status == 200 and answer["phase"] == "stopped" and answer["can_check"] is False, answer
+    assert answer["sentence"] == "Stopped. stopped on request before the search began."

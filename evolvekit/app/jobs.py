@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -29,21 +30,29 @@ from typing import Any, Callable
 
 from evolvekit.app import AppError
 from evolvekit.confirm import BASELINE, RULE_WORDS, decide, t_cdf
+from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
 from evolvekit.harness.compile import STUDY_RUN
 from evolvekit.harness.execute import read_job, run_study_of, runner_command
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
 from evolvekit.ledger import read_jsonl
-from evolvekit.lock import pid_alive
+from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
 __all__ = ["download", "latest_run", "next_study", "phase", "report_html", "results", "resume_final_check",
-           "running", "runs", "start", "state_line", "status", "stop"]
+           "run_alive", "running", "runs", "start", "state_line", "status", "stop"]
 
 LAUNCH = "launch.json"
 MODELS = "models.json"
 LOG = "job.log"
+HEARTBEAT_MAX_AGE_S = 12 * HEARTBEAT_INTERVAL_S
+"""A run on another computer is alive while its last beat is younger than
+this: a minute, so a sync client that is a few beats behind does not make
+it dead."""
+LAUNCH_SLACK_S = 120.0
+"""A process that started this long after its launch was written is not the
+one launched: the pid was recycled, by a reboot or by chance."""
 EXPORT_TIMEOUT_S = 300
 PRICES = {"anthropic/claude-sonnet-5": (2.0, 10.0)}
 """USD per million input and output tokens, for the models the app suggests."""
@@ -65,11 +74,37 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _alive(pid: Any) -> bool:
+def run_alive(run_dir: Path, pid: Any, launched_at: str | None, host: str | None, *,
+              now: datetime | None = None) -> bool:
+    """Whether the process a run was launched as is still running -- that
+    process, not whoever holds its pid today.
+
+    A pid is recycled quickly on Windows and always across a reboot, so a
+    live pid is only the run's when the process started no later than the
+    launch (with `LAUNCH_SLACK_S` for clocks and a slow launcher). A run on
+    another computer cannot be asked, so its heartbeat answers: alive while
+    the last beat is younger than `HEARTBEAT_MAX_AGE_S`. Here, the process
+    check wins over the heartbeat: a machine that slept has a live process
+    with a stale beat, and that run is still running."""
     try:
-        return bool(pid) and pid_alive(int(pid))
+        pid = int(pid or 0)
     except (TypeError, ValueError):
         return False
+    if pid <= 0:
+        return False
+    if host and host != socket.gethostname():
+        beat = _moment((read_heartbeat(run_dir) or {}).get("ts"))
+        return beat is not None and ((now or _now()) - _utc(beat)).total_seconds() < HEARTBEAT_MAX_AGE_S
+    if not pid_alive(pid):
+        return False
+    launched, born = _moment(launched_at), pid_started_at(pid)
+    if launched is not None and born is not None and _utc(born) > _utc(launched) + timedelta(seconds=LAUNCH_SLACK_S):
+        return False
+    return True
+
+
+def _utc(moment: datetime) -> datetime:
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
 def _log_tail(run_dir: Path, lines: int = 3) -> str:
@@ -105,13 +140,17 @@ def phase(run_dir: Path) -> dict[str, Any]:
     job = read_job(run_dir)
     launch = _read(run_dir / LAUNCH) or {}
     if job is None:
-        if launch and _alive(launch.get("pid")):
+        if launch and run_alive(run_dir, launch.get("pid"), launch.get("started_at"), launch.get("host")):
             return {"phase": "starting", "started_at": launch.get("started_at")}
         if launch:
             return {"phase": "failed", "started_at": launch.get("started_at"),
                     "error": f"the run did not start: {_log_tail(run_dir)}"}
         return {"phase": "unknown"}
-    if job.get("phase") in ("search", "check") and not _alive(job.get("pid")):
+    # The launch says when this process began; a run without one (started by
+    # hand) is dated by its job, from the resume when there was one.
+    launched_at = launch.get("started_at") or job.get("resumed_at") or job.get("started_at")
+    if (job.get("phase") in ("search", "check")
+            and not run_alive(run_dir, job.get("pid"), launched_at, launch.get("host"))):
         return {**job, "phase": "failed",
                 "error": "the run's process ended without finishing: it was ended from outside, or the computer "
                          f"restarted. The last thing it wrote: {_log_tail(run_dir, 1)}"}
@@ -189,7 +228,7 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str]) -> int:
         said = (done.stderr.strip().splitlines() or ["no message"])[-1]
         raise AppError(f"the run could not be started: {said}", 500) from None
     (run_dir / LAUNCH).write_text(json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
-                                              "argv": argv[1:]}, indent=2), encoding="utf-8")
+                                              "host": socket.gethostname(), "argv": argv[1:]}, indent=2), encoding="utf-8")
     return pid
 
 
@@ -210,7 +249,7 @@ def start(home: Any, root: Path) -> dict[str, Any]:
     while (root / "runs" / run_id).exists():
         run_id, number = f"{run_id.split('~')[0]}~{number}", number + 1
     run_dir = root / "runs" / run_id
-    run_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)  # new, so no stale stop request can be waiting in it
     if models:
         (run_dir / MODELS).write_text(json.dumps(models, indent=2), encoding="utf-8")
     _launch(home, root, run_dir, [])
@@ -472,7 +511,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "busy_line": ("Other programs kept this computer busy during the study. A run with a time limit then finds a "
                       "little less than it would alone, so close heavy programs while a study runs." if busy else ""),
         "final": job.get("final"),
-        "can_check": bool(job.get("search")) and job.get("phase") in ("stopped", "failed") and bool(study.test),
+        # A run stopped before its search began has a `search` but no runs, and nothing to check.
+        "can_check": (bool(job.get("search")) and job.get("phase") in ("stopped", "failed") and bool(study.test)
+                      and (run_dir / "runs.jsonl").is_file()),
         "dashboard": f"/studies/{root.name}/runs/{run}/dashboard/",
     }
 

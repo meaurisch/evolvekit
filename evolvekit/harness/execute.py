@@ -323,12 +323,20 @@ def run_study(
 
     root = Path(root)
     study = load_study(root)
+    run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = root / "runs" / run_id
+    if (run_dir / STOP_REQUEST).is_file():
+        # Stopped while starting: before the preview, the compile and the seed.
+        # The file stays: it is the run's record, and whoever starts a run on
+        # this directory again removes it first.
+        job = Job(run_dir, run_id=run_id, study=study.name, plan={})
+        job.finish("stopped", search={"stop_reason": "stopped on request before the search began",
+                                      "generations": 0, "aborted": False})
+        return job.state
     harness = study_harness(root)
     require_valid(study, harness, root=root)
     plan = plan_for(study, harness, measured(root))
-    run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = write_run(study, harness, plan, root, run_id, models=models)
-    (run_dir / STOP_REQUEST).unlink(missing_ok=True)
+    write_run(study, harness, plan, root, run_id, models=models)  # compiles into `run_dir`
     job = Job(run_dir, run_id=run_id, study=study.name, plan=plan.to_json())
     try:
         config = load_config(run_dir / CONFIG)

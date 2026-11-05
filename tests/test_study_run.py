@@ -161,6 +161,16 @@ def test_a_stop_request_during_the_search_ends_the_job_as_stopped(tmp_path):
     assert time.monotonic() - began < 40, "the study was given three minutes; the stop ended it"
 
 
+def test_a_stop_before_the_run_began_ends_it_without_a_search(tmp_path):
+    folder = _study(tmp_path)
+    run_dir = folder / "runs" / "r3"; run_dir.mkdir(parents=True)
+    (run_dir / STOP_REQUEST).write_text("stop", encoding="utf-8")
+    began = time.monotonic()
+    job = run_study(folder, "r3", log=lambda _m: None)
+    assert job["phase"] == "stopped" and job["search"]["stop_reason"] == "stopped on request before the search began"
+    assert not (run_dir / "runs.jsonl").exists() and time.monotonic() - began < 5
+
+
 # -- the check adds runs on its own ----------------------------------------
 
 
