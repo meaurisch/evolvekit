@@ -10,7 +10,13 @@ import pytest
 
 from evolvekit.cli import main
 from evolvekit.config import ConfigError, build_config, load_config
-from evolvekit.confirm import confirm, paired_summary, wilcoxon_signed_rank
+from evolvekit.confirm import (
+    confirm,
+    decide,
+    paired_summary,
+    t_cdf,
+    wilcoxon_signed_rank,
+)
 from evolvekit.space import ParameterSpace
 
 # cost = scale * (1 + x) * (1 + noise(instance, seed, x)); `x` is the tuned parameter.
@@ -106,6 +112,32 @@ def test_a_summary_says_in_words_what_the_interval_says():
     worse = paired_summary([-1.0, -1.2, -0.8, -1.1])
     assert worse["verdict"].startswith("WORSE")
     assert paired_summary([0.4])["ci95"] is None
+
+
+def test_the_t_distribution_is_right():
+    assert t_cdf(0.0, 5) == pytest.approx(0.5)
+    assert t_cdf(4.303, 2) == pytest.approx(0.975, abs=0.001)
+    assert t_cdf(-2.920, 2) == pytest.approx(0.05, abs=0.001)
+    assert t_cdf(1.96, 2000) == pytest.approx(0.975, abs=0.001)
+    assert t_cdf(1.0, 1) == pytest.approx(0.75, abs=0.001)
+
+
+def test_a_summary_gives_the_chance_of_a_gain_and_the_worst_case():
+    handoff = paired_summary([1.3, 0.6, 1.9])            # the design handoff's own study
+    assert handoff["chance"] == pytest.approx(0.96, abs=0.01)
+    assert handoff["worst"] == pytest.approx(handoff["ci95"][0])
+    assert decide(handoff) == "use", "all three cheaper, worst case within 1 %"
+    luck = paired_summary([-9.0, 11.5, -0.4])          # review round 1: -10.1 % .. 11.5 %
+    assert 0.4 < luck["chance"] < 0.7 and decide(luck) == "keep"
+    assert paired_summary([2.0, 2.0, 2.0])["chance"] == 1.0, "no spread, no division"
+    assert decide(paired_summary([-2.0, -2.0, -2.0])) == "worse"
+    assert decide(paired_summary([-1.5, -1.0, -1.2, -0.8])) == "worse"
+    assert decide(paired_summary([5.0, 5.2, 4.8])) == "use"
+    assert decide(paired_summary([0.5, 0.5, 0.5, 0.5, 0.5])) == "use"
+    assert decide(paired_summary([-8.0, 1.0, 1.2])) == "keep", "one bad held-back case holds it back"
+    assert decide(paired_summary([0.4])) == "single" and paired_summary([0.4])["chance"] is None
+    assert decide(paired_summary([])) == "none"
+    assert decide(paired_summary([3.0, 3.1, 2.9, -1.4])) == "keep", "chance is high but the worst case is beyond 1 %"
 
 
 # -- the comparison --------------------------------------------------------
