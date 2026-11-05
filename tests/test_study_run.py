@@ -90,6 +90,12 @@ def test_the_test_run_says_when_the_starting_point_breaks_a_guardrail(tmp_path):
 @pytest.mark.slow
 def test_a_study_runs_its_search_and_then_the_final_check(tmp_path):
     folder = _study(tmp_path)
+    # The automatic plan is drawn from this machine's measured speed: on a slow
+    # runner 14 s buys fewer than 3 rounds and the plan refuses to start. This
+    # test is about the search and the check, not the plan, so the plan is fixed.
+    study = load_study(folder)
+    study.plan = {"auto": False, "children": 4, "generations": 3}
+    save_study(study, folder)
     job = run_study(folder, "r1", log=lambda _m: None)
     run_dir = folder / "runs" / "r1"
     assert job["phase"] == "done", job
