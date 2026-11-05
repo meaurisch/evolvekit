@@ -675,7 +675,8 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     of_gain = "" if not words else "a gain almost certain" if sure else f"a chance of {words} of a gain"
     if decision == "use":
         start = "your starting point" + (f" ({baseline})" if baseline and what != "data changes" else "")
-        edge = (f"at least {_pct(worst)} better than {start}" if worst is not None and worst > 0
+        edge = (f"at least {_pct(worst)} better than {start}" if worst is not None and worst >= 0.05
+                else f"at worst about the same as {start}" if worst is not None and worst > -0.05
                 else f"at worst {_pct(worst)} worse than {start}")
         how_sure = "" if not words else ", almost certain" if sure else f", a chance of {words}"
         return {**base, "state": "confirmed",

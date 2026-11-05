@@ -38,6 +38,13 @@ def words_for(differences, what="settings", baseline="", **job):
                              GOAL, what, baseline)
 
 
+def test_a_worst_case_that_rounds_to_nothing_is_said_as_about_the_same():
+    tiny = jobs._final_words({"final": {"candidate": "c1", "decision": "use"}},
+                             comparison([-0.02, 10.6], 5.3, cases=2), GOAL, "settings")
+    assert tiny["line"].endswith("; at worst about the same as your starting point."), tiny["line"]
+    assert "0.0 %" not in tiny["line"]
+
+
 def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     use = words_for([1.3, 0.6, 1.9], what="settings", baseline="PyVRP's own defaults")
     assert use["state"] == "confirmed" and use["decision"] == "use"
