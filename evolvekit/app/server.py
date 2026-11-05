@@ -38,6 +38,8 @@ __all__ = ["AppServer", "DEFAULT_PORT", "FileResponse", "PAGE", "Request"]
 
 DEFAULT_PORT = 8780
 PORT_ATTEMPTS = 20
+TICK_S = 5.0
+"""How often the server looks for a queued run to launch (`jobs.launch_queued`)."""
 PAGE = Path(__file__).with_name("static") / "app.html"
 CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -252,6 +254,8 @@ class AppServer:
         self._status_cache: dict[str, tuple[float, Any]] = {}
         self._server = self._bind(host, port)
         self._thread: threading.Thread | None = None
+        self._ticker: threading.Thread | None = None
+        self._stopping = threading.Event()
 
     def _bind(self, host: str, port: int) -> ThreadingHTTPServer:
         handler = _handler(self)
@@ -285,15 +289,44 @@ class AppServer:
             self._status_cache[key] = (time.monotonic(), document)
         return document
 
+    def _tick(self) -> None:
+        """Every `TICK_S`, launch the run that waits longest if nothing is
+        active (one study at a time); a fault in one tick is logged, not fatal."""
+        from evolvekit.app import jobs
+
+        while not self._stopping.wait(TICK_S):
+            try:
+                jobs.launch_queued(self.home)
+            except Exception:  # noqa: BLE001 - the ticker must outlive a bad run directory
+                traceback.print_exc(file=sys.stderr)
+
+    def _start_ticker(self) -> None:
+        if self._ticker is None or not self._ticker.is_alive():
+            self._stopping.clear()
+            self._ticker = threading.Thread(target=self._tick, name="evolvekit-app-ticker", daemon=True)
+            self._ticker.start()
+
     def start(self) -> str:
+        self._start_ticker()
         self._thread = threading.Thread(target=self._server.serve_forever, name="evolvekit-app", daemon=True)
         self._thread.start()
         return self.url
 
     def serve_forever(self) -> None:
-        self._server.serve_forever()
+        self._start_ticker()
+        try:
+            self._server.serve_forever()
+        finally:
+            self._stop_ticker()
+
+    def _stop_ticker(self) -> None:
+        self._stopping.set()
+        if self._ticker is not None:
+            self._ticker.join(timeout=TICK_S + 5)
+            self._ticker = None
 
     def stop(self) -> None:
+        self._stop_ticker()
         if self._thread is not None:
             self._server.shutdown()
             self._thread.join(timeout=5)

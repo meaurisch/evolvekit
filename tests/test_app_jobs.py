@@ -290,3 +290,78 @@ def test_a_resumed_run_is_starting_while_its_job_is_still_the_old_one(tmp_path):
     # The launch that wrote the old job is the old process itself: not a resume.
     (run_dir / "launch.json").write_text(json.dumps({"pid": 2 ** 22 + 7, "started_at": now, "host": socket.gethostname()}), encoding="utf-8")
     assert jobs.phase(run_dir)["phase"] == "stopped"
+
+
+# -- one study at a time, and unique run names
+
+
+def _fake_active_run(app: AppServer, slug: str, run: str = "20260101-000000") -> Path:
+    """A run of `slug` that reads as starting: a launch by this very process,
+    which is alive, has written no job yet -- and nothing is really launched."""
+    run_dir = app.home.study_root(slug) / "runs" / run
+    run_dir.mkdir(parents=True)
+    (run_dir / "launch.json").write_text(json.dumps({"pid": os.getpid(), "started_at": utc_now(), "host": socket.gethostname()}),
+                                         encoding="utf-8")
+    return run_dir
+
+
+@pytest.mark.slow
+def test_a_second_study_waits_its_turn(app):
+    first, second = _ready_study(app, "First"), _ready_study(app, "Second")
+    status, started = call(app, "POST", f"/api/studies/{first}/start")
+    assert status == 200 and "queued" not in started
+    status, body = call(app, "POST", f"/api/studies/{second}/start")
+    assert status == 200 and body["queued"] is True, body
+    s = call(app, "GET", f"/api/studies/{second}/status")[1]
+    assert s["phase"] == "queued" and s["sentence"] == "Waiting for 'First' to finish.", s
+    assert s["time"]["left_s"] is None and s["can_resume"] is False and s["can_check"] is False
+    lines = {st["slug"]: st for st in call(app, "GET", "/api/home")[1]["studies"]}
+    assert lines[second]["kind"] == "queued" and lines[second]["line"] == "queued · after First"
+    assert call(app, "POST", f"/api/studies/{second}/start")[0] == 409, "queued is running, as far as a second start goes"
+    assert call(app, "PATCH", f"/api/studies/{second}", {"plan": {"auto": True}})[0] == 409, "a queued study is not edited"
+    _until(app, f"/api/studies/{first}/status", lambda b: b["phase"] == "done", timeout=180)
+    s = _until(app, f"/api/studies/{second}/status", lambda b: b["phase"] != "queued", timeout=30)  # the ticker launched it
+    assert s["phase"] in ("starting", "search", "check", "done"), s
+    assert not (app.home.study_root(second) / "runs" / body["run"] / "queued.json").exists()
+    _until(app, f"/api/studies/{second}/status", lambda b: b["phase"] in ("done", "failed", "stopped"), timeout=180)
+
+
+def test_a_queued_run_can_be_taken_back(app):
+    first, second = _ready_study(app, "First"), _ready_study(app, "Second")
+    _fake_active_run(app, first)
+    assert app.home.active_run() == (first, "20260101-000000")
+    status, body = call(app, "POST", f"/api/studies/{second}/start")
+    assert status == 200 and body["queued"] is True, body
+    run_dir = app.home.study_root(second) / "runs" / body["run"]
+    assert (run_dir / "queued.json").is_file() and jobs.phase(run_dir)["phase"] == "queued"
+    assert jobs.launch_queued(app.home) is None, "the first study is active: nothing is launched"
+    assert (run_dir / "queued.json").is_file()
+    assert call(app, "PATCH", f"/api/studies/{second}", {"plan": {"auto": True}})[0] == 409
+    status, body = call(app, "POST", f"/api/studies/{second}/stop")
+    assert status == 200 and body == {"stopping": False, "dequeued": True}, body
+    assert not run_dir.exists()
+    document = call(app, "GET", f"/api/studies/{second}")[1]
+    assert document["runs"] == [] and document["state"]["kind"] == "draft"
+    assert call(app, "PATCH", f"/api/studies/{second}", {"plan": {"auto": True}})[0] == 200, "editable again"
+
+
+def test_two_starts_in_one_second_get_two_visible_run_ids(app, monkeypatch):
+    fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_now", lambda: fixed)
+
+    def launched_and_done(home, root, run_dir, extra):  # a run that finished within the second
+        (run_dir / "job.json").write_text(json.dumps({"phase": "done", "pid": 2 ** 22 + 7, "started_at": fixed.isoformat(),
+                                                       "finished_at": fixed.isoformat()}), encoding="utf-8")
+        return 2 ** 22 + 7
+
+    monkeypatch.setattr(jobs, "_launch", launched_and_done)
+    slug, other = _ready_study(app, "Twice"), _ready_study(app, "Other")
+    status, one = call(app, "POST", f"/api/studies/{slug}/start")
+    assert status == 200 and one == {"run": fixed.astimezone().strftime("%Y%m%d-%H%M%S")}
+    _fake_active_run(app, other)  # so the second start waits, in a directory of its own
+    status, two = call(app, "POST", f"/api/studies/{slug}/start")
+    assert status == 200 and two == {"run": one["run"] + "-2", "queued": True}, two
+    listed = call(app, "GET", f"/api/studies/{slug}")[1]["runs"]
+    assert [r["id"] for r in listed] == [one["run"], two["run"]] and [r["phase"] for r in listed] == ["done", "queued"]
+    assert all(jobs._RUN.match(r["id"]) and "~" not in r["id"] for r in listed)  # noqa: SLF001
+    assert jobs.latest_run(app.home.study_root(slug)) == two["run"]

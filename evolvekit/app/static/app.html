@@ -446,10 +446,10 @@ async function route() {
 window.addEventListener("hashchange", route);
 
 // ===================================================================== home
-const STATE_ICON = { draft: ["none", "draft"], running: ["good", "pulse"], finished: ["good", "ok"], stopped: ["warn", "stop"], failed: ["bad", "bad"], broken: ["bad", "bad"] };
+const STATE_ICON = { draft: ["none", "draft"], queued: ["warn", "info"], running: ["good", "pulse"], finished: ["good", "ok"], stopped: ["warn", "stop"], failed: ["bad", "bad"], broken: ["bad", "bad"] };
 
 function studyLink(study) {
-  if (study.kind === "running") return `#/study/${study.slug}/running`;
+  if (study.kind === "running" || study.kind === "queued") return `#/study/${study.slug}/running`;
   if (study.kind === "finished" || study.kind === "stopped" || study.kind === "failed") return `#/study/${study.slug}/results`;
   return `#/study/${study.slug}/${Math.max(1, parseInt(String(study.line).match(/step (\d)/)?.[1] || "1", 10))}`;
 }
@@ -1732,16 +1732,22 @@ async function renderRunning(slug) {
     try { s = await api("GET", studyPath("/status")); }
     catch (err) { fill(box, note("bad", h("p", {}, err.message))); return; }
     const running = ["starting", "search", "check"].includes(s.phase);
+    const queued = s.phase === "queued";  // waiting for another study's run to finish; the server starts it then
     const $here = $("#crumbs .here");
-    if ($here) $here.textContent = running ? "Running" : s.phase === "done" ? "Finished" : s.phase === "stopped" ? "Stopped" : "Failed";
+    if ($here) $here.textContent = running ? "Running" : queued ? "Queued" : s.phase === "done" ? "Finished" : s.phase === "stopped" ? "Stopped" : "Failed";
     const pill = running ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.phase === "check" ? "Final check" : "Running"))
-      : s.phase === "done" ? status("good", "Finished") : s.phase === "stopped" ? status("warn", "Stopped") : status("bad", "Failed");
+      : queued ? status("warn", "Queued") : s.phase === "done" ? status("good", "Finished") : s.phase === "stopped" ? status("warn", "Stopped") : status("bad", "Failed");
     const planned = Math.max(s.rounds.planned, s.rounds.done, 1);
-    const stop = h("button", { class: "btn danger", type: "button", disabled: !running || stopping, onclick: () => {
-      const dialog = h("dialog", {}, h("h3", { style: "margin-top:0" }, "Stop the study?"),
-        h("p", {}, "Runs in progress are stopped within seconds. The best so far is kept, and you see the results."),
-        h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Keep running"),
-          h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop")); toast("Stopping…"); draw(); }) }, "Stop")));
+    const stop = h("button", { class: "btn danger", type: "button", disabled: !(running || queued) || stopping, onclick: () => {
+      const dialog = queued
+        ? h("dialog", {}, h("h3", { style: "margin-top:0" }, "Take the study out of the queue?"),
+          h("p", {}, "It has not started, so nothing is lost. You can start it again from the review step."),
+          h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Keep waiting"),
+            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop")); toast("Taken out of the queue"); clearTimers(); location.hash = `#/study/${slug}/7`; }) }, "Take it out")))
+        : h("dialog", {}, h("h3", { style: "margin-top:0" }, "Stop the study?"),
+          h("p", {}, "Runs in progress are stopped within seconds. The best so far is kept, and you see the results."),
+          h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Keep running"),
+            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop")); toast("Stopping…"); draw(); }) }, "Stop")));
       document.body.append(dialog); dialog.showModal(); dialog.addEventListener("close", () => dialog.remove());
     } }, stopping && running ? "Stopping…" : "Stop");
     fill(box, 
@@ -1766,13 +1772,13 @@ async function renderRunning(slug) {
       s.failures.length ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Runs that failed"),
         s.failures.map((f) => h("div", { class: "item" }, h("span", { class: "badge" }, `${f.count}×`), h("div", { class: "body" }, h("div", { class: "what small" }, sentence(f.message)), h("div", { class: "muted small" }, f.todo))))) : null,
       h("div", { class: "step-foot" }, h("a", { class: "btn", href: s.dashboard, target: "_blank", rel: "noopener", title: "Every number the engine keeps, in its own words: for experts" }, "Detailed dashboard (for experts)"),
-        running ? stop : h("div", { class: "row" },
+        running || queued ? stop : h("div", { class: "row" },
           s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check")); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
           s.phase === "failed" ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start")); toast("Started again."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Start it again") : null,
           // A run that stopped or died with rounds of its plan left goes on from where it was: the same run, nothing done twice.
           s.can_resume ? h("button", { class: "btn primary", type: "button", title: "The rounds already done are kept; the search finishes the rest, then the final check runs", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start"), { resume: s.run }); toast("Continuing where it stopped."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Continue where it stopped") : null,
           s.phase === "failed" && !s.rounds.done ? null : h("a", { class: s.can_resume ? "btn" : "btn primary", href: `#/study/${slug}/results` }, "See the results"))));
-    if (!running) clearTimers();
+    if (!running && !queued) clearTimers();  // a queued run keeps polling: the server starts it by itself
   }
   await draw();
   every(2500, draw);

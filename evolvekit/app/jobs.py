@@ -18,10 +18,12 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,12 +42,17 @@ from evolvekit.ledger import read_jsonl
 from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
-__all__ = ["can_resume", "download", "latest_run", "next_study", "phase", "report_html", "results",
-           "resume_final_check", "run_alive", "running", "runs", "start", "state_line", "status", "stop"]
+__all__ = ["active_run", "can_resume", "download", "latest_run", "launch_queued", "next_study", "phase", "report_html",
+           "results", "resume_final_check", "run_alive", "running", "runs", "start", "state_line", "status", "stop"]
 
 LAUNCH = "launch.json"
 MODELS = "models.json"
+QUEUED = "queued.json"
+"""`{"queued_at": iso}` in a run directory that waits for another study's
+run to finish; `launch_queued` launches it and removes the file."""
 LOG = "job.log"
+ACTIVE = ("starting", "search", "check")
+"""The phases in which a run has a process: one such run per home at a time."""
 HEARTBEAT_MAX_AGE_S = 12 * HEARTBEAT_INTERVAL_S
 """A run on another computer is alive while its last beat is younger than
 this: a minute, so a sync client that is a few beats behind does not make
@@ -60,6 +67,9 @@ _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 _BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
 DocumentOf = Callable[[Path], Any]
+_launch_guard = threading.Lock()
+"""Held from the question "is anything active?" to the launch that answers
+it, so a start from the page and the server's ticker never launch two."""
 
 
 def _read(path: Path) -> dict[str, Any] | None:
@@ -124,7 +134,8 @@ def _run_dirs(root: Path) -> list[Path]:
 
     def started(path: Path) -> str:
         launch, job = _read(path / LAUNCH) or {}, read_job(path) or {}
-        return str(launch.get("started_at") or job.get("started_at") or "")
+        queued = (_read(path / QUEUED) or {}) if not launch else {}
+        return str(launch.get("started_at") or job.get("started_at") or queued.get("queued_at") or "")
 
     return sorted(found, key=lambda p: (started(p), p.name))
 
@@ -139,6 +150,9 @@ def phase(run_dir: Path) -> dict[str, Any]:
     """`job.json`, with the phase corrected for a process that is gone."""
     job = read_job(run_dir)
     launch = _read(run_dir / LAUNCH) or {}
+    if not launch and (run_dir / QUEUED).is_file():
+        # Waiting its turn: a launch, once there is one, is the newer word.
+        return {"phase": "queued", "queued_at": (_read(run_dir / QUEUED) or {}).get("queued_at")}
     if job is None:
         if launch and run_alive(run_dir, launch.get("pid"), launch.get("started_at"), launch.get("host")):
             return {"phase": "starting", "started_at": launch.get("started_at")}
@@ -177,7 +191,46 @@ def latest_run(root: Path) -> str | None:
 
 
 def running(root: Path) -> bool:
-    return any(phase(d).get("phase") in ("starting", "search", "check") for d in _run_dirs(root))
+    """Whether the study has a run with a process, or one waiting its turn:
+    either way it is not to be edited or started again."""
+    return any(phase(d).get("phase") in (*ACTIVE, "queued") for d in _run_dirs(root))
+
+
+def _study_roots(studies_dir: Path) -> list[Path]:
+    if not studies_dir.is_dir():
+        return []
+    return sorted(p for p in studies_dir.iterdir() if (p / "study.yaml").is_file())
+
+
+def _active_runs(studies_dir: Path) -> list[tuple[str, str, str]]:
+    """`(started_at, slug, run)` of every run with a process across the home's
+    studies, oldest first."""
+    found = []
+    for root in _study_roots(studies_dir):
+        for run_dir in _run_dirs(root):
+            job = phase(run_dir)
+            if job.get("phase") in ACTIVE:
+                found.append((str(job.get("started_at") or ""), root.name, run_dir.name))
+    return sorted(found)
+
+
+def active_run(home: Any) -> tuple[str, str] | None:
+    """The study and run that has the computer now -- the oldest of any
+    `starting | search | check` run across the home -- or None."""
+    found = _active_runs(home.studies_dir)
+    return (found[0][1], found[0][2]) if found else None
+
+
+def _waiting_for(root: Path) -> str:
+    """The name of the study a queued run of `root` waits for: the active run's
+    study, read from its `study.yaml`; "" when nothing is active."""
+    found = _active_runs(root.parent)
+    if not found:
+        return ""
+    try:
+        return load_study(root.parent / found[0][1]).name
+    except Exception:  # noqa: BLE001 - a damaged study still has a slug
+        return found[0][1]
 
 
 # ---------------------------------------------------------------------------
@@ -253,15 +306,19 @@ def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]
     """Start the study: a new run, or with `resume` the run of that name
     again from where it stopped (`job.py --resume`). A stop request left in
     the run directory is removed first: it was answered, and the resume is
-    not to answer it again."""
+    not to answer it again. One study runs at a time: while another study's
+    run is active, a new run is queued (`{"run": id, "queued": True}`) and
+    launched by the server when that one is done."""
     if running(root):
         raise AppError("the study is already running", 409)
     if resume is not None:
         run_dir = _run_dir(root, resume)
         if not can_resume(run_dir, phase(run_dir)):
             raise AppError("this run cannot be continued: start the study again", 409)
-        (run_dir / STOP_REQUEST).unlink(missing_ok=True)
-        _launch(home, root, run_dir, ["--resume"])
+        with _launch_guard:
+            _one_at_a_time(home)
+            (run_dir / STOP_REQUEST).unlink(missing_ok=True)
+            _launch(home, root, run_dir, ["--resume"])
         return {"run": resume, "resumed": True}
     study, harness = load_study(root), load_harness(root / "harness")
     problems = study_problems(study, harness, root=root)
@@ -272,21 +329,65 @@ def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]
         models = ai_models(home)
         if models is None:
             raise AppError("AI search help is on, and there is no key for it: add one in Settings, or turn AI help off", 409)
-    run_id = _now().astimezone().strftime("%Y%m%d-%H%M%S")
-    number = 2
-    while (root / "runs" / run_id).exists():
-        run_id, number = f"{run_id.split('~')[0]}~{number}", number + 1
+    base = _now().astimezone().strftime("%Y%m%d-%H%M%S")
+    run_id, number = base, 2
+    while (root / "runs" / run_id).exists():  # a second start within the second: -2, -3, ...
+        run_id, number = f"{base}-{number}", number + 1
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True)  # new, so no stale stop request can be waiting in it
     if models:
         (run_dir / MODELS).write_text(json.dumps(models, indent=2), encoding="utf-8")
-    _launch(home, root, run_dir, [])
+    with _launch_guard:
+        if active_run(home) is not None:
+            # Another study has the computer: this run waits, and the
+            # server's ticker launches it when that one is done.
+            (run_dir / QUEUED).write_text(json.dumps({"queued_at": _now().isoformat(timespec="seconds")}, indent=2),
+                                          encoding="utf-8")
+            return {"run": run_id, "queued": True}
+        _launch(home, root, run_dir, [])
     return {"run": run_id}
+
+
+def _one_at_a_time(home: Any) -> None:
+    """A run continued by hand (a resume, a final check again) is launched
+    at once, so it may not be while another study's run has the computer."""
+    active = active_run(home)
+    if active is not None:
+        name = _waiting_for(home.studies_dir / active[0]) or active[0]
+        raise AppError(f"'{name}' is running: continue this one when it has finished", 409)
+
+
+def launch_queued(home: Any) -> str | None:
+    """Launch the run that has waited longest across the home, when nothing is
+    active; `"slug/run"` of what was launched, or None. The server calls
+    this every few seconds."""
+    with _launch_guard:
+        if active_run(home) is not None:
+            return None
+        waiting = []
+        for root in _study_roots(home.studies_dir):
+            for run_dir in _run_dirs(root):
+                job = phase(run_dir)
+                if job.get("phase") == "queued":
+                    waiting.append((str(job.get("queued_at") or ""), root.name, run_dir))
+        if not waiting:
+            return None
+        _, slug, run_dir = min(waiting)
+        _launch(home, run_dir.parent.parent, run_dir, [])
+        (run_dir / QUEUED).unlink(missing_ok=True)  # the launch is the newer word anyway
+        return f"{slug}/{run_dir.name}"
 
 
 def stop(root: Path, run: str) -> dict[str, Any]:
     run_dir = _run_dir(root, run)
-    if phase(run_dir).get("phase") not in ("starting", "search", "check"):
+    state = phase(run_dir).get("phase")
+    if state == "queued":
+        # It never started: nothing to keep. The directory goes, and the
+        # study is a draft again.
+        with _launch_guard:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        return {"stopping": False, "dequeued": True}
+    if state not in ACTIVE:
         raise AppError("the run is not running", 409)
     (run_dir / STOP_REQUEST).write_text("stop\n", encoding="utf-8")
     return {"stopping": True, "run": run}
@@ -303,7 +404,9 @@ def resume_final_check(home: Any, root: Path, run: str, seeds: int | None = None
         raise AppError("the run held no cases back, so there is no final check", 409)
     if seeds is not None and not 1 <= int(seeds) <= len(CHECK_SEEDS):
         raise AppError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case", 400)
-    _launch(home, root, run_dir, ["--check"] + (["--seeds", str(int(seeds))] if seeds is not None else []))
+    with _launch_guard:
+        _one_at_a_time(home)
+        _launch(home, root, run_dir, ["--check"] + (["--seeds", str(int(seeds))] if seeds is not None else []))
     return {"run": run}
 
 
@@ -506,7 +609,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     else:
         now_line = ""
 
+    waiting = _waiting_for(root) if job.get("phase") == "queued" else ""
     sentences = {
+        "queued": f"Waiting for '{waiting}' to finish." if waiting else "Waiting for its turn.",
         "starting": "Starting.",
         "search": ("Searching again, from where it stopped." if job.get("resumed_at")
                    else "Searching for better " + _what(study) + "."),
@@ -1225,7 +1330,10 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
         goal = _goal(study, load_harness(root / "harness"))
     except Exception:  # noqa: BLE001 - a card must render even for a damaged study
         goal = {"says": "the goal", "direction": "lower"}
-    if state in ("starting", "search", "check"):
+    if state == "queued":
+        waiting = _waiting_for(root)
+        return {"kind": "queued", "run": run_dir.name, "line": "queued" + (f" · after {waiting}" if waiting else "")}
+    if state in ACTIVE:
         started = _started(job, run_dir)
         hours = float((_plan(run_dir, job) or {}).get("hours") or study.budget.hours)
         left = max(0.0, hours * 3600 - (_now() - started).total_seconds()) if started else None
