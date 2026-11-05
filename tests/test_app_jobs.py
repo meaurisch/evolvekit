@@ -145,6 +145,20 @@ def test_a_run_from_start_to_results_and_downloads(app, tmp_path):
                                           "test": ["cases/county-50.json"]}
     assert document["problems"] == [], document["problems"]
 
+    # The run reads the study it was started with: a split changed afterwards
+    # does not change what the results say was held back.
+    status, body = call(app, "PATCH", f"/api/studies/{slug}", {
+        "cases": {"training": ["cases/north-south-30.json", "cases/town-40.json", "cases/county-50.json"],
+                  "test": ["cases/region-60.json"]}})
+    assert status == 200, body
+    status, after = call(app, "GET", f"/api/studies/{slug}/results")
+    assert status == 200 and after["cases"] == results["cases"] == {
+        "training": ["cases/north-south-30.json", "cases/town-40.json", "cases/region-60.json"],
+        "test": ["cases/county-50.json"]}
+    assert after["by_case"]["held"] == results["by_case"]["held"]
+    if results["final"]["state"] != "skipped":
+        assert [c["case"] for c in after["by_case"]["held"]] == ["county-50"]
+
 
 @pytest.mark.slow
 def test_a_stopped_run_says_so(app):

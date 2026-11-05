@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from evolvekit.harness.execute import preview, read_job, read_preview, run_study, run_test
+from evolvekit.harness.execute import final_check, preview, read_job, read_preview, run_study, run_test
 from evolvekit.harness.library import create_study
 from evolvekit.harness.study import Guardrail, load_study, save_study
 from evolvekit.stopping import STOP_REQUEST
@@ -35,6 +35,16 @@ def _study(tmp_path: Path, template: str = "tune", hours: float = 0.004) -> Path
     study.budget.hours = hours
     save_study(study, folder)
     return folder
+
+
+def _fix_plan(folder: Path, generations: int = 3) -> None:
+    # The automatic plan is drawn from this machine's measured speed: on a slow
+    # runner 14 s buys fewer than 3 rounds and the plan refuses to start. The
+    # tests that use this are about the search and the check, not the plan,
+    # so the plan is fixed.
+    study = load_study(folder)
+    study.plan = {"auto": False, "children": 4, "generations": generations}
+    save_study(study, folder)
 
 
 def test_a_new_study_pins_its_harness_without_the_samples(tmp_path):
@@ -90,12 +100,7 @@ def test_the_test_run_says_when_the_starting_point_breaks_a_guardrail(tmp_path):
 @pytest.mark.slow
 def test_a_study_runs_its_search_and_then_the_final_check(tmp_path):
     folder = _study(tmp_path)
-    # The automatic plan is drawn from this machine's measured speed: on a slow
-    # runner 14 s buys fewer than 3 rounds and the plan refuses to start. This
-    # test is about the search and the check, not the plan, so the plan is fixed.
-    study = load_study(folder)
-    study.plan = {"auto": False, "children": 4, "generations": 3}
-    save_study(study, folder)
+    _fix_plan(folder)
     job = run_study(folder, "r1", log=lambda _m: None)
     run_dir = folder / "runs" / "r1"
     assert job["phase"] == "done", job
@@ -109,6 +114,20 @@ def test_a_study_runs_its_search_and_then_the_final_check(tmp_path):
         comparison = json.loads((run_dir / final["comparison"]).read_text(encoding="utf-8"))
         assert comparison["instances"] == ["region-60"] and comparison["seeds"][0] == 1001
         assert final["candidate"] in comparison["per_candidate"]
+
+
+@pytest.mark.slow
+def test_a_rerun_final_check_uses_the_cases_the_run_held_back(tmp_path):
+    folder = _study(tmp_path)
+    _fix_plan(folder)
+    run_study(folder, "r1", log=lambda _m: None)
+    assert (folder / "runs" / "r1" / "study.yaml").is_file()
+    study = load_study(folder)
+    study.training, study.test = study.training[1:] + study.test, [study.training[0]]   # swap after the run
+    save_study(study, folder)
+    job = final_check(folder, "r1", seeds=2, log=lambda _m: None)
+    comparison = json.loads((folder / "runs" / "r1" / job["final"]["comparison"]).read_text(encoding="utf-8"))
+    assert comparison["instances"] == ["region-60"], "the run's own held-back case, not today's"
 
 
 @pytest.mark.slow

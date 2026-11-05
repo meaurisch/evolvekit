@@ -30,7 +30,7 @@ from typing import Any, Callable
 from evolvekit.app import AppError
 from evolvekit.confirm import BASELINE, RULE_WORDS, decide, t_cdf
 from evolvekit.harness.compile import STUDY_RUN
-from evolvekit.harness.execute import read_job, runner_command
+from evolvekit.harness.execute import read_job, run_study_of, runner_command
 from evolvekit.harness.plan import CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
@@ -232,8 +232,8 @@ def resume_final_check(home: Any, root: Path, run: str, seeds: int | None = None
     job = phase(run_dir)
     if not job.get("search") or (job.get("search") or {}).get("aborted"):
         raise AppError("the search of this run did not finish, so there is nothing to check", 409)
-    if not load_study(root).test:
-        raise AppError("the study holds no cases back, so there is no final check", 409)
+    if not run_study_of(root, run_dir).test:
+        raise AppError("the run held no cases back, so there is no final check", 409)
     if seeds is not None and not 1 <= int(seeds) <= len(CHECK_SEEDS):
         raise AppError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case", 400)
     _launch(home, root, run_dir, ["--check"] + (["--seeds", str(int(seeds))] if seeds is not None else []))
@@ -375,9 +375,10 @@ def _closest(run_dir: Path, finished: bool = False) -> str:
 
 
 def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
-    """Where a run is, in the words the Running screen uses."""
+    """Where a run is, in the words the Running screen uses. The run's own
+    study (the copy it keeps) says what it learns from and holds back."""
     run_dir = _run_dir(root, run)
-    study, harness = load_study(root), load_harness(root / "harness")
+    study, harness = run_study_of(root, run_dir), load_harness(root / "harness")
     job = phase(run_dir)
     plan = _plan(run_dir, job)
     document = document_of(run_dir) if (run_dir / "events.jsonl").exists() else {}
@@ -825,8 +826,10 @@ def _summary_text(data: dict[str, Any]) -> str:
 
 
 def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
+    """The results of a run, as the study it was started with describes them:
+    its goal, cases and choices, not today's edited ones."""
     run_dir = _run_dir(root, run)
-    study, harness = load_study(root), load_harness(root / "harness")
+    study, harness = run_study_of(root, run_dir), load_harness(root / "harness")
     job = phase(run_dir)
     plan = _plan(run_dir, job)
     document = document_of(run_dir) if (run_dir / "events.jsonl").exists() else {}
@@ -996,7 +999,7 @@ def download(root: Path, run: str, export: str, document_of: DocumentOf) -> tupl
         raise AppError(f"the harness offers no download {export!r}", 404)
     values = _best_values(run_dir, document_of)
     if export == "requests":
-        study = load_study(root)
+        study = run_study_of(root, run_dir)
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for case in study.training + study.test:
@@ -1132,7 +1135,9 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) -> dict[str, Any]:
     """The home card's state in a few words: "draft · step 4 of 7", "running ·
     1 h 10 min left · 3.2 % better so far", "finished · probably better: 3.1 %
-    lower real cost", "finished · not proven on the held-back cases"."""
+    lower real cost", "finished · not proven on the held-back cases". A draft
+    is `study` as it is today; a run is described by the study it was
+    started with (the copy the latest run keeps)."""
     dirs = _run_dirs(root)
     if not dirs:
         return {"kind": "draft", "line": f"draft · step {max(1, min(study.step, 7))} of 7"}
@@ -1140,6 +1145,7 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
     job = phase(run_dir)
     state = job.get("phase")
     try:
+        study = run_study_of(root, run_dir)
         goal = _goal(study, load_harness(root / "harness"))
     except Exception:  # noqa: BLE001 - a card must render even for a damaged study
         goal = {"says": "the goal", "direction": "lower"}

@@ -49,7 +49,7 @@ from evolvekit.harness.compile import (
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS, Plan, make_plan
 from evolvekit.harness.sql import schema_database, sql_problem
-from evolvekit.harness.study import Study, load_study, require_valid, resolve_kpi
+from evolvekit.harness.study import Study, load_study, load_study_file, require_valid, resolve_kpi
 from evolvekit.leaderboard import rank
 from evolvekit.ledger import _atomic_write, read_jsonl
 from evolvekit.stopping import STOP_REQUEST, RunStop
@@ -66,6 +66,7 @@ __all__ = [
     "read_job",
     "read_preview",
     "run_study",
+    "run_study_of",
     "runner_command",
     "smallest_case",
     "study_harness",
@@ -347,6 +348,15 @@ def run_study(
     return job.state
 
 
+def run_study_of(root: str | Path, run_dir: str | Path) -> Study:
+    """The study a run was started with: the copy of `study.yaml` the run
+    keeps, so its cases, goal and choices stay the run's own when the study
+    is edited afterwards. Runs made before runs kept that copy read the study
+    folder's, as they always did."""
+    pinned = Path(run_dir) / "study.yaml"
+    return load_study_file(pinned) if pinned.is_file() else load_study(root)
+
+
 def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
                 log: Callable[[str], None] = print) -> dict[str, Any]:
     """The final check of a search that has finished, run again: after a stop
@@ -360,7 +370,7 @@ def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
         raise HarnessError(f"runs/{run_id}: the search has not finished, so there is nothing to check yet")
     if (state.get("search") or {}).get("aborted"):
         raise HarnessError(f"runs/{run_id}: the search was aborted: {state['search'].get('stop_reason')}")
-    study = load_study(root)
+    study = run_study_of(root, run_dir)
     checks = int(seeds or (state.get("plan") or {}).get("check_seeds") or DEFAULT_CHECK_SEEDS)
     if not 1 <= checks <= len(CHECK_SEEDS):
         raise HarnessError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case, not {checks}")
