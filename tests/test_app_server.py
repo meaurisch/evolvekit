@@ -251,3 +251,89 @@ def test_the_status_document_is_rebuilt_only_when_a_run_file_changed(tmp_path, m
     (run_dir / "runs.jsonl").write_text("{}\n", encoding="utf-8")
     assert server.status_document(run_dir) == {"n": 4} and len(built) == 4
     assert server.status_document(run_dir) == {"n": 4} and len(built) == 4
+
+
+# ---------------------------------------------------------------------------
+# managing studies
+# ---------------------------------------------------------------------------
+
+
+def test_a_study_can_be_trashed_restored_duplicated_and_archived(app):
+    status, created = call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Keep me"})
+    assert status == 200 and created["slug"] == "keep-me"
+    call(app, "POST", "/api/studies/keep-me/application", {"path": str(SOLVER)})
+    call(app, "POST", "/api/studies/keep-me/samples")
+
+    status, copy = call(app, "POST", "/api/studies/keep-me/duplicate", {"name": "Keep me too"})
+    assert status == 200 and copy["slug"] == "keep-me-too" and copy["study"]["name"] == "Keep me too"
+    assert [c["name"] for c in copy["cases"]] == [c["name"] for c in call(app, "GET", "/api/studies/keep-me")[1]["cases"]]
+
+    status, document = call(app, "PATCH", "/api/studies/keep-me-too", {"archived": True})
+    assert status == 200 and document["slug"] == "keep-me-too"
+    status, home = call(app, "GET", "/api/home")
+    archived = {s["slug"]: s["archived"] for s in home["studies"]}
+    assert archived == {"keep-me": False, "keep-me-too": True} and home["trash"] == []
+    status, document = call(app, "PATCH", "/api/studies/keep-me-too", {"archived": False, "name": "Keep me 2"})
+    assert status == 200 and document["study"]["name"] == "Keep me 2"
+    assert call(app, "GET", "/api/home")[1]["studies"][0]["archived"] is False
+
+    status, gone = call(app, "DELETE", "/api/studies/keep-me")
+    assert status == 200 and gone["trashed"].startswith("keep-me~"), gone
+    assert call(app, "GET", "/api/studies/keep-me")[0] == 404
+    status, home = call(app, "GET", "/api/home")
+    assert [s["slug"] for s in home["studies"]] == ["keep-me-too"]
+    (entry,) = home["trash"]
+    assert entry["entry"] == gone["trashed"] and entry["name"] == "Keep me" and entry["deleted_at"]
+    assert call(app, "DELETE", "/api/studies/keep-me")[0] == 404
+
+    status, home = call(app, "POST", f"/api/trash/{entry['entry']}/restore")
+    assert status == 200 and sorted(s["slug"] for s in home["studies"]) == ["keep-me", "keep-me-too"] and home["trash"] == []
+    assert call(app, "GET", "/api/studies/keep-me")[0] == 200
+    assert call(app, "POST", f"/api/trash/{entry['entry']}/restore")[0] == 404
+    assert call(app, "POST", "/api/trash/..%2Fkeep-me/restore")[0] == 404
+
+
+def test_a_study_zip_round_trip_refuses_zip_slip(app):
+    import io
+    import zipfile
+
+    call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Pack"})
+    call(app, "POST", "/api/studies/pack/application", {"path": str(SOLVER)})
+    call(app, "POST", "/api/studies/pack/samples")
+    status, data = call(app, "GET", "/api/studies/pack/download/study")
+    assert status == 200 and isinstance(data, bytes)
+    names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+    assert "study.yaml" in names and "cases/town-40.json" in names and "harness/harness.yaml" in names
+
+    status, document = call(app, "POST", "/api/studies?name=pack.zip", data, headers={"Content-Type": "application/zip"})
+    assert status == 200 and document["slug"] == "pack-2" and document["study"]["name"] == "Pack", document
+    assert len(document["cases"]) == 4
+
+    def zipped(members: dict[str, bytes]) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, content in members.items():
+                archive.writestr(name, content)
+        return buffer.getvalue()
+
+    status, body = call(app, "POST", "/api/studies?name=evil.zip", zipped({"study.yaml": b"x", "../evil.txt": b"x"}),
+                        headers={"Content-Type": "application/zip"})
+    assert status == 400 and "outside" in body["error"], body
+    status, body = call(app, "POST", "/api/studies?name=no.zip", zipped({"harness/harness.yaml": b"x"}),
+                        headers={"Content-Type": "application/zip"})
+    assert status == 400 and "study.yaml" in body["error"], body
+    assert [s["slug"] for s in call(app, "GET", "/api/home")[1]["studies"]] == ["pack-2", "pack"]
+
+
+def test_a_removed_case_can_be_restored(app):
+    call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Cases"})
+    call(app, "POST", "/api/studies/cases/application", {"path": str(SOLVER)})
+    call(app, "POST", "/api/studies/cases/samples")
+    status, document = call(app, "DELETE", "/api/studies/cases/cases/town-40.json")
+    assert status == 200 and "town-40.json" not in [c["name"] for c in document["cases"]]
+    status, document = call(app, "POST", "/api/studies/cases/cases/town-40.json/restore")
+    assert status == 200 and "town-40.json" in [c["name"] for c in document["cases"]]
+    assert "cases/town-40.json" in document["study"]["cases"]["training"]
+    restored = next(c for c in document["cases"] if c["name"] == "town-40.json")
+    assert restored["inspected"]["ok"] is True
+    assert call(app, "POST", "/api/studies/cases/cases/town-40.json/restore")[0] == 404

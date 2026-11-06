@@ -189,7 +189,17 @@ h3 { font-size: 15px; margin: 18px 0 6px; } .card > h3:first-child { margin-top:
 /* ------------------------------------------------------------------ home */
 .study-card { display: flex; flex-direction: column; gap: 8px; text-decoration: none; color: var(--ink); min-height: 132px; }
 .study-card:hover { border-color: var(--accent); }
-.study-card .name { font-weight: 650; font-size: 17px; }
+.study-card .name { font-weight: 650; font-size: 17px; padding-right: 28px; }
+.study-wrap { position: relative; display: flex; } .study-wrap > .study-card { flex: 1; }
+.study-wrap > .menu { position: absolute; top: 10px; right: 10px; }
+.menu > summary { list-style: none; cursor: pointer; width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; color: var(--ink-2); }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu > summary:hover, .menu[open] > summary { background: var(--sunken); color: var(--ink); }
+.menu > .menu-list { position: absolute; right: 0; top: 32px; z-index: 20; min-width: 150px; display: flex; flex-direction: column; padding: 6px;
+  background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; box-shadow: var(--shadow); }
+.menu > .menu-list > button { text-align: left; border: 0; background: transparent; color: var(--ink); font: inherit; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+.menu > .menu-list > button:hover { background: var(--sunken); } .menu > .menu-list > button.danger { color: var(--critical-ink); }
+.archived-card { opacity: .75; }
 .empty { text-align: center; padding: 40px 20px; }
 .drop {
   border: 2px dashed var(--hair-strong); border-radius: 14px; padding: 26px 18px; text-align: center;
@@ -263,6 +273,10 @@ svg.chart { width: 100%; height: 170px; display: block; }
   background: var(--ink); color: var(--page); padding: 10px 16px; border-radius: 12px; box-shadow: var(--shadow); font-size: 14px; }
 .toast.bad { background: var(--critical-ink); color: #fff; }
 .toast[hidden] { display: none; }
+.toast.undo { bottom: 68px; display: flex; gap: 14px; align-items: center; }
+.toast.undo[hidden] { display: none; }
+.toast.undo > button { border: 1px solid color-mix(in srgb, var(--page) 50%, transparent); background: transparent; color: inherit; font: inherit; font-weight: 650; padding: 4px 12px; border-radius: 8px; cursor: pointer; }
+.toast.undo > button:hover { background: color-mix(in srgb, var(--page) 15%, transparent); }
 dialog { border: 1px solid var(--hair); border-radius: 14px; background: var(--surface); color: var(--ink); max-width: min(520px, calc(100vw - 32px)); padding: 20px; box-shadow: var(--shadow); }
 dialog::backdrop { background: rgba(0,0,0,.35); }
 
@@ -304,6 +318,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 </header>
 <main id="view" tabindex="-1"></main>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="toast undo" id="undo" role="status" aria-live="polite" hidden></div>
 <script>
 "use strict";
 /* =========================================================================
@@ -401,6 +416,15 @@ function toast(message, bad = false) {
   el.textContent = message; el.className = "toast" + (bad ? " bad" : ""); el.hidden = false;
   clearTimeout(toast.timer); toast.timer = setTimeout(() => { el.hidden = true; }, bad ? 7000 : 3500);
 }
+const UNDO_S = 10;
+// A bar with an Undo button, up for UNDO_S seconds after something was removed; one at a time, and gone with the screen.
+function undo(message, action) {
+  const el = $("#undo");
+  const button = h("button", { type: "button", onclick: () => { hideUndo(); guarded(action); } }, "Undo");
+  el.replaceChildren(h("span", {}, message), button); el.hidden = false;
+  clearTimeout(undo.timer); undo.timer = setTimeout(hideUndo, UNDO_S * 1000);
+}
+function hideUndo() { const el = $("#undo"); el.hidden = true; el.replaceChildren(); clearTimeout(undo.timer); }
 
 async function api(method, path, body, options = {}) {
   const init = { method, headers: {} };
@@ -439,7 +463,7 @@ function crumbs(...parts) {
 }
 
 async function route() {
-  clearTimers();
+  clearTimers(); hideUndo();
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   view.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), "Loading…"));
   try {
@@ -472,18 +496,21 @@ async function renderHome() {
   crumbs({ text: "Your studies" });
   const home = await api("GET", "/api/home");
   const hasKey = Object.values(home.keys || {}).some(Boolean);
-  const studies = home.studies.length ? h("div", { class: "grid" }, home.studies.map((s) => {
-    const [kind, sym] = s.tone === "warn" ? ["warn", "warn"] : s.tone === "bad" ? ["bad", "bad"] : STATE_ICON[s.kind] || ["none", "info"];
-    const stateEl = sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
-      : h("span", { class: `status ${kind}` }, icon(sym), h("span", {}, s.line));
-    return h("a", { class: "card study-card", href: studyLink(s) },
-      h("span", { class: "name" }, s.name), h("span", { class: "faint" }, s.harness), h("span", { class: "spacer" }), stateEl);
-  })) : h("div", { class: "card empty" },
-    h("h2", { style: "margin-top:0" }, "No studies yet"),
-    h("p", { class: "lede", style: "margin: 0 auto 16px" }, "A study finds the best settings for an application — or the best data to give it — on cases you choose, and then checks the result on cases it never saw."),
-    h("a", { class: "btn primary", href: "#/new" }, "New study"));
+  const active = home.studies.filter((s) => !s.archived), archived = home.studies.filter((s) => s.archived);
+  const studies = active.length ? h("div", { class: "grid" }, active.map(studyCard))
+    : archived.length ? h("p", { class: "muted" }, "Every study is archived; they are listed below.")
+    : h("div", { class: "card empty" },
+      h("h2", { style: "margin-top:0" }, "No studies yet"),
+      h("p", { class: "lede", style: "margin: 0 auto 16px" }, "A study finds the best settings for an application — or the best data to give it — on cases you choose, and then checks the result on cases it never saw."),
+      h("a", { class: "btn primary", href: "#/new" }, "New study"));
+  const shelf = archived.length ? h("div", {}, h("h2", {}, "Archived"), h("p", { class: "lede" }, "Kept, but out of the way. Unarchive one to bring it back up."),
+    h("div", { class: "grid" }, archived.map(studyCard))) : "";
+  const trash = home.trash.length ? h("p", { class: "small muted", style: "margin-top:14px" }, "Deleted: ",
+    home.trash.map((t, i) => [i ? " · " : "", h("span", {}, `${t.name} (${t.deleted_at.replace("T", " ")}) `),
+      h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await api("POST", `/api/trash/${encodeURIComponent(t.entry)}/restore`); toast(`${t.name} is back.`); renderHome(); }, e.currentTarget) }, "Restore")]),
+    ". The trash is emptied after 7 days.") : "";
 
-  const upload = h("input", { type: "file", accept: ".zip", class: "sr", id: "harness-zip", onchange: (e) => installHarness(e.target.files[0]) });
+  const upload = h("input", { type: "file", accept: ".zip", class: "sr", id: "harness-zip", onchange: (e) => addZip(e.target.files[0]) });
   const zipPath = h("input", { type: "text", id: "harness-path", placeholder: "C:\\...\\pyvrp-1.0.0.zip" });
   const zipAdd = h("button", { class: "btn small", type: "button", onclick: () => guarded(async () => {
     const harness = await api("POST", "/api/harnesses", { path: zipPath.value.trim() });
@@ -494,15 +521,15 @@ async function renderHome() {
     h("p", { class: "muted small" }, x.problem || x.summary || ""),
     x.problem ? null : h("p", { class: "small", style: "margin:0" }, status("good", "Ready to use: start a new study with it.")))));
   const drop = h("div", { class: "drop", tabindex: "0" },
-    h("p", { style: "margin:0 0 8px" }, "Add a harness: drop its .zip file here, or"),
+    h("p", { style: "margin:0 0 8px" }, "Add a harness, or a study saved as a zip: drop the .zip file here, or"),
     h("label", { class: "btn small", for: "harness-zip" }, "Choose a .zip file"), upload,
     h("div", { class: "row", style: "margin-top:10px; flex-wrap:nowrap; max-width:560px; margin-inline:auto" },
-      h("label", { for: "harness-path", class: "small", style: "white-space:nowrap" }, "or its path:"), zipPath, zipAdd));
-  dropZone(drop, (files) => files[0] && installHarness(files[0]));
+      h("label", { for: "harness-path", class: "small", style: "white-space:nowrap" }, "or a harness's path:"), zipPath, zipAdd));
+  dropZone(drop, (files) => files[0] && addZip(files[0]));
 
   view.replaceChildren(
     h("div", { class: "row between" }, h("div", {}, h("h1", {}, "Your studies"), h("p", { class: "lede" }, "Each study tunes one application on your cases.")), home.studies.length ? h("a", { class: "btn primary", href: "#/new" }, "New study") : null),
-    studies,
+    studies, shelf, trash,
     h("h2", {}, "Applications you can tune"),
     h("p", { class: "lede" }, "A harness connects evolvekit to one application. Your colleagues who build them send them as .zip files."),
     installed ? note("good", h("p", { style: "margin:0" }, installed)) : "",
@@ -512,6 +539,70 @@ async function renderHome() {
       note("info", h("p", { style: "margin:0" }, "Optional: with an API key the assistant helps you describe measures and data changes in your own words. Everything else works without one. ", h("a", { href: "#/settings" }, "Add a key in Settings"))),
     h("p", { class: "faint", style: "margin-top:24px" }, `Your library is in ${home.home}.`),
   );
+}
+
+// One study's card, with its menu: rename, duplicate, archive, delete (with Undo for a while, Restore after).
+function studyCard(s) {
+  const [kind, sym] = s.tone === "warn" ? ["warn", "warn"] : s.tone === "bad" ? ["bad", "bad"] : STATE_ICON[s.kind] || ["none", "info"];
+  const stateEl = sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
+    : h("span", { class: `status ${kind}` }, icon(sym), h("span", {}, s.line));
+  const card = h("a", { class: "card study-card" + (s.archived ? " archived-card" : ""), href: studyLink(s) },
+    h("span", { class: "name" }, s.name), h("span", { class: "faint" }, s.harness), h("span", { class: "spacer" }), stateEl);
+  const path = `/api/studies/${encodeURIComponent(s.slug)}`;
+  const menu = h("details", { class: "menu" });
+  const item = (label, action, danger) => h("button", { type: "button", class: danger ? "danger" : null, onclick: () => { menu.open = false; guarded(action); } }, label);
+  menu.append(h("summary", { "aria-label": `More for ${s.name}`, title: "Rename, duplicate, archive, delete" }, "⋯"),
+    h("div", { class: "menu-list" },
+      item("Rename", async () => {
+        const name = prompt("The study's new name:", s.name);
+        if (name === null || !name.trim() || name.trim() === s.name) return;
+        await api("PATCH", path, { name: name.trim() }); toast("Renamed."); renderHome();
+      }),
+      item("Duplicate", async () => {
+        const name = prompt("The name of the copy (it takes the setup and the cases, not the runs):", `${s.name} (copy)`);
+        if (name === null) return;
+        const doc = await api("POST", `${path}/duplicate`, { name: name.trim() });
+        toast(`Copied as ${doc.study.name}.`); location.hash = `#/study/${doc.slug}/${doc.study.step || 1}`;
+      }),
+      item(s.archived ? "Unarchive" : "Archive", async () => { await api("PATCH", path, { archived: !s.archived }); renderHome(); }),
+      item("Delete", async () => {
+        if (!confirm(`Delete “${s.name}”? It waits in the trash for 7 days; you can restore it from the home page until then.`)) return;
+        const gone = await api("DELETE", path);
+        await renderHome();
+        undo(`Deleted ${s.name}.`, async () => { await api("POST", `/api/trash/${encodeURIComponent(gone.trashed)}/restore`); toast(`${s.name} is back.`); renderHome(); });
+      }, true)));
+  return h("div", { class: "study-wrap" }, card, menu);
+}
+document.addEventListener("click", (e) => { for (const m of document.querySelectorAll("details.menu[open]")) if (!m.contains(e.target)) m.open = false; });
+
+// The file names a zip holds, from its central directory: enough to tell a study (study.yaml inside) from a harness.
+function zipNames(buffer) {
+  const bytes = new Uint8Array(buffer), view = new DataView(buffer), names = [];
+  let end = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) if (view.getUint32(i, true) === 0x06054b50) { end = i; break; }
+  if (end < 0) return null;
+  const count = view.getUint16(end + 10, true);
+  let at = view.getUint32(end + 16, true);
+  const text = new TextDecoder();
+  for (let n = 0; n < count && at + 46 <= bytes.length && view.getUint32(at, true) === 0x02014b50; n++) {
+    const nameLength = view.getUint16(at + 28, true), extra = view.getUint16(at + 30, true), comment = view.getUint16(at + 32, true);
+    names.push(text.decode(bytes.subarray(at + 46, at + 46 + nameLength)));
+    at += 46 + nameLength + extra + comment;
+  }
+  return names;
+}
+
+// A dropped .zip: a study if study.yaml is in it (at the top, or under one folder), else a harness.
+async function addZip(file) {
+  if (!file) return;
+  await guarded(async () => {
+    const data = await file.arrayBuffer();
+    const names = zipNames(data) || [];
+    const isStudy = names.some((n) => n === "study.yaml" || /^[^/]+\/study\.yaml$/.test(n));
+    if (!isStudy) { await installHarness(file); return; }
+    const doc = await api("POST", `/api/studies?name=${encodeURIComponent(file.name)}`, data);
+    toast(`Imported the study ${doc.study.name}.`); location.hash = `#/study/${doc.slug}/${doc.study.step || 1}`;
+  });
 }
 
 function dropZone(el, onFiles) {
@@ -1037,7 +1128,11 @@ async function step3(box) {
           h("td", {}, h("span", { class: "badge" + (c.set === "test" ? " accent" : "") }, c.set === "test" ? "final check" : "search")),
           h("td", { class: "n" }, h("div", { class: "row", style: "justify-content:flex-end; flex-wrap:nowrap" },
             h("button", { class: "btn small quiet", type: "button", title: `Use it for the ${other === "test" ? "final check" : "search"}`, onclick: (e) => guarded(() => move(c.name, other), e.currentTarget) }, other === "test" ? "Hold back" : "Search with it"),
-            h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${c.name}`, onclick: (e) => guarded(async () => { current.doc = await api("DELETE", studyPath(`/cases/${encodeURIComponent(c.name)}`)); draw(); }, e.currentTarget) }, "Remove"))));
+            h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${c.name}`, onclick: (e) => guarded(async () => {
+              const path = studyPath(`/cases/${encodeURIComponent(c.name)}`);
+              current.doc = await api("DELETE", path); draw();
+              undo(`Removed ${c.name}.`, async () => { current.doc = await api("POST", `${path}/restore`); draw(); });
+            }, e.currentTarget) }, "Remove"))));
       })))));
     const notes = [];
     if (test === 0) notes.push(note("warn", h("p", { style: "margin:0" }, "No cases are held back: there will be no final check, and the result will look better than it is.")));
@@ -1186,7 +1281,10 @@ async function step4(box) {
       return h("div", { class: "item" }, h("div", { class: "body" },
         h("div", { class: "what" }, change.says || `${lever.label}: ${column}`),
         h("div", { class: "muted small" }, `${capital(column)} of ${change.where ? "the rows where " : "all rows of "}`, h("code", {}, change.where || lever.table), `, ${how}, starting at ${fmt(change.start)}.`)),
-        h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${name}`, onclick: (e) => guarded(() => { const next = { ...data }; delete next[name]; return saveVary(null, next); }, e.currentTarget) }, "Remove"));
+        h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${name}`, onclick: (e) => guarded(async () => {
+          const next = { ...data }; delete next[name]; await saveVary(null, next);
+          undo(`Removed the data change ${change.says || name}.`, () => saveVary(null, { ...(current.doc.study.vary.data || {}), [name]: change }));
+        }, e.currentTarget) }, "Remove"));
     });
     dataBox.replaceChildren(rows.length ? h("div", { class: "card", style: "padding:4px 18px" }, rows) : h("p", { class: "muted" }, "No data changes: the study leaves the data as it is."), dataForm());
   }
@@ -1268,7 +1366,13 @@ async function step4(box) {
     fill(rulesBox, 
       rules.length ? h("div", { class: "card", style: "padding:4px 18px" }, rules.map((rule, i) => h("div", { class: "item" },
         h("div", { class: "body" }, h("div", { class: "what" }, sentence(rule.says)), h("div", { class: "faint" }, h("code", {}, rule.expr || rule.sql))),
-        h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await patch({ constraints: rules.filter((_, j) => j !== i) }); drawAll(); }, e.currentTarget) }, "Remove"))))
+        h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove the rule ${rule.says}`, onclick: (e) => guarded(async () => {
+          await patch({ constraints: rules.filter((_, j) => j !== i) }); drawAll();
+          undo(`Removed the rule ${sentence(rule.says)}`, async () => {
+            const back = [...(current.doc.study.constraints || [])]; back.splice(Math.min(i, back.length), 0, rule);
+            await patch({ constraints: back }); drawAll();
+          });
+        }, e.currentTarget) }, "Remove"))))
         : h("p", { class: "muted" }, "No rules: every combination in the ranges above may be tried."),
       builder,
       names.length ? h("details", { class: "card", style: "margin-top:12px" }, h("summary", {}, builder ? "Write a rule yourself" : "Add a rule"),
@@ -1339,8 +1443,11 @@ async function step5(box) {
         kpiHelp(name) ? h("div", { class: "small" }, kpiHelp(name)) : null,
         h("div", { class: "muted small" }, `${kpiDirection(name) === "lower" ? "Lower" : "Higher"} is better. Today, on the smallest case: `, valueEl),
         kpi.sql ? h("details", {}, h("summary", {}, "How it is counted"), h("pre", { class: "mono small", style: "white-space:pre-wrap" }, kpi.sql)) : null, rowsBtn),
-        used ? h("span", { class: "badge" }, "in use") : h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => {
-          const next = { ...kpis }; delete next[name]; await patch({ kpis: next }); drawAll(); }, e.currentTarget) }, "Remove"));
+        used ? h("span", { class: "badge" }, "in use") : h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${kpiLabel(name)}`, onclick: (e) => guarded(async () => {
+          const label = kpiLabel(name);
+          const next = { ...kpis }; delete next[name]; await patch({ kpis: next }); drawAll();
+          undo(`Removed the measure ${label}.`, async () => { await patch({ kpis: { ...current.doc.study.kpis, [name]: kpi } }); drawAll(); });
+        }, e.currentTarget) }, "Remove"));
     });
     kpisBox.replaceChildren(rows.length ? h("div", { class: "card", style: "padding:4px 18px" }, rows) : h("p", { class: "muted" }, "No measures yet."));
   }
@@ -1688,6 +1795,8 @@ async function step7(box) {
       h("ul", { style: "margin:0; padding-left:18px" }, problems.map((p) => h("li", {}, h("a", { href: `#/study/${current.slug}/${p.step}` }, `Step ${p.step}, ${STEPS[p.step - 1]}`), `: ${sentence(p.text)}`)))) : null,
     plan && plan.blocked ? note("bad", h("p", { style: "margin:0" }, sentence(plan.blocked))) : null,
     h("h2", {}, "Test run"), testResult, h("div", { class: "row", style: "margin-top:8px" }, testBtn),
+    h("p", { class: "faint", style: "margin-top:18px" }, "The study's setup — its cases, choices and harness — travels as one file: ",
+      h("a", { href: studyPath("/download/study"), download: "" }, "Save as zip"), ". Dropped on the home page of another library, it becomes a study there."),
     h("div", { class: "step-foot" }, h("a", { class: "btn", href: `#/study/${current.slug}/6` }, "Back"),
       h("div", { class: "row" }, h("span", { class: "faint" }, "The study runs on even if you close the app."), start)));
   drawTest(doc.test_run);
@@ -2108,7 +2217,9 @@ async function renderResults(slug, run) {
     h("h2", {}, "Hand it over"), h("div", { class: "card" },
       h("p", { class: "muted", style: "margin-top:0" }, "The summary says how the study was set up, what it found, how sure that is and what changed — ready to paste into a message. The report says the same on one page, with every number."),
       h("div", { class: "row" }, summary, report, settingsButton), shown,
-      h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads),
+      h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads,
+      h("p", { class: "faint", style: "margin:14px 0 0" }, "The study itself — its cases, choices and harness, not the runs — as one file to pass on: ",
+        h("a", { href: studyPath("/download/study"), download: "" }, "Save as zip"), ".")),
     h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again),
     assistantPanel({ screen: "results", run: r.run, open: false })));
 }

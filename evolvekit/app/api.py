@@ -111,7 +111,8 @@ def home(req: Request) -> dict[str, Any]:
         state = jobs.state_line(root, study, req.server.status_document)
         template = (pinned.templates.get(study.template) or {}).get("title") if study.template else None
         studies.append({"slug": slug, "name": study.name, "harness": pinned.title + (f" · {template}" if template else ""),
-                        **state, "updated_at": (root / "study.yaml").stat().st_mtime})
+                        **state, "updated_at": (root / "study.yaml").stat().st_mtime,
+                        "archived": req.home.is_archived(slug)})
     studies.sort(key=lambda s: -float(s.get("updated_at") or 0))
     harnesses = []
     for entry in req.home.harness_entries():
@@ -124,7 +125,7 @@ def home(req: Request) -> dict[str, Any]:
                           "application": {"kind": h.application.kind, "label": h.application.label}})
     settings = req.home.settings()
     return {"home": str(req.home.root), "studies": studies, "harnesses": harnesses, "keys": req.home.keys(),
-            "provider": settings["provider"]}
+            "provider": settings["provider"], "trash": req.home.trash()}
 
 
 def _templates(harness: Harness) -> list[dict[str, Any]]:
@@ -192,8 +193,34 @@ def _document(req: Request, slug: str) -> dict[str, Any]:
 
 
 def create_study(req: Request) -> dict[str, Any]:
-    body = req.json()
-    slug = req.home.create_study(str(body.get("harness") or ""), body.get("template") or None, str(body.get("name") or ""))
+    """A new study from JSON `{harness, template, name}` -- or, with a zip in
+    the body (`Content-Type: application/zip`, or any body with `?name=`),
+    the study that zip holds (`Home.export_study` wrote it)."""
+    kind = req.headers.get("Content-Type") or ""
+    zipped = req.body and not kind.startswith("application/json") and (kind.startswith("application/zip") or bool(req.query.get("name")))
+    if zipped:
+        slug = req.home.import_study(req.body, req.query.get("name") or "study.zip")
+    else:
+        body = req.json()
+        slug = req.home.create_study(str(body.get("harness") or ""), body.get("template") or None, str(body.get("name") or ""))
+    return _document(req, slug)
+
+
+def delete_study(req: Request) -> dict[str, Any]:
+    """To the trash, where it waits for a restore: `{"trashed": entry}`."""
+    slug = req.params["slug"]
+    if jobs.running(req.home.study_root(slug)):
+        raise AppError("the study is running; stop it before deleting it", 409)
+    return {"trashed": req.home.delete_study(slug)}
+
+
+def restore_study(req: Request) -> dict[str, Any]:
+    req.home.restore_study(req.params["entry"])
+    return home(req)
+
+
+def duplicate_study(req: Request) -> dict[str, Any]:
+    slug = req.home.duplicate_study(req.params["slug"], str(req.json().get("name") or ""))
     return _document(req, slug)
 
 
@@ -207,11 +234,20 @@ def study_harness(req: Request) -> dict[str, Any]:
 
 
 def save_step(req: Request) -> dict[str, Any]:
+    """Parts of the study to merge in -- and `archived: true|false`, which is
+    a marker on the folder, not a part of the study."""
     slug = req.params["slug"]
     root = req.home.study_root(slug)
     if jobs.running(root):
         raise AppError("the study is running; stop it before changing it", 409)
-    req.home.save_step(slug, req.json())
+    changes = dict(req.json())
+    archived = changes.pop("archived", None)
+    if archived is not None and not isinstance(archived, bool):
+        raise AppError("archived: true or false")
+    if changes:
+        req.home.save_step(slug, changes)
+    if archived is not None:
+        req.home.set_archived(slug, archived)
     return _document(req, slug)
 
 
@@ -273,6 +309,14 @@ def delete_case(req: Request) -> dict[str, Any]:
     if jobs.running(req.home.study_root(slug)):
         raise AppError("the study is running; its cases cannot change now", 409)
     req.home.delete_case(slug, req.params["name"])
+    return _document(req, slug)
+
+
+def restore_case(req: Request) -> dict[str, Any]:
+    slug = req.params["slug"]
+    if jobs.running(req.home.study_root(slug)):
+        raise AppError("the study is running; its cases cannot change now", 409)
+    req.home.restore_case(slug, req.params["name"])
     return _document(req, slug)
 
 
@@ -539,8 +583,11 @@ def results(req: Request) -> dict[str, Any]:
 
 
 def download(req: Request) -> FileResponse:
-    root, _, _ = req.home.load(req.params["slug"])
+    slug = req.params["slug"]
+    root, _, _ = req.home.load(slug)
     export = req.params["export"]
+    if export == "study":  # the study itself, as one zip: no run needed
+        return FileResponse(req.home.export_study(slug), "application/zip", f"{slug}.zip")
     body, content_type, filename = jobs.download(root, _run(req, root), export, req.server.status_document)
     # The report opens in the browser with ?view=1; everything else is a file to save.
     inline = export == "report" and req.query.get("view") == "1"
@@ -564,12 +611,16 @@ ROUTES = [
     route("GET", "/api/detect")(detect),
     route("POST", "/api/pick-file")(pick_file),
     route("POST", "/api/studies")(create_study),
+    route("POST", "/api/trash/{entry}/restore")(restore_study),
     route("GET", "/api/studies/{slug}")(study),
     route("PATCH", "/api/studies/{slug}")(save_step),
+    route("DELETE", "/api/studies/{slug}")(delete_study),
+    route("POST", "/api/studies/{slug}/duplicate")(duplicate_study),
     route("GET", "/api/studies/{slug}/harness")(study_harness),
     route("POST", "/api/studies/{slug}/application")(application),
     route("PUT", "/api/studies/{slug}/cases/{name}")(put_case),
     route("DELETE", "/api/studies/{slug}/cases/{name}")(delete_case),
+    route("POST", "/api/studies/{slug}/cases/{name}/restore")(restore_case),
     route("POST", "/api/studies/{slug}/samples")(use_samples),
     route("POST", "/api/studies/{slug}/import")(import_cases),
     route("POST", "/api/studies/{slug}/inspect")(inspect_cases),

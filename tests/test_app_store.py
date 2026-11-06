@@ -201,3 +201,142 @@ def test_an_empty_model_means_the_cli_default_and_is_refused_elsewhere(home):
         home.save_settings({"provider": "azure", "models": {"assistant": ""}})
     with pytest.raises(AppError, match="models.assistant"):
         home.save_settings({"provider": "openrouter", "models": {"assistant": ""}})
+
+
+# ---------------------------------------------------------------------------
+# managing studies: the trash, duplicates, the zip, a removed case
+# ---------------------------------------------------------------------------
+
+
+def test_a_deleted_study_waits_in_the_trash_under_its_slug_and_a_stamp(home):
+    import re
+
+    slug = _demo_study(home, "Demo")
+    entry = home.delete_study(slug)
+    assert re.fullmatch(r"demo~\d{8}-\d{6}", entry), entry
+    assert home.slugs() == [], "the trash is not a study"
+    with pytest.raises(AppError) as caught:
+        home.study_root(slug)
+    assert caught.value.status == 404
+    (listed,) = home.trash()
+    assert listed["entry"] == entry and listed["name"] == "Demo" and listed["deleted_at"][:4] == entry[5:9]
+    assert home.create_study("demo-tour", "tune", "Demo") == "demo", "the slug is free again"
+    assert home.restore_study(entry) == "demo-2", "the slug was taken meanwhile"
+    assert home.trash() == [] and home.slugs() == ["demo", "demo-2"]
+    with pytest.raises(AppError) as caught:
+        home.restore_study(entry)
+    assert caught.value.status == 404
+    for bad in ("../x", "demo~x", "demo", ".."):
+        with pytest.raises(AppError):
+            home.restore_study(bad)
+
+
+def test_the_trash_is_emptied_after_seven_days(home):
+    slug = _demo_study(home, "Old")
+    entry = home.delete_study(slug)
+    old = home.studies_dir / ".trash" / "old~20200101-120000"
+    (home.studies_dir / ".trash" / entry).rename(old)
+    fresh = home.delete_study(_demo_study(home, "Fresh"))
+    assert home.clean_trash(days=7) == ["old~20200101-120000"]
+    assert not old.exists() and (home.studies_dir / ".trash" / fresh).is_dir()
+    assert [e["entry"] for e in home.trash()] == [fresh]
+    assert home.clean_trash(days=7) == []
+
+
+def test_archiving_is_a_marker_and_not_a_study_field(home):
+    slug = _demo_study(home, "Shelf")
+    assert home.is_archived(slug) is False
+    home.set_archived(slug, True)
+    assert home.is_archived(slug) is True and (home.study_root(slug) / ".archived").is_file()
+    assert "archived" not in load_study(home.study_root(slug)).to_yaml()
+    home.set_archived(slug, False)
+    assert home.is_archived(slug) is False and not (home.study_root(slug) / ".archived").exists()
+
+
+def test_a_duplicate_takes_the_setup_and_not_the_runs(home):
+    slug = _demo_study(home, "Original")
+    home.use_samples(slug)
+    home.save_step(slug, {"step": 5})
+    root = home.study_root(slug)
+    (root / "runs" / "20260101-000000").mkdir(parents=True)
+    (root / "runs" / "20260101-000000" / "job.json").write_text('{"phase": "done"}', encoding="utf-8")
+    (root / "preview").mkdir()
+    (root / "assistant.jsonl").write_text("{}\n", encoding="utf-8")
+    copy = home.duplicate_study(slug, "Second try")
+    assert copy == "second-try"
+    new_root = home.study_root(copy)
+    assert not (new_root / "runs").exists() and not (new_root / "preview").exists() and not (new_root / "assistant.jsonl").exists()
+    study = load_study(new_root)
+    assert study.name == "Second try" and study.step == 5 and study.training == load_study(root).training
+    assert (new_root / "harness" / "harness.yaml").is_file()
+    assert [c["name"] for c in home.cases(copy)] == [c["name"] for c in home.cases(slug)]
+    assert all(c["inspected"] for c in home.cases(copy)), "the inspection cache came along: nothing is read again"
+    assert home.duplicate_study(slug, "") == "original-copy", "a copy without a name is named after the original"
+    assert load_study(home.study_root("original-copy")).name == "Original (copy)"
+
+
+def test_a_removed_case_can_be_restored_without_reading_it_again(home):
+    slug = _demo_study(home)
+    home.put_case(slug, "town-40.json", (DEMO / "samples" / "town-40.json").read_bytes())
+    home.put_case(slug, "county-50.json", (DEMO / "samples" / "county-50.json").read_bytes())
+    home.split(slug, 1)
+    held = load_study(home.study_root(slug)).test
+    name = held[0].replace("cases/", "")
+    home.delete_case(slug, name)
+    assert (home.study_root(slug) / ".trash" / "cases" / name).is_file()
+    assert name not in [c["name"] for c in home.cases(slug)] and load_study(home.study_root(slug)).test == []
+    home.restore_case(slug, name)
+    assert (home.study_root(slug) / "cases" / name).is_file()
+    study = load_study(home.study_root(slug))
+    assert f"cases/{name}" in study.training and study.test == [], "restored into training"
+    restored = next(c for c in home.cases(slug) if c["name"] == name)
+    assert restored["inspected"] and restored["inspected"]["ok"] is True, "the inspection was kept"
+    with pytest.raises(AppError) as caught:
+        home.restore_case(slug, name)
+    assert caught.value.status == 404
+    with pytest.raises(AppError):
+        home.restore_case(slug, "../x.json")
+
+
+def _zip(members: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def test_a_study_travels_as_one_zip(home):
+    import io
+    import zipfile
+
+    slug = _demo_study(home, "Travel")
+    home.use_samples(slug)
+    root = home.study_root(slug)
+    (root / "runs" / "r1").mkdir(parents=True)
+    (root / "runs" / "r1" / "job.json").write_text("{}", encoding="utf-8")
+    (root / "assistant.jsonl").write_text("{}\n", encoding="utf-8")
+    data = home.export_study(slug)
+    names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+    assert "study.yaml" in names and "harness/harness.yaml" in names and "cases/town-40.json" in names
+    assert not any(n.startswith(("runs/", "preview/", "downloads/")) or n == "assistant.jsonl" or ".inspected" in n for n in names), names
+    copy = home.import_study(data, "travel.zip")
+    assert copy == "travel-2" and load_study(home.study_root(copy)).name == "Travel"
+    assert [c["name"] for c in home.cases(copy)] == [c["name"] for c in home.cases(slug)]
+    assert not (home.study_root(copy) / "runs").exists()
+
+    with pytest.raises(AppError, match="study.yaml"):
+        home.import_study(_zip({"harness/harness.yaml": b"id: x"}), "x.zip")
+    with pytest.raises(AppError, match="outside"):
+        home.import_study(_zip({"study.yaml": b"x", "../evil.txt": b"x"}), "x.zip")
+    with pytest.raises(AppError, match="outside"):
+        home.import_study(_zip({"study.yaml": b"x", "cases/..\\evil.txt": b"x"}), "x.zip")
+    with pytest.raises(AppError, match="not a zip"):
+        home.import_study(b"not a zip", "x.zip")
+    with pytest.raises(AppError):
+        home.import_study(_zip({"study.yaml": b"study: 1\nname: Broken\n"}), "x.zip")
+    assert home.slugs() == ["travel", "travel-2"], "a refused import leaves nothing behind"
+    assert not any(p.name.startswith(".") for p in home.studies_dir.iterdir() if p.name != ".trash")

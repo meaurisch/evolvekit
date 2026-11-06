@@ -411,3 +411,25 @@ def test_ai_search_help_refuses_a_cap_it_cannot_hold(app, monkeypatch):
     assert not (app.home.study_root(slug) / "runs").exists(), "nothing was started"
     call(app, "PUT", "/api/settings", {"prices": {"dep": [1.5, 6]}})
     assert jobs.ai_models(app.home)["strong"]["price_in_per_mtok"] == 1.5
+
+
+def test_a_running_or_queued_study_cannot_be_deleted_renamed_or_archived(app):
+    first, second = _ready_study(app, "First"), _ready_study(app, "Second")
+    status, started = call(app, "POST", f"/api/studies/{first}/start")
+    assert status == 200, started
+    status, queued = call(app, "POST", f"/api/studies/{second}/start")
+    assert status == 200 and queued["queued"] is True, queued
+    try:
+        for slug in (first, second):
+            status, body = call(app, "DELETE", f"/api/studies/{slug}")
+            assert status == 409 and "running" in body["error"], (slug, body)
+            assert call(app, "PATCH", f"/api/studies/{slug}", {"archived": True})[0] == 409
+            assert call(app, "PATCH", f"/api/studies/{slug}", {"name": "Renamed"})[0] == 409
+        status, home = call(app, "GET", "/api/home")
+        assert sorted(s["slug"] for s in home["studies"]) == [first, second] and home["trash"] == []
+    finally:
+        call(app, "POST", f"/api/studies/{second}/stop")
+        call(app, "POST", f"/api/studies/{first}/stop")
+        _until(app, f"/api/studies/{first}/status", lambda b: b["phase"] in ("done", "failed", "stopped"), timeout=120)
+    status, gone = call(app, "DELETE", f"/api/studies/{second}")
+    assert status == 200 and gone["trashed"].startswith(f"{second}~")
