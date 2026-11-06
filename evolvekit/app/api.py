@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from evolvekit.app import AppError, assistant, compare, jobs, work
+from evolvekit.app import AppError, assistant, compare, jobs, tries, work
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
 from evolvekit.harness import HarnessError
@@ -588,6 +588,14 @@ def status(req: Request) -> dict[str, Any]:
     return jobs.status(root, _run(req, root), req.server.status_document)
 
 
+def tries_of(req: Request) -> dict[str, Any]:
+    """Every try of a run, for the Study page's Tries, Cases and Settings views (`tries.digest`)."""
+    root, _, _ = req.home.load(req.params["slug"])
+    run = _run(req, root)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the run's folder, judged by name
+    return {"run": run, **tries.digest(run_dir)}
+
+
 def results(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
     return jobs.results(root, _run(req, root), req.server.status_document)
@@ -663,6 +671,7 @@ ROUTES = [
     route("POST", "/api/studies/{slug}/continue")(continue_run),
     route("GET", "/api/studies/{slug}/status")(status),
     route("GET", "/api/studies/{slug}/results")(results),
+    route("GET", "/api/studies/{slug}/tries")(tries_of),
     route("GET", "/api/studies/{slug}/download/{export}")(download),
     route("POST", "/api/studies/{slug}/next")(next_study),
 ]

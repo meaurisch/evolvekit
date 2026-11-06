@@ -28,6 +28,7 @@ def test_two_finished_runs_compare_side_by_side(tmp_path):
     assert a["final"]["state"] == "unclear" and a["final"]["decision"] == "keep"
     assert a["final"]["line"].startswith("Not proven on 1 held-back case")
     assert a["final"]["chance"] == pytest.approx(0.97) and a["final"]["ci95"] == [pytest.approx(-0.8), pytest.approx(1.6)]
+    assert a["final"]["mean"] is not None and a["final"]["n"] == 1, "the estimate itself, for the range strip"
     assert a["held"] == [{"case": "cases/town-40.json", "start": 50.0, "best": pytest.approx(49.8), "change_pct": pytest.approx(0.4)}]
     assert [c["name"] for c in a["changes"]] == ["neighbours", "restart_after", "accept_worse", "init"]
     assert next(c for c in a["changes"] if c["name"] == "restart_after") == {
