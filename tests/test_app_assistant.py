@@ -484,7 +484,7 @@ def test_a_card_that_fails_in_the_list_leaves_the_others_applied(study):
     cards = [{"kind": "guardrail", "kpi": "nobody", "max": 1}, *WHOLE]
     done = assistant.apply_cards(root, cards)
     assert [c["ok"] for c in done] == [False, True, True, True]
-    assert "'nobody' is not a KPI" in done[0]["problem"]
+    assert "'nobody' is not a measure" in done[0]["problem"]
     studied = load_study(root)
     assert "late" in studied.kpis and studied.goal[0].kpi == "late" and [g.kpi for g in studied.guardrails] == ["late"]
     done = assistant.apply_cards(root, [{"kind": "wrong"}, WHOLE[2]])

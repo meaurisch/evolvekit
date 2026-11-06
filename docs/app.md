@@ -9,6 +9,9 @@ asks the questions and explains the answers.
 
 ![Home](app/home-light.png)
 
+It follows the computer's light or dark setting (`?theme=light` or `?theme=dark`
+in the address forces one) and works down to a phone's width.
+
 ## Starting it
 
 ```
@@ -52,179 +55,174 @@ opened again at any time:
 A study folder is self-contained: copy it to another computer, point it at
 the application there, and it runs.
 
-On the home page every study card has a menu (⋯): *Rename*; *Duplicate* — a
-new study with the setup and the cases, not the runs; *Archive* — kept, but
-out of the way, under **Archived** at the bottom of the page, until
-*Unarchive*; and *Delete*. Nothing is deleted at once: a deleted study waits
-in the trash for 7 days — an *Undo* bar offers it back for ten seconds, and
-after that the **Deleted:** line at the bottom of the home page has *Restore*
-for each. A study that is running, or waiting its turn, can be neither
-renamed, archived nor deleted. A study travels as one `.zip` — *Save as zip*
-on the review step and under the results — and dropped on the home page of
-another library, where harnesses are dropped, it becomes a study there.
+**Home** shows your studies as cards: each says where the study is
+(*Running · round 7 of 12*, *Queued*, *Finished · 4 held-back cases*), its
+answer with the likely range, and Pepper — the app's butterfly — in the
+study's phase: eggs for a draft, a caterpillar early in the search, a cocoon
+late in it and during the final check, and a butterfly when it is done
+(bright when the answer is *use it*, in quiet colours otherwise). Every card
+has a menu (⋯): *Rename*; *Duplicate* — a new study with the setup and the
+cases, not the runs; *Compare with…*; *Past runs*; *Save as zip*; *Archive* —
+kept, but out of the way, under **Archived** until *Restore*; and *Delete*.
+Nothing is deleted at once: a deleted study waits under **Deleted** for 7
+days — an *Undo* bar offers it back for ten seconds, and the Deleted tab has
+*Restore* for each. A study that is running, or waiting its turn, can be
+neither renamed, archived nor deleted. One click away under the cards:
+*Applications* (the harnesses you can tune, and installing one), *Add a
+harness or zip* (a study zip dropped there becomes a study), *Compare two
+studies* and the *Library folder*.
 
-## A study, step by step
+## A study, from start to answer
 
-**New study** asks three questions: which application (a *harness*
-connects evolvekit to one — PyVRP and a demo come with evolvekit, colleagues
-send others as `.zip` files), what you want to find out (a template, or blank),
-and a name. Then seven steps, on a rail at the left; each is saved as you go,
-and you can always go back.
+The app has four pages for a study: **Start a study**, **Set up**, the
+**Study** page, and — one click away from it — **Compare**. Everything is
+saved as you go.
 
-1. **Question** — the application and the kind of study, and the name.
-2. **Application** — where the application is on this computer. For PyVRP
-   that is the Python that has it installed: the app looks in the usual
-   places and asks each one, so the right one says *PyVRP 0.14.0 found*.
-   Otherwise Browse, or paste the path.
+![Start a study](app/start-light.png)
 
-   ![The application step](app/application-light.png)
-3. **Cases** — the requests to work on: drop files or folders, choose a
-   folder, type a folder's path, or use the harness's samples. Every file is
-   read at once and described ("64 tasks, 19 vehicles in 9 types"), or you
-   are told why it cannot be read. A few cases are **held back**: the search
-   never sees them, and at the end the best result is checked on them — the
-   *final check*. The others are the cases the search learns from. The app
-   picks cases of different sizes; you can swap any. Leaving this step starts
-   the **preview**: the smallest case solved once, at the starting values and
-   for at most 10 seconds — proof that everything works, every measure's value
-   today, the real tables for the assistant, and the timing the plan needs.
-   It shows how long it has been running and how long it usually takes.
-4. **What may change** — the application's settings (each *Tune*, *Keep
-   fixed at …* or *Default*, with *Why would I tune this?*; the recommended
-   ones come first, the one that matters most at the top), changes to the data (a harness decides which: for PyVRP
-   vehicle costs, fleet, shifts, time windows, prizes, service times), and
-   rules every combination must keep. *Keep one value above another* writes
-   the common one in the values themselves — "Box truck cost per km (today
-   0.5) stays above Van cost per km (today 0.3)" — checked on the changed data
-   of every case; a rule written by hand uses the names of what is tuned, and
-   a data change's name stands for its factor (1 is today).
-   A file of the settings you use today can be imported: everything not tuned
-   keeps its value from there.
+**Start a study** asks four things on one page:
 
-   ![What may change](app/change-light.png)
-5. **Goal** — the measures to watch, each with what it means and its value
-   on the preview case today; what should improve: *one measure*, *a
-   combination* (weights shown as exchange rates: "1 late task counts as much
-   as 2 hours of waiting"), or *in order of importance* (the first level
-   decides unless two results are within its tolerance); and guardrails, which
-   every case must meet ("no required task left out"). A goal that does not
-   count broken rules — PyVRP's *Real cost* — comes with an offer to add the
-   guardrail it needs, *Feasible at least 1*, in one click.
+1. **Application** — which application (a *harness* connects evolvekit to
+   one — PyVRP and a demo come with evolvekit, colleagues send others as
+   `.zip` files) and where it is on this computer. The app looks in the usual
+   places and asks each one, so the right one says *PyVRP 0.14.0 · Found on
+   this computer*; *Other* lists what it found, browses, or takes a pasted
+   path.
+2. **Kind of study** — the harness's templates (better settings, better
+   data), or blank.
+3. **Cases** — the requests to work on: drop files or a folder, choose
+   them, give a folder's path, or use the harness's samples. Every file is read
+   at once; one that cannot be read is named and left out. A few cases are
+   **held back**: the search never sees them, and at the end the best result
+   is checked on them — the *final check*. The strip under the drop zone shows
+   every case by size, held-back ones filled, with one sentence on how firm
+   the answer can be (*4 held back: a fair answer for a clear, consistent
+   gain*); *Which ones?* swaps any case, or removes one (with Undo).
+4. **Name**.
 
-   ![The goal](app/goal-light.png)
-6. **Limits and budget** — the time per case (the application stops itself
-   then; a run still going at 1.5 × that + 30 s counts as failed), retries,
-   runs per case, the total time, and optional AI search help with a dollar
-   cap. The **plan** says in words what the time buys ("about 9 rounds, about
-   108 combinations, a final check on 3 held-back cases; done around 17:40").
-   When that is thin for what you tune, it offers fixes with their
-   consequences — *Tune only the 4 that matter most* (about 10 tries each), or
-   *Allow 1 hour in total* — and when it is too little to learn anything,
-   three concrete ways out. Experts can set the combinations per round and the
-   rounds under *Adjust*.
-7. **Review and start** — everything in sentences, what is still missing,
-   and the **test run**: the study once on the smallest case, with every
-   measure and the guardrails, before anything is spent. Then Start.
+*Next: set up* starts the **preview** in the background: the smallest case
+solved once at the starting values — proof that everything works, every
+measure's value today, and the timing the plan needs.
 
-What is still missing is listed on each step (*Still to do on this step*) and
-marked on the rail, and both follow every change at once.
+![Set up](app/setup-light.png)
 
-## While it runs
+**Set up** is one screen with three summaries, each with *Change*, which
+opens a drawer on the right (full screen on a phone):
 
-![Running](app/running-light.png)
+- **What to tune** — the application's settings, as its harness names,
+  groups and ranks them: each *Tune*, *Fixed* or *Default*, the recommended
+  ones first, and an ⓘ right after each name with what the setting does in
+  plain words (*More detail* for the technical text). A tuned number has
+  *Change the range*. A file of the settings you use today can be imported.
+- **Goal** — what counts as better, from the harness's own measures, or a
+  fill-in-the-blank measure whose choices come from your cases (*Share of
+  tasks done by a vehicle class*), and an optional second goal that breaks
+  ties within 1 %.
+- **Time** — the time per case (the application stops itself then; a run
+  still going at 1.5 × that + 30 s counts as failed), the total time, runs
+  per case, retries, and optional AI search help with a cap. Experts can set
+  the combinations per round and the rounds here too.
 
-The running page says where the study is: time used and left, the rounds
-done, the best improvement so far in plain words (with a chart), what runs
-right now (and, while nothing has beaten the starting point, how close the
-best try came), and failed runs grouped with what to do about them — a run that
-did not come back in time is explained against the time per case you set.
-**Stop** ends it within seconds and keeps the best so far. *Detailed dashboard
-(for experts)* opens evolvekit's full dashboard for the run.
+Under them the **plan bar** shows what the time buys — the rounds of search,
+then the final check, and when it will be done. When that is thin for what
+you tune it says so and offers fixes with their consequences (*Tune the top
+9* — the harness's recommended ones first; *Allow 22 h*), and when it is too
+little to learn anything it says why. *Test run* tries the study once on the
+smallest case before anything is spent. One click away below: the held-back
+cases, runs per case, **Rules** (combinations that may not be tried),
+**Measures** (your own measures in SQL, for experts, and limits a combination
+must keep), **Data changes** and AI help.
 
-The app runs one study at a time. A study started while another runs says
-*Waiting for '…' to finish* and starts by itself when its turn comes; **Stop**
-takes it out of the line. A run that was continued after it died says
-*Searching again, from where it stopped* and goes on with the rounds it had
-left; one given more time from its results says *Searching on, with more
-time*, and its card *running · continued · 12 min left*.
+## The Study page
 
-## The results
+![The Study page](app/study-light.png)
 
-![Results](app/results-light.png)
+The **status strip** at the top says the study's one answer right now —
+*Searching · round 7 of 12 · Best so far: 1.95 % better · Not checked yet* —
+and becomes the verdict when the final check has decided. Nothing says *use
+it* before then. The app decides by one fixed rule, stated under the answer:
+*use it at 9 in 10 or better, worst within 1 %* — the chance of a gain at
+least 9 in 10 and the worst plausible case within 1 % of today. Every
+estimate shows its likely range as a band through *today*, with both ends
+marked, *worst* and *best*, and the dashed 1 % limit.
 
-The app follows the computer's light or dark setting, and works on a phone's
-width:
+- **Use it** (the strip turns orange): the improvement, the chance, the worst
+  case; *Save settings file* and *Copy* a summary.
+- **Keep today's settings**: better on average, but not sure enough (*chance
+  under 9 in 10*, or a worst case beyond 1 %); *Check with more runs* keeps
+  the runs it did and adds others.
+- **Worse**, a number on **one case** (no range, so no answer), **nothing beat
+  the starting point**, a **stopped** check (*Continue the check*), a study
+  **stopped by you** (*Run the final check*, *Carry on*) or **by an error**
+  (*Continue where it stopped*), and **queued** (*Remove from queue*).
+
+Below the strip three linked views:
+
+- **Tries** — every combination by when it finished and how much better
+  than today; the orange line is the best so far, on full looks only (all
+  study cases), so a lucky quick look on a few cases never sets it; rings at
+  *now* are tries still running.
+- **Cases** — a row per study case, a dot per try, and how many tries beat
+  today on it.
+- **Settings** — one panel per tuned setting: the value tried across, the
+  result up, today's value dashed and the band of values that did well; the
+  settings that moved the result most come first.
+
+Hover, focus or tap a dot for its card; click it (or Enter) to follow that
+combination across all three views. When the answer is *use it*, the checked
+combination and its family — the line back to today's settings — are marked.
 
 | Dark | Phone |
 |---|---|
-| ![Results in dark](app/results-dark.png) | ![Results on a phone](app/results-phone-light.png) |
+| ![The Study page in dark](app/study-dark.png) | ![The Study page on a phone](app/study-phone-dark.png) |
 
-1. **The headline**: "The best settings found give 4.2 % lower real cost
-   than your starting point on the cases the search learned from" — and under
-   it, what to do: *Use the new settings: they are probably better on cases
-   the search never saw*, or *Keep your current settings for now: the gain is
-   not proven*. The app decides by one fixed rule, stated in one line under
-   the answer: *The app says use it when the chance of a gain is at least 9 in
-   10 and the worst plausible case is within 1 % of today.*
-2. **The final check** on the held-back cases, with the chance of a gain and
-   the worst plausible case: *Probably better: 1.3 % lower real cost on 3
-   held-back cases, a chance of about 19 in 20; at worst 0.3 % worse than
-   your starting point*, or honestly *Not proven on 3 held-back cases: a
-   chance of about 12 in 20 of a gain; at worst 10.1 % worse (somewhere
-   between 10.1 % worse and 11.5 % better)*, or *Worse on 3 held-back cases*.
-   An open answer comes with *Check again with 6 runs per case instead of 3
-   (about 4 min)*: the check keeps the runs it did and adds the others. With
-   one held-back case there is no range and no verdict; hold back three or
-   more for an answer to rely on.
-3. **The goal, case by case**: every held-back case and every case the search
-   learned from, starting point against best, with the change in words.
-4. **Every measure**, starting point against best, on both kinds of case.
-5. **What changed**, old value → new, with what each setting does; a data
-   change in the values it makes ("0.3 → 0.2817 (×0.939)", on the smallest
-   case), not only its factor.
-6. **Hand it over**: *Copy a summary* — the answer, how the study was set
-   up, what it found, how sure that is, what else moved on the held-back cases,
-   the rules it kept and what changed, ready to paste into a message;
-   *Open the report* — the same on one page with every number and the settings
-   file, to read in the browser or send as `report.html`; *Show the settings*;
-   and the files: the settings for the application (and the same as
-   command-line flags), the data changes, the changed requests; and the study
-   itself — its cases, choices and harness, not the runs — as one zip to pass
-   on (*Save as zip*).
-7. **Next steps**: *Continue for another 2 h* — the same run goes on with
-   the study's hours once more: the rounds done are kept, the search goes on
-   from its best, and then the final check runs again (a best that stayed the
-   same keeps the check it had). Not while another study runs. And a new
-   study that starts where this one ended.
-8. **This study's runs**: every run of the study, newest first, each with
-   its verdict in the card's words (*finished · probably better: 3.1 % lower
-   real cost*, *finished · not proven on the held-back cases*, *stopped*),
-   the one shown marked; open any. *Compare this run* puts it beside another
-   run of this study, or another study that has run: two columns — the goal,
-   the final check, every held-back case, what changed — rows aligned by
-   label; a run with no final check says so in its column. *Compare* on the
-   home page does the same for two studies.
+Further down: **Hand it over** — what changed (old value → new, with what
+each setting does), *Show the settings file*, *Copy a summary*, *Open the
+report* (every number on one page, to read or send as `report.html`), the
+harness's files (the settings, as flags, the data changes, the changed
+requests) and the study itself as one zip; **What next** — *Continue for
+another 22 h* (the same run goes on: the rounds done are kept, then the final
+check runs again), *Start a new study from this*, *Compare with…*; and
+**Details** — the set-up, every held-back case and every case the search
+learned from, every measure, failed runs grouped with what to do about them.
+*Past runs* lists every run of the study with its verdict; *Detailed
+dashboard (for experts)* opens evolvekit's full dashboard for the run.
+
+The app runs one study at a time. A study started while another runs waits
+its turn and starts by itself; a run that was continued after it died says
+*Searching again* and goes on with the rounds it had left. The tab's title
+says when a study is done.
+
+![Compare](app/compare-light.png)
+
+**Compare** puts two studies, or two runs of one, side by side, rows aligned
+by label: the goal, the answer, the likely range, the held-back cases they
+share (one dot per side on one axis), what changed and the set-up. Two
+studies with different goals are shown, but not ranked; a side without a
+final check says its number may not hold on new cases.
 
 ## The assistant
 
-On every screen of a study — each step, *Running* and *The results* — an
-*Assistant* drawer takes requests and questions in your own words. It is open
-on steps 4 and 5, folded elsewhere, and it sees the screen you are on: the
-plan's words, a test run's failures, and on *Running* and *The results* the
-run's verdict and its numbers per case. Ask a question — "why is this not
-proven?" — and it answers in a few plain sentences, with the numbers. Ask for
-a change — "count late deliveries to frozen customers", "try cheaper vans and
-dearer trucks; trucks must stay dearer" — and it answers with proposals as
-cards: a measure (with its SQL, the rows it counts, and its value on the
-preview case), a data change ("applies to 7 vehicle types"), a rule ("holds
-today"), a goal, a guardrail. Each card says it is a proposal: nothing
-changes until you press *Apply*. *Edit* opens the card's fields on the card —
-a measure's SQL and direction, a data change's rows and range, a rule, a
-goal's levels, a guardrail's bound — and *Apply* then checks what you wrote
-exactly as it checked the model's, with the reason on the card when it fails.
-An answer with several cards has *Apply all*: the measures go in first, so a
-goal or a guardrail may name a measure proposed in the same answer; a card
-that fails is left out with its reason, and the others still go in.
+**Pepper** floats over every page, in the phase of the study on screen.
+Click it for an update; right-click it (or Shift+F10, or a long press on a
+phone) for its menu: *Ask a question…*, *What's happening now?*, *Move to the
+corner*, *Hide until it ends*. It can be dragged anywhere.
+
+*Ask a question…* docks **Ask Pepper** on the right of every page (full
+screen on a phone). It takes requests and questions in your own words about
+the study on screen, and it sees that screen: the plan's words, a test run's
+failures, and on the Study page the run's verdict and its numbers per case.
+Ask a question — "why is this not proven?" — and it answers in a few plain
+sentences, with the numbers. Ask for a change — "count late deliveries to
+frozen customers", "try cheaper vans and dearer trucks; trucks must stay
+dearer" — and it answers with proposals as cards: a setting to tune, a
+measure, a data change, a rule, a goal, a limit. Each card says it is a
+proposal: nothing changes until you press *Apply*. *Edit* opens the card's
+fields on the card, and *Apply* then checks what you wrote exactly as it
+checked the model's, with the reason on the card when it fails. An answer with
+several cards has *Apply all*: the measures go in first, so a goal or a limit
+may name a measure proposed in the same answer; a card that fails is left out
+with its reason, and the others still go in.
 
 The conversation is kept with the study, and so is the fate of every card:
 reopen the study and each proposal still says whether it was applied,
@@ -233,7 +231,7 @@ were taken when it is asked again. While it thinks — up to a minute, since
 every proposal is tried on the smallest case first — you may move to another
 screen (the drawer picks the answer up there) or press *Cancel*, which throws
 the answer away. When the model gives no answer, the chat says why, keeps
-saying it after a reload, and offers *Ask again*; *Test the assistant* in
+saying it after a reload, and offers *Ask again*; *Test* in
 Settings asks the model a one-line question to show that the key and the
 model work.
 
@@ -248,9 +246,13 @@ how many rows, the smallest, average and largest numbers, and the values of
 columns the harness marks as categories (tags, vehicle classes). **Never** a
 row, a name, an address or a coordinate.
 
-**Keys and cost:** Settings takes an OpenRouter or Azure OpenAI key (kept in
-the library's `.env`, never shown again), or uses Claude Code on this
-computer. A key you change or remove there counts from the next question, with
+**Keys and cost:** Settings offers four services: OpenRouter or Azure OpenAI
+with a key (kept in the library's `.env`, never shown again), or Claude Code
+or GitHub Copilot CLI on this computer, which use their own sign-in. For
+Copilot CLI (enterprise accounts too) run `copilot` once in a terminal and
+type `/login`; *Test* then says that Copilot CLI works, that it is not signed
+in, or that the organisation's Copilot policy blocks it. Copilot counts
+requests in your plan rather than dollars, and the app shows them that way. A key you change or remove there counts from the next question, with
 no restart. The default model costs a few cents an answer. The cost shown
 under every answer is real: what OpenRouter reports, or what the price table
 says for the model (Settings › Models › Prices, where you can add a model's
@@ -298,7 +300,8 @@ runs, the run is queued and the server starts it later), `stop` (on a queued
 run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,
 with N runs per case), `continue` (`{"run": RUN, "hours": H}`: a finished
 run searches on for H hours more, at most 48, then checks again; 409 while
-anything runs), `status`, `results`, `download/{export}`
+anything runs), `status`, `results`, `tries` (every try of a run, digested for the
+Study page's three views: `evolvekit/app/tries.py`), `download/{export}`
 (`download/report?view=1` opens the report in the browser; `download/study`
 is the study as a zip) and `next`; and each run's dashboard at
 `/studies/{name}/runs/{run}/dashboard/`. Managing studies: `DELETE
@@ -311,3 +314,17 @@ outside its folder); `POST …/cases/{name}/restore` brings a removed case
 back; `GET /api/compare?a=<name>[/<run>]&b=<name>[/<run>]` is two runs side
 by side. A run is `python -m evolvekit.app.job STUDY RUN`, started so that it
 outlives the app.
+
+The page is plain HTML, CSS and JavaScript with no build step, under
+`evolvekit/app/static/`: `app.html` (the shell), `css/tokens.css` (every
+design token as a CSS variable, light and dark), `css/app.css`, `fonts/`
+(Young Serif, Overpass, Overpass Mono as woff2, SIL Open Font License 1.1,
+licences beside them), and `js/`: `core.js` (markup that escapes every value,
+the API client, timers, toasts, undo), `parts.js` (one function per component
+of the design, named as in its hand-over pack), `pepper.js` (Pepper's phases
+and the mark, the design's own SVG), `plots.js`, `words.js` (what a state
+says: the verdict mark, Pepper's phase, the card's lines), `drawer.js`
+(drawers, Ask Pepper, the companion), `pages/*.js` and `app.js` (the router).
+The page's own files are served under `/static/` without the key; nothing
+loads from the internet. `docs/app/make_screenshots.py` takes this page's
+pictures.

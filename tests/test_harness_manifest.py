@@ -115,7 +115,7 @@ def test_a_study_template_that_does_not_compile_is_refused(tmp_path):
     templates = dict(TEMPLATES, bad={"title": "Bad", "vary": {"settings": "recommended"},
                                      "kpis": {"total": {"from": "harness"}},
                                      "goal": {"levels": [{"kpi": "nothing", "direction": "lower"}]}})
-    with pytest.raises(HarnessError, match=r"templates/bad\.yaml: goal\.levels\[0\]\.kpi: 'nothing' is not a KPI of the study"):
+    with pytest.raises(HarnessError, match=r"templates/bad\.yaml: goal\.levels\[0\]\.kpi: 'nothing' is not a measure of the study"):
         load_harness(write_toy_harness(tmp_path / "toy", templates=templates))
 
 

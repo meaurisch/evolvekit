@@ -258,6 +258,8 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .plan-track { position: relative; }
 .plan-track > svg { display: block; width: 100%; height: 34px; }
 .plan-over { position: absolute; top: 9px; height: 18px; display: flex; align-items: center; justify-content: center; font: 700 12px/1 var(--sans); color: var(--ink-1); pointer-events: none; }
+.plan-over > span { background: var(--surface-page); padding: 2px 6px; border-radius: var(--radius-1); }
+.plan-over.is-critical > span { background: transparent; }
 .plan-over.is-critical { justify-content: flex-start; padding-left: 12px; color: var(--critical); }
 .plan-head { display: flex; align-items: center; gap: 8px; }
 .plan-title { font: 700 16px/22px var(--sans); }

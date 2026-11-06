@@ -334,7 +334,7 @@
     var ic = state === "fits" ? "" : EK.icon(state === "thin" ? "warning" : "critical", 20);
     return html`<div class="plan-bar is-${state}"><div class="plan-head">${ic}<span class="plan-title">${EK.figures(o.head || "")}</span></div>
       <div class="plan-track">${raw('<svg width="100%" height="34" viewBox="0 0 ' + w + ' 34" preserveAspectRatio="none" role="img" aria-label="' + EK.esc(o.aria || o.head || "") + '">' + svg + "</svg>")}
-        ${overlay ? html`<span class="plan-over${overlay.critical ? " is-critical" : ""}" aria-hidden="true" style="left:${overlay.left}%;width:${overlay.width.toFixed(1)}%">${overlay.text}</span>` : ""}</div>
+        ${overlay ? html`<span class="plan-over${overlay.critical ? " is-critical" : ""}" aria-hidden="true" style="left:${overlay.left}%;width:${overlay.width.toFixed(1)}%"><span>${overlay.text}</span></span>` : ""}</div>
       <div class="plan-caption type-small ink-2"><span>${o.left || ""}</span><span>${o.right || ""}</span></div></div>`;
   };
 

@@ -642,11 +642,11 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None) 
         for name, kpi in study.kpis.items():
             where = f"kpis.{name}"
             if kpi.kind == "harness" and name not in harness.kpis:
-                add(f"{where}: the harness has no ready-made KPI {name!r}")
+                add(f"{where}: the harness has no ready-made measure {name!r}")
             elif kpi.kind == "template":
                 template = harness.kpi_templates.get(kpi.template)
                 if template is None:
-                    add(f"{where}.template: the harness has no KPI template {kpi.template!r}")
+                    add(f"{where}.template: the harness has no fill-in-the-blank measure {kpi.template!r}")
                 elif set(kpi.params) != set(template.params):
                     add(f"{where}.params: fill in {sorted(template.params)}")
             elif kpi.kind == "sql":
@@ -658,7 +658,7 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None) 
             elif kpi.kind == "weighted":
                 for part in kpi.weighted:
                     if part not in study.kpis or study.kpis[part].kind == "weighted":
-                        add(f"{where}.weighted.{part}: a weighted sum adds up KPIs of the study that are not sums themselves")
+                        add(f"{where}.weighted.{part}: a weighted sum adds up measures of the study that are not sums themselves")
             if name in tunables:
                 add(f"{where}: {name!r} is also the name of something the study tunes")
     finally:
@@ -671,7 +671,7 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None) 
     for index, level in enumerate(study.goal):
         where = f"goal.levels[{index}]"
         if level.kpi not in study.kpis:
-            add(f"{where}.kpi: {level.kpi!r} is not a KPI of the study")
+            add(f"{where}.kpi: {level.kpi!r} is not a measure of the study")
         if level.direction not in ("lower", "higher"):
             add(f"{where}.direction: must be 'lower' or 'higher'")
         last = index == len(study.goal) - 1
@@ -685,11 +685,11 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None) 
         if within is not None and last and len(study.goal) > 1:
             add(f"{where}.equal_within: the last level decides whatever is left, so it has no tolerance")
     if len({level.kpi for level in study.goal}) != len(study.goal):
-        add("goal.levels: each level is a different KPI")
+        add("goal.levels: each level is a different measure")
     for index, rail in enumerate(study.guardrails):
         where = f"guardrails[{index}]"
         if rail.kpi not in study.kpis:
-            add(f"{where}.kpi: {rail.kpi!r} is not a KPI of the study")
+            add(f"{where}.kpi: {rail.kpi!r} is not a measure of the study")
         if (rail.max is None) == (rail.min is None):
             add(f"{where}: give `max` or `min`, one of them")
 

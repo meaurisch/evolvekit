@@ -553,7 +553,7 @@ def check_card(card: Any, study: Study, harness: Harness, root: Path, proposed: 
         if kind == "kpi":
             name = str(card.get("name") or "")
             if not _NAME.match(name) or name in study.kpis or name in tunables or name in proposed.get("twice", set()):
-                return fail(f"{name!r} cannot name a new KPI: lower case, and not taken")
+                return fail(f"{name!r} cannot name a new measure: lower case, and not taken")
             if card.get("direction") not in ("lower", "higher"):
                 return fail("direction is lower or higher")
             result = work.try_sql(root, str(card.get("sql") or ""), {}, str(card.get("rows_sql") or ""))
@@ -563,13 +563,13 @@ def check_card(card: Any, study: Study, harness: Harness, root: Path, proposed: 
         if kind == "weighted":
             name = str(card.get("name") or "")
             if not _NAME.match(name) or name in study.kpis or name in tunables or name in proposed.get("twice", set()):
-                return fail(f"{name!r} cannot name a new KPI: lower case, and not taken")
+                return fail(f"{name!r} cannot name a new measure: lower case, and not taken")
             parts = card.get("weighted")
             if not isinstance(parts, dict) or not parts:
-                return fail("name the KPIs and their weights")
+                return fail("name the measures and their weights")
             for part, weight in parts.items():
                 if part not in kpi_names and part not in harness.kpis:
-                    return fail(f"{part!r} is not a KPI of the study")
+                    return fail(f"{part!r} is not a measure of the study")
                 if not isinstance(weight, (int, float)) or isinstance(weight, bool):
                     return fail(f"the weight of {part} must be a number")
             return out
@@ -579,19 +579,19 @@ def check_card(card: Any, study: Study, harness: Harness, root: Path, proposed: 
                 return fail("a goal has one to four levels")
             for index, level in enumerate(levels):
                 if level.get("kpi") not in kpi_names and level.get("kpi") not in harness.kpis:
-                    return fail(f"{level.get('kpi')!r} is not a KPI of the study")
+                    return fail(f"{level.get('kpi')!r} is not a measure of the study")
                 if level.get("direction") not in ("lower", "higher"):
                     return fail("each level says lower or higher")
                 within = parse_within(level.get("equal_within"))
                 if within is None and index < len(levels) - 1:
                     return fail(f"level {index + 1} needs equal_within, so the next level can decide")
             if len({level["kpi"] for level in levels}) != len(levels):
-                return fail("each level is a different KPI")
+                return fail("each level is a different measure")
             return out
         if kind == "guardrail":
             kpi = card.get("kpi")
             if kpi not in kpi_names and kpi not in harness.kpis:
-                return fail(f"{kpi!r} is not a KPI of the study")
+                return fail(f"{kpi!r} is not a measure of the study")
             if (card.get("max") is None) == (card.get("min") is None):
                 return fail("a guardrail has max or min, one of them")
             return out
