@@ -16,7 +16,7 @@
     if (!checked(s)) {
       return [kind, (s.improvement_pct != null ? EK.capital(EK.better(s.improvement_pct)) : "A number") + ", not checked", "On its own study cases"];
     }
-    var w = EK.answerWords({ decision: f.decision, mean: f.mean, ci95: f.ci95, chance: f.chance, what: "settings" });
+    var w = EK.answerWords({ decision: f.decision, mean: f.mean, ci95: f.ci95, chance: f.chance, what: "settings", goal: s.goal });
     var sub = (EK.capital(EK.chanceWords(f.chance)) || "") + (f.n ? (f.chance != null ? " · " : "") + EK.plural(f.n, "held-back case") : "");
     return [kind, w.head, sub];
   }

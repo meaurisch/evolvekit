@@ -37,13 +37,22 @@
     return s && s.what === "data" ? "Keep today’s data" : "Keep today’s settings";
   };
 
+  /** "on cost as PyVRP counts it (lower)": the goal's measure and which way is better. */
+  EK.goalWords = function (goal) {
+    if (!goal || !(goal.says || goal.label)) return "";
+    return " on " + (goal.says || goal.label) + " (" + (goal.direction === "higher" ? "higher" : "lower") + ")";
+  };
+  /** The verdict in a word or two, for a kicker: the headline itself is the number. */
+  EK.verdictWord = function (d) {
+    return { use: "Use it", keep: "Keep", worse: "Worse", single: "No answer", skipped: "Nothing better" }[d] || "Finished";
+  };
   /** The answer's headline and its second line, from the decision and the numbers. */
   EK.answerWords = function (s) {
-    var d = s.decision, mean = s.mean, ci = s.ci95 || [], chance = EK.chanceWords(s.chance);
-    if (d === "use") return { head: "Use it: " + EK.better(mean), sub: EK.capital(chance || "") + (ci.length ? (chance ? " · " : "") + "at worst " + EK.better(ci[0]) : "") };
-    if (d === "keep") return { head: EK.keepWords(s), sub: (mean != null ? EK.better(mean) + ", but not sure enough" : "Not proven on new cases") };
-    if (d === "worse") return { head: "Worse: " + EK.better(mean), sub: EK.keepWords(s) + "." };
-    if (d === "single") return { head: (mean != null ? EK.better(mean) : "A number") + " on one case", sub: "One case gives no range, so no answer." };
+    var d = s.decision, mean = s.mean, on = EK.goalWords(s.goal);
+    if (d === "use") return { head: EK.better(mean) + on, sub: "" };
+    if (d === "keep") return { head: EK.keepWords(s), sub: (mean != null ? EK.better(mean) + on + ", but not sure enough" : "Not proven on new cases") };
+    if (d === "worse") return { head: EK.better(mean) + on, sub: EK.keepWords(s) + "." };
+    if (d === "single") return { head: (mean != null ? EK.better(mean) : "A number") + on + " on one case", sub: "One case gives no range, so no answer." };
     if (d === "skipped") return { head: "Nothing beat the starting point", sub: EK.keepWords(s) + "." };
     return { head: "No answer", sub: s.line || "" };
   };
@@ -92,9 +101,9 @@
         check: s.phase === "check" && s.check ? [s.check.done, s.check.planned] : null };
     } else if (s.kind === "finished") {
       var w = EK.answerWords(s);
-      c.kicker = "Finished" + (s.n ? " · " + EK.plural(s.n, "held-back case") : "");
+      c.kicker = EK.verdictWord(s.decision) + (s.n ? " · " + EK.plural(s.n, "held-back case") : "");
       c.head = w.head;
-      c.sub = s.decision === "use" || s.decision === "keep" ? EK.rangeCaption(s) : w.sub;
+      c.sub = s.decision === "use" || s.decision === "keep" ? "" : w.sub;
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
     } else if (s.kind === "stopped") {
       c.kicker = s.check_stopped ? "Final check stopped" : "Stopped" + (r.done ? " · round " + (r.done + 1) : "");

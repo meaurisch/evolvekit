@@ -179,6 +179,7 @@ def _build(run_dir: Path) -> dict[str, Any]:
             "parent": row.get("parent_id"), "start_h": round(begun.get(cid, end), 4), "end_h": round(end, 4),
             "pct": None if failed else round(fmean(gains), 4), "full": full, "failed": failed,
             "cases": {stage: per[stage] for stage in reached}, "params": row.get("params") or {},
+            "failed_runs": failed_evals.get(cid, 0),
             "base": cid == base,
         })
     combos.sort(key=lambda c: c["end_h"])

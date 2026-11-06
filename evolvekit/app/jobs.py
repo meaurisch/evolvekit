@@ -624,7 +624,7 @@ def _failures_in_words(reasons: list[dict[str, Any]], limit_s: float) -> list[di
         elif "exit code 3" in low or "cannot read" in low:
             todo = "A case could not be read. Check the cases in step 3."
         else:
-            todo = "Runs failed with an error. Open the detailed dashboard to see the message; if every run fails, run the test run again."
+            todo = "Runs failed with an error. Show the output to see the message; if every run fails, run the test run again."
         grouped.append({"count": count, "stage": reason.get("stage"), "message": text, "todo": todo})
     return grouped
 
@@ -1492,6 +1492,7 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
     document = (document_of(run_dir) or {}) if wants and document_of is not None and (run_dir / "events.jsonl").exists() else {}
     last = ((document.get("health") or {}).get("generation") or {}).get("last_finished")
     facts: dict[str, Any] = {"phase": state, "what": _kind_of(study),
+                             "goal": {"says": goal.get("says"), "label": goal.get("label"), "direction": goal.get("direction")},
                              "rounds": {"done": max(0, int(last)) if isinstance(last, int) else 0,
                                         "planned": int(plan.get("rounds") or 0)}}
     pct = ((document.get("progress") or {}).get("improvement") or {}).get("pct")

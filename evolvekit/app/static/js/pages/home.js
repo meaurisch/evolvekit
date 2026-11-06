@@ -43,16 +43,36 @@
       ${EK.link("Library folder", { act: "library", icon: EK.gl("folder", 18) })}</div>`;
   }
 
+  var remembered = null;
+  /** After a change made here: draw from a fresh answer, never the remembered one. */
+  function freshRender() { remembered = null; EK.rerender(); }
   function render(main, slug, query, gen) {
+    // Back on Home: the last answer at once, then the fresh one when it differs.
+    if (remembered) {
+      data = remembered;
+      draw(main, query);
+      EK.get("/api/home").then(function (d) {
+        var same = JSON.stringify(d) === JSON.stringify(remembered);
+        remembered = d;
+        if (!same && EK.isCurrent(gen) && !document.body.classList.contains("drawer-open")) { data = d; EK._moveFocus = false; draw(main, query); }
+      }).catch(function () { /* the page shows what it had */ });
+      return Promise.resolve().then(function () { poll(main, query, gen); });
+    }
     return EK.get("/api/home").then(function (d) {
       if (!EK.isCurrent(gen)) return;
-      data = d;
+      data = remembered = d;
       draw(main, query);
+      poll(main, query, gen);
+    });
+  }
+  function poll(main, query, gen) {
+    var d = data;
+    {
       var live = d.studies.some(function (s) { return s.kind === "running" || s.kind === "queued"; });
       if (live) EK.every(10000, function () {
         EK.get("/api/home").then(function (n) {
           if (!EK.isCurrent(gen)) return;
-          data = n;
+          data = remembered = n;
           var grid = EK.$(".home-cards", main);
           if (grid && !EK.$(".menu:not([hidden])", main)) {
             var busy = document.activeElement && document.activeElement !== main && main.contains(document.activeElement);
@@ -60,7 +80,7 @@
           }
         }).catch(function () { /* the next poll tries again */ });
       });
-    });
+    }
   }
 
   function draw(main, query) {
@@ -135,7 +155,7 @@
   }
   function installed(h) {
     EK.toast("done", h.already ? h.title + " is already " + h.already : "Installed " + h.title + " " + (h.version || ""));
-    EK.rerender();
+    freshRender();
   }
 
   function acts(main, query) {
@@ -149,7 +169,7 @@
         EK.closeMenus();
         EK.askText("Rename the study", "Name", s.name, "Rename").then(function (name) {
           if (!name || name === s.name) return;
-          return EK.patch(EK.studyPath(s.slug), { name: name }).then(function () { EK.toast("done", "Renamed to " + name); EK.rerender(); });
+          return EK.patch(EK.studyPath(s.slug), { name: name }).then(function () { EK.toast("done", "Renamed to " + name); freshRender(); });
         }).catch(EK.fail);
       },
       duplicate: function (el) {
@@ -171,21 +191,21 @@
         EK.closeMenus();
         EK.patch(EK.studyPath(s.slug), { archived: !s.archived }).then(function () {
           EK.toast("done", s.archived ? "“" + s.name + "” is back" : "“" + s.name + "” archived");
-          EK.rerender();
+          freshRender();
         }).catch(EK.fail);
       },
       "delete": function (el) {
         var s = find(el.getAttribute("data-arg"));
         EK.closeMenus();
         EK.del(EK.studyPath(s.slug)).then(function (res) {
-          EK.rerender();
+          freshRender();
           EK.undo("“" + s.name + "” deleted.", function () {
-            return EK.post("/api/trash/" + EK.q(res.trashed) + "/restore").then(function () { EK.toast("done", "“" + s.name + "” is back"); EK.rerender(); });
+            return EK.post("/api/trash/" + EK.q(res.trashed) + "/restore").then(function () { EK.toast("done", "“" + s.name + "” is back"); freshRender(); });
           });
         }).catch(EK.fail);
       },
       restore: function (el) {
-        EK.post("/api/trash/" + EK.q(el.getAttribute("data-arg")) + "/restore").then(function () { EK.toast("done", "Restored"); EK.rerender(); }).catch(EK.fail);
+        EK.post("/api/trash/" + EK.q(el.getAttribute("data-arg")) + "/restore").then(function () { EK.toast("done", "Restored"); freshRender(); }).catch(EK.fail);
       },
       apps: appsDrawer,
       add: addDrawer,

@@ -14,11 +14,12 @@
     st = { slug: slug, gen: gen, run: query.run || "", view: ["tries", "cases", "settings"].indexOf(query.view) >= 0 ? query.view : "tries",
       chosen: null, chosenSet: false, doc: null, h: null, status: null, results: null, tries: null, hover: null, lastStrip: "", lastPlot: "", phase: null,
       showAllSettings: false, openRuns: query.runs === "1" };
-    return Promise.all([EK.get(EK.studyPath(slug)), EK.get(EK.studyPath(slug, "/harness"))]).then(function (r) {
+    // Everything at once: the study, its harness and the run (status, tries, results) in one round.
+    return Promise.all([EK.get(EK.studyPath(slug)), EK.get(EK.studyPath(slug, "/harness")), load(true).catch(function () { return "no run"; })]).then(function (r) {
       if (!EK.isCurrent(gen)) return;
       st.doc = r[0]; st.h = r[1];
-      if (!st.doc.runs || !st.doc.runs.length) { location.replace(((st.doc.study.step || 1) >= 4 ? "#/setup/" : "#/start/") + EK.q(slug)); return; }
-      return load().then(function () {
+      if (r[2] === "no run" || !st.doc.runs || !st.doc.runs.length) { location.replace(((st.doc.study.step || 1) >= 4 ? "#/setup/" : "#/start/") + EK.q(slug)); return; }
+      return Promise.resolve().then(function () {
         if (!EK.isCurrent(gen)) return;
         EK.hoverEscape = hoverEscape;
         EK.onStudyChanged = function () { load().then(function () { if (EK.isCurrent(gen)) update(main); }); };
@@ -41,19 +42,19 @@
   function isLive() { var p = st.status.phase; return p === "queued" || p === "starting" || p === "search" || p === "check"; }
   function runQ() { return st.run ? "?run=" + EK.q(st.run) : ""; }
 
-  function load() {
-    return EK.get(EK.studyPath(st.slug, "/status" + runQ())).then(function (s) {
-      st.status = s;
-      if (!st.run) st.run = s.run;
-      var wantResults = s.phase === "done" || s.phase === "stopped" || s.phase === "failed" || s.phase === "check";
-      return Promise.all([
-        EK.get(EK.studyPath(st.slug, "/tries?run=" + EK.q(st.run))).catch(function () { return null; }),
-        wantResults ? EK.get(EK.studyPath(st.slug, "/results?run=" + EK.q(st.run))).catch(function () { return null; }) : Promise.resolve(null)
-      ]);
-    }).then(function (r) {
-      st.tries = r[0];
+  /** The run's status, tries and results, asked for together. While the search runs, the results wait. */
+  function load(first) {
+    var wantResults = first || !st.status || ["done", "stopped", "failed", "check"].indexOf(st.status.phase) >= 0;
+    return Promise.all([
+      EK.get(EK.studyPath(st.slug, "/status" + runQ())),
+      EK.get(EK.studyPath(st.slug, "/tries" + runQ())).catch(function () { return null; }),
+      wantResults ? EK.get(EK.studyPath(st.slug, "/results" + runQ())).catch(function () { return null; }) : Promise.resolve(st.results)
+    ]).then(function (r) {
+      st.status = r[0];
+      if (!st.run) st.run = r[0].run;
+      st.tries = r[1];
       if (st.tries && st.tries.cases) EK.caseNames(st.tries.cases);
-      st.results = r[1];
+      st.results = r[2];
       if (!st.chosenSet && st.results && st.results.best_id && st.status.phase !== "search") { st.chosen = st.results.best_id; }
     });
   }
@@ -137,17 +138,17 @@
         caption: EK.capital(roundWord()) + (s.time && s.time.used ? " · stopped at " + s.time.used : ""), stoppedAt: true,
         acts: [s.can_check ? { text: "Run the final check", act: "check" } : null, s.can_resume ? { text: "Carry on", kind: s.can_check ? "secondary" : "primary", act: "resume" } : null].filter(Boolean) });
     } else if (d === "use") {
-      Object.assign(x, { tone: "accent", mark: "use", kickerTone: "", kicker: "Final check done · " + EK.plural(f.n || heldCount(), "case"), head: "Use it: " + EK.better(f.mean),
+      Object.assign(x, { tone: "accent", mark: "use", kickerTone: "", kicker: "Use it · final check on " + EK.plural(f.n || heldCount(), "case"), head: EK.better(f.mean) + EK.goalWords(goalOf()),
         sub: EK.rangeCaption({ decision: "use", chance: f.chance, ci95: f.ci95 }).split(" · at best")[0], right: "range",
         range: [f.mean, f.ci95 && f.ci95[0], f.ci95 && f.ci95[1]], caption: "Likely range, on the final check", rule: true,
         acts: [hasExport("settings_json") ? { text: "Save settings file", act: "save-settings" } : null, { text: "Copy", kind: "secondary", act: "copy-summary", label: "Copy a summary" }].filter(Boolean) });
     } else if (d === "keep") {
-      Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Final check done · " + EK.plural(f.n || heldCount(), "held-back case"), head: keep,
-        sub: f.mean != null ? EK.capital(EK.better(f.mean)) + " on held-back cases, but not sure enough." : "Not proven on new cases.", right: "range",
+      Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Keep · final check on " + EK.plural(f.n || heldCount(), "held-back case"), head: keep,
+        sub: f.mean != null ? EK.capital(EK.better(f.mean)) + EK.goalWords(goalOf()) + " on held-back cases, but not sure enough." : "Not proven on new cases.", right: "range",
         range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
         acts: [f.recheck ? { text: "Check with more runs", kind: "secondary", act: "recheck" } : null].filter(Boolean) });
     } else if (d === "worse") {
-      Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Final check done · " + EK.plural(f.n || heldCount(), "case"), head: "Worse: " + EK.better(f.mean),
+      Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Worse · final check on " + EK.plural(f.n || heldCount(), "case"), head: EK.better(f.mean) + EK.goalWords(goalOf()),
         sub: "On held-back cases. " + keep + ".", right: "range", range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95 }), rule: true,
         acts: [{ text: "Start a new study", kind: "secondary", act: "next" }] });
     } else if (d === "single") {
@@ -181,6 +182,7 @@
     return fetch(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run)), { headers: { "X-Evolvekit-Token": EK._token } })
       .then(function (r) { if (!r.ok) throw new Error("The settings file could not be read"); return r.text(); });
   }
+  function goalOf() { return (st.results && st.results.goal) || (st.status && st.status.goal) || null; }
   function hasExport(name) { return ((st.results && st.results.downloads) || []).some(function (d) { return d.name === name; }); }
 
   function statusStrip() {
@@ -321,7 +323,11 @@
       if (again) again.focus();
     }
     var chip = document.getElementById("chip-slot");
-    if (chip) chip.innerHTML = String(EK.chosenChip(chosenCombo()));
+    if (chip) chip.innerHTML = String(chipHtml());
+  }
+  function chipHtml() {
+    var c = chosenCombo();
+    return html`${EK.chosenChip(c)}${c ? EK.button("Details", { kind: "quiet", size: "s", act: "details", arg: c.id, label: "Details of combination " + c.n }) : ""}`;
   }
   function chosenCombo() { var c = st.chosen && combo(st.chosen); return c && !c.base ? c : null; }
 
@@ -352,7 +358,8 @@
         card.style.left = left + "px"; card.style.top = top + "px";
         if (pinned) {
           card.classList.add("is-pinned");
-          card.insertAdjacentHTML("beforeend", String(EK.button(chosen ? "Stop following" : "Follow it", { kind: "secondary", size: "s", act: chosen ? "unchoose" : "choose", arg: p.id })));
+          card.insertAdjacentHTML("beforeend", String(html`<span class="actions">${EK.button(chosen ? "Stop following" : "Follow it", { kind: "secondary", size: "s", act: chosen ? "unchoose" : "choose", arg: p.id })}
+            ${EK.button("Details", { kind: "quiet", size: "s", act: "details", arg: p.id })}</span>`));
         }
         svg.setAttribute("aria-describedby", "hover-card");
         st.hover = { svg: svg, i: i };
@@ -391,10 +398,8 @@
   }
   function choose(id) {
     st.chosen = id; st.chosenSet = true;
-    var c = combo(id);
     st.lastPlot = "";
     drawView();
-    EK.toast("done", "Following combination " + (c ? c.n : "") + " across the views");
   }
   function unchoose() { st.chosen = null; st.chosenSet = true; st.lastPlot = ""; drawView(); }
 
@@ -413,7 +418,7 @@
       return EK.link(x.label, { href: EK.withToken(EK.studyPath(st.slug, "/download/" + EK.q(x.name) + "?run=" + EK.q(st.run))), download: true, icon: EK.gl("file", 18) });
     });
     var keepIt = d !== "use";
-    return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">Hand it over</h2>
+    return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">${keepIt ? "Settings to keep" : "Settings to use"}</h2>
       ${keepIt ? html`<p class="type-body strong">Nothing to change: ${EK.keepWords({ what: whatOf() }).replace(/^Keep /, "keep ")}${(r.context || {}).compared_with ? " (" + r.context.compared_with + ")" : ""}.</p>
         <p class="type-small ink-2">Hand over today’s settings. Below them is what the search found: not proven on held-back cases, so not recommended.</p>` : ""}
       ${changedTable()}
@@ -454,7 +459,14 @@
           ${(r.rules || []).length ? html`<p class="type-small ink-2">Rules: ${r.rules.join(" · ")}</p>` : ""}</div>`);
       }
     }
-    (s.failures || []).forEach(function (fl) { parts.push(EK.notice("warning", fl.count + " × " + fl.message + (fl.todo ? " " + fl.todo : ""))); });
+    if ((s.failures || []).length) {
+      var failing = st.tries ? st.tries.combinations.filter(function (c) { return c.failed_runs; }).slice(-12).reverse() : [];
+      parts.push(html`<div class="sub-section"><h3>What went wrong</h3>
+        ${s.failures.map(function (fl) { return EK.notice("warning", fl.count + " × " + fl.message + (fl.todo ? " " + fl.todo : "")); })}
+        ${failing.length ? html`<p class="type-small ink-2">Show the output of a combination with failed runs:</p><div class="actions">${failing.map(function (c) {
+          return EK.button("No. " + c.n, { kind: "secondary", size: "s", act: "details", arg: c.id, label: "Show combination " + c.n + " and its failed runs" });
+        })}</div>` : ""}</div>`);
+    }
     if (s.gated_line) parts.push(html`<p class="type-small ink-2">${s.gated_line}</p>`);
     if (s.best && s.best.line && !isLive()) parts.push(html`<p class="type-small ink-2">${s.best.line}</p>`);
     return html`<details class="section-fold"><summary>Details</summary><div class="sub-section">${parts}</div></details>`;
@@ -482,10 +494,9 @@
     var counts = st.tries && st.tries.available ? { tries: st.tries.combinations.filter(function (c) { return !c.base; }).length, cases: st.tries.cases.length, settings: (st.tries.parameters || []).length } : null;
     EK.mount(main, html`<div class="page"><div class="page-inner">${header()}<div id="study-notices">${notices()}</div>
       <div id="strip-slot">${statusStrip()}</div>
-      <div class="sub-section"><div class="view-head">${EK.viewTabs(st.view, phone ? null : counts)}<div id="chip-slot" style="padding:6px 0">${EK.chosenChip(chosenCombo())}</div></div>
+      <div class="sub-section"><div class="view-head">${EK.viewTabs(st.view, phone ? null : counts)}<div id="chip-slot" class="actions" style="padding:6px 0">${chipHtml()}</div></div>
         <div class="view-panel" id="view-panel" role="tabpanel" aria-labelledby="tab-${st.view}"></div></div>
-      ${handOver()}${nextSteps()}${details()}
-      <p class="type-small ink-2">${EK.link("Detailed dashboard (for experts)", { href: EK.withToken(st.status.dashboard), target: "_blank" })}</p></div></div>`, acts(main));
+      ${handOver()}${nextSteps()}${details()}</div></div>`, acts(main));
     st.lastStrip = String(statusStrip());
     st.lastNotices = String(notices());
     st.lastPlot = "";
@@ -594,8 +605,36 @@
           <p class="type-small ink-2">You need not stop the study. For the best result, close heavy programs while it runs.</p>` });
       },
       latest: function () { EK.go(EK.studyHref(st.slug)); },
-      runs: runsDrawer
+      runs: runsDrawer,
+      details: function (el) { return comboDrawer(el.getAttribute("data-arg")); }
     };
+  }
+  /** One combination in full: what it changed, how it did case by case, and the output of its failed runs. */
+  function comboDrawer(id) {
+    var c = combo(id);
+    if (!c) return;
+    return EK.get(EK.studyPath(st.slug, "/tries/" + EK.q(id) + runQ())).then(function (d) {
+      var params = (d.parameters || []).filter(function (p) { return p.changed; });
+      var per = c.cases[st.tries.full_stage] || c.cases[Object.keys(c.cases).slice(-1)[0]] || {};
+      var failed = (d.evaluations || []).filter(function (e) { return String(e.ok) === "false" || e.ok === false; });
+      var parent = d.parent_id && combo(d.parent_id);
+      var body = html`<p class="type-body strong">${c.failed || c.pct == null ? "Did not finish" : EK.better(c.pct) + " on the study cases"}</p>
+        <p class="type-small ink-2">${lookWords(c)}${parent ? " · comes from combination " + (parent.base ? "0, today’s settings" : parent.n) : ""}</p>
+        <div class="sub-section"><h3 class="type-heading">What it changed</h3>
+          ${params.length ? html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Today</th><th>This one</th></tr></thead><tbody>
+            ${params.map(function (p) { return html`<tr><td>${labelOf(p.name)}</td><td>${EK.valueText(p, p.default)}</td><td class="new">${EK.valueText(p, p.value)}</td></tr>`; })}</tbody></table></div>`
+            : html`<p class="type-small ink-2">Nothing: these are today’s settings.</p>`}</div>
+        <div class="sub-section"><h3 class="type-heading">Case by case</h3><div class="cases-wrap"><table class="changed-table"><tbody>
+          ${Object.keys(per).sort().map(function (cs) { return html`<tr><td class="mono">${cs}</td><td>${EK.better(per[cs])}</td></tr>`; })}</tbody></table></div></div>
+        ${failed.length ? html`<div class="sub-section"><h3 class="type-heading">${EK.plural(failed.length, "failed run")}</h3>
+          ${failed.slice(0, 6).map(function (e) {
+            var out = (e.stderr_tail || e.stdout_tail || "").trim();
+            return html`<div class="sub-section"><p class="type-small"><span class="mono">${e.instance}</span> · ${e.stage} · ${e.failure || "failed"}${e.duration_s ? " after " + EK.duration(Number(e.duration_s)) : ""}</p>
+              ${out ? html`<pre class="code">${out}</pre>` : html`<p class="type-small ink-2">It printed nothing.</p>`}
+              ${e.argv ? html`<details class="more-detail"><summary>How it was started</summary><pre class="code">${Array.isArray(e.argv) ? e.argv.join(" ") : e.argv}</pre></details>` : ""}</div>`;
+          })}</div>` : ""}`;
+      EK.openDrawer({ title: "Combination " + c.n + " · round " + c.round, wide: true, body: body });
+    }).catch(EK.fail);
   }
   function runsDrawer() {
     var runs = (st.doc.runs || []).slice().reverse().map(function (r) {

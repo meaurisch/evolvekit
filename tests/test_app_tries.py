@@ -129,3 +129,35 @@ def test_the_digest_is_rebuilt_when_the_run_changes(tmp_path):
                                  "seed": 0, "ok": True, "kpis": {"cost": 180}}) + "\n")
         handle.write(json.dumps({"type": "run_finished", "ts": at(30)}) + "\n")
     assert digest(run)["done"] is True
+
+
+def test_one_combination_in_full_through_the_api(tmp_path):
+    """GET …/tries/{combination}: what it set and every run of it, for the Study page's details drawer
+    (it replaces the old dashboard's candidate view)."""
+    import http.client
+
+    from evolvekit.app.server import AppServer
+
+    server = AppServer(tmp_path / "home", port=0)
+    server.start()
+    try:
+        def get(path):
+            connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=60)
+            connection.request("GET", path, headers={"Host": f"127.0.0.1:{server.port}", "X-Evolvekit-Token": server.token})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            connection.close()
+            return response.status, body
+
+        slug = server.home.create_study("demo-tour", "tune", "Tries")
+        a_run(server.home.study_root(slug))
+        status, detail = get(f"/api/studies/{slug}/tries/g001-c0003?run=20260101-000000")
+        assert status == 200 and detail["id"] == "g001-c0003" and detail["parent_id"] == "g000-c0001"
+        assert len(detail["evaluations"]) == 6 and all(e["ok"] for e in detail["evaluations"])
+        assert "block" not in detail, "the page gets what it shows, not the run's internals"
+        status, _ = get(f"/api/studies/{slug}/tries/g999-c9999?run=20260101-000000")
+        assert status == 404
+        status, digest = get(f"/api/studies/{slug}/tries?run=20260101-000000")
+        assert {c["id"]: c["failed_runs"] for c in digest["combinations"]}["g001-c0004"] == 1
+    finally:
+        server.stop()

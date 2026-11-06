@@ -146,8 +146,9 @@ least 9 in 10 and the worst plausible case within 1 % of today. Every
 estimate shows its likely range as a band through *today*, with both ends
 marked, *worst* and *best*, and the dashed 1 % limit.
 
-- **Use it** (the strip turns orange): the improvement, the chance, the worst
-  case; *Save settings file* and *Copy* a summary.
+- **Use it** (the strip turns orange): the improvement on the goal's measure
+  — *1.40 % better on cost as PyVRP counts it (lower)* — with the chance and
+  the worst case; *Save settings file* and *Copy* a summary.
 - **Keep today's settings**: better on average, but not sure enough (*chance
   under 9 in 10*, or a worst case beyond 1 %); *Check with more runs* keeps
   the runs it did and adds others.
@@ -170,13 +171,17 @@ Below the strip three linked views:
 
 Hover, focus or tap a dot for its card; click it (or Enter) to follow that
 combination across all three views. When the answer is *use it*, the checked
-combination and its family — the line back to today's settings — are marked.
+combination and its family — the combinations it came from, back to today's
+settings — are marked on the Tries plot. *Details* shows one combination in
+full: every setting it changed, its result case by case, and for a run that
+failed, what it printed and how it was started.
 
 | Dark | Phone |
 |---|---|
 | ![The Study page in dark](app/study-dark.png) | ![The Study page on a phone](app/study-phone-dark.png) |
 
-Further down: **Hand it over** — what changed (old value → new, with what
+Further down: **Settings to use** (or **Settings to keep**, when the answer
+is keep, with today's settings first) — what changed (old value → new, with what
 each setting does), *Show the settings file*, *Copy a summary*, *Open the
 report* (every number on one page, to read or send as `report.html`), the
 harness's files (the settings, as flags, the data changes, the changed
@@ -184,9 +189,9 @@ requests) and the study itself as one zip; **What next** — *Continue for
 another 22 h* (the same run goes on: the rounds done are kept, then the final
 check runs again), *Start a new study from this*, *Compare with…*; and
 **Details** — the set-up, every held-back case and every case the search
-learned from, every measure, failed runs grouped with what to do about them.
-*Past runs* lists every run of the study with its verdict; *Detailed
-dashboard (for experts)* opens evolvekit's full dashboard for the run.
+learned from, every measure, and *What went wrong*: failed runs grouped with
+what to do about them, and the combinations that had them, each with its
+output. *Past runs* lists every run of the study with its verdict.
 
 The app runs one study at a time. A study started while another runs waits
 its turn and starts by itself; a run that was continued after it died says

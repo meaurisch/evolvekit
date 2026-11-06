@@ -123,7 +123,7 @@
   };
 
   // ------------------------------------------------------------------ routing
-  var generation = 0;
+  var generation = 0, loadingTimer = null;
   function route() {
     if (!EK.hasToken()) return EK.onLocked();
     var r = parse(), moved = legacy(r);
@@ -143,9 +143,14 @@
     EK.route = { page: page, slug: slug, query: r.query, generation: mine };
     appBar(page === "setup" ? "start" : page);
     main.setAttribute("aria-busy", "true");
+    // A thin line under the app bar from the first moment a page takes a while.
+    clearTimeout(loadingTimer);
+    loadingTimer = setTimeout(function () { if (mine === generation) document.body.classList.add("is-loading"); }, 80);
     var handler = EK.pages[page];
     var done = function () {
       if (mine !== generation) return;
+      clearTimeout(loadingTimer);
+      document.body.classList.remove("is-loading");
       main.removeAttribute("aria-busy");
       var title = EK.$("#page-title", main);
       if (EK._moveFocus !== false) (title || main).focus({ preventScroll: false });
@@ -153,6 +158,8 @@
     };
     Promise.resolve().then(function () { return handler.render(main, slug, r.query, mine); }).then(done, function (err) {
       if (mine !== generation) return;
+      clearTimeout(loadingTimer);
+      document.body.classList.remove("is-loading");
       main.removeAttribute("aria-busy");
       if (err && err.status === 403) return;
       EK.mount(main, html`<div class="page"><div class="page-inner">${EK.titleBlock("", "Something went wrong")}

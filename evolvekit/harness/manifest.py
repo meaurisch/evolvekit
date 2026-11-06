@@ -20,7 +20,9 @@ the declared tables, and a study template that does not compile.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -644,9 +646,14 @@ def _check_sql(harness: Harness) -> None:
         db.close()
 
 
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+"""libyaml's loader where PyYAML has it: the same safe subset, about ten times
+faster -- the app reads a study's harness several times per request."""
+
+
 def _read_yaml(path: Path, what: str) -> dict[str, Any]:
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_SAFE_LOADER)  # noqa: S506 - a safe loader
     except OSError as exc:
         raise HarnessError(f"{what}: cannot be read: {exc}") from None
     except yaml.YAMLError as exc:
@@ -654,9 +661,49 @@ def _read_yaml(path: Path, what: str) -> dict[str, Any]:
     return _mapping(raw, what)
 
 
+_LOADED: dict[tuple[str, bool], tuple[str, Harness]] = {}
+_LOADED_GUARD = threading.Lock()
+LOADED_MAX = 32
+
+
+def _content_key(root: Path) -> str | None:
+    """A digest of everything `load_harness` reads: harness.yaml and the templates."""
+    digest = hashlib.sha1()
+    try:
+        digest.update((root / "harness.yaml").read_bytes())
+        folder = root / "templates"
+        if folder.is_dir():
+            for path in sorted(folder.glob("*.yaml")):
+                digest.update(path.name.encode("utf-8"))
+                digest.update(path.read_bytes())
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def load_harness(root: str | Path, *, check_templates: bool = True) -> Harness:
-    """Read and check the harness in folder `root`."""
+    """Read and check the harness in folder `root`. A harness whose files are
+    byte for byte the same as last time is not parsed and checked again (the app
+    reads a study's harness several times per request); `Harness` is frozen."""
     root = Path(root)
+    key = (str(root.resolve()), check_templates)
+    content = _content_key(root)
+    if content is not None:
+        with _LOADED_GUARD:
+            hit = _LOADED.get(key)
+        if hit and hit[0] == content:
+            return hit[1]
+    harness = _load_harness(root, check_templates=check_templates)
+    if content is not None:
+        with _LOADED_GUARD:
+            if len(_LOADED) >= LOADED_MAX:
+                _LOADED.pop(next(iter(_LOADED)))
+            _LOADED[key] = (content, harness)
+    return harness
+
+
+def _load_harness(root: Path, *, check_templates: bool = True) -> Harness:
+    """Read and check the harness in folder `root`, every time."""
     manifest = root / "harness.yaml"
     if not manifest.is_file():
         raise HarnessError(f"{root}: there is no harness.yaml in this folder")

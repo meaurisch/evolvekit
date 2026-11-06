@@ -200,7 +200,7 @@
       "; the dashed mark is the 1 % limit";
     return html`<div class="interval-strip${o.onAccent ? " on-accent" : ""}"${attrs({ style: "max-width:" + w + "px" })}>
       ${raw('<svg width="100%" height="58" viewBox="0 0 ' + w + ' 58" role="img" aria-label="' + EK.esc(aria) + '" style="display:block;overflow:visible">' + out.join("") + "</svg>")}
-      <div class="strip-caption type-small"><span>← worse</span><span>dashed: 1 % limit</span><span>better →</span></div></div>`;
+      ${o.compact ? "" : html`<div class="strip-caption type-small"><span>← worse</span><span>dashed: 1 % limit</span><span>better →</span></div>`}</div>`;
   };
   /** The range in one sentence, both ends. */
   EK.rangeWords = function (lo, hi) {
@@ -224,7 +224,7 @@
     var menuId = "menu-" + c.slug;
     var vis = "";
     if (c.timeline) vis = html`<div class="card-vis">${EK.runTimeline(Object.assign({ width: 300 }, c.timeline))}</div>`;
-    if (c.range) vis = html`<div class="card-vis">${EK.intervalStrip(c.range[0], c.range[1], c.range[2], { width: 334 })}</div>`;
+    if (c.range) vis = html`<div class="card-vis">${EK.intervalStrip(c.range[0], c.range[1], c.range[2], { width: 334, compact: true })}</div>`;
     var actions = (c.actions || []).length ? html`<div class="card-actions">${c.actions.map(function (a) {
       return EK.button(a.text, Object.assign({ kind: a.kind || "secondary", size: "s" }, a));
     })}</div>` : "";

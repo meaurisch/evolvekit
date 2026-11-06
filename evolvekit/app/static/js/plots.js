@@ -97,9 +97,12 @@
     });
     var byId = {};
     d.combinations.forEach(function (c) { byId[c.id] = c; });
+    var family = {};
     if (o.family && o.chosen && byId[o.chosen]) {
-      var fl = lineage(byId, o.chosen, d.base).map(function (c) { return f(X(c.end_h)) + "," + f(Y(c.base ? 0 : c.pct || 0)); });
-      out.push('<polyline points="' + fl.join(" ") + '" fill="none" style="stroke:var(--ink-1)" stroke-width="1.5" stroke-dasharray="5 4"/>');
+      var members = lineage(byId, o.chosen, d.base);
+      members.forEach(function (c) { if (!c.base && c.id !== o.chosen) family[c.id] = 1; });
+      var fl = members.map(function (c) { return f(X(c.end_h)) + "," + f(Y(c.base ? 0 : c.pct || 0)); });
+      out.push('<polyline points="' + fl.join(" ") + '" fill="none" style="stroke:var(--accent-line)" stroke-width="2" stroke-dasharray="6 4"/>');
     }
     if ((d.best || []).length) {
       var pts = [], prev = null;
@@ -130,6 +133,11 @@
       else out.push('<circle cx="' + f(x) + '" cy="' + f(y) + '" r="' + f(3.2 * rr) + '" style="fill:var(--surface-page);stroke:var(--line-edge)" stroke-width="1.4"/>');
       points.push({ id: c.id, x: x, y: y });
     });
+    Object.keys(family).forEach(function (id) {
+      var m = byId[id];
+      if (m.pct == null || m.pct < lo) return;
+      out.push('<circle cx="' + f(X(m.end_h)) + '" cy="' + f(Y(m.pct)) + '" r="4.6" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.2"/>');
+    });
     if (o.chosen && byId[o.chosen] && !byId[o.chosen].base) {
       var c = byId[o.chosen], cy = c.pct == null ? base - 6 : Y(c.pct);
       out.push('<circle cx="' + f(X(c.end_h)) + '" cy="' + f(cy) + '" r="5.5" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.5"/>' +
@@ -159,14 +167,14 @@
     if (quick) it.push(["quick", "quick look, " + d.quick_cases + " cases"]);
     it.push(["x", "did not finish"]);
     if (!d.done) it.push(["ring", "running"]);
-    if (o && o.family) it.push(["fam", "its family"]);
+    if (o && o.family) it.push(["fam", "its family: the combinations it came from"]);
     var g = {
       line: '<svg width="22" height="8" aria-hidden="true"><path d="M0 4h22" style="stroke:var(--accent-line)" stroke-width="3"/></svg>',
       full: '<svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="3.6" style="fill:var(--ink-1)"/></svg>',
       quick: '<svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="3.2" style="fill:var(--surface-page);stroke:var(--line-edge)" stroke-width="1.4"/></svg>',
       x: '<svg width="10" height="10" aria-hidden="true"><path d="M1.5 1.5l7 7m0-7l-7 7" style="stroke:var(--ink-2)" stroke-width="1.4"/></svg>',
       ring: '<svg width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" style="stroke:var(--line-rule)" stroke-width="3"/><path d="M8 2a6 6 0 0 1 6 6" fill="none" style="stroke:var(--accent-line)" stroke-width="3"/></svg>',
-      fam: '<svg width="22" height="8" aria-hidden="true"><path d="M0 4h22" style="stroke:var(--ink-1)" stroke-width="1.5" stroke-dasharray="5 4"/></svg>'
+      fam: '<svg width="30" height="10" aria-hidden="true"><path d="M0 5h30" style="stroke:var(--accent-line)" stroke-width="2" stroke-dasharray="6 4"/><circle cx="15" cy="5" r="4" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.2"/></svg>'
     };
     return EK.raw('<div class="plot-legend">' + it.map(function (x) { return "<span>" + g[x[0]] + esc(x[1]) + "</span>"; }).join("") + "</div>");
   };
