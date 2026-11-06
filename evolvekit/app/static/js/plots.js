@@ -13,9 +13,23 @@
   function f(x) { return (Math.round(x * 10) / 10).toString(); }
   function esc(s) { return EK.esc(s); }
 
+  var sharedPrefix = "";
+  /** Tell the short names which cases they are among: a prefix all of them share is left out. */
+  EK.caseNames = function (names) {
+    var list = (names || []).map(function (n) { return String(n).replace(/\.[A-Za-z0-9]+$/, ""); });
+    sharedPrefix = "";
+    if (list.length < 2) return;
+    var p = list[0];
+    list.forEach(function (n) { while (p && n.indexOf(p) !== 0) p = p.slice(0, -1); });
+    var cut = Math.max(p.lastIndexOf("-"), p.lastIndexOf("_"), p.lastIndexOf("."), p.lastIndexOf(" "));
+    sharedPrefix = cut >= 0 ? p.slice(0, cut + 1) : "";
+  };
+  /** A case's short name (t01, 03): its first word, or what is left after the shared prefix. */
   EK.shortCase = function (name) {
-    var first = String(name).split(/[-_.\s]/)[0];
-    return first.length >= 2 && first.length <= 6 ? first : String(name).slice(0, 6);
+    var n = String(name).replace(/\.[A-Za-z0-9]+$/, "");
+    if (sharedPrefix && n.indexOf(sharedPrefix) === 0 && n.length > sharedPrefix.length) n = n.slice(sharedPrefix.length);
+    var first = n.split(/[-_.\s]/)[0];
+    return first.length >= 1 && first.length <= 6 ? first : n.slice(0, 6);
   };
   EK.caseLabel = function (name, phone) { return phone ? EK.shortCase(name) : String(name).length > 22 ? String(name).slice(0, 21) + "…" : String(name); };
 

@@ -319,7 +319,7 @@
   function draw() {
     var el = host();
     if (!el) return;
-    if (pep.hidden) { el.innerHTML = ""; return; }
+    if (pep.hidden || !pep.phase) { el.innerHTML = ""; return; }
     var size = EK.isPhone() ? 64 : 92;
     var word = EK.PEPPER_WORDS[pep.phase] || "";
     var bubble = pep.bubble ? html`<div class="pep-bubble" role="status"><span class="type-small">${pep.bubble}</span>
@@ -434,7 +434,7 @@
     show: function (o) {
       var was = pep.phase;
       pep.state = o;
-      pep.phase = o.phase || "egg";
+      pep.phase = o.phase === null ? null : o.phase || "egg";
       if (pep.hidden && (o.finished || pep.slug !== pep.hiddenFor)) pep.hidden = false;
       if (o.announce && was !== pep.phase && !EK.reducedMotion()) pep.bubble = o.announce;
       if (o.announce && was !== pep.phase && EK.reducedMotion()) pep.bubble = o.announce;

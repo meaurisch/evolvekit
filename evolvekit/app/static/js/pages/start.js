@@ -32,7 +32,8 @@
     }
     return EK.get("/api/home").then(function (home) {
       if (!EK.isCurrent(gen)) return;
-      st.harnesses = (home.harnesses || []).filter(function (h) { return !h.problem; });
+      st.harnesses = (home.harnesses || []).filter(function (h) { return !h.problem; })
+        .sort(function (a, b) { return (/demo/i.test(a.id) ? 1 : 0) - (/demo/i.test(b.id) ? 1 : 0); });
       st.pick = query.harness && st.harnesses.some(function (h) { return h.id === query.harness; }) ? query.harness : (st.harnesses[0] || {}).id || "";
       var h = harnessOf(st.pick);
       st.template = h && h.templates && h.templates.length ? h.templates[0].id : "";
@@ -176,6 +177,7 @@
 
   // ------------------------------------------------------------------ drawing
   function caseItems() {
+    EK.caseNames((st.doc ? st.doc.cases : []).map(function (c) { return c.name; }));
     return (st.doc ? st.doc.cases : []).map(function (c) {
       return { name: c.name, short: EK.shortCase(c.name), size: c.bytes || 0, held: c.set === "test", refused: c.inspected && c.inspected.ok === false };
     }).sort(function (a, b) { return a.size - b.size || (a.name < b.name ? -1 : 1); });
@@ -193,10 +195,13 @@
     var line;
     if (st.finding) line = html`<div class="app-line" role="status"><span class="breathe">${EK.gl("folder", 20)}</span><div class="app-line-words"><span class="app-line-title">Looking for ${label}…</span>
       <span class="type-small ink-2">On this computer. Up to 10 s.</span></div></div>`;
-    else if (app) line = html`<div class="app-line">${EK.icon("good", 20)}<div class="app-line-words"><span class="app-line-title">${label} ${app.version || ""}</span>
+    else if (app) line = html`<div class="app-line">${EK.icon("good", 20)}<div class="app-line-words"><span class="app-line-title">${(st.harness || harnessOf(st.pick) || {}).title || label} ${app.version || ""}</span>
       <span class="type-small ink-2">${app.mine ? app.path : "Found on this computer"}</span></div>${EK.button("Other", { kind: "quiet", size: "s", act: "other-app" })}</div>`;
-    else line = html`<div class="app-line" role="alert">${EK.icon("warning", 20)}<div class="app-line-words"><span class="app-line-title">${label} not found</span>
-      <span class="type-small ink-2">Point to it on this computer.</span></div>${EK.button("Find it", { kind: "secondary", size: "s", act: "other-app" })}</div>`;
+    else {
+      var near = (st.found || []).filter(function (x) { return x.version; })[0] || (st.found || [])[0];
+      line = html`<div class="app-line" role="alert">${EK.icon("warning", 20)}<div class="app-line-words"><span class="app-line-title">${label} not found</span>
+      <span class="type-small ink-2">${near ? near.message + ". " : ""}Point to it on this computer.</span></div>${EK.button("Find it", { kind: "secondary", size: "s", act: "other-app" })}</div>`;
+    }
     return html`${picker}${line}`;
   }
   function kindBlock() {

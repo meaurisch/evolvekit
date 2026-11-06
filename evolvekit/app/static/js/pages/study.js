@@ -50,6 +50,7 @@
       ]);
     }).then(function (r) {
       st.tries = r[0];
+      if (st.tries && st.tries.cases) EK.caseNames(st.tries.cases);
       st.results = r[1];
       if (!st.chosenSet && st.results && st.results.best_id && st.status.phase !== "search") { st.chosen = st.results.best_id; }
     });

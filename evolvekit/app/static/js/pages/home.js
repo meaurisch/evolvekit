@@ -96,7 +96,7 @@
   function companion(active) {
     var running = active.filter(function (s) { return s.kind === "running"; })[0];
     var latest = running || active.filter(function (s) { return s.kind === "finished"; })[0];
-    if (!latest) { EK.companion.show({ phase: "egg", say: "Start a study and I will follow it." }); return; }
+    if (!latest) { EK.companion.show({ phase: data.studies.length ? "egg" : null, say: "Start a study and I will follow it." }); return; }
     var c = EK.cardOf(latest);
     EK.companion.show({ phase: c.pepper || "egg", slug: latest.slug, say: latest.name + ": " + c.head + ". " + (c.sub || "") });
   }
