@@ -444,13 +444,31 @@ def card_event(req: Request) -> dict[str, Any]:
 
 
 def add_card(req: Request) -> dict[str, Any]:
-    """Add a card to the study -- one of the assistant's, or one the page's
-    forms made -- after checking it again on the preview."""
+    """Add cards to the study -- the assistant's, or ones the page's forms
+    made -- after checking them again on the preview. `{card}` adds one and
+    refuses (400) when it fails; `{cards: [...]}` adds a whole answer in the
+    right order, answers `{cards, study}` with each card's `ok` and `problem`,
+    and with `turn` given records each applied card's fate by its `index` in
+    that answer."""
     slug = req.params["slug"]
     root, study, pinned = req.home.load(slug)
     if jobs.running(root):
         raise AppError("the study is running; stop it before changing it", 409)
-    card = req.json().get("card")
+    body = req.json()
+    if "cards" in body:
+        cards = body.get("cards")
+        if not isinstance(cards, list):
+            raise AppError("cards: a list of cards")
+        done = assistant.apply_cards(root, cards)
+        turn = str(body.get("turn") or "")
+        for card in done:
+            if turn and card["ok"] and isinstance(card.get("index"), int):
+                try:
+                    assistant.record_card(root, turn, card["index"], "applied")
+                except AppError:
+                    pass  # the card went in; an index that names no card of the turn only loses the note
+        return {"cards": done, "study": _document(req, slug)}
+    card = body.get("card")
     checked = assistant.check_card(card, study, pinned, root, assistant._proposed([card]))  # noqa: SLF001
     if not checked["ok"]:
         raise AppError(checked["problem"])

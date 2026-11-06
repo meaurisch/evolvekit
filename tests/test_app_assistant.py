@@ -460,3 +460,56 @@ def test_the_api_passes_the_screen_and_the_run_to_the_assistant(study):
         assert "Screen: results" in prompt and "held-back" in prompt
     finally:
         server.stop()
+
+
+WHOLE = [{"kind": "goal", "levels": [{"kpi": "late", "direction": "lower"}]},
+         {"kind": "guardrail", "kpi": "late", "max": 0},
+         {"kind": "kpi", "name": "late", "says": "late stops", "direction": "lower", "sql": "SELECT COUNT(*) FROM stops WHERE 0"}]
+"""An answer whose goal and guardrail name the measure it proposes: it only
+applies as a whole when the measure goes in first, whatever the model's order."""
+
+
+def test_an_answer_applies_as_a_whole_in_the_right_order(study):
+    _, root = study
+    done = assistant.apply_cards(root, WHOLE)
+    assert [c["ok"] for c in done] == [True, True, True], [c["problem"] for c in done]
+    assert [c["kind"] for c in done] == ["goal", "guardrail", "kpi"], "the answer comes back in its own order"
+    studied = load_study(root)
+    assert "late" in studied.kpis and studied.goal[0].kpi == "late" and studied.guardrails[0].kpi == "late"
+    assert done[2]["value"] == 0, "each card is checked on the preview as it goes in"
+
+
+def test_a_card_that_fails_in_the_list_leaves_the_others_applied(study):
+    _, root = study
+    cards = [{"kind": "guardrail", "kpi": "nobody", "max": 1}, *WHOLE]
+    done = assistant.apply_cards(root, cards)
+    assert [c["ok"] for c in done] == [False, True, True, True]
+    assert "'nobody' is not a KPI" in done[0]["problem"]
+    studied = load_study(root)
+    assert "late" in studied.kpis and studied.goal[0].kpi == "late" and [g.kpi for g in studied.guardrails] == ["late"]
+    done = assistant.apply_cards(root, [{"kind": "wrong"}, WHOLE[2]])
+    assert done[0]["ok"] is False and done[1]["ok"] is False and "not taken" in done[1]["problem"], "the second time, the name is taken"
+
+
+def test_the_api_applies_a_list_of_cards_and_records_their_fate(study):
+    home, root = study
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        slug = root.name
+        server.assistant_provider = FakeProvider(responses=[json.dumps({"say": "Late stops.", "cards": WHOLE})])
+        turn = _asked(server, slug, "Count late stops")["turn"]
+        bad = {"kind": "guardrail", "kpi": "nobody", "max": 1, "index": 7}
+        posted = [bad, *({**card, "index": i} for i, card in enumerate(WHOLE))]
+        status, body = call(server, "POST", f"/api/studies/{slug}/cards", {"cards": posted, "turn": turn})
+        assert status == 200, body
+        assert [c["ok"] for c in body["cards"]] == [False, True, True, True] and body["cards"][0]["problem"]
+        assert body["study"]["study"]["goal"]["levels"][0]["kpi"] == "late" and "late" in body["study"]["study"]["kpis"]
+        status, history = call(server, "GET", f"/api/studies/{slug}/assistant")
+        assert [c["state"] for c in history["turns"][1]["cards"]] == ["applied", "applied", "applied"], "the fate of each applied card is kept"
+        # The single form is as it was.
+        status, body = call(server, "POST", f"/api/studies/{slug}/cards", {"card": GOOD["cards"][3]})
+        assert status == 200 and body["card"]["ok"] and "study" in body
+        assert call(server, "POST", f"/api/studies/{slug}/cards", {"cards": "no"})[0] == 400
+    finally:
+        server.stop()

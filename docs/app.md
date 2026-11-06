@@ -176,15 +176,35 @@ width:
 
 ## The assistant
 
-In steps 4 and 5 a panel takes requests in your own words — "count late
-deliveries to frozen customers", "try cheaper vans and dearer trucks; trucks
-must stay dearer" — and answers with proposals as cards: a measure (with its
-SQL, the rows it counts, and its value on the preview case), a data change
-("applies to 7 vehicle types"), a rule ("holds today"), a goal, a guardrail.
-Each card says it is a proposal: nothing changes until you press *Apply*.
-When the model gives no answer, the chat says why, keeps saying it after a
-reload, and offers *Ask again*; *Test the assistant* in Settings asks the
-model a one-line question to show that the key and the model work.
+On every screen of a study — each step, *Running* and *The results* — an
+*Assistant* drawer takes requests and questions in your own words. It is open
+on steps 4 and 5, folded elsewhere, and it sees the screen you are on: the
+plan's words, a test run's failures, and on *Running* and *The results* the
+run's verdict and its numbers per case. Ask a question — "why is this not
+proven?" — and it answers in a few plain sentences, with the numbers. Ask for
+a change — "count late deliveries to frozen customers", "try cheaper vans and
+dearer trucks; trucks must stay dearer" — and it answers with proposals as
+cards: a measure (with its SQL, the rows it counts, and its value on the
+preview case), a data change ("applies to 7 vehicle types"), a rule ("holds
+today"), a goal, a guardrail. Each card says it is a proposal: nothing
+changes until you press *Apply*. *Edit* opens the card's fields on the card —
+a measure's SQL and direction, a data change's rows and range, a rule, a
+goal's levels, a guardrail's bound — and *Apply* then checks what you wrote
+exactly as it checked the model's, with the reason on the card when it fails.
+An answer with several cards has *Apply all*: the measures go in first, so a
+goal or a guardrail may name a measure proposed in the same answer; a card
+that fails is left out with its reason, and the others still go in.
+
+The conversation is kept with the study, and so is the fate of every card:
+reopen the study and each proposal still says whether it was applied,
+dismissed or is still waiting, and the model is told which of its proposals
+were taken when it is asked again. While it thinks — up to a minute, since
+every proposal is tried on the smallest case first — you may move to another
+screen (the drawer picks the answer up there) or press *Cancel*, which throws
+the answer away. When the model gives no answer, the chat says why, keeps
+saying it after a reload, and offers *Ask again*; *Test the assistant* in
+Settings asks the model a one-line question to show that the key and the
+model work.
 
 Every proposal is checked on the preview case first: a measure must return a
 number, a data change must select rows, a rule must hold at the starting
@@ -199,9 +219,15 @@ row, a name, an address or a coordinate.
 
 **Keys and cost:** Settings takes an OpenRouter or Azure OpenAI key (kept in
 the library's `.env`, never shown again), or uses Claude Code on this
-computer. The default model costs a few cents an answer; the cost of every
-answer and the total per study are shown. Without a key the assistant says so,
-and templates, the forms and the SQL box still do everything it does.
+computer. A key you change or remove there counts from the next question, with
+no restart. The default model costs a few cents an answer. The cost shown
+under every answer is real: what OpenRouter reports, or what the price table
+says for the model (Settings › Models › Prices, where you can add a model's
+price per million tokens in and out). For a model with neither, the answer
+says the cost is *not known* rather than showing a made-up figure, and the
+study's total counts only the answers whose cost is known. Without a key the
+assistant says so, and templates, the forms and the SQL box still do
+everything it does.
 
 ## When something is wrong
 
@@ -223,7 +249,14 @@ The page uses nothing but a JSON API (`evolvekit/app/api.py`), so a server
 can take the app's place later: `/api/home`, `/api/settings`,
 `/api/harnesses`, `/api/studies/{name}` and its `application`, `cases`,
 `import`, `samples`, `split`, `inputs`, `preview`, `kpis/try`, `choices`,
-`assistant`, `cards`, `plan`, `tune-only`, `test-run`, `start` (with
+`assistant` (a `POST` with `{message, screen, run}` answers at once with a
+`turn` that is thinking; `GET …/assistant?turn=` is polled until it is done
+or cancelled, and `GET …/assistant` is the whole conversation with the cards'
+fates folded in), `assistant/cancel`, `assistant/cards` (what became of a
+card: `{turn, index, state}`), `cards` (`{card}` adds one and refuses it
+with the reason; `{cards: [...], turn}` adds a whole answer in the right
+order and answers with every card's `ok` and `problem`, recording the applied
+ones by their `index` in the turn), `plan`, `tune-only`, `test-run`, `start` (with
 `{"resume": RUN}`: that run goes on where it stopped; while another study
 runs, the run is queued and the server starts it later), `stop` (on a queued
 run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,

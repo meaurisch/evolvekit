@@ -51,10 +51,14 @@ from evolvekit.harness.compile import base_settings
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Constraint, DataChange, GoalLevel, Guardrail, SettingChoice, Study, StudyKpi, load_study, parse_within, save_study
 
-__all__ = ["apply_card", "ask", "history", "record_card"]
+__all__ = ["apply_card", "apply_cards", "ask", "history", "record_card"]
 
 HISTORY = "assistant.jsonl"
 CARD_STATES = ("proposed", "applied", "dismissed")
+APPLY_ORDER = ("kpi", "weighted", "setting", "data_change", "constraint", "goal", "guardrail")
+"""The order a whole answer goes into the study: measures first, so a goal,
+a guardrail or a combination may name one proposed in the same answer; the
+things tuned before the rules that hold them."""
 MAX_CORRECTIONS = 2
 MAX_TOKENS = 16000
 """The model thinks before it answers, and its thinking counts against this:
@@ -790,3 +794,26 @@ def apply_card(root: Path, card: dict[str, Any]) -> None:
     except (KeyError, HarnessError) as exc:
         raise AppError(f"the card cannot be added: {exc}") from None
     save_study(updated, root)
+
+
+def apply_cards(root: Path, cards: list[Any]) -> list[dict[str, Any]]:
+    """A whole answer into the study: every card checked and added in
+    `APPLY_ORDER` (stable within a kind), each against the study as the ones
+    before it left it, so a goal sees the measure added a moment ago. Returns
+    the cards in the order given, each with `ok` and `problem`; one that fails
+    is left out and the others still go in."""
+    harness = load_harness(root / "harness")
+    rank = {kind: i for i, kind in enumerate(APPLY_ORDER)}
+    order = sorted(range(len(cards)), key=lambda i: rank.get(cards[i].get("kind") if isinstance(cards[i], dict) else None, len(rank)))
+    done: list[dict[str, Any] | None] = [None] * len(cards)
+    for i in order:
+        # The names the answer still promises: the cards not yet found wanting.
+        promised = [card for j, card in enumerate(cards) if done[j] is None or done[j]["ok"]]
+        checked = check_card(cards[i], load_study(root), harness, root, _proposed(promised))
+        if checked["ok"]:
+            try:
+                apply_card(root, checked)
+            except AppError as exc:
+                checked = {**checked, "ok": False, "problem": str(exc)}
+        done[i] = checked
+    return [card for card in done if card is not None]
