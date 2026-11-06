@@ -27,7 +27,7 @@ The session has three parts:
 - **Who:** planners, analysts and interns at a logistics company. They know their routes, costs and time windows; they are not programmers or statisticians. They read literally and stop at jargon.
 - **The one job:** "Find settings that do better on our data, in the time I have, and tell me if I can trust them."
 - **What they take away:** use it or not, how much better, how sure, and the settings file to hand over.
-- **How it runs:** a Python process on their own computer serves a page on 127.0.0.1. A study runs 30 minutes to a few hours; people set it up, press Start, leave, and come back to the answer. Nothing loads from the internet.
+- **How it runs:** a Python process on their own computer serves a page on 127.0.0.1, at an address that carries a key for this launch (a bare bookmark shows one sentence). A study runs 30 minutes to a few hours; people set it up, press Start, leave, and come back to the answer. Nothing loads from the internet.
 - **How it decides:** it learns on most cases and holds a few back. At the end the final check runs the winner and the starting point on the held-back cases several times each, and the app decides by one fixed rule: *use it* when the chance of a gain is at least 9 in 10 and the worst plausible case is within 1 % of today; *keep today's settings* otherwise; *worse* when the chance of a gain is 1 in 10 or less. The user sets nothing. The check keeps adding runs on its own while time remains and the answer is open.
 - **One study at a time.** A second study waits in a queue and starts by itself. A run that died with the computer continues where it stopped.
 - **The assistant:** a drawer on every screen. It proposes parts of the study as cards (a measure, a data change, a rule, a goal, a guardrail), each checked on real data before it is shown, and it answers questions in plain words ("Why is this not proven?") with the run's own numbers.
@@ -132,6 +132,7 @@ Name everything: the build turns each token into a CSS variable and each compone
 | Chat bubble and proposal card | Assistant | You, assistant (plain answer), thinking with Cancel, no answer; proposed, edited, applied, dismissed, not expressible; Apply all |
 | Toast | Anywhere | Done, error |
 | App bar with where you are | Every screen | Wide, phone |
+| Locked page | The app opened without its key | One sentence: open the app from the address printed in the window it runs in |
 | Empty state with the motif | Home, Running | First run, nothing yet |
 
 ## Constraints
