@@ -117,8 +117,10 @@
     if (!lv.length) return { kicker: "Goal", value: "No goal yet", sub: "Pick the measure to improve.", state: "missing", action: "Pick a goal", act: "goal" };
     var head = kpiLabel(lv[0].kpi) + ", " + (kpiDirection(lv[0].kpi) === "higher" ? "higher" : "lower");
     if (lv.length > 1) head += "; then " + kpiLabel(lv[1].kpi).toLowerCase();
-    var train = (study().cases || {}).training || [];
-    return { kicker: "Goal", value: head, sub: lv.length > 1 ? "The second breaks ties within " + (lv[0].equal_within || "1 %") + "." : "On the " + EK.plural(train.length, "study case") + ".", act: "goal" };
+    var train = (study().cases || {}).training || [], held = ((study().cases || {}).test || []).length;
+    return { kicker: "Goal", value: head, act: "goal",
+      sub: lv.length > 1 ? "The second breaks ties within " + (lv[0].equal_within || "1 %") + "."
+        : "On the " + EK.plural(train.length, "study case") + (held ? "; " + held + " more held back for the final check." : ".") };
   }
   function timeSummary() {
     var lim = study().limits || {}, hours = (study().budget || {}).hours;

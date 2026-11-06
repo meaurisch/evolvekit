@@ -380,7 +380,10 @@
     btn.addEventListener("click", function () {
       if (moved) { moved = false; return; }
       pep.bubble = pep.bubble ? null : update();
+      pep.asked = !!pep.bubble;
       draw();
+      clearTimeout(pep.timer);
+      if (pep.bubble) pep.timer = setTimeout(function () { if (pep.asked) { pep.bubble = null; pep.asked = false; draw(); } }, 12000);
       var b = document.getElementById("pep-btn"); if (b) b.focus();
     });
     btn.addEventListener("contextmenu", function (ev) { ev.preventDefault(); setMenu(!pep.menu); });
@@ -437,6 +440,7 @@
       var was = pep.phase;
       pep.state = o;
       pep.phase = o.phase === null ? null : o.phase || "egg";
+      if (pep.asked && pep.bubble && o.say && pep.bubble !== o.say) { pep.bubble = o.say; o.redraw = true; }
       if (pep.hidden && (o.finished || pep.slug !== pep.hiddenFor)) pep.hidden = false;
       if (o.announce && was !== pep.phase && !EK.reducedMotion()) pep.bubble = o.announce;
       if (o.announce && was !== pep.phase && EK.reducedMotion()) pep.bubble = o.announce;

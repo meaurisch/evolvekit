@@ -252,3 +252,25 @@ cases, chance under 9 in 10, at worst 2.57 % worse).
   tune drawer says what Tune, Fixed and Default mean; the application reads
   *Ready on this computer*, its path behind *Other*; drawers slide in without
   fading, so nothing shows through.
+
+## The redesign, round 3 — 8/10, no blocker: the gate passes (2026-11-06)
+
+| Getting started | Knowing what to do next | Setting up | Confidence while it ran | Understanding the result | Handing it over |
+|---|---|---|---|---|---|
+| 9 | 8 | 8 | 6 | 8 | 9 |
+
+Keep today's settings again (0.57 % better on the held-back cases, chance
+under 9 in 10, at worst 2.27 % worse); the reviewer sent today's settings
+with *Show today's settings*, "The verdict says keep these. Send this file."
+
+- **(major) The strip and the notices were rebuilt on every poll** — the
+  check for a change compared the new markup with the browser's copy of the
+  old, which never matches — so *Is it still fair?* could not be clicked and
+  the live region spoke every 2.5 s. They change now only when their words do.
+- **(major) The details said "no combination has beaten the starting point
+  yet" beside a best so far.** The server's sentence shows once the run is
+  over; while it runs, the strip alone says it.
+- **Pepper's update went stale.** An update you asked for follows the study
+  and goes away by itself after 12 s.
+- **Small ones.** The Settings view keeps its order while you look; the Goal
+  summary says how many cases are held back for the final check.

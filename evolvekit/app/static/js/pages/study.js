@@ -279,7 +279,10 @@
         <span>right column: tries better than today on that case</span></div>
         ${weakest ? html`<p class="type-small ink-2">Hardest case: ${EK.shortCase(weakest[0])}, better in ${weakest[2][0]} of ${weakest[2][1]} full looks.</p>` : ""}`;
     }
-    var params = (t.parameters || []).slice().sort(function (a, b) { return EK.settingWeight(t, b) - EK.settingWeight(t, a); });
+    if (!st.paramOrder || st.paramOrder.length !== (t.parameters || []).length) {
+      st.paramOrder = (t.parameters || []).slice().sort(function (a, b) { return EK.settingWeight(t, b) - EK.settingWeight(t, a); }).map(function (p) { return p.name; });
+    }
+    var params = st.paramOrder.map(function (n) { return (t.parameters || []).filter(function (p) { return p.name === n; })[0]; }).filter(Boolean);
     var shown = st.showAllSettings ? params : params.slice(0, 6);
     var cols = phone ? 1 : W > 1100 ? 3 : 2, pw = Math.floor((W - (cols - 1) * 16) / cols) - 28;
     plotPoints = [];
@@ -453,7 +456,7 @@
     }
     (s.failures || []).forEach(function (fl) { parts.push(EK.notice("warning", fl.count + " × " + fl.message + (fl.todo ? " " + fl.todo : ""))); });
     if (s.gated_line) parts.push(html`<p class="type-small ink-2">${s.gated_line}</p>`);
-    if (s.best && s.best.line) parts.push(html`<p class="type-small ink-2">${s.best.line}</p>`);
+    if (s.best && s.best.line && !isLive()) parts.push(html`<p class="type-small ink-2">${s.best.line}</p>`);
     return html`<details class="section-fold"><summary>Details</summary><div class="sub-section">${parts}</div></details>`;
   }
 
@@ -483,7 +486,8 @@
         <div class="view-panel" id="view-panel" role="tabpanel" aria-labelledby="tab-${st.view}"></div></div>
       ${handOver()}${nextSteps()}${details()}
       <p class="type-small ink-2">${EK.link("Detailed dashboard (for experts)", { href: EK.withToken(st.status.dashboard), target: "_blank" })}</p></div></div>`, acts(main));
-    st.lastStrip = document.getElementById("strip-slot").innerHTML;
+    st.lastStrip = String(statusStrip());
+    st.lastNotices = String(notices());
     st.lastPlot = "";
     drawView();
     companion();
@@ -495,11 +499,11 @@
     if (strip !== st.lastStrip) {
       var focusedAct = document.activeElement && slot.contains(document.activeElement) ? document.activeElement.getAttribute("data-act") : null;
       slot.innerHTML = strip;
-      st.lastStrip = slot.innerHTML;
+      st.lastStrip = strip;
       if (focusedAct) { var again = EK.$('[data-act="' + focusedAct + '"]', slot); if (again) again.focus(); }
     }
     var n = document.getElementById("study-notices");
-    if (n) { var nh = String(notices()); if (n.innerHTML !== nh) n.innerHTML = nh; }
+    if (n) { var nh = String(notices()); if (nh !== st.lastNotices) { n.innerHTML = nh; st.lastNotices = nh; } }
     if (!st.hover) drawView();
     companion();
     if (!isLive()) { EK._moveFocus = false; draw(main); }
