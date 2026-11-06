@@ -231,12 +231,17 @@ def completion_from_chat(response: Any, *, model: str, provider: str) -> Complet
             f"{provider} provider: response contained empty content{detail}"
         )
     usage = getattr(response, "usage", None)
+    # OpenRouter reports what the call cost as `usage.cost` when asked to
+    # (`extra_body={"usage": {"include": True}}`); the ledger and the app
+    # trust it over any price table.
+    cost = getattr(usage, "cost", None)
     return Completion(
         text=text,
         input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
         output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
         model=str(getattr(response, "model", None) or model),
         provider=provider,
+        usd=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
     )
 
 

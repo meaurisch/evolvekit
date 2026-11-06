@@ -359,3 +359,40 @@ def test_split_system_separates_the_stable_prefix():
     system, rest = split_system(MESSAGES)
     assert system == "you are an optimiser"
     assert [m["role"] for m in rest] == ["user"]
+
+
+def test_openrouter_asks_for_the_cost_and_reads_it():
+    response = chat_response(model="anthropic/claude")
+    response.usage.cost = 0.0123
+    client, chat = make_client(response)
+    result = OpenRouterProvider(client=client).complete(
+        MESSAGES, model="anthropic/claude", max_tokens=128, temperature=0.9
+    )
+    assert chat.calls[0]["extra_body"] == {"usage": {"include": True}}
+    assert result.usd == 0.0123
+    unpriced, _ = make_client(chat_response())
+    result = OpenRouterProvider(client=unpriced).complete(
+        MESSAGES, model="m", max_tokens=1, temperature=0.0
+    )
+    assert result.usd is None
+
+
+@pytest.mark.parametrize("cls", [OpenRouterProvider, AzureProvider])
+def test_json_mode_is_passed_through_where_the_api_has_it(cls):
+    client, chat = make_client(chat_response())
+    provider = cls(client=client)
+    provider.complete(
+        MESSAGES, model="m", max_tokens=9, temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+    assert chat.calls[0]["response_format"] == {"type": "json_object"}
+    provider.complete(MESSAGES, model="m", max_tokens=9, temperature=0.1)
+    assert "response_format" not in chat.calls[1]
+
+
+def test_json_mode_is_accepted_and_ignored_where_the_backend_has_none():
+    fake = FakeProvider(responses=["x"])
+    fake.complete(MESSAGES, model="m", max_tokens=9, temperature=0.1, response_format={"type": "json_object"})
+    assert fake.calls[0]["response_format"] == {"type": "json_object"}
+    argv = ClaudeCliProvider(executable="claude").build_argv(model="")
+    assert "--model" not in argv, "an empty model is the CLI's default"

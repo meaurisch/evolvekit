@@ -4,6 +4,7 @@ cards checked on the preview, corrected at most twice, never sent a row."""
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -186,3 +187,73 @@ def test_a_model_that_gives_no_answer_says_so_in_the_chat_and_is_not_asked_again
     assert "Trucks must stay dearer than vans" not in asked, "an unanswered question is not put to the model again"
     assert asked[-1] == "Try weights"
     assert assistant.MAX_TOKENS >= 16000, "room to think and still answer"
+
+
+def test_a_key_changed_in_settings_is_used_at_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-the-shell")
+    home = Home(tmp_path / "home")
+    home.set_keys({"OPENROUTER_API_KEY": "first"})
+    assistant._provider(home)
+    assert os.environ["OPENROUTER_API_KEY"] == "first", "the app's file wins over a shell variable"
+    home.set_keys({"OPENROUTER_API_KEY": "second"})
+    assistant._provider(home)
+    assert os.environ["OPENROUTER_API_KEY"] == "second"
+    home.set_keys({"OPENROUTER_API_KEY": ""})
+    assert "OPENROUTER_API_KEY" not in os.environ
+    assert home.keys()["OPENROUTER_API_KEY"] is False
+
+
+def test_a_removed_key_stops_the_assistant_with_the_needs_a_key_answer(study, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    home, root = study
+    home.set_keys({"OPENROUTER_API_KEY": "first"})
+    assistant._provider(home)
+    home.set_keys({"OPENROUTER_API_KEY": ""})
+    answer = assistant.ask(home, root, "Anything")
+    assert answer["needs_key"] is True and answer["cards"] == []
+
+
+def test_a_cost_is_real_or_absent():
+    def config_for(model: str):
+        return assistant._config("openrouter", model, {})
+
+    reported = Completion(text="", input_tokens=1000, output_tokens=0, model="m", provider="p", usd=0.0123)
+    assert assistant._cost(reported, None) == 0.0123
+    priced = Completion(text="", input_tokens=1_000_000, output_tokens=0, model="anthropic/claude-sonnet-5", provider="openrouter")
+    assert assistant._cost(priced, config_for("anthropic/claude-sonnet-5")) == 2.0
+    unpriced = Completion(text="", input_tokens=1000, output_tokens=0, model="my-deployment", provider="azure")
+    assert assistant._cost(unpriced, config_for("my-deployment")) is None
+    assert assistant._cost(unpriced, assistant._config("azure", "my-deployment", {"my-deployment": [1.0, 3.0]})) == 0.001
+
+
+class _Unpriced:
+    """A provider that reports no cost, for a model nobody knows the price of."""
+
+    name = "azure"
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def complete(self, messages, *, model, max_tokens, temperature, response_format=None):
+        self.calls.append({"model": model, "response_format": response_format})
+        return Completion(text=json.dumps(GOOD), input_tokens=1000, output_tokens=200, model=model, provider=self.name)
+
+
+def test_an_unknown_cost_is_said_to_be_unknown_and_kept_out_of_the_total(study):
+    home, root = study
+    assistant.ask(home, root, "One", provider=_Priced())
+    answer = assistant.ask(home, root, "Two", provider=_Unpriced())
+    assert answer["usd"] is None and answer["total_usd"] == 0.0125
+    history = assistant.history(root)
+    assert history["total_usd"] == 0.0125 and history["unknown"] == 1
+    assert history["turns"][-1]["usd"] is None
+
+
+def test_the_assistant_asks_for_json_where_the_api_has_it(study):
+    home, root = study
+    provider = _Unpriced()
+    assistant.ask(home, root, "One", provider=provider)
+    assert provider.calls[0]["response_format"] == {"type": "json_object"}
+    fake = FakeProvider(responses=[json.dumps(GOOD)])
+    assistant.ask(home, root, "Two", provider=fake)
+    assert fake.calls[0]["response_format"] is None, "the fake provider is not asked for JSON mode"

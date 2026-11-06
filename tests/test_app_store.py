@@ -181,3 +181,23 @@ def test_a_settings_input_is_checked_against_the_harness(home):
     assert load_study(home.study_root(slug)).inputs == {"solver_settings": "inputs/My-settings.json"}
     home.remove_input(slug, "solver_settings")
     assert load_study(home.study_root(slug)).inputs == {}
+
+
+def test_prices_are_kept_per_model_and_checked(home):
+    assert home.settings()["prices"] == {}
+    home.save_settings({"prices": {"my-deployment": [1.5, 6]}})
+    assert home.settings()["prices"] == {"my-deployment": [1.5, 6.0]}
+    for bad in ({"m": [1]}, {"m": [-1, 2]}, {"m": "cheap"}, ["m"], {"": [1, 2]}):
+        with pytest.raises(AppError, match="prices"):
+            home.save_settings({"prices": bad})
+    home.save_settings({"prices": {}})
+    assert home.settings()["prices"] == {}
+
+
+def test_an_empty_model_means_the_cli_default_and_is_refused_elsewhere(home):
+    home.save_settings({"provider": "claude-cli", "models": {"assistant": "", "search": ""}})
+    assert home.settings()["models"] == {"assistant": "", "search": ""}
+    with pytest.raises(AppError, match="deployment name"):
+        home.save_settings({"provider": "azure", "models": {"assistant": ""}})
+    with pytest.raises(AppError, match="models.assistant"):
+        home.save_settings({"provider": "openrouter", "models": {"assistant": ""}})

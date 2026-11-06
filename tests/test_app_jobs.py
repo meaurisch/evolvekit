@@ -393,3 +393,21 @@ def test_the_status_reads_the_runs_file_once(app, monkeypatch):
     assert reads == [run_dir], "runs.jsonl is read once per status"
     assert answer["gated"] == 1 and "1 tried; the closest came within 10.0 % of it." in answer["best"]["line"]
     assert answer["phase"] == "stopped" and answer["can_resume"] is True
+
+
+def test_ai_search_help_refuses_a_cap_it_cannot_hold(app, monkeypatch):
+    for name in ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    slug = _ready_study(app)
+    status, _ = call(app, "PATCH", f"/api/studies/{slug}", {"budget": {"hours": 0.05, "ai": {"enabled": True, "max_usd": 2.0}}})
+    assert status == 200
+    status, _ = call(app, "PUT", "/api/settings", {"provider": "azure", "models": {"assistant": "dep", "search": "dep"},
+                                                   "keys": {"AZURE_OPENAI_API_KEY": "k", "AZURE_OPENAI_ENDPOINT": "https://x.openai.azure.com"}})
+    assert status == 200
+    status, body = call(app, "POST", f"/api/studies/{slug}/start")
+    assert status == 409, body
+    assert body["error"] == ("AI search help is on with a $2 cap, but the cost of dep is not known, so the cap cannot hold: "
+                             "add its price under Settings › Models, or turn AI help off")
+    assert not (app.home.study_root(slug) / "runs").exists(), "nothing was started"
+    call(app, "PUT", "/api/settings", {"prices": {"dep": [1.5, 6]}})
+    assert jobs.ai_models(app.home)["strong"]["price_in_per_mtok"] == 1.5

@@ -548,23 +548,59 @@ async function renderSettings() {
   const PROVIDERS = { openrouter: "OpenRouter (one key for many models)", azure: "Azure OpenAI", "claude-cli": "Claude Code on this computer (no key)" };
   const KEYS = { openrouter: ["OPENROUTER_API_KEY"], azure: ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"], "claude-cli": [] };
   const LABELS = { OPENROUTER_API_KEY: "OpenRouter key", AZURE_OPENAI_API_KEY: "Azure OpenAI key", AZURE_OPENAI_ENDPOINT: "Azure OpenAI endpoint (https://….openai.azure.com)" };
+  // The model field's default per provider, and what an empty field means there.
+  const MODEL_DEFAULT = { openrouter: "anthropic/claude-sonnet-5", azure: "", "claude-cli": "" };
+  const MODEL_HINT = { openrouter: "the model's name on OpenRouter", azure: "deployment name", "claude-cli": "the CLI's default" };
   const provider = h("select", { id: "provider" }, Object.entries(PROVIDERS).map(([v, t]) => h("option", { value: v, selected: v === settings.provider }, t)));
   const keysBox = h("div");
   const inputs = {};
+  const removed = new Set();
   function drawKeys() {
     keysBox.replaceChildren();
     for (const name of KEYS[provider.value]) {
       const set = settings.keys[name];
-      inputs[name] = h("input", { type: "password", id: `key-${name}`, autocomplete: "off", placeholder: set ? "set — type to replace it" : "paste it here" });
-      keysBox.append(h("label", { class: "field", for: `key-${name}` }, h("span", { class: "label" }, LABELS[name]), inputs[name],
-        h("span", { class: "hint" }, set ? status("good", "Set. It is kept on this computer and never shown again.") : "Not set yet.")));
+      const input = h("input", { type: "password", id: `key-${name}`, autocomplete: "off", placeholder: set ? "set — type to replace it" : "paste it here" });
+      input.addEventListener("input", () => { input.edited = true; });
+      inputs[name] = input;
+      const hint = h("span", { class: "hint" }, set ? status("good", "Set. It is kept on this computer and never shown again.") : "Not set yet.");
+      const remove = set ? h("button", { class: "btn small quiet", type: "button", onclick: () => {
+        removed.add(name); input.value = ""; input.disabled = true; remove.disabled = true;
+        hint.replaceChildren(status("warn", "Removed when you save."));
+      } }, "Remove") : null;
+      keysBox.append(h("label", { class: "field", for: `key-${name}` }, h("span", { class: "label" }, LABELS[name]), input, hint, remove));
     }
     if (!KEYS[provider.value].length) keysBox.append(note("info", h("p", { style: "margin:0" }, "Uses the Claude Code command on this computer, signed in as you. No key is needed here.")));
   }
-  provider.addEventListener("change", drawKeys);
+  const assistantModel = h("input", { type: "text", id: "model-assistant", value: settings.models.assistant, placeholder: MODEL_HINT[settings.provider] });
+  const searchModel = h("input", { type: "text", id: "model-search", value: settings.models.search, placeholder: MODEL_HINT[settings.provider] });
+  provider.addEventListener("change", () => {
+    drawKeys();
+    // Another provider, another model: the field starts from that provider's default.
+    for (const field of [assistantModel, searchModel]) { field.value = MODEL_DEFAULT[provider.value]; field.placeholder = MODEL_HINT[provider.value]; }
+  });
   drawKeys();
-  const assistantModel = h("input", { type: "text", id: "model-assistant", value: settings.models.assistant });
-  const searchModel = h("input", { type: "text", id: "model-search", value: settings.models.search });
+  // Prices, USD per million tokens, for models the app does not know: the assistant then shows a real cost, and AI search help's cap can hold.
+  const priceRows = h("tbody");
+  function priceRow(model = "", pair = ["", ""]) {
+    const row = h("tr", {}, h("td", {}, h("input", { type: "text", "aria-label": "Model", placeholder: "model or deployment name", value: model, style: "width:100%" })),
+      h("td", {}, numberBox({ "aria-label": "Price per million tokens read", value: pair[0], style: "width:80px" })),
+      h("td", {}, numberBox({ "aria-label": "Price per million tokens written", value: pair[1], style: "width:80px" })),
+      h("td", {}, h("button", { class: "btn small quiet", type: "button", "aria-label": "Remove this price", onclick: () => row.remove() }, "×")));
+    priceRows.append(row);
+  }
+  for (const [model, pair] of Object.entries(settings.prices || {})) priceRow(model, pair);
+  const addPrice = h("button", { class: "btn small", type: "button", onclick: () => priceRow() }, "Add a model's price");
+  function readPrices() {
+    const prices = {};
+    for (const row of priceRows.querySelectorAll("tr")) {
+      const [model, inVal, outVal] = [...row.querySelectorAll("input")];
+      if (!model.value.trim()) continue;
+      const pair = [readNumber(inVal), readNumber(outVal)];
+      if (pair.some((v) => !isFinite(v) || v < 0)) throw new Error(`Give ${model.value.trim()} both prices: dollars per million tokens read and written, 0 or more.`);
+      prices[model.value.trim()] = pair;
+    }
+    return prices;
+  }
   const save = h("button", { class: "btn primary", type: "submit" }, "Save");
   const checked = h("div", { "aria-live": "polite", style: "margin-top:10px" });
   const check = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
@@ -575,10 +611,15 @@ async function renderSettings() {
   }, e.currentTarget) }, "Test the assistant");
   const form = h("form", { class: "card narrow", onsubmit: async (e) => {
     e.preventDefault();
+    // A key typed is replaced; one emptied or removed is sent as "" and taken out; one left alone stays.
     const keys = {};
-    for (const [name, input] of Object.entries(inputs)) if (input.value.trim() && KEYS[provider.value].includes(name)) keys[name] = input.value.trim();
+    for (const [name, input] of Object.entries(inputs)) {
+      if (!KEYS[provider.value].includes(name)) continue;
+      if (removed.has(name) || (input.edited && !input.value.trim())) keys[name] = "";
+      else if (input.value.trim()) keys[name] = input.value.trim();
+    }
     await guarded(async () => {
-      await api("PUT", "/api/settings", { provider: provider.value, models: { assistant: assistantModel.value, search: searchModel.value }, keys });
+      await api("PUT", "/api/settings", { provider: provider.value, models: { assistant: assistantModel.value, search: searchModel.value }, keys, prices: readPrices() });
       toast("Saved."); renderSettings();
     }, save);
   } },
@@ -589,7 +630,11 @@ async function renderSettings() {
     h("details", {}, h("summary", {}, "Models"),
       h("label", { class: "field", for: "model-assistant" }, h("span", { class: "label" }, "For the assistant"), assistantModel),
       h("label", { class: "field", for: "model-search" }, h("span", { class: "label" }, "For AI search help"), searchModel),
-      h("span", { class: "hint" }, "The default, anthropic/claude-sonnet-5, costs about $2 per million words read and $10 per million written; an answer of the assistant costs a few cents.")),
+      h("span", { class: "hint" }, "The default, anthropic/claude-sonnet-5, costs about $2 per million words read and $10 per million written; an answer of the assistant costs a few cents. With Azure, name the deployment; with Claude Code, an empty field means the CLI's own default model."),
+      h("h3", { style: "margin:16px 0 4px" }, "Prices"),
+      h("p", { class: "hint", style: "margin:0 0 8px" }, "OpenRouter and Claude Code report what each call cost. For any other model, say its price in dollars per million tokens, read and written, or the assistant cannot show a cost and AI search help cannot hold its cap."),
+      h("table", { class: "small" }, h("thead", {}, h("tr", {}, h("th", {}, "Model"), h("th", {}, "$ / M read"), h("th", {}, "$ / M written"), h("th", {}))), priceRows),
+      h("div", { style: "margin-top:6px" }, addPrice)),
     h("div", { class: "row", style: "margin-top:16px" }, save, check), checked);
   view.replaceChildren(h("h1", {}, "Settings"), form,
     h("div", { class: "card narrow" }, h("h2", { style: "margin-top:0" }, "Your library"), h("p", { class: "mono" }, settings.home),
@@ -1689,13 +1734,14 @@ function assistantPanel() {
       if (answer.failed) { failed(answer.failed, message); return; }
       if (answer.say) bubble(answer.say);
       for (const card of answer.cards) proposal(card);
-      cost.textContent = `This answer cost $${fmt(answer.usd, 3)}; this study's assistant, $${fmt(answer.total_usd, 3)} so far.`;
+      cost.textContent = answer.usd == null ? `The cost of this answer is not known for this model; this study's assistant has cost $${fmt(answer.total_usd, 3)} so far where known.`
+        : `This answer cost $${fmt(answer.usd, 3)}; this study's assistant, $${fmt(answer.total_usd, 3)} so far.`;
     } catch (err) { thinking.remove(); failed(err.message, message); }
   }, ask));
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask.click(); });
   api("GET", `/api/studies/${encodeURIComponent(slug)}/assistant`).then((history) => {
     for (const turn of history.turns.slice(-6)) turn.role === "user" ? bubble(turn.text, true) : turn.failed ? failed(turn.failed) : (turn.say ? bubble(turn.say) : null);
-    if (history.total_usd) cost.textContent = `This study's assistant has cost $${fmt(history.total_usd, 3)} so far.`;
+    if (history.total_usd || history.unknown) cost.textContent = `This study's assistant has cost $${fmt(history.total_usd, 3)} so far` + (history.unknown ? ` (${plural(history.unknown, "answer")} with no known cost).` : ".");
     if (!history.turns.length) log.append(h("p", { class: "muted small", style: "margin:0" }, "For example: “a measure for late deliveries to VIP customers”, or “try cheaper vans and dearer trucks, trucks must stay dearer”."));
   }).catch(() => {});
   return panel;
