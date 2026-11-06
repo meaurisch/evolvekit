@@ -27,7 +27,9 @@ def app(tmp_path):
 
 
 def call(app: AppServer, method: str, path: str, body: bytes | dict | None = None, *, origin: str | None = "own",
-         host: str | None = None, headers: dict | None = None) -> tuple[int, object]:
+         host: str | None = None, headers: dict | None = None, token: str | None = "own") -> tuple[int, object]:
+    """One request, as the app's own page would make it: `token="own"` sends
+    the server's key in `X-Evolvekit-Token`; `None` sends no key."""
     connection = http.client.HTTPConnection("127.0.0.1", app.port, timeout=120)
     sent = dict(headers or {})
     sent["Host"] = host or f"127.0.0.1:{app.port}"
@@ -35,6 +37,10 @@ def call(app: AppServer, method: str, path: str, body: bytes | dict | None = Non
         sent["Origin"] = f"http://127.0.0.1:{app.port}"
     elif origin is not None:
         sent["Origin"] = origin
+    if token == "own":
+        sent["X-Evolvekit-Token"] = app.token
+    elif token is not None:
+        sent["X-Evolvekit-Token"] = token
     payload = json.dumps(body).encode() if isinstance(body, dict) else body
     if isinstance(body, dict):
         sent["Content-Type"] = "application/json"
@@ -79,15 +85,81 @@ def test_an_unknown_route_is_a_json_404(app):
     assert status == 404 and body == {"error": "not found"}
 
 
-def test_an_upload_over_the_limit_is_refused_before_it_is_read(app):
+def _raw(app: AppServer, request: str) -> str:
+    """Send `request` as written and read until the server closes the connection
+    (it does after a refusal): what came back, decoded."""
     with socket.create_connection(("127.0.0.1", app.port), timeout=10) as sock:
-        sock.sendall((f"PUT /api/studies/x/cases/a.json HTTP/1.1\r\nHost: 127.0.0.1:{app.port}\r\n"
-                      f"Origin: http://127.0.0.1:{app.port}\r\nContent-Length: {300 * 1024 * 1024}\r\n\r\n").encode())
+        sock.sendall(request.encode())
         received = b""
-        while chunk := sock.recv(4096):  # the server closes the connection after refusing
+        while chunk := sock.recv(4096):
             received += chunk
-        answer = received.decode()
+    return received.decode()
+
+
+def test_an_upload_over_the_limit_is_refused_before_it_is_read(app):
+    answer = _raw(app, f"PUT /api/studies/x/cases/a.json HTTP/1.1\r\nHost: 127.0.0.1:{app.port}\r\n"
+                       f"Origin: http://127.0.0.1:{app.port}\r\nX-Evolvekit-Token: {app.token}\r\n"
+                       f"Content-Length: {300 * 1024 * 1024}\r\n\r\n")
     assert answer.startswith("HTTP/1.1 413") and "200 MB" in answer
+
+
+# -- the per-launch key ------------------------------------------------------
+
+
+def test_the_app_opens_at_an_address_that_carries_its_key(app):
+    assert len(app.token) >= 32 and app.url_with_token == f"{app.url}?token={app.token}"
+    other = AppServer(app.home.root.parent / "other", port=0)
+    try:
+        assert other.token != app.token, "two launches never share a key"
+    finally:
+        other.stop()
+
+
+def test_a_request_without_the_token_is_refused_before_its_body_is_read(app):
+    # The right Origin, the right Host, no key, and a body that never comes: the refusal
+    # must arrive at once. Were the body read first, `recv` would wait for it and time out.
+    started = time.monotonic()
+    answer = _raw(app, f"POST /api/studies HTTP/1.1\r\nHost: 127.0.0.1:{app.port}\r\n"
+                       f"Origin: http://127.0.0.1:{app.port}\r\nContent-Type: application/json\r\n"
+                       f"Content-Length: {1024 * 1024}\r\n\r\n")
+    assert answer.startswith("HTTP/1.1 403") and "open the app from the address it printed" in answer
+    assert time.monotonic() - started < 5
+    assert call(app, "GET", "/api/home")[1]["studies"] == [], "nothing was created"
+
+
+@pytest.mark.parametrize("wrong", [None, "", "not-the-key"])
+def test_a_wrong_or_missing_token_is_refused_on_every_method(app, wrong):
+    status, body = call(app, "GET", "/api/home", token=wrong)
+    assert status == 403 and body == {"error": "refused: open the app from the address it printed, which carries its key"}
+    status, body = call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "No"}, token=wrong)
+    assert status == 403 and "carries its key" in body["error"]
+    assert call(app, "GET", "/api/home")[1]["studies"] == []
+
+
+def test_the_token_is_accepted_as_a_header_or_in_the_query(app):
+    assert call(app, "GET", "/api/home", token=app.token)[0] == 200
+    assert call(app, "GET", f"/api/home?token={app.token}", token=None)[0] == 200
+    assert call(app, "GET", "/api/home?token=wrong", token=None)[0] == 403
+    assert call(app, "GET", "/api/home", token=None, headers={"x-evolvekit-token": app.token})[0] == 200, "header names are case-insensitive"
+
+
+def test_the_page_itself_needs_no_token(app):
+    status, body = call(app, "GET", "/", token=None)
+    assert status == 200 and b"<html" in body
+    assert call(app, "GET", "/index.html", token=None)[0] == 200
+    assert call(app, "GET", "/robots.txt", token=None)[0] == 403, "the page is the only thing served without the key"
+
+
+def test_the_dashboard_needs_the_token(app):
+    _, doc = call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Dash"})
+    (app.home.study_root(doc["slug"]) / "runs" / "20260101-000000").mkdir(parents=True)
+    dashboard = f"/studies/{doc['slug']}/runs/20260101-000000/dashboard/"
+    status, body = call(app, "GET", dashboard, token=None)
+    assert status == 403 and "carries its key" in body["error"]
+    assert call(app, "GET", f"{dashboard}api/status", token=None)[0] == 403
+    status, body = call(app, "GET", f"{dashboard}?token={app.token}", token=None)
+    assert status == 200 and b"<html" in body, "the link the page builds carries the key in its query"
+    assert call(app, "GET", f"{dashboard}api/status?token={app.token}", token=None)[0] == 200
 
 
 def test_keys_are_accepted_and_never_sent_back(app, monkeypatch):
@@ -214,10 +286,15 @@ def test_a_harness_is_installed_from_a_path_on_this_computer(app, tmp_path):
 
 def test_the_detection_list_answers_for_a_study(app):
     call(app, "POST", "/api/studies", {"harness": "pyvrp", "template": "tune", "name": "Detect"})
-    status, found = call(app, "GET", "/api/detect?study=detect")
+    status, found = call(app, "POST", "/api/detect?study=detect")
     assert status == 200 and isinstance(found, list) and found
     assert all(set(item) == {"path", "ok", "message", "version", "python"} for item in found)
     assert found == sorted(found, key=lambda item: not item["ok"]), "matches first"
+
+
+def test_detection_looks_around_the_machine_so_it_is_not_a_get(app):
+    call(app, "POST", "/api/studies", {"harness": "pyvrp", "template": "tune", "name": "Detect"})
+    assert call(app, "GET", "/api/detect?study=detect")[0] == 404
 
 
 def test_a_settings_file_is_checked_on_upload(app):

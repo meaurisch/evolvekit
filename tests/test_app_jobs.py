@@ -48,7 +48,7 @@ def _until(app: AppServer, path: str, done, timeout: float = 180.0) -> dict:
 
 def _disposition(app: AppServer, path: str) -> str:
     connection = http.client.HTTPConnection("127.0.0.1", app.port, timeout=120)
-    connection.request("GET", path, headers={"Host": f"127.0.0.1:{app.port}"})
+    connection.request("GET", path, headers={"Host": f"127.0.0.1:{app.port}", "X-Evolvekit-Token": app.token})
     response = connection.getresponse()
     response.read()
     connection.close()

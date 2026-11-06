@@ -625,7 +625,7 @@ ROUTES = [
     route("POST", "/api/settings/check")(check_assistant),
     route("POST", "/api/harnesses")(install),
     route("GET", "/api/harnesses/{harness}")(harness),
-    route("GET", "/api/detect")(detect),
+    route("POST", "/api/detect")(detect),  # it looks around the machine (up to seconds): not a GET
     route("POST", "/api/pick-file")(pick_file),
     route("POST", "/api/studies")(create_study),
     route("POST", "/api/trash/{entry}/restore")(restore_study),

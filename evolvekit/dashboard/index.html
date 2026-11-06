@@ -401,6 +401,10 @@ footer code { background: var(--sunken); border: 1px solid var(--hair); border-r
    what `evolvekit status --json` prints. The exported, offline form of this
    page carries that document in EMBEDDED instead of fetching it. */
 const EMBEDDED = /*__EVOLVEKIT_EMBEDDED__*/null;
+// Behind the app, this page is opened with the app's key in its query (`?token=`), and
+// every request it makes must carry it on; the standalone dashboard has none and adds nothing.
+const TOKEN = new URLSearchParams(location.search).get("token");
+function withToken(url) { return TOKEN ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN) : url; }
 
 const ui = { doc: null, param: null, bestTab: "parameters", filter: "all", sort: { key: "generation", dir: 1 },
              chartTable: false, instTable: false, lastOk: 0, signatures: {}, drawer: null };
@@ -995,7 +999,7 @@ function openFromHash() {
 }
 function copyButton(text, label = "Copy") { const b = h("button", { class: "ghost", type: "button" }, label); b.onclick = async () => { try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch { b.textContent = "Select and copy"; } }; return b; }
 function quote(argv) { return (argv || []).map((a) => /[\s"']/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a).join(" "); }
-function logLink(path, label) { return !path || EMBEDDED ? null : h("a", { href: "api/log?path=" + encodeURIComponent(path), target: "_blank", rel: "noopener" }, label); }
+function logLink(path, label) { return !path || EMBEDDED ? null : h("a", { href: withToken("api/log?path=" + encodeURIComponent(path)), target: "_blank", rel: "noopener" }, label); }
 function evaluationBlock(e) {
   return h("div", null, h("dl", { class: "kv" }, h("dt", null, "run"), h("dd", null, `stage ${e.stage}` + (e.instance != null ? ` · ${e.instance}` : "") + ` · seed ${e.seed}` + (e.attempt ? ` · attempt ${e.attempt + 1}` : "") + (e.private ? " · hold-out" : "") + (e.cached ? " · from the cache" : ` · ${dur(e.duration_s)}`) + (isNum(e.host_busy) ? ` · machine ${Math.round(e.host_busy * 100)} % busy` : "") + " · ", h("span", { class: "chip " + (e.ok ? "ok" : "bad") }, e.ok ? "ok" : e.failure || "failed")),
       e.ok ? [h("dt", null, "KPIs"), h("dd", { class: "mono", style: { fontSize: "12px" } }, Object.entries(e.kpis || {}).map(([k, v]) => `${k}=${num(v)}`).join("  "))] : null,
@@ -1018,7 +1022,7 @@ function openFailure(index) {
 }
 async function loadCandidate(id) {
   if (EMBEDDED) return EMBEDDED.candidates[id] || null;
-  try { const r = await fetch("api/candidate/" + encodeURIComponent(id)); return r.ok ? await r.json() : null; } catch { return null; }
+  try { const r = await fetch(withToken("api/candidate/" + encodeURIComponent(id))); return r.ok ? await r.json() : null; } catch { return null; }
 }
 async function openCandidate(id) {
   hideTip(); setHash("candidate=" + encodeURIComponent(id));
@@ -1058,12 +1062,12 @@ function render() {
   replace("archive", [doc.archive], () => renderArchive(doc));
   replace("log", [doc.log_tail], () => { queueMicrotask(() => { const p = $("log-pre"); if (p) p.scrollTop = p.scrollHeight; }); return renderLog(doc); });
   $("footer").replaceChildren("The same document, for a script or an agent: ", h("code", null, "python -m evolvekit status --run-dir … --json"),
-    EMBEDDED ? "" : [" or ", h("a", { href: "api/status" }, h("code", null, "GET /api/status"))], (doc.errors || []).length ? h("div", { class: "offline" }, "view errors: " + doc.errors.join(" · ")) : "");
+    EMBEDDED ? "" : [" or ", h("a", { href: withToken("api/status") }, h("code", null, "GET /api/status"))], (doc.errors || []).length ? h("div", { class: "offline" }, "view errors: " + doc.errors.join(" · ")) : "");
 }
 async function poll() {
   if (document.hidden && ui.doc) return schedule();
   try {
-    const r = await fetch("api/status", { cache: "no-store" });
+    const r = await fetch(withToken("api/status"), { cache: "no-store" });
     if (r.ok) { ui.doc = await r.json(); ui.lastOk = Date.now(); render(); }
   } catch { /* the clock line says so */ }
   schedule();

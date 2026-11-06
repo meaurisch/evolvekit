@@ -12,6 +12,13 @@ the app writes:
 * every request that changes something (POST, PUT, PATCH, DELETE) must carry
   a same-origin `Origin` -- which browsers always send on those methods --
   so no other site can make a visitor's browser start a run;
+* everything but the page itself needs the key of this launch
+  (`AppServer.token`): the address the app prints and opens carries it, the
+  page keeps it and sends it as `X-Evolvekit-Token` (links that open in a
+  new tab carry it as `?token=`), so a process on this machine that merely
+  knows the port -- or a page served from another local port, which the
+  `Origin` rule lets read -- can drive nothing. A refusal is sent before the
+  body is read;
 * bodies are limited to 200 MB, names from URLs are cleaned (`store.safe_name`)
   and every path is judged as text before the filesystem sees it.
 """
@@ -21,6 +28,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import secrets
 import sys
 import threading
 import traceback
@@ -41,6 +49,14 @@ TICK_S = 5.0
 """How often the server looks for a queued run to launch (`jobs.launch_queued`)."""
 PAGE = Path(__file__).with_name("static") / "app.html"
 CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
+TOKEN_HEADER = "X-Evolvekit-Token"
+TOKEN_QUERY = "token"
+OPEN_PATHS = {"/", "/index.html"}
+"""What is served without the key: the page, which shows a sentence when it has none."""
+NO_TOKEN = "refused: open the app from the address it printed, which carries its key"
+SKIPPED = 64 * 1024
+"""The most of a refused request's body the server swallows to close cleanly;
+a larger body is left unread and the connection is closed instead."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DASHBOARD = re.compile(r"^/studies/(?P<slug>[^/]+)/runs/(?P<run>[^/]+)/dashboard/(?P<rest>.*)$")
 STATUS_FILES = ("events.jsonl", "runs.jsonl", "heartbeat.json")
@@ -146,7 +162,9 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
             port = self.server.server_address[1]
             return {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]")}
 
-        def _refusal(self) -> str | None:
+        def _refusal(self, path: str, query: dict[str, str]) -> str | None:
+            """Why this request is not answered, judged from its headers and
+            URL alone -- before any of its body is read."""
             if self.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
                 return "refused: a request from another site"
             if _is_loopback(self.server.server_address[0]) and self.headers.get("Host", "").lower() not in self._allowed_hosts():
@@ -155,7 +173,13 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
                 origin = self.headers.get("Origin", "").lower()
                 if origin not in {f"http://{host}" for host in self._allowed_hosts()}:
                     return "refused: a change must come from the app's own page"
+            if path not in OPEN_PATHS and not self._has_token(query):
+                return NO_TOKEN
             return None
+
+        def _has_token(self, query: dict[str, str]) -> bool:
+            given = self.headers.get(TOKEN_HEADER) or query.get(TOKEN_QUERY) or ""
+            return secrets.compare_digest(given.encode("utf-8"), app.token.encode("utf-8"))
 
         # -- dispatch ---------------------------------------------------------
 
@@ -174,19 +198,34 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
                 return None
             return self.rfile.read(size) if size > 0 else b""
 
+        def _refuse(self, refusal: str) -> None:
+            """The 403, without reading the body: a refused request can be as
+            large as it likes and costs nothing. A small body (`SKIPPED`) is
+            swallowed first, because closing a socket with unread bytes on it
+            makes Windows reset the connection and the client lose the answer."""
+            try:
+                size = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                size = 0
+            if 0 < size <= SKIPPED:
+                self.rfile.read(size)
+            else:
+                self.close_connection = True
+            self._error(refusal, 403)
+
         def _dispatch(self) -> None:
             url = urlparse(self.path)
-            refusal = self._refusal()
+            path = url.path
+            query = {k: v[-1] for k, v in parse_qs(url.query, keep_blank_values=True).items()}
+            refusal = self._refusal(path, query)
+            if refusal:
+                self._refuse(refusal)
+                return
             body = self._body() if self.command in CHANGING else b""
             if body is None:
                 return
-            if refusal:
-                self._error(refusal, 403)
-                return
-            path = url.path
-            query = {k: v[-1] for k, v in parse_qs(url.query, keep_blank_values=True).items()}
             try:
-                if self.command in ("GET", "HEAD") and path in ("/", "/index.html"):
+                if self.command in ("GET", "HEAD") and path in OPEN_PATHS:
                     self._send(PAGE.read_bytes(), "text/html; charset=utf-8")
                     return
                 dashboard = _DASHBOARD.match(path)
@@ -268,6 +307,9 @@ class AppServer:
         """Background work of this process (previews, test runs), by key."""
         self.assistant_provider: Any = None
         """A provider object to use instead of the one Settings name: for tests."""
+        self.token = secrets.token_urlsafe(24)
+        """The key of this launch: in the address the app opens, and on every
+        request the page makes. A new one each time the app starts."""
         self.lock = threading.Lock()
         self._status_cache: dict[str, tuple[RunStamp, Any]] = {}
         self._server = self._bind(host, port)
@@ -292,6 +334,11 @@ class AppServer:
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/"
+
+    @property
+    def url_with_token(self) -> str:
+        """The address to print and open: the page takes the key from it."""
+        return f"{self.url}?{TOKEN_QUERY}={self.token}"
 
     def status_document(self, run_dir: Path) -> Any:
         """`build_status`, rebuilt only when a file of the run changed: a page
