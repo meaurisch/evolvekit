@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -394,5 +395,6 @@ def test_json_mode_is_accepted_and_ignored_where_the_backend_has_none():
     fake = FakeProvider(responses=["x"])
     fake.complete(MESSAGES, model="m", max_tokens=9, temperature=0.1, response_format={"type": "json_object"})
     assert fake.calls[0]["response_format"] == {"type": "json_object"}
-    argv = ClaudeCliProvider(executable="claude").build_argv(model="")
+    # Any executable that exists will do: the argv is built, never run. CI has no `claude`.
+    argv = ClaudeCliProvider(runner=lambda *a, **k: None, executable=sys.executable).build_argv(model="")
     assert "--model" not in argv, "an empty model is the CLI's default"
