@@ -197,3 +197,34 @@ better, keep today's rates — the app's own advice.
   cases; Copy falls back to the older clipboard way and then selects the text;
   "preview case" became "the smallest case"; "Deliveries per hour" says what
   it counts in plain words.
+
+## The redesign (stage 4), round 1 — 7/10, no blocker (2026-11-06)
+
+The same persona, note and protocol on the rebuilt page (Home, Start a study,
+Set up option A, the Study page), with ten delivery requests named like daily
+files (`requests-2026-03-02.json` …), 20 s per request and 30 minutes.
+
+| Getting started | Knowing what to do next | Setting up | Confidence while it ran | Understanding the result | Handing it over |
+|---|---|---|---|---|---|
+| 7 | 8 | 7 | 7 | 6 | 6 |
+
+**The run.** 6 cases learned from, 4 held back; 119 combinations in 30
+minutes. Keep today's settings: 0.47 % better on the held-back cases, chance
+under 9 in 10, at worst 2.57 % worse. The reviewer's answer: keep PyVRP's
+defaults; the new file is not proven.
+
+**Frictions, and what changed.**
+
+- **(major) Three "better" numbers.** The chosen combination's chip says *on
+  study cases*, the verdict *on held-back cases*.
+- **(major) Keep, but only the new file offered.** A keep now opens *Hand it
+  over* with *Nothing to change: keep today's settings*; the new settings are
+  shown as what the search found, at your own risk.
+- **(major) The folder box.** It takes focus once its drawer is open, says
+  what went wrong inside the drawer, and closes on success.
+- **Progress words.** The line counts the cases of the look that is running
+  (a quick look runs on 2 of 6), not all study cases.
+- **Small ones.** A test run's clock no longer reads a date as seconds; the
+  legend never repeats a count; a setting's tip gives its own name
+  (`penalty_decrease`); *held back* is explained where it is first used;
+  Pepper's news clears itself; a measure without a label reads as words.
