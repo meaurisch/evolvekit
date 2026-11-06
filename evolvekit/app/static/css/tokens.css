@@ -1,0 +1,173 @@
+/* evolvekit app: design tokens (Dusk, approved 2026-11-06; hand-over pack round 12).
+   One CSS variable per token. Light by default; dark follows the computer's
+   setting unless the page forces a theme with ?theme=light|dark, which sets
+   data-theme on <html>. Every text pair passes WCAG 2.2 AA in both themes. */
+
+@font-face {
+  font-family: "Young Serif";
+  src: url("../fonts/YoungSerif-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Overpass";
+  src: url("../fonts/Overpass-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Overpass Mono";
+  src: url("../fonts/OverpassMono-Variable.woff2") format("woff2");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+  /* colour: light */
+  --surface-page: #FDFBFC;
+  --surface-panel: #F5EEF2;
+  --surface-raised: #FFFFFF;
+  --surface-wash: #FBE4EE;
+  --ink-1: #1A1218;
+  --ink-2: #5E525A;
+  --ink-3: #73666E;
+  --line-rule: #E2D7DD;
+  --line-edge: #8C7F87;
+  --accent: #FF8A3D;
+  --accent-ink: #A84400;
+  --accent-line: #C65300;
+  --on-accent: #1A1218;
+  --accent-band: #FFE8D9;
+  --good: #1D6B40;
+  --good-tint: #E1F1E6;
+  --warning: #7A5400;
+  --warning-tint: #FDF0CF;
+  --critical: #B02A2A;
+  --critical-tint: #FBE6DF;
+  --focus: #A84400;
+  --pepper-rim: transparent;
+  --elev-1: 0 0 0 1px #8C7F87, 0 2px 8px rgba(26, 18, 24, .10);
+  --elev-2: 0 0 0 1.5px #1A1218, 0 8px 24px rgba(26, 18, 24, .16);
+
+  /* type */
+  --serif: "Young Serif", Georgia, serif;
+  --sans: "Overpass", system-ui, sans-serif;
+  --mono: "Overpass Mono", ui-monospace, monospace;
+  --type-display: 400 34px/40px var(--serif);
+  --type-title: 400 24px/30px var(--serif);
+  --type-heading: 400 19px/24px var(--serif);
+  --type-body: 400 16px/24px var(--sans);
+  --type-small: 400 14px/20px var(--sans);
+  --type-label: 700 12px/16px var(--sans);
+  --type-data: 500 12px/16px var(--mono);
+
+  /* space: a 4 px grid */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* radius */
+  --radius-0: 0;
+  --radius-1: 4px;
+  --radius-2: 12px;
+  --radius-full: 999px;
+
+  /* motion */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 400ms;
+  --dur-ambient: 1600ms;
+  --ease-standard: cubic-bezier(.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0, 0, .2, 1);
+  --ease-exit: cubic-bezier(.4, 0, 1, 1);
+}
+
+/* colour: dark */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-page: #1A1219;
+  --surface-panel: #261B24;
+  --surface-raised: #2E212B;
+  --surface-wash: #45263A;
+  --ink-1: #F7EEF3;
+  --ink-2: #BFAEB9;
+  --ink-3: #A8969F;
+  --line-rule: #3F2F3B;
+  --line-edge: #86737F;
+  --accent: #FF8A3D;
+  --accent-ink: #FF8A3D;
+  --accent-line: #FF8A3D;
+  --on-accent: #1A1219;
+  --accent-band: #4A2B22;
+  --good: #7CD39C;
+  --good-tint: #1D3326;
+  --warning: #F1C55A;
+  --warning-tint: #3A2D14;
+  --critical: #FF8F80;
+  --critical-tint: #4A1F1C;
+  --focus: #FF8A3D;
+  --pepper-rim: #EADBE3;
+  --elev-1: 0 0 0 1px #4A3846, 0 2px 8px rgba(0, 0, 0, .40);
+  --elev-2: 0 0 0 1.5px #F7EEF3, 0 8px 24px rgba(0, 0, 0, .50);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-page: #1A1219;
+    --surface-panel: #261B24;
+    --surface-raised: #2E212B;
+    --surface-wash: #45263A;
+    --ink-1: #F7EEF3;
+    --ink-2: #BFAEB9;
+    --ink-3: #A8969F;
+    --line-rule: #3F2F3B;
+    --line-edge: #86737F;
+    --accent: #FF8A3D;
+    --accent-ink: #FF8A3D;
+    --accent-line: #FF8A3D;
+    --on-accent: #1A1219;
+    --accent-band: #4A2B22;
+    --good: #7CD39C;
+    --good-tint: #1D3326;
+    --warning: #F1C55A;
+    --warning-tint: #3A2D14;
+    --critical: #FF8F80;
+    --critical-tint: #4A1F1C;
+    --focus: #FF8A3D;
+    --pepper-rim: #EADBE3;
+    --elev-1: 0 0 0 1px #4A3846, 0 2px 8px rgba(0, 0, 0, .40);
+    --elev-2: 0 0 0 1.5px #F7EEF3, 0 8px 24px rgba(0, 0, 0, .50);
+  }
+}
+
+/* phone: below 760 px the three serif sizes step down */
+@media (max-width: 759.98px) {
+  :root {
+    --type-display: 400 28px/33px var(--serif);
+    --type-title: 400 21px/26px var(--serif);
+    --type-heading: 400 18px/23px var(--serif);
+  }
+}
+
+/* reduced motion: no movement, short fades only, nothing ambient */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 120ms;
+    --dur-ambient: 0ms;
+    --ease-standard: linear;
+    --ease-enter: linear;
+    --ease-exit: linear;
+  }
+}

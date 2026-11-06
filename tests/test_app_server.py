@@ -147,7 +147,35 @@ def test_the_page_itself_needs_no_token(app):
     status, body = call(app, "GET", "/", token=None)
     assert status == 200 and b"<html" in body
     assert call(app, "GET", "/index.html", token=None)[0] == 200
-    assert call(app, "GET", "/robots.txt", token=None)[0] == 403, "the page is the only thing served without the key"
+    assert call(app, "GET", "/robots.txt", token=None)[0] == 403, "the page and its own files are all that is served without the key"
+
+
+def test_the_pages_own_files_are_served_without_the_key(app):
+    status, body = call(app, "GET", "/static/css/tokens.css", token=None)
+    assert status == 200 and b"--surface-page" in body
+    connection = http.client.HTTPConnection("127.0.0.1", app.port, timeout=30)
+    connection.request("GET", "/static/fonts/Overpass-Variable.woff2", headers={"Host": f"127.0.0.1:{app.port}"})
+    response = connection.getresponse()
+    data = response.read()
+    connection.close()
+    assert response.status == 200 and response.getheader("Content-Type") == "font/woff2" and data[:4] == b"wOF2"
+    assert response.getheader("X-Content-Type-Options") == "nosniff"
+
+
+@pytest.mark.parametrize("path", [
+    "/static/../server.py", "/static/%2e%2e/server.py", "/static/css/..%2f..%2fserver.py", "/static/app.html",
+    "/static/css/missing.css", "/static/css", "/static/", "/static/C:/Windows/win.ini", "/static//etc/passwd",
+    "/static/.hidden.css", "/static/css/tokens.css.bak",
+])
+def test_nothing_outside_the_pages_own_files_is_served(app, path):
+    status, _ = call(app, "GET", path, token=None)
+    assert status == 404
+
+
+def test_the_pages_own_files_cannot_be_changed(app):
+    assert call(app, "POST", "/static/css/tokens.css", b"x", token=None)[0] == 404
+    assert call(app, "DELETE", "/static/css/tokens.css", token=None)[0] == 404
+    assert (Path(__file__).resolve().parents[1] / "evolvekit/app/static/css/tokens.css").is_file()
 
 
 def test_the_dashboard_needs_the_token(app):

@@ -53,6 +53,17 @@ TOKEN_HEADER = "X-Evolvekit-Token"
 TOKEN_QUERY = "token"
 OPEN_PATHS = {"/", "/index.html"}
 """What is served without the key: the page, which shows a sentence when it has none."""
+STATIC = PAGE.parent
+STATIC_PREFIX = "/static/"
+STATIC_TYPES = {
+    ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2",
+    ".svg": "image/svg+xml", ".png": "image/png", ".txt": "text/plain; charset=utf-8",
+}
+"""The page's own files (styles, scripts, fonts, their licences): public, the
+same for everyone, so served without the key like the page. Only these
+extensions, only files under `static/`, and nothing named in a URL is trusted
+until it is judged as text (`_static_file`)."""
+_STATIC_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 NO_TOKEN = "refused: open the app from the address it printed, which carries its key"
 SKIPPED = 64 * 1024
 """The most of a refused request's body the server swallows to close cleanly;
@@ -115,6 +126,25 @@ class FileResponse:
     status: int = 200
 
 
+def _static_file(path: str) -> Path | None:
+    """The file under `static/` that `path` names, or `None`: every part a
+    plain name (no `..`, no drive, no encoded slash), a known extension, and
+    the file really inside `static/` once resolved."""
+    parts = path[len(STATIC_PREFIX):].split("/")
+    if not parts or len(parts) > 3 or not all(_STATIC_NAME.match(part) for part in parts):
+        return None
+    if Path(parts[-1]).suffix.lower() not in STATIC_TYPES or any(".." in part for part in parts):
+        return None
+    target = STATIC.joinpath(*parts)
+    try:
+        resolved = target.resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved.is_file() or STATIC.resolve() not in resolved.parents:
+        return None
+    return resolved
+
+
 def _is_loopback(host: str) -> bool:
     try:
         return ipaddress.ip_address(host).is_loopback
@@ -173,7 +203,7 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
                 origin = self.headers.get("Origin", "").lower()
                 if origin not in {f"http://{host}" for host in self._allowed_hosts()}:
                     return "refused: a change must come from the app's own page"
-            if path not in OPEN_PATHS and not self._has_token(query):
+            if path not in OPEN_PATHS and not path.startswith(STATIC_PREFIX) and not self._has_token(query):
                 return NO_TOKEN
             return None
 
@@ -227,6 +257,13 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
             try:
                 if self.command in ("GET", "HEAD") and path in OPEN_PATHS:
                     self._send(PAGE.read_bytes(), "text/html; charset=utf-8")
+                    return
+                if path.startswith(STATIC_PREFIX):
+                    found = _static_file(path) if self.command in ("GET", "HEAD") else None
+                    if found is None:
+                        self._error("not found", 404)
+                    else:
+                        self._send(found.read_bytes(), STATIC_TYPES[found.suffix.lower()])
                     return
                 dashboard = _DASHBOARD.match(path)
                 if dashboard and self.command in ("GET", "HEAD"):
