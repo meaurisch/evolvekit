@@ -419,8 +419,14 @@ def choices(req: Request) -> dict[str, Any]:
 
 
 def ask_assistant(req: Request) -> dict[str, Any]:
+    """A question from `screen` (`step-1`…`step-7`, `running`, `results`),
+    with `run` in view where the screen shows one."""
     root, _, _ = req.home.load(req.params["slug"])
-    return assistant.ask(req.home, root, str(req.json().get("message") or ""), provider=req.server.assistant_provider)
+    body = req.json()
+    run = body.get("run")
+    return assistant.ask(req.home, root, str(body.get("message") or ""), provider=req.server.assistant_provider,
+                         screen=str(body.get("screen") or ""), run=str(run) if run else None,
+                         document_of=req.server.status_document)
 
 
 def add_card(req: Request) -> dict[str, Any]:

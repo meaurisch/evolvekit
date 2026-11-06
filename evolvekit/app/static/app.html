@@ -216,6 +216,17 @@ h3 { font-size: 15px; margin: 18px 0 6px; } .card > h3:first-child { margin-top:
 .rail .dot.todo { background: var(--warning-wash); border-color: transparent; color: var(--warning); }
 .step-foot { display: flex; gap: 10px; justify-content: space-between; align-items: center; margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--hair); flex-wrap: wrap; }
 .side { position: sticky; top: 76px; max-height: calc(100vh - 96px); display: flex; flex-direction: column; }
+/* The assistant is a drawer: a <details> whose summary is its title. Open, it lays out as before (chat, then the box). */
+details.side > summary { list-style: none; display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 16px; color: var(--ink); margin: 0; }
+details.side > summary::-webkit-details-marker { display: none; }
+details.side > summary::before { content: "▸"; color: var(--ink-3); font-size: 13px; }
+details.side[open] > summary::before { content: "▾"; }
+details.side[open] > summary { margin-bottom: 8px; }
+details.side:not([open]) { position: static; }
+/* Under the content (every screen but the ones that tune and measure): a full-width block, never a third column. */
+.wizard > .side.below { grid-column: 2; position: static; max-height: none; }
+.side.below .chat { max-height: 50vh; }
+.narrow > .side { position: static; max-height: none; margin-top: 24px; }
 .setting { padding: 14px 0; border-bottom: 1px solid var(--hair); }
 .setting:last-child { border-bottom: 0; }
 .setting .head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
@@ -264,7 +275,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
   .btn { white-space: normal; text-align: center; }
   .top-in { padding: 8px 14px; }
   .wizard, .wizard.with-side { grid-template-columns: 1fr; gap: 14px; }
-  .wizard.with-side .side { grid-column: 1; }
+  .wizard.with-side .side, .wizard > .side.below { grid-column: 1; }
   .rail { position: static; }
   .rail ol { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
   .rail li a { white-space: nowrap; padding: 6px 8px; }
@@ -776,8 +787,11 @@ async function renderStep(slug, step) {
   crumbs({ href: "#/", text: "Your studies", small: true }, { text: doc.study.name });
   current.step = step;
   const content = h("div", { class: "step" });
+  // The assistant is beside the content where the study is tuned and measured (open by default there), under it elsewhere.
   const withSide = step === 4 || step === 5 || (step === 1 && !doc.study.template);
-  const layout = h("div", { class: "wizard" + (withSide ? " with-side" : "") }, railFor(step), content, withSide ? assistantPanel() : null);
+  const drawer = assistantPanel({ screen: `step-${step}`, run: null, open: withSide });
+  if (!withSide) drawer.classList.add("below");
+  const layout = h("div", { class: "wizard" + (withSide ? " with-side" : "") }, railFor(step), content, drawer);
   view.replaceChildren(layout);
   const draw = [null, step1, step2, step3, step4, step5, step6, step7][step];
   await draw(content, step);
@@ -1678,15 +1692,27 @@ async function step7(box) {
 }
 
 // ============================================================== assistant
-function assistantPanel() {
+const ASSISTANT_OPEN = "evolvekit.assistant.open";  // sessionStorage: the drawer stays as it was last left in this tab
+function assistantPanel(where = {}) {
+  // `where` says which screen the question comes from (`step-4`, `running`, `results`) and which run is in view;
+  // the caller may set `where.run` later (the Running screen learns its run from the first status).
   const slug = current.slug;
-  const panel = h("aside", { class: "side card", "aria-label": "Assistant" });
+  let remembered = null;
+  try { remembered = sessionStorage.getItem(ASSISTANT_OPEN); } catch (err) { /* storage refused: the defaults apply */ }
+  const open = remembered === null ? Boolean(where.open) : remembered === "1";
+  const panel = h("details", { class: "side card", "aria-label": "Assistant", open: open || null });
+  let known = open;  // a toggle also fires when the drawer is inserted open: only a change of state is the user's, and kept
+  panel.addEventListener("toggle", () => {
+    if (panel.open === known) return;
+    known = panel.open;
+    try { sessionStorage.setItem(ASSISTANT_OPEN, known ? "1" : "0"); } catch (err) { /* same */ }
+  });
   const log = h("div", { class: "chat", "aria-live": "polite" });
-  const input = h("textarea", { id: "ask", placeholder: "Say what you want in your own words, e.g. “count late deliveries to frozen customers”", style: "min-height:70px" });
+  const input = h("textarea", { id: "ask", placeholder: "Say what you want, or ask about this screen, in your own words — e.g. “count late deliveries to frozen customers” or “why is this not proven?”", style: "min-height:70px" });
   const ask = h("button", { class: "btn primary", type: "button" }, "Ask");
   const cost = h("p", { class: "faint", style: "margin:6px 0 0" });
-  panel.append(h("h3", { style: "margin-top:0" }, "Assistant"),
-    h("p", { class: "faint", style: "margin-top:0" }, "It sees the tables' structure and summaries of the smallest case — never rows, names, addresses or coordinates."),
+  panel.append(h("summary", {}, "Assistant"),
+    h("p", { class: "faint", style: "margin-top:0" }, "It sees the tables' structure, summaries of the smallest case and this screen's words and numbers — never rows, names, addresses or coordinates."),
     log, h("label", { for: "ask", class: "sr" }, "Ask the assistant"), input, h("div", { class: "row", style: "margin-top:8px" }, ask), cost);
 
   function bubble(text, me) { log.append(h("div", { class: "bubble" + (me ? " me" : "") }, text)); log.scrollTop = log.scrollHeight; }
@@ -1728,7 +1754,7 @@ function assistantPanel() {
     const thinking = h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "Thinking… this takes up to a minute (every proposal is tried on the smallest case first)");
     log.append(thinking);
     try {
-      const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/assistant`, { message });
+      const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/assistant`, { message, screen: where.screen || "", run: where.run || null });
       thinking.remove();
       if (answer.needs_key) { log.append(note("info", h("p", { style: "margin:0" }, answer.say, " ", h("a", { href: "#/settings" }, "Settings")))); return; }
       if (answer.failed) { failed(answer.failed, message); return; }
@@ -1770,13 +1796,15 @@ function chart(series) {
 async function renderRunning(slug) {
   await loadStudy(slug, true);
   crumbs({ href: "#/", text: "Your studies", small: true }, { href: `#/study/${slug}/7`, text: current.doc.study.name, small: true }, { text: "Running" });
-  const box = h("div", { class: "narrow" });
-  view.replaceChildren(box);
+  const box = h("div");
+  const where = { screen: "running", run: null, open: false };  // the run is known once the first status is in
+  view.replaceChildren(h("div", { class: "narrow" }, box, assistantPanel(where)));
   let stopping = false;
   async function draw() {
     let s;
     try { s = await api("GET", studyPath("/status")); }
     catch (err) { fill(box, note("bad", h("p", {}, err.message))); return; }
+    where.run = s.run;
     const running = ["starting", "search", "check"].includes(s.phase);
     const queued = s.phase === "queued";  // waiting for another study's run to finish; the server starts it then
     const $here = $("#crumbs .here");
@@ -1955,7 +1983,8 @@ async function renderResults(slug, run) {
       h("p", { class: "muted", style: "margin-top:0" }, "The summary says how the study was set up, what it found, how sure that is and what changed — ready to paste into a message. The report says the same on one page, with every number."),
       h("div", { class: "row" }, summary, report, settingsButton), shown,
       h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads),
-    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again)));
+    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again),
+    assistantPanel({ screen: "results", run: r.run, open: false })));
 }
 
 route();

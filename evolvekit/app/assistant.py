@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from evolvekit.app import AppError
-from evolvekit.app import work
+from evolvekit.app import jobs, work
 from evolvekit.app.prices import price_of
 from evolvekit.config import ModelConfig
 from evolvekit.expressions import Expression, ExpressionError
@@ -89,6 +89,9 @@ Rules:
 - A goal has at most four levels in order of importance; every level but the last needs
   "equal_within" ("1 %" relative to the starting point, or a number in the KPI's unit).
 - When the request cannot be expressed with these tables, say so and return no cards.
+- When the consultant asks a question rather than for a change, answer it in "say" in two to five
+  plain sentences and return no cards. Explain a verdict with its numbers: the chance, the worst case,
+  which cases went which way.
 """
 
 
@@ -175,8 +178,13 @@ def history(root: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def context(root: Path, study: Study, harness: Harness) -> str:
-    """The schema, the catalogues, the study and the preview's summaries."""
+def context(root: Path, study: Study, harness: Harness, *, screen: str = "", run: str | None = None, home: Any = None,
+            document_of: Any = None) -> str:
+    """The schema, the catalogues, the study, the preview's summaries, and
+    where the consultant is: the screen, and the run's words and numbers
+    when a run is in view. `document_of` is the server's cached status
+    document; without one the status is built afresh."""
+    del home  # the keys and settings are the provider's business, not the model's
     tables = {
         name: {"source": t.source, "describe": t.describe,
                "columns": {c: {"type": col.type, "unit": col.unit, "describe": col.describe,
@@ -187,7 +195,8 @@ def context(root: Path, study: Study, harness: Harness) -> str:
     catalogues = {
         "settings": {s.name: {"type": s.parameter.type, "low": s.parameter.low, "high": s.parameter.high,
                               "default": s.parameter.default, "choices": list(s.parameter.choices),
-                              "label": s.label, "explain": s.explain or s.help}
+                              "label": s.label, "explain": s.explain or s.help,
+                              **({"log": True} if s.parameter.log else {})}
                      for s in harness.settings.values()},
         "levers": {n: {"table": lv.table, "columns": dict(lv.columns), "modes": list(lv.modes), "code": lv.code,
                        "explain": lv.explain or lv.help} for n, lv in harness.levers.items()},
@@ -206,7 +215,116 @@ def context(root: Path, study: Study, harness: Harness) -> str:
         f"## The study so far\n{json.dumps(so_far, indent=1)}\n\n"
         f"## The preview case, summarised (no rows)\n"
         + (json.dumps(summary, indent=1, default=str) if summary else "(no preview yet)")
+        + "\n\n## Where the consultant is\n" + _where(root, study, harness, screen, run, document_of)
     )
+
+
+def _status_document(run_dir: Path) -> Any:
+    from evolvekit.status import build_status
+
+    return build_status(run_dir)
+
+
+def _where(root: Path, study: Study, harness: Harness, screen: str, run: str | None, document_of: Any) -> str:
+    """The screen, and what it shows: a run's status and results in the words
+    and numbers of the Running and Results pages (per case: the case's file
+    name and its numbers, never a row), the plan's words, the test run's
+    failures and the preview's error when there is one."""
+    lines = [f"Screen: {screen or 'unknown'}" + (f", run {run}" if run else "")]
+    plan_line = ""
+    if run:
+        document_of = document_of or _status_document
+        try:
+            status, results = jobs.status(root, run, document_of), jobs.results(root, run, document_of)
+        except AppError as exc:
+            lines.append(f"The run could not be read: {exc}")
+        else:
+            plan = jobs._plan(root / "runs" / run, jobs.phase(root / "runs" / run))  # noqa: SLF001 - the run's own plan
+            plan_line = str(plan.get("summary") or "") or _plan_numbers(plan)
+            lines.append("The run:\n" + json.dumps(_run_words(status, results), indent=1, default=str))
+    if not plan_line:
+        plan_line = _plan_line(root, study, harness)
+    if plan_line:
+        lines.append(f"The plan: {plan_line}")
+    test = work.test_run_state(root)
+    if test.get("state") == "failed":
+        failures = (test.get("result") or {}).get("failures") or [test.get("error") or "it failed"]
+        lines.append("The test run failed: " + "; ".join(str(f) for f in failures))
+    preview = work.preview_state(root)
+    error = preview.get("error") if preview.get("state") in ("failed", "interrupted") else (preview.get("result") or {}).get("error")
+    if error:
+        lines.append(f"The preview's error: {error}")
+    return "\n".join(lines)
+
+
+def _run_words(status: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
+    """The words and numbers of the Running and Results screens, nothing else."""
+    final = results.get("final") or {}
+    goal = results.get("goal") or {}
+
+    def rows(kind: str) -> list[str]:
+        return [f"{c['case']}: {_num(c['start'])} -> {_num(c['best'])}, {_change(c.get('change_pct'))}"
+                + (f" ({c['failed']} run(s) did not finish)" if c.get("failed") else "")
+                for c in (results.get("by_case") or {}).get(kind) or []]
+
+    changed = [f"{c['label']} ({c['name']}): {c['old_text']} -> {c['new_text']}" + ("" if c["changed"] else " (kept)")
+               for c in results.get("changed") or [] if c.get("old") is not None or c.get("new") is not None]
+    words: dict[str, Any] = {
+        "status": _drop_empty({
+            "sentence": status.get("sentence"), "best so far": (status.get("best") or {}).get("line"),
+            "runs that failed": [f"{f['count']}x {f['message']}" for f in status.get("failures") or []],
+            "note": status.get("busy_line"), "gated": status.get("gated_line"),
+        }),
+        "results": _drop_empty({
+            "headline": results.get("headline"),
+            "goal": f"{goal.get('says')} ({goal.get('direction')} is better)" if goal.get("kpi") else "",
+            "final check": _drop_empty({
+                "line": final.get("line"), "advice": final.get("advice"), "state": final.get("state"),
+                "chance of a gain": final.get("chance_words") or final.get("chance"),
+                "worst case %": final.get("worst_pct"), "mean %": final.get("mean"), "ci95 %": final.get("ci95"),
+                "rule": final.get("rule"), "next": final.get("next"),
+            }),
+            "held-back cases (case: start -> best, change)": rows("held"),
+            "cases the search learned from (case: start -> best, change)": rows("learned"),
+            "what changed (before -> now)": changed if not results.get("is_seed") else "nothing: no combination beat the starting point",
+        }),
+    }
+    return words
+
+
+def _drop_empty(data: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in data.items() if v not in (None, "", [], {})}
+
+
+def _num(value: Any) -> str:
+    return jobs._number(value)  # noqa: SLF001 - the results page's own figures
+
+
+def _change(pct: Any) -> str:
+    if not isinstance(pct, (int, float)):
+        return "no comparison"
+    if abs(pct) < 0.05:
+        return "the same"
+    return f"{abs(pct):.1f} % {'better' if pct > 0 else 'worse'}"
+
+
+def _plan_numbers(plan: dict[str, Any]) -> str:
+    parts = [f"{plan['rounds']} rounds" if plan.get("rounds") else "",
+             f"{plan['combinations']} combinations" if plan.get("combinations") else "",
+             f"{plan['hours']:g} h in total" if plan.get("hours") else ""]
+    return ", ".join(p for p in parts if p)
+
+
+def _plan_line(root: Path, study: Study, harness: Harness) -> str:
+    """The plan in words, as the Limits step shows it."""
+    from evolvekit.harness.execute import plan_for, read_preview
+
+    measured = read_preview(root)
+    timing = measured if measured and measured.get("ok") else {"overhead_s": 0.0, "wall_s": study.limits.time_per_case_s}
+    try:
+        return plan_for(study, harness, timing).summary()
+    except (HarnessError, ValueError, ZeroDivisionError):
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -434,9 +552,11 @@ def _cost(completion: Any, config: ModelConfig | None) -> float | None:
     return (completion.input_tokens * config.price_in_per_mtok + completion.output_tokens * config.price_out_per_mtok) / 1e6
 
 
-def ask(home: Any, root: Path, message: str, provider: Any = None) -> dict[str, Any]:
-    """The assistant's answer to `message`: what it says, and its cards, each
-    checked on the preview."""
+def ask(home: Any, root: Path, message: str, provider: Any = None, *, screen: str = "", run: str | None = None,
+        document_of: Any = None) -> dict[str, Any]:
+    """The assistant's answer to `message`, asked from `screen` (`step-4`,
+    `running`, `results`...) with `run` in view: what it says, and its cards,
+    each checked on the preview."""
     message = message.strip()
     if not message:
         raise AppError("say what you would like the study to do")
@@ -454,7 +574,8 @@ def ask(home: Any, root: Path, message: str, provider: Any = None) -> dict[str, 
         except Exception as exc:  # noqa: BLE001 - a provider that cannot be built is a sentence, not a crash
             raise AppError(f"the assistant cannot reach its model: {exc}", 502) from None
     past = _answered(_entries(root))[-2 * TURNS:]
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": context(root, study, harness)}]
+    messages = [{"role": "system", "content": SYSTEM},
+                {"role": "user", "content": context(root, study, harness, screen=screen, run=run, home=home, document_of=document_of)}]
     messages.append({"role": "assistant", "content": '{"say": "I have read the tables, the catalogues and the study.", "cards": []}'})
     for entry in past:
         if entry["role"] == "user":

@@ -257,3 +257,84 @@ def test_the_assistant_asks_for_json_where_the_api_has_it(study):
     fake = FakeProvider(responses=[json.dumps(GOOD)])
     assistant.ask(home, root, "Two", provider=fake)
     assert fake.calls[0]["response_format"] is None, "the fake provider is not asked for JSON mode"
+
+
+def _finished_run(root: Path, run: str = "20260101-000000") -> str:
+    """A finished run written by hand, as `jobs.results` reads one: a search
+    whose best was c1, and a final check of it against the starting point on
+    three held-back cases. Nothing is run."""
+    from evolvekit.confirm import paired_summary
+
+    run_dir = root / "runs" / run
+    final = run_dir / "confirm" / "final"
+    final.mkdir(parents=True)
+    (run_dir / "job.json").write_text(json.dumps({
+        "phase": "done", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00", "finished_at": "2026-01-01T00:10:00+00:00",
+        "plan": {"rounds": 2, "hours": 0.05, "workers": 1, "run_s": 1.0, "summary": "2 rounds of 4 combinations, then a final check"},
+        "search": {"generations": 2},
+        "final": {"candidate": "c1", "comparison": "confirm/final/comparison.json", "seeds": 1}}), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"id": "seed", "operator": "human-seed", "score": 100.0, "params": {"neighbours": 8}, "kpis": {"tour_length": 100.0}},
+        {"id": "c1", "operator": "mutate", "score": 110.0, "params": {"neighbours": 12}, "kpis": {"tour_length": 90.0}},
+    ]) + "\n", encoding="utf-8")
+    held = {"a.json": (100.0, 98.7), "b.json": (80.0, 81.6), "c.json": (120.0, 115.2)}
+    checked = []
+    for case, (start, best) in held.items():
+        checked.append({"configuration": "baseline", "instance": case, "seed": 1001, "ok": True, "kpis": {"tour_length": start}})
+        checked.append({"configuration": "c1", "instance": case, "seed": 1001, "ok": True, "kpis": {"tour_length": best}})
+    (final / "results.json").write_text(json.dumps(checked), encoding="utf-8")
+    gains = [(start - best) / start * 100 for start, best in held.values()]  # lower is better: a positive gain
+    (final / "comparison.json").write_text(json.dumps({
+        "seeds": [1001], "instances": list(held), "baseline_id": "baseline", "candidates": ["c1"],
+        "per_candidate": {"c1": {"summary": paired_summary(gains)}}}), encoding="utf-8")
+    return run
+
+
+def test_a_question_on_the_results_screen_sees_the_verdict_and_gets_a_plain_answer(study):
+    home, root = study
+    run = _finished_run(root)
+    provider = FakeProvider(responses=['{"say": "Only 3 cases were held back, so the range is wide.", "cards": []}'])
+    answer = assistant.ask(home, root, "Why is this not proven?", provider=provider, screen="results", run=run)
+    assert answer["cards"] == [] and answer["say"].startswith("Only 3")
+    seen = {"prompt": provider.calls[0]["messages"][1]["content"]}
+    where = seen["prompt"].split("## Where the consultant is\n")[1]
+    assert where.startswith("Screen: results")
+    assert "held-back" in where and "chance" in where and "Not proven on 3 held-back cases" in where
+    assert "a.json" in where and "98.7" in where, "the per-case numbers, as the results page shows them"
+    assert "2 rounds of 4 combinations" in where, "the plan's words"
+    assert "Finished." in where, "the status in words"
+    assert "neighbours" in where, "what changed"
+    db = sqlite3.connect(root / "preview" / "tables.sqlite")
+    coordinates = [row for row in db.execute("SELECT x, y FROM stops").fetchall()]
+    db.close()
+    assert not [v for pair in coordinates for v in pair if f"{v:.4f}" in seen["prompt"]], "still never a row"
+    assert "When the consultant asks a question" in assistant.SYSTEM and "return no cards" in assistant.SYSTEM
+
+
+def test_the_context_names_the_screen_and_marks_log_scale_settings(study):
+    home, root = study
+    from evolvekit.harness.manifest import load_harness
+
+    sent = assistant.context(root, load_study(root), load_harness(root / "harness"), screen="step-4")
+    where = sent.split("## Where the consultant is\n")[1]
+    assert where.startswith("Screen: step-4") and "held-back" not in where, "no run: no run section"
+    catalogues = json.loads(sent.split("## Catalogues\n")[1].split("\n\n## ")[0])
+    assert catalogues["settings"]["restart_after"]["log"] is True
+    assert "log" not in catalogues["settings"]["neighbours"]
+
+
+def test_the_api_passes_the_screen_and_the_run_to_the_assistant(study):
+    home, root = study
+    run = _finished_run(root)
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        provider = FakeProvider(responses=[json.dumps({"say": "Three cases.", "cards": []})])
+        server.assistant_provider = provider
+        status, answer = call(server, "POST", f"/api/studies/{root.name}/assistant", {"message": "Why?", "screen": "results", "run": run})
+        assert status == 200 and answer["say"] == "Three cases." and answer["cards"] == []
+        prompt = provider.calls[0]["messages"][1]["content"]
+        assert "Screen: results" in prompt and "held-back" in prompt
+    finally:
+        server.stop()
