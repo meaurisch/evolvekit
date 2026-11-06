@@ -44,7 +44,8 @@ from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
 __all__ = ["active_run", "can_resume", "download", "latest_run", "launch_queued", "next_study", "phase", "report_html",
-           "results", "resume_final_check", "run_alive", "running", "runs", "start", "state_line", "status", "stop"]
+           "results", "resume_final_check", "run_alive", "run_line", "running", "runs", "start", "state_line", "status",
+           "stop"]
 
 LAUNCH = "launch.json"
 MODELS = "models.json"
@@ -179,11 +180,22 @@ def phase(run_dir: Path) -> dict[str, Any]:
 
 
 def runs(root: Path) -> list[dict[str, Any]]:
+    """Every run of the study, oldest first, each with the card's words for it
+    (`run_line`: `kind`, `line`, `tone`)."""
+    dirs = _run_dirs(root)
+    if not dirs:
+        return []
+    try:
+        study: Study | None = load_study(root)
+    except Exception:  # noqa: BLE001 - the list still renders for a damaged study
+        study = None
     listed = []
-    for run_dir in _run_dirs(root):
+    for run_dir in dirs:
         job = phase(run_dir)
+        line = run_line(root, study, run_dir)
         listed.append({"id": run_dir.name, "phase": job.get("phase"), "started_at": job.get("started_at"),
-                       "finished_at": job.get("finished_at")})
+                       "finished_at": job.get("finished_at"), "kind": line["kind"], "line": line["line"],
+                       "tone": line.get("tone")})
     return listed
 
 
@@ -1341,7 +1353,16 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
     dirs = _run_dirs(root)
     if not dirs:
         return {"kind": "draft", "line": f"draft · step {max(1, min(study.step, 7))} of 7"}
-    run_dir = dirs[-1]
+    return run_line(root, study, dirs[-1], document_of)
+
+
+def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None) -> dict[str, Any]:
+    """One run's state in the card's few words (`state_line`): `kind`, `run`,
+    `line`, and a `tone` where the news is bad or open. The run is described
+    by the study it was started with; `study` (today's) is the fallback for a
+    run that kept no copy. Without `document_of`, a running run's line says
+    how much time is left but not how far it got: that reads the run's
+    status document, which a list of runs need not pay for."""
     job = phase(run_dir)
     state = job.get("phase")
     try:
@@ -1354,8 +1375,8 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
         return {"kind": "queued", "run": run_dir.name, "line": "queued" + (f" · after {waiting}" if waiting else "")}
     if state in ACTIVE:
         started = _started(job, run_dir)
-        hours = float((_plan(run_dir, job) or {}).get("hours") or study.budget.hours)
-        left = max(0.0, hours * 3600 - (_now() - started).total_seconds()) if started else None
+        hours = float((_plan(run_dir, job) or {}).get("hours") or (study.budget.hours if study is not None else 0))
+        left = max(0.0, hours * 3600 - (_now() - started).total_seconds()) if started and hours else None
         line = "running" + (f" · {_duration(left)} left" if left is not None else "")
         if document_of is not None and (run_dir / "events.jsonl").exists():
             pct = (((document_of(run_dir) or {}).get("progress") or {}).get("improvement") or {}).get("pct")

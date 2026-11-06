@@ -464,16 +464,20 @@ function crumbs(...parts) {
 
 async function route() {
   clearTimers(); hideUndo();
-  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  // `#/study/<slug>/results?run=<id>`: the path before the "?", the query after it (a bare path means the latest run).
+  const [path, queryText] = location.hash.replace(/^#\/?/, "").split("?", 2);
+  const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
+  const query = new URLSearchParams(queryText || "");
   view.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), "Loading…"));
   try {
     if (!parts.length) await renderHome();
     else if (parts[0] === "settings") await renderSettings();
     else if (parts[0] === "new") await renderNew();
+    else if (parts[0] === "compare") await renderCompare(query.get("a"), query.get("b"));
     else if (parts[0] === "study" && parts[1]) {
       const slug = parts[1];
-      if (parts[2] === "running") await renderRunning(slug);
-      else if (parts[2] === "results") await renderResults(slug, parts[3]);
+      if (parts[2] === "running") await renderRunning(slug, query.get("run"));
+      else if (parts[2] === "results") await renderResults(slug, query.get("run") || parts[3]);
       else await renderStep(slug, Math.min(7, Math.max(1, parseInt(parts[2] || "1", 10) || 1)));
     } else await renderHome();
   } catch (err) {
@@ -505,6 +509,9 @@ async function renderHome() {
       h("a", { class: "btn primary", href: "#/new" }, "New study"));
   const shelf = archived.length ? h("div", {}, h("h2", {}, "Archived"), h("p", { class: "lede" }, "Kept, but out of the way. Unarchive one to bring it back up."),
     h("div", { class: "grid" }, archived.map(studyCard))) : "";
+  // Two studies that have run, side by side.
+  const ran = home.studies.filter((s) => HAS_RUN.includes(s.kind)).map((s) => ({ value: s.slug, text: `${s.name} · ${s.line}` }));
+  const compareRow = ran.length >= 2 ? h("div", { style: "margin-top:14px" }, compareControl("Compare", ran, ran)) : "";
   const trash = home.trash.length ? h("p", { class: "small muted", style: "margin-top:14px" }, "Deleted: ",
     home.trash.map((t, i) => [i ? " · " : "", h("span", {}, `${t.name} (${t.deleted_at.replace("T", " ")}) `),
       h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await api("POST", `/api/trash/${encodeURIComponent(t.entry)}/restore`); toast(`${t.name} is back.`); renderHome(); }, e.currentTarget) }, "Restore")]),
@@ -529,7 +536,7 @@ async function renderHome() {
 
   view.replaceChildren(
     h("div", { class: "row between" }, h("div", {}, h("h1", {}, "Your studies"), h("p", { class: "lede" }, "Each study tunes one application on your cases.")), home.studies.length ? h("a", { class: "btn primary", href: "#/new" }, "New study") : null),
-    studies, shelf, trash,
+    studies, compareRow, shelf, trash,
     h("h2", {}, "Applications you can tune"),
     h("p", { class: "lede" }, "A harness connects evolvekit to one application. Your colleagues who build them send them as .zip files."),
     installed ? note("good", h("p", { style: "margin:0" }, installed)) : "",
@@ -542,10 +549,33 @@ async function renderHome() {
 }
 
 // One study's card, with its menu: rename, duplicate, archive, delete (with Undo for a while, Restore after).
-function studyCard(s) {
+// A state line with its mark: `{kind, line, tone}` as the API says it for a study's card or one of its runs.
+function stateMark(s) {
   const [kind, sym] = s.tone === "warn" ? ["warn", "warn"] : s.tone === "bad" ? ["bad", "bad"] : STATE_ICON[s.kind] || ["none", "info"];
-  const stateEl = sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
+  return sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
     : h("span", { class: `status ${kind}` }, icon(sym), h("span", {}, s.line));
+}
+const HAS_RUN = ["running", "finished", "stopped", "failed"];  // the kinds with a run to look at (a queued run has none yet)
+function whenText(iso) {
+  // "2026-01-01T00:00:00+00:00" as the reader's clock says it; nothing for no time.
+  if (!iso) return "";
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? String(iso) : at.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+// Two studies, or a study and a run, side by side: the pick becomes `#/compare?a=…&b=…`.
+function compareControl(label, choicesA, choicesB) {
+  const select = (choices, name) => h("select", { class: "inline", "aria-label": name }, choices.map((c) => h("option", { value: c.value }, c.text)));
+  const a = select(choicesA, "First"), b = select(choicesB, "Second");
+  if (choicesB.length > 1 && b.options[0].value === a.value) b.selectedIndex = 1;
+  const go = h("button", { class: "btn small", type: "button", onclick: () => {
+    if (a.value === b.value) { toast("Pick two different studies or runs.", true); return; }
+    location.hash = `#/compare?a=${a.value}&b=${b.value}`;
+  } }, "Compare");
+  return h("div", { class: "row", style: "align-items:center; flex-wrap:wrap" }, h("span", { class: "small" }, label), a, h("span", { class: "small" }, "with"), b, go);
+}
+
+function studyCard(s) {
+  const stateEl = stateMark(s);
   const card = h("a", { class: "card study-card" + (s.archived ? " archived-card" : ""), href: studyLink(s) },
     h("span", { class: "name" }, s.name), h("span", { class: "faint" }, s.harness), h("span", { class: "spacer" }), stateEl);
   const path = `/api/studies/${encodeURIComponent(s.slug)}`;
@@ -2028,16 +2058,17 @@ function chart(series) {
   const wrap = h("div"); wrap.innerHTML = svg; return wrap;
 }
 
-async function renderRunning(slug) {
+async function renderRunning(slug, run) {
   await loadStudy(slug, true);
   crumbs({ href: "#/", text: "Your studies", small: true }, { href: `#/study/${slug}/7`, text: current.doc.study.name, small: true }, { text: "Running" });
+  const runQuery = run ? `?run=${encodeURIComponent(run)}` : "";  // a named run; bare, the latest
   const box = h("div");
   const where = { screen: "running", run: null, open: false };  // the run is known once the first status is in
   view.replaceChildren(h("div", { class: "narrow" }, box, assistantPanel(where)));
   let stopping = false;
   async function draw() {
     let s;
-    try { s = await api("GET", studyPath("/status")); }
+    try { s = await api("GET", studyPath("/status" + runQuery)); }
     catch (err) { fill(box, note("bad", h("p", {}, err.message))); return; }
     where.run = s.run;
     const running = ["starting", "search", "check"].includes(s.phase);
@@ -2052,11 +2083,11 @@ async function renderRunning(slug) {
         ? h("dialog", {}, h("h3", { style: "margin-top:0" }, "Take the study out of the queue?"),
           h("p", {}, "It has not started, so nothing is lost. You can start it again from the review step."),
           h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Keep waiting"),
-            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop")); toast("Taken out of the queue"); clearTimers(); location.hash = `#/study/${slug}/7`; }) }, "Take it out")))
+            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop" + runQuery)); toast("Taken out of the queue"); clearTimers(); location.hash = `#/study/${slug}/7`; }) }, "Take it out")))
         : h("dialog", {}, h("h3", { style: "margin-top:0" }, "Stop the study?"),
           h("p", {}, "Runs in progress are stopped within seconds. The best so far is kept, and you see the results."),
           h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Keep running"),
-            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop")); toast("Stopping…"); draw(); }) }, "Stop")));
+            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop" + runQuery)); toast("Stopping…"); draw(); }) }, "Stop")));
       document.body.append(dialog); dialog.showModal(); dialog.addEventListener("close", () => dialog.remove());
     } }, stopping && running ? "Stopping…" : "Stop");
     fill(box, 
@@ -2082,11 +2113,12 @@ async function renderRunning(slug) {
         s.failures.map((f) => h("div", { class: "item" }, h("span", { class: "badge" }, `${f.count}×`), h("div", { class: "body" }, h("div", { class: "what small" }, sentence(f.message)), h("div", { class: "muted small" }, f.todo))))) : null,
       h("div", { class: "step-foot" }, h("a", { class: "btn", href: s.dashboard, target: "_blank", rel: "noopener", title: "Every number the engine keeps, in its own words: for experts" }, "Detailed dashboard (for experts)"),
         running || queued ? stop : h("div", { class: "row" },
-          s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check")); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
-          s.phase === "failed" ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start")); toast("Started again."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Start it again") : null,
+          s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check" + runQuery)); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
+          // A fresh run: the page follows it, not the run it was opened on.
+          s.phase === "failed" ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start")); toast("Started again."); stopping = false; clearTimers(); if (run) { location.hash = `#/study/${slug}/running`; return; } every(2500, draw); draw(); }, e.currentTarget) }, "Start it again") : null,
           // A run that stopped or died with rounds of its plan left goes on from where it was: the same run, nothing done twice.
           s.can_resume ? h("button", { class: "btn primary", type: "button", title: "The rounds already done are kept; the search finishes the rest, then the final check runs", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start"), { resume: s.run }); toast("Continuing where it stopped."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Continue where it stopped") : null,
-          s.phase === "failed" && !s.rounds.done ? null : h("a", { class: s.can_resume ? "btn" : "btn primary", href: `#/study/${slug}/results` }, "See the results"))));
+          s.phase === "failed" && !s.rounds.done ? null : h("a", { class: s.can_resume ? "btn" : "btn primary", href: `#/study/${slug}/results${runQuery}` }, "See the results"))));
     if (!running && !queued) clearTimers();  // a queued run keeps polling: the server starts it by itself
   }
   await draw();
@@ -2144,9 +2176,24 @@ async function renderResults(slug, run) {
   }
   const running = ["starting", "search", "check"].includes(r.phase);
   const runQuery = `?run=${encodeURIComponent(r.run)}`;
-  const finalKind = { confirmed: "good", worse: "bad", unclear: "warn", single: "warn", skipped: "info", stopped: "warn", missing: "info" }[r.final.state] || "info";
-  const finalWord = { good: "Probably better", bad: "Worse", warn: r.final.state === "stopped" ? "Not finished" : "Not clear", info: "Note" }[finalKind];
+  const finalKind = finalKindOf(r.final.state), finalWord = finalWordOf(r.final.state);
   const unitOf = (k) => k.unit ? ` · in ${k.unit}` : "";
+  // This study's runs, newest first, each with its verdict; and a pick to compare this run with another run or study.
+  const allRuns = [...(current.doc.runs || [])].reverse();
+  const runsList = h("div", {}, allRuns.map((entry) => {
+    const here = entry.id === r.run, active = ["running", "queued"].includes(entry.kind);
+    const label = whenText(entry.started_at) || entry.id;
+    const href = `#/study/${slug}/${active ? "running" : "results"}?run=${encodeURIComponent(entry.id)}`;
+    return h("div", { class: "item", "aria-current": here ? "true" : null },
+      h("div", { class: "body" }, h("div", { class: "what" }, here ? h("strong", {}, label) : h("a", { href }, label), here ? h("span", { class: "faint" }, " · this one") : null),
+        h("div", { class: "small" }, stateMark(entry))));
+  }));
+  const home = await api("GET", "/api/home");
+  const otherRuns = allRuns.filter((e) => e.id !== r.run && e.kind !== "queued").map((e) => ({ value: `${slug}/${e.id}`, text: `${whenText(e.started_at) || e.id} · ${e.line}` }));
+  const otherStudies = home.studies.filter((s) => s.slug !== slug && HAS_RUN.includes(s.kind)).map((s) => ({ value: s.slug, text: `${s.name} · ${s.line}` }));
+  const compareRow = otherRuns.length || otherStudies.length
+    ? compareControl("Compare this run", [{ value: `${slug}/${r.run}`, text: `${whenText((allRuns.find((e) => e.id === r.run) || {}).started_at) || r.run} · this run` }], [...otherRuns, ...otherStudies])
+    : h("p", { class: "faint", style: "margin:0" }, "Once another run or study has finished, you can compare this one with it here.");
   const kpiTable = h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {},
       h("tr", {}, h("th", { rowspan: "2" }, "Measure"), h("th", { class: "n group", colspan: "2" }, "Cases the search learned from"), h("th", { class: "n group", colspan: "2" }, "Held-back cases")),
@@ -2190,7 +2237,7 @@ async function renderResults(slug, run) {
   const ctx = r.context;
   view.replaceChildren(h("div", { class: "narrow" },
     h("h1", {}, r.study),
-    running ? note("info", h("p", { style: "margin:0" }, "The study is still running; these are the results so far. ", h("a", { href: `#/study/${slug}/running` }, "See it run"))) : null,
+    running ? note("info", h("p", { style: "margin:0" }, "The study is still running; these are the results so far. ", h("a", { href: `#/study/${slug}/running${run ? runQuery : ""}` }, "See it run"))) : null,
     r.final.advice ? h("div", { class: "card answer", "data-kind": finalKind },
       h("div", { class: "faint" }, "The answer"),
       h("p", { class: "big", style: "margin:4px 0 0" }, r.final.advice),
@@ -2221,7 +2268,86 @@ async function renderResults(slug, run) {
       h("p", { class: "faint", style: "margin:14px 0 0" }, "The study itself — its cases, choices and harness, not the runs — as one file to pass on: ",
         h("a", { href: studyPath("/download/study"), download: "" }, "Save as zip"), ".")),
     h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again),
+    h("h2", {}, allRuns.length === 1 ? "This study's run" : "This study's runs"),
+    h("div", { class: "card" }, runsList, h("div", { style: "margin-top:12px" }, compareRow)),
     assistantPanel({ screen: "results", run: r.run, open: false })));
+}
+
+// The final check's verdict as a mark: its kind (the colour) and the word on it.
+function finalKindOf(state) { return { confirmed: "good", worse: "bad", unclear: "warn", single: "warn", skipped: "info", stopped: "warn", missing: "info" }[state] || "info"; }
+function finalWordOf(state) { return { good: "Probably better", bad: "Worse", warn: state === "stopped" ? "Not finished" : "Not clear", info: "Note" }[finalKindOf(state)]; }
+
+// ================================================================ compare
+// Two studies, or two runs, side by side: `#/compare?a=<slug>[/<run>]&b=<slug>[/<run>]`.
+// Every row is one label with a cell per side; cases and changes are joined by name.
+async function renderCompare(a, b) {
+  crumbs({ href: "#/", text: "Your studies", small: true }, { text: "Compare" });
+  if (!a || !b) {
+    view.replaceChildren(h("div", { class: "narrow" }, note("info", h("p", { style: "margin:0" }, "Pick two studies, or two runs of one study, to compare: from the home page, or from a study's results.")),
+      h("p", {}, h("a", { href: "#/" }, "Back to your studies"))));
+    return;
+  }
+  let c;
+  try { c = await api("GET", `/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`); }
+  catch (err) {
+    if (err.status === 404) { view.replaceChildren(h("div", { class: "narrow" }, note("info", h("p", { style: "margin:0" }, sentence(err.message))), h("p", {}, h("a", { href: "#/" }, "Back to your studies")))); return; }
+    throw err;
+  }
+  const sides = [c.a, c.b];
+  const head = (side) => h("th", { class: "group" }, h("a", { href: `#/study/${side.slug}/results?run=${encodeURIComponent(side.run)}` }, side.name),
+    h("div", { class: "faint", style: "font-weight:400" }, `${side.harness} · run ${side.run}`));
+  const row = (label, cell) => h("tr", {}, h("th", { scope: "row" }, label), sides.map((s) => h("td", {}, cell(s))));
+  const dash = h("span", { class: "faint" }, "–");
+  const pctText = (v) => typeof v === "number" ? `${fmt(v, 1)} %` : null;
+  const verdict = h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, ""), sides.map(head))),
+    h("tbody", {},
+      row("Goal", (s) => `${capital(s.goal.says)} (${s.goal.direction} is better)`),
+      row("Verdict", (s) => status(finalKindOf(s.final.state), finalWordOf(s.final.state))),
+      row("The answer", (s) => s.final.advice || dash.cloneNode(true)),
+      row("The search", (s) => s.headline),
+      row("The final check", (s) => s.final.line || dash.cloneNode(true)),
+      row("Chance of a gain", (s) => typeof s.final.chance === "number" ? `${Math.round(s.final.chance * 100)} %` : dash.cloneNode(true)),
+      row("Likely range", (s) => Array.isArray(s.final.ci95) ? `${pctText(s.final.ci95[0])} to ${pctText(s.final.ci95[1])}` : dash.cloneNode(true)))));
+  // Held-back cases, joined by name: start, best and change per side.
+  const caseNames = [...new Set(sides.flatMap((s) => s.held.map((r) => r.case)))];
+  const heldOf = (s, name) => s.held.find((r) => r.case === name);
+  const held = caseNames.length ? h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {},
+      h("tr", {}, h("th", { rowspan: "2" }, "Case"), sides.map((s) => h("th", { class: "n group", colspan: "3" }, s.name))),
+      h("tr", {}, sides.flatMap(() => [h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"), h("th", { class: "n" }, "Change")]))),
+    h("tbody", {}, caseNames.map((name) => h("tr", {}, h("td", {}, name), sides.flatMap((s) => {
+      const r = heldOf(s, name);
+      return r ? [h("td", { class: "n" }, fmt(r.start, 2)), h("td", { class: "n" }, fmt(r.best, 2)), h("td", { class: "n" }, change(r.change_pct, s.goal.direction))]
+        : [h("td", { class: "n faint" }, "–"), h("td", { class: "n faint" }, "–"), h("td", { class: "n faint" }, "not held back")];
+    })))))) : h("p", { class: "muted", style: "margin:0" }, "Neither run has a final check on held-back cases.");
+  // What changed, joined by the setting or data change's name.
+  const changeNames = [...new Set(sides.flatMap((s) => s.changes.map((x) => x.name)))];
+  const changeOf = (s, name) => s.changes.find((x) => x.name === name);
+  const changes = changeNames.length ? h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "What"), sides.map((s) => h("th", {}, s.name)))),
+    h("tbody", {}, changeNames.map((name) => {
+      const label = (sides.map((s) => changeOf(s, name)).find(Boolean) || {}).label || name;
+      return h("tr", {}, h("td", {}, label, h("div", { class: "faint" }, name)), sides.map((s) => {
+        const x = changeOf(s, name);
+        return h("td", { class: "num" }, !x ? h("span", { class: "faint" }, "not varied") : x.changed ? [x.old_text, " → ", h("strong", {}, x.new_text)] : [x.old_text, h("span", { class: "faint" }, " (kept)")]);
+      }));
+    })))) : h("p", { class: "muted", style: "margin:0" }, "Nothing was varied.");
+  const setup = h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, ""), sides.map((s) => h("th", {}, s.name)))),
+    h("tbody", {},
+      row("Time per case", (s) => duration(s.setup.time_per_case_s)),
+      row("Time for the study", (s) => duration(s.setup.hours * 3600)),
+      row("Combinations tried", (s) => String(s.setup.combinations)))));
+  view.replaceChildren(h("div", { class: "narrow" },
+    h("h1", {}, "Side by side"),
+    h("p", { class: "lede" }, sides.map((s, i) => [i ? " and " : "", h("strong", {}, s.name)]), "."),
+    c.same_goal ? null : note("warn", h("p", { style: "margin:0" }, "The two chase different goals, so their numbers are not comparable; read each verdict on its own.")),
+    h("h2", {}, "The verdict"), h("div", { class: "card" }, verdict),
+    h("h2", {}, "Held-back cases"), h("div", { class: "card" }, held),
+    h("h2", {}, "What changed"), h("div", { class: "card" }, changes),
+    h("h2", {}, "The set-up"), h("div", { class: "card" }, setup),
+    h("p", { style: "margin-top:20px" }, h("a", { href: "#/" }, "Back to your studies"))));
 }
 
 route();

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from evolvekit.app import AppError, assistant, jobs, work
+from evolvekit.app import AppError, assistant, compare, jobs, work
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
 from evolvekit.harness import HarnessError
@@ -601,8 +601,14 @@ def next_study(req: Request) -> dict[str, Any]:
     return _document(req, new)
 
 
+def compare_runs(req: Request) -> dict[str, Any]:
+    """Two studies or runs side by side: `?a=<slug>[/<run>]&b=<slug>[/<run>]`; a bare slug is its latest run."""
+    return compare.compare(req.home, req.query.get("a") or "", req.query.get("b") or "", req.server.status_document)
+
+
 ROUTES = [
     route("GET", "/api/home")(home),
+    route("GET", "/api/compare")(compare_runs),
     route("GET", "/api/settings")(get_settings),
     route("PUT", "/api/settings")(put_settings),
     route("POST", "/api/settings/check")(check_assistant),
