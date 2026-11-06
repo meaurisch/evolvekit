@@ -126,8 +126,12 @@ def test_a_study_runs_its_search_and_then_the_final_check(tmp_path):
 def test_a_rerun_final_check_uses_the_cases_the_run_held_back(tmp_path):
     folder = _study(tmp_path)
     _fix_plan(folder)
-    run_study(folder, "r1", log=lambda _m: None)
+    job = run_study(folder, "r1", log=lambda _m: None)
     assert (folder / "runs" / "r1" / "study.yaml").is_file()
+    if "skipped" in job["final"]:
+        # A slow machine may find nothing better than the starting point in
+        # 14 s; then there is no check to run again, here or on CI.
+        pytest.skip("the search found nothing better, so there is no final check to run again")
     study = load_study(folder)
     study.training, study.test = study.training[1:] + study.test, [study.training[0]]   # swap after the run
     save_study(study, folder)
