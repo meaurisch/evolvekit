@@ -14,6 +14,19 @@ twice; after that it says honestly that it could not be expressed. Every
 answer's cost is kept in `assistant.jsonl` in the study folder: what the
 provider reported, else what the price table says, else `None` -- the page
 then says the cost is not known rather than showing a made-up figure.
+
+`assistant.jsonl` holds one JSON object per line, each with an `id`:
+
+    {"role": "user", "id": <turn>, "text": ...}
+    {"role": "assistant", "turn": <turn>, "say": ..., "raw_cards": [...], "cards": [...], "usd": ...}
+    {"role": "assistant", "turn": <turn>, "cancelled": true, "usd": ...}   the consultant cancelled it
+    {"role": "assistant", "turn": <turn>, "failed": "why"}                 the model gave no answer
+    {"role": "card", "turn": <turn>, "index": n, "state": "applied" | "dismissed"}
+
+A turn is a question and its answer, named by the question's id. The card
+events are folded into the answer's cards as their `state` (`proposed`,
+`applied` or `dismissed`, the last event winning) by `history`, and the
+model is shown which of its proposals were applied when the turn is replayed.
 """
 
 from __future__ import annotations
@@ -21,7 +34,9 @@ from __future__ import annotations
 import copy
 import json
 import re
+import secrets
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,9 +51,10 @@ from evolvekit.harness.compile import base_settings
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Constraint, DataChange, GoalLevel, Guardrail, SettingChoice, Study, StudyKpi, load_study, parse_within, save_study
 
-__all__ = ["apply_card", "ask", "history"]
+__all__ = ["apply_card", "ask", "history", "record_card"]
 
 HISTORY = "assistant.jsonl"
+CARD_STATES = ("proposed", "applied", "dismissed")
 MAX_CORRECTIONS = 2
 MAX_TOKENS = 16000
 """The model thinks before it answers, and its thinking counts against this:
@@ -99,9 +115,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _append(root: Path, entry: dict[str, Any]) -> None:
+def _id() -> str:
+    """A short random token naming an entry of the history."""
+    return secrets.token_urlsafe(6)
+
+
+def _append(root: Path, entry: dict[str, Any]) -> dict[str, Any]:
+    entry = {"ts": _now(), "id": _id(), **entry}
     with open(root / HISTORY, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, allow_nan=False) + "\n")
+    return entry
 
 
 def _entries(root: Path) -> list[dict[str, Any]]:
@@ -111,22 +134,89 @@ def _entries(root: Path) -> list[dict[str, Any]]:
     entries = []
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
-            entries.append(json.loads(line))
+            loaded = json.loads(line)
         except ValueError:
             continue
+        if isinstance(loaded, dict):
+            entries.append(loaded)
     return entries
+
+
+def _folded(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The turns in question order, each question followed by its answer --
+    matched by the turn's id, or, for a history from before ids, by
+    adjacency -- with the card events folded into the answers' cards as
+    their `state`. The events themselves are not listed; an answer whose
+    question is gone is kept where it is."""
+    by_turn = {e["turn"]: e for e in entries if e.get("role") == "assistant" and e.get("turn")}
+    states: dict[str, dict[int, str]] = {}
+    for event in entries:
+        if event.get("role") == "card" and isinstance(event.get("index"), int):
+            states.setdefault(str(event.get("turn")), {})[event["index"]] = str(event.get("state"))
+    folded: list[dict[str, Any]] = []
+    placed: set[int] = set()
+
+    def answer(entry: dict[str, Any]) -> dict[str, Any]:
+        placed.add(id(entry))
+        if "cards" not in entry:
+            return entry
+        fate = states.get(str(entry.get("turn")), {})
+        return {**entry, "cards": [{**card, "state": fate.get(i) if fate.get(i) in CARD_STATES else "proposed"}
+                                   for i, card in enumerate(entry["cards"])]}
+
+    for at, entry in enumerate(entries):
+        role = entry.get("role")
+        if role == "card" or id(entry) in placed:
+            continue
+        if role == "user":
+            folded.append(entry)
+            reply = by_turn.get(entry.get("id")) if entry.get("id") else None
+            if reply is None and at + 1 < len(entries):
+                following = entries[at + 1]
+                if following.get("role") == "assistant" and not following.get("turn"):
+                    reply = following
+            if reply is not None and id(reply) not in placed:
+                folded.append(answer(reply))
+        elif role == "assistant":
+            folded.append(answer(entry))
+    return folded
 
 
 def _answered(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The conversation the model is shown again: each question with its
-    answer. A question that got none (the model failed) is left out, or the
-    next answer would have to deal with every one of them at once."""
+    answer. A question that got none (the model failed, or the consultant
+    cancelled it) is left out, or the next answer would have to deal with
+    every one of them at once."""
+    turns = _folded(entries)
     kept = []
-    for at, entry in enumerate(entries):
-        reply = entries[at + 1] if at + 1 < len(entries) else None
-        if entry.get("role") == "user" and reply and reply.get("role") == "assistant" and not reply.get("failed"):
+    for at, entry in enumerate(turns):
+        reply = turns[at + 1] if at + 1 < len(turns) else None
+        if (entry.get("role") == "user" and reply and reply.get("role") == "assistant"
+                and not reply.get("failed") and not reply.get("cancelled")):
             kept += [entry, reply]
     return kept
+
+
+def _replayed_cards(entry: dict[str, Any]) -> list[Any]:
+    """The answer's cards as the model wrote them, each one the consultant
+    applied marked `"applied": true` so the model knows what was taken."""
+    states = [card.get("state") for card in entry.get("cards") or []]
+    return [{**card, "applied": True} if isinstance(card, dict) and i < len(states) and states[i] == "applied" else card
+            for i, card in enumerate(entry.get("raw_cards") or [])]
+
+
+def record_card(root: Path, turn: str, index: Any, state: Any) -> dict[str, Any]:
+    """What became of a card: `applied` or `dismissed`, kept in the history
+    after the answer it belongs to."""
+    if state not in ("applied", "dismissed"):
+        raise AppError("state: applied or dismissed")
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        raise AppError("index: which card of the answer, counted from 0")
+    answer = next((e for e in _entries(root) if e.get("role") == "assistant" and e.get("turn") == turn), None)
+    if answer is None or index >= len(answer.get("cards") or []):
+        raise AppError("there is no such card in this study's conversation", 404)
+    _append(root, {"role": "card", "turn": turn, "index": index, "state": state})
+    return {"turn": turn, "index": index, "state": state}
 
 
 def failure_words(exc: BaseException) -> str:
@@ -165,11 +255,13 @@ def check_model(home: Any) -> dict[str, Any]:
 
 
 def history(root: Path) -> dict[str, Any]:
-    """The turns so far; `total_usd` sums the costs that are known, and
-    `unknown` counts the answers whose cost nobody knew."""
-    entries = _entries(root)
-    answers = [e for e in entries if e.get("role") == "assistant"]
-    return {"turns": entries, "total_usd": round(sum(float(e["usd"]) for e in answers if e.get("usd") is not None), 6),
+    """The turns so far, each question followed by its answer and each card
+    carrying its `state` (`proposed`, `applied` or `dismissed`); `total_usd`
+    sums the costs that are known, and `unknown` counts the answers whose
+    cost nobody knew."""
+    turns = _folded(_entries(root))
+    answers = [e for e in turns if e.get("role") == "assistant"]
+    return {"turns": turns, "total_usd": round(sum(float(e["usd"]) for e in answers if e.get("usd") is not None), 6),
             "unknown": sum(1 for e in answers if "usd" in e and e["usd"] is None)}
 
 
@@ -553,13 +645,18 @@ def _cost(completion: Any, config: ModelConfig | None) -> float | None:
 
 
 def ask(home: Any, root: Path, message: str, provider: Any = None, *, screen: str = "", run: str | None = None,
-        document_of: Any = None) -> dict[str, Any]:
+        document_of: Any = None, turn: str | None = None, cancelled: threading.Event | None = None) -> dict[str, Any]:
     """The assistant's answer to `message`, asked from `screen` (`step-4`,
     `running`, `results`...) with `run` in view: what it says, and its cards,
-    each checked on the preview."""
+    each checked on the preview. `turn` names the question in the history
+    (one is made up when none is given); `cancelled`, set by the consultant
+    while the model thinks, makes the model's answer be thrown away: the
+    history then says the turn was cancelled and the answer is
+    `{"cancelled": True}`."""
     message = message.strip()
     if not message:
         raise AppError("say what you would like the study to do")
+    turn = turn or _id()
     study, harness = load_study(root), load_harness(root / "harness")
     config: ModelConfig | None = None
     if provider is None:
@@ -568,7 +665,7 @@ def ask(home: Any, root: Path, message: str, provider: Any = None, *, screen: st
         if any(not keys.get(k) for k in needed):
             return {"needs_key": True, "say": "The assistant needs an API key. Open Settings, choose the provider and paste "
                     "the key; it is kept on this computer only. Templates, the data-change form and the SQL box work without one.",
-                    "cards": [], "usd": 0.0, "total_usd": history(root)["total_usd"]}
+                    "cards": [], "usd": 0.0, "total_usd": history(root)["total_usd"], "turn": turn}
         try:
             provider, config = _provider(home)
         except Exception as exc:  # noqa: BLE001 - a provider that cannot be built is a sentence, not a crash
@@ -581,24 +678,34 @@ def ask(home: Any, root: Path, message: str, provider: Any = None, *, screen: st
         if entry["role"] == "user":
             messages.append({"role": "user", "content": entry.get("text", "")})
         else:
-            messages.append({"role": "assistant", "content": json.dumps({"say": entry.get("say", ""), "cards": entry.get("raw_cards", [])})})
+            messages.append({"role": "assistant", "content": json.dumps({"say": entry.get("say", ""), "cards": _replayed_cards(entry)})})
     messages.append({"role": "user", "content": message})
-    _append(root, {"ts": _now(), "role": "user", "text": message})
+    _append(root, {"id": turn, "role": "user", "text": message})
 
     usd: float | None = 0.0
     tokens, checked, say, raw_cards = 0, [], "", []
     json_mode = {"response_format": {"type": "json_object"}} if getattr(provider, "name", "") in JSON_MODE else {}
+
+    def thrown_away() -> dict[str, Any]:
+        # The consultant cancelled while the model thought: its answer is not kept, what it cost is.
+        _append(root, {"role": "assistant", "turn": turn, "cancelled": True, "usd": _round(usd)})
+        return {"cancelled": True, "usd": _round(usd), "total_usd": history(root)["total_usd"], "turn": turn}
+
     for attempt in range(1 + MAX_CORRECTIONS):
         try:
             completion = provider.complete(messages, model=config.model if config else "fake",
                                            max_tokens=MAX_TOKENS, temperature=0.2, **json_mode)
         except Exception as exc:  # noqa: BLE001 - the model's failure is said in the chat, and kept there
+            if cancelled is not None and cancelled.is_set():
+                return thrown_away()
             reason = failure_words(exc)
-            _append(root, {"ts": _now(), "role": "assistant", "failed": reason, "usd": _round(usd)})
-            return {"failed": reason, "say": "", "cards": [], "usd": _round(usd), "total_usd": history(root)["total_usd"]}
+            _append(root, {"role": "assistant", "turn": turn, "failed": reason, "usd": _round(usd)})
+            return {"failed": reason, "say": "", "cards": [], "usd": _round(usd), "total_usd": history(root)["total_usd"], "turn": turn}
         cost = _cost(completion, config)
         usd = None if cost is None or usd is None else usd + cost  # one unknown call makes the answer's cost unknown
         tokens += completion.input_tokens + completion.output_tokens
+        if cancelled is not None and cancelled.is_set():
+            return thrown_away()
         try:
             answer = _parse(completion.text)
         except ValueError as exc:
@@ -621,9 +728,9 @@ def ask(home: Any, root: Path, message: str, provider: Any = None, *, screen: st
         if not card["ok"]:
             card["problem"] = (f"It could not be expressed: {card['problem']}. Try saying it differently, "
                                "or use a template or the forms.")
-    _append(root, {"ts": _now(), "role": "assistant", "say": say, "raw_cards": raw_cards, "cards": checked,
+    _append(root, {"role": "assistant", "turn": turn, "say": say, "raw_cards": raw_cards, "cards": checked,
                    "usd": _round(usd), "tokens": tokens})
-    return {"say": say, "cards": checked, "usd": _round(usd), "total_usd": history(root)["total_usd"]}
+    return {"say": say, "cards": checked, "usd": _round(usd), "total_usd": history(root)["total_usd"], "turn": turn}
 
 
 def _round(usd: float | None) -> float | None:

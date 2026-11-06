@@ -1693,19 +1693,26 @@ async function step7(box) {
 
 // ============================================================== assistant
 const ASSISTANT_OPEN = "evolvekit.assistant.open";  // sessionStorage: the drawer stays as it was last left in this tab
+const ASSISTANT_TURNS = 6;      // question-and-answer pairs the panel draws: the ones the model is shown again
+const ASSISTANT_POLL_MS = 1500;
 function assistantPanel(where = {}) {
   // `where` says which screen the question comes from (`step-4`, `running`, `results`) and which run is in view;
   // the caller may set `where.run` later (the Running screen learns its run from the first status).
+  // A question is answered in the background: the page polls its turn, so the question outlives a change of
+  // screen (the next panel picks it up from the history) and can be cancelled while the model thinks.
   const slug = current.slug;
+  const path = (tail = "") => `/api/studies/${encodeURIComponent(slug)}/assistant${tail}`;
   let remembered = null;
   try { remembered = sessionStorage.getItem(ASSISTANT_OPEN); } catch (err) { /* storage refused: the defaults apply */ }
   const open = remembered === null ? Boolean(where.open) : remembered === "1";
   const panel = h("details", { class: "side card", "aria-label": "Assistant", open: open || null });
   let known = open;  // a toggle also fires when the drawer is inserted open: only a change of state is the user's, and kept
+  let polling = null;  // the turn being polled, while one is
   panel.addEventListener("toggle", () => {
     if (panel.open === known) return;
     known = panel.open;
     try { sessionStorage.setItem(ASSISTANT_OPEN, known ? "1" : "0"); } catch (err) { /* same */ }
+    if (known && !polling) load();  // opened again: the conversation may have moved on, and a question may still be thought about
   });
   const log = h("div", { class: "chat", "aria-live": "polite" });
   const input = h("textarea", { id: "ask", placeholder: "Say what you want, or ask about this screen, in your own words — e.g. “count late deliveries to frozen customers” or “why is this not proven?”", style: "min-height:70px" });
@@ -1723,7 +1730,10 @@ function assistantPanel(where = {}) {
       h("strong", {}, "No answer. "), reason, again ? h("div", {}, again) : null));
     log.scrollTop = log.scrollHeight;
   }
-  function proposal(card) {
+  // What became of a card is kept with the conversation, so a reload -- and the model's next answer -- know it.
+  function fate(turn, index, state) { if (turn) api("POST", path("/cards"), { turn, index, state }).catch(() => {}); }
+  function proposal(card, turn, index) {
+    if (card.state === "dismissed") return;
     const kindText = { kpi: "A measure", data_change: "A data change", constraint: "A rule", setting: "A setting", weighted: "A combination", goal: "The goal", guardrail: "A guardrail" }[card.kind] || card.kind;
     const detail = card.sql || card.expr || (card.kind === "data_change" ? `${card.lever} · ${card.column || "in code"} · where ${card.where || "all rows"} · ${card.mode} ${card.low}–${card.high}` : "")
       || (card.kind === "goal" ? card.levels.map((l) => `${l.kpi} ${l.direction}${l.equal_within ? " within " + l.equal_within : ""}`).join(" → ") : "")
@@ -1736,40 +1746,82 @@ function assistantPanel(where = {}) {
       h("div", { class: "faint" }, card.ok ? `Proposed: ${kindText.toLowerCase()} — nothing changes until you apply it` : `${kindText}, not usable`), h("div", { class: "says" }, card.says || card.name || kindText),
       detail ? h("pre", { class: "mono" }, detail) : null,
       card.ok ? (facts ? h("p", { class: "small", style: "margin:6px 0 0" }, facts) : null) : h("p", { class: "small", style: "margin:6px 0 0; color: var(--critical-ink)" }, card.problem));
-    if (card.ok) {
+    if (card.ok && card.state === "applied") {
+      el.append(h("div", { class: "row", style: "margin-top:8px" }, status("good", "Applied to the study")));
+    } else if (card.ok) {
       const add = h("button", { class: "btn small primary", type: "button", onclick: () => guarded(async () => {
         const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/cards`, { card });
         current.doc = answer.study; add.replaceWith(status("good", "Applied to the study")); edit.remove(); dismiss.remove();
         if (current.redraw) current.redraw();
+        fate(turn, index, "applied");
       }, add) }, "Apply");
       const edit = card.kind === "kpi" && current.fillSql ? h("button", { class: "btn small", type: "button", onclick: () => current.fillSql(card) }, "Edit") : h("span");
-      const dismiss = h("button", { class: "btn small quiet", type: "button", onclick: () => el.remove() }, "Dismiss");
+      const dismiss = h("button", { class: "btn small quiet", type: "button", onclick: () => { el.remove(); fate(turn, index, "dismissed"); } }, "Dismiss");
       el.append(h("div", { class: "row", style: "margin-top:8px" }, add, edit, dismiss));
     }
     log.append(el); log.scrollTop = log.scrollHeight;
   }
-  ask.addEventListener("click", () => guarded(async () => {
-    const message = input.value.trim(); if (!message) return;
-    bubble(message, true); input.value = "";
-    const thinking = h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "Thinking… this takes up to a minute (every proposal is tried on the smallest case first)");
-    log.append(thinking);
-    try {
-      const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/assistant`, { message, screen: where.screen || "", run: where.run || null });
-      thinking.remove();
-      if (answer.needs_key) { log.append(note("info", h("p", { style: "margin:0" }, answer.say, " ", h("a", { href: "#/settings" }, "Settings")))); return; }
-      if (answer.failed) { failed(answer.failed, message); return; }
-      if (answer.say) bubble(answer.say);
-      for (const card of answer.cards) proposal(card);
+  function answered(answer, question) {
+    // An answer drawn as the history keeps it: what it says, then its cards with what became of them.
+    if (answer.needs_key) { log.append(note("info", h("p", { style: "margin:0" }, answer.say, " ", h("a", { href: "#/settings" }, "Settings")))); return; }
+    if (answer.failed) { failed(answer.failed, question); return; }
+    if (answer.cancelled) { log.append(h("p", { class: "muted small", style: "margin:0" }, "Cancelled: the answer was not kept.")); log.scrollTop = log.scrollHeight; return; }
+    if (answer.say) bubble(answer.say);
+    (answer.cards || []).forEach((card, index) => proposal(card, answer.turn, index));
+  }
+  function thinking(turn) {
+    const cancel = h("button", { class: "btn small quiet", type: "button", onclick: () => guarded(async () => {
+      await api("POST", path("/cancel")); settle(turn, { state: "cancelled", cancelled: true });
+    }, cancel) }, "Cancel");
+    const row = h("div", { class: "row muted small", "data-turn": turn }, h("span", { class: "spinner" }),
+      h("span", { style: "flex:1" }, "Thinking… this takes up to a minute (every proposal is tried on the smallest case first). You can move to another screen meanwhile."), cancel);
+    log.append(row); log.scrollTop = log.scrollHeight;
+  }
+  function settle(turn, answer, question) {
+    // The turn's end, drawn once: a cancel pressed here and a poll that comes back later both land here.
+    if (polling !== turn) return;
+    polling = null; ask.disabled = false;
+    for (const row of log.querySelectorAll("[data-turn]")) if (row.dataset.turn === turn) row.remove();
+    answered(answer, question);
+    if (answer.state === "done" && !answer.failed && !answer.needs_key) {
       cost.textContent = answer.usd == null ? `The cost of this answer is not known for this model; this study's assistant has cost $${fmt(answer.total_usd, 3)} so far where known.`
         : `This answer cost $${fmt(answer.usd, 3)}; this study's assistant, $${fmt(answer.total_usd, 3)} so far.`;
-    } catch (err) { thinking.remove(); failed(err.message, message); }
-  }, ask));
+    }
+  }
+  function poll(turn, question) {
+    polling = turn; ask.disabled = true;
+    const tick = async () => {
+      if (polling !== turn || !panel.isConnected) return;  // settled, or the screen changed: the next panel takes over from the history
+      let state;
+      try { state = await api("GET", path(`?turn=${encodeURIComponent(turn)}`)); }
+      catch (err) { settle(turn, { failed: err.message }, question); return; }
+      if (state.state === "thinking") { setTimeout(tick, ASSISTANT_POLL_MS); return; }
+      settle(turn, state, question);
+    };
+    setTimeout(tick, ASSISTANT_POLL_MS);
+  }
+  ask.addEventListener("click", async () => {
+    const message = input.value.trim(); if (!message || polling) return;
+    bubble(message, true); input.value = ""; ask.disabled = true;
+    try {
+      const started = await api("POST", path(), { message, screen: where.screen || "", run: where.run || null });
+      thinking(started.turn); poll(started.turn, message);
+    } catch (err) { ask.disabled = false; failed(err.message, message); }
+  });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask.click(); });
-  api("GET", `/api/studies/${encodeURIComponent(slug)}/assistant`).then((history) => {
-    for (const turn of history.turns.slice(-6)) turn.role === "user" ? bubble(turn.text, true) : turn.failed ? failed(turn.failed) : (turn.say ? bubble(turn.say) : null);
-    if (history.total_usd || history.unknown) cost.textContent = `This study's assistant has cost $${fmt(history.total_usd, 3)} so far` + (history.unknown ? ` (${plural(history.unknown, "answer")} with no known cost).` : ".");
-    if (!history.turns.length) log.append(h("p", { class: "muted small", style: "margin:0" }, "For example: “a measure for late deliveries to VIP customers”, or “try cheaper vans and dearer trucks, trucks must stay dearer”."));
-  }).catch(() => {});
+  function load() {
+    api("GET", path()).then((history) => {
+      log.replaceChildren();
+      const questions = history.turns.map((t, i) => (t.role === "user" ? i : -1)).filter((i) => i >= 0);
+      const from = questions.length > ASSISTANT_TURNS ? questions[questions.length - ASSISTANT_TURNS] : 0;
+      for (const turn of history.turns.slice(from)) turn.role === "user" ? bubble(turn.text, true) : answered(turn);
+      if (history.total_usd || history.unknown) cost.textContent = `This study's assistant has cost $${fmt(history.total_usd, 3)} so far` + (history.unknown ? ` (${plural(history.unknown, "answer")} with no known cost).` : ".");
+      if (!history.turns.length) log.append(h("p", { class: "muted small", style: "margin:0" }, "For example: “a measure for late deliveries to VIP customers”, or “try cheaper vans and dearer trucks, trucks must stay dearer”."));
+      // A question asked on another screen, or before a reload, is still being thought about: keep waiting for it here.
+      if (history.thinking && polling !== history.thinking) { thinking(history.thinking); poll(history.thinking); }
+    }).catch(() => {});
+  }
+  load();
   return panel;
 }
 

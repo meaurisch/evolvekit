@@ -420,13 +420,27 @@ def choices(req: Request) -> dict[str, Any]:
 
 def ask_assistant(req: Request) -> dict[str, Any]:
     """A question from `screen` (`step-1`…`step-7`, `running`, `results`),
-    with `run` in view where the screen shows one."""
+    with `run` in view where the screen shows one. Answers at once with
+    `{turn, state: "thinking"}`; the answer comes from `GET …/assistant?turn=`."""
     root, _, _ = req.home.load(req.params["slug"])
     body = req.json()
     run = body.get("run")
-    return assistant.ask(req.home, root, str(body.get("message") or ""), provider=req.server.assistant_provider,
-                         screen=str(body.get("screen") or ""), run=str(run) if run else None,
-                         document_of=req.server.status_document)
+    return work.start_ask(req.server, req.home, root, str(body.get("message") or ""), provider=req.server.assistant_provider,
+                          screen=str(body.get("screen") or ""), run=str(run) if run else None,
+                          document_of=req.server.status_document)
+
+
+def cancel_assistant(req: Request) -> dict[str, Any]:
+    root, _, _ = req.home.load(req.params["slug"])
+    return work.cancel_ask(req.server, root)
+
+
+def card_event(req: Request) -> dict[str, Any]:
+    """What became of one of the assistant's cards: `{turn, index, state}`,
+    state `applied` or `dismissed`."""
+    root, _, _ = req.home.load(req.params["slug"])
+    body = req.json()
+    return assistant.record_card(root, str(body.get("turn") or ""), body.get("index"), body.get("state"))
 
 
 def add_card(req: Request) -> dict[str, Any]:
@@ -445,8 +459,13 @@ def add_card(req: Request) -> dict[str, Any]:
 
 
 def assistant_history(req: Request) -> dict[str, Any]:
+    """With `?turn=`, where that question stands (and its answer when done);
+    without, the whole conversation, plus `thinking`: the id of the question
+    being thought about now, or null."""
     root, _, _ = req.home.load(req.params["slug"])
-    return assistant.history(root)
+    if req.query.get("turn"):
+        return work.ask_state(req.server, root, req.query["turn"])
+    return {**assistant.history(root), "thinking": work.ask_state(req.server, root).get("turn")}
 
 
 def start_test_run(req: Request) -> dict[str, Any]:
@@ -547,6 +566,8 @@ ROUTES = [
     route("GET", "/api/studies/{slug}/choices")(choices),
     route("POST", "/api/studies/{slug}/assistant")(ask_assistant),
     route("GET", "/api/studies/{slug}/assistant")(assistant_history),
+    route("POST", "/api/studies/{slug}/assistant/cancel")(cancel_assistant),
+    route("POST", "/api/studies/{slug}/assistant/cards")(card_event),
     route("POST", "/api/studies/{slug}/cards")(add_card),
     route("POST", "/api/studies/{slug}/test-run")(start_test_run),
     route("GET", "/api/studies/{slug}/test-run")(test_run),

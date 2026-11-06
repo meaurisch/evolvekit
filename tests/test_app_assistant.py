@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -134,6 +136,27 @@ def test_without_a_key_the_assistant_says_how_to_add_one(study, monkeypatch):
     assert answer["needs_key"] is True and "Settings" in answer["say"] and answer["cards"] == []
 
 
+def _settled(server: AppServer, slug: str, turn: str, timeout: float = 30.0) -> dict:
+    """The answer to `turn`, polled as the page polls it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status, body = call(server, "GET", f"/api/studies/{slug}/assistant?turn={turn}")
+        assert status == 200, body
+        if body["state"] != "thinking":
+            return body
+        time.sleep(0.05)
+    raise AssertionError("the assistant never finished")
+
+
+def _asked(server: AppServer, slug: str, message: str, **where) -> dict:
+    """A question through the API, waited for: what the page gets in the end."""
+    status, started = call(server, "POST", f"/api/studies/{slug}/assistant", {"message": message, **where})
+    assert status == 200 and started["state"] == "thinking" and started["turn"], started
+    answer = _settled(server, slug, started["turn"])
+    assert answer["turn"] == started["turn"]
+    return answer
+
+
 def test_cards_are_added_to_the_study_through_the_api(study):
     home, root = study
     server = AppServer(home.root, port=0)
@@ -149,8 +172,107 @@ def test_cards_are_added_to_the_study_through_the_api(study):
         studied = load_study(root)
         assert studied.data["north_weight"].where == "tag = 'north'" and studied.kpis["north_legs"].sql == NORTH_LEGS
         server.assistant_provider = FakeProvider(responses=[json.dumps(GOOD)])
-        status, answer = call(server, "POST", f"/api/studies/{slug}/assistant", {"message": "more"})
-        assert status == 200 and answer["cards"]
+        answer = _asked(server, slug, "more")
+        assert answer["state"] == "done" and answer["cards"]
+    finally:
+        server.stop()
+
+
+class _Slow(FakeProvider):
+    """A model that answers only when the test lets it: `complete` waits for `go`."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.asked = threading.Event()
+        self.go = threading.Event()
+
+    def complete(self, messages, **kwargs):
+        self.asked.set()
+        assert self.go.wait(30), "the test never let the model answer"
+        return super().complete(messages, **kwargs)
+
+
+def test_a_question_runs_in_the_background_and_can_be_cancelled(study):
+    home, root = study
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        slug = root.name
+        slow = _Slow(responses=[json.dumps(GOOD)])
+        server.assistant_provider = slow
+        status, started = call(server, "POST", f"/api/studies/{slug}/assistant", {"message": "Try weights", "screen": "step-4"})
+        assert status == 200 and started["state"] == "thinking" and started["turn"], started
+        turn = started["turn"]
+        assert slow.asked.wait(10), "the model is asked in the background"
+        status, body = call(server, "GET", f"/api/studies/{slug}/assistant?turn={turn}")
+        assert status == 200 and body["state"] == "thinking"
+        status, body = call(server, "GET", f"/api/studies/{slug}/assistant")
+        assert status == 200 and body["thinking"] == turn, "a page opened meanwhile learns a question is still being thought about"
+        status, body = call(server, "POST", f"/api/studies/{slug}/assistant", {"message": "Another"})
+        assert status == 409 and "thinking" in body["error"]
+        status, body = call(server, "POST", f"/api/studies/{slug}/assistant/cancel")
+        assert status == 200 and body == {"cancelled": True}
+        assert call(server, "GET", f"/api/studies/{slug}/assistant?turn={turn}")[1]["state"] == "cancelled"
+        slow.go.set()
+        server.work[f"assistant:{slug}"]["thread"].join(10)
+        status, history = call(server, "GET", f"/api/studies/{slug}/assistant")
+        assert [t["role"] for t in history["turns"]] == ["user", "assistant"]
+        answer = history["turns"][1]
+        assert answer["cancelled"] is True and "cards" not in answer, "the model's answer is thrown away"
+        assert history["thinking"] is None and all(t["id"] for t in history["turns"])
+        assert history["turns"][0]["id"] == turn and answer["turn"] == turn
+        assert call(server, "POST", f"/api/studies/{slug}/assistant/cancel")[1] == {"cancelled": False}, "nothing to cancel now"
+        # A new question is allowed, and the cancelled one is not put to the model again.
+        fast = FakeProvider(responses=[json.dumps(GOOD)])
+        server.assistant_provider = fast
+        answer = _asked(server, slug, "Scale the northern weights")
+        assert answer["state"] == "done" and len(answer["cards"]) == 5 and answer["usd"] is None, "the fake has no price"
+        asked = [m["content"] for m in fast.calls[0]["messages"] if m["role"] == "user"]
+        assert len(asked) == 2 and asked[-1] == "Scale the northern weights", "no half entry is replayed"
+    finally:
+        server.stop()
+
+
+def test_a_cancelled_question_direct_from_python(study):
+    home, root = study
+    cancelled = threading.Event()
+    cancelled.set()
+    answer = assistant.ask(home, root, "Try weights", provider=_Priced(), cancelled=cancelled)
+    assert answer["cancelled"] is True and "cards" not in answer
+    turns = assistant.history(root)["turns"]
+    assert turns[-1]["cancelled"] is True and turns[-1]["usd"] == 0.0125, "what the discarded answer cost is still counted"
+    assert assistant._answered(assistant._entries(root)) == []
+
+
+def test_cards_keep_their_fate(study):
+    home, root = study
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        slug = root.name
+        server.assistant_provider = FakeProvider(responses=[json.dumps(GOOD)])
+        answer = _asked(server, slug, "Try weights")
+        turn = answer["turn"]
+        assert len(answer["cards"]) == 5
+        events = f"/api/studies/{slug}/assistant/cards"
+        for index, state in [(0, "applied"), (1, "dismissed"), (2, "dismissed"), (2, "applied")]:
+            status, body = call(server, "POST", events, {"turn": turn, "index": index, "state": state})
+            assert status == 200 and body == {"turn": turn, "index": index, "state": state}, body
+        assert call(server, "POST", events, {"turn": turn, "index": 9, "state": "applied"})[0] == 404
+        assert call(server, "POST", events, {"turn": "nope", "index": 0, "state": "applied"})[0] == 404
+        assert call(server, "POST", events, {"turn": turn, "index": 0, "state": "lost"})[0] == 400
+        status, history = call(server, "GET", f"/api/studies/{slug}/assistant")
+        assert [t["role"] for t in history["turns"]] == ["user", "assistant"], "card events are folded in, not listed"
+        reply = history["turns"][1]
+        assert reply["turn"] == turn
+        assert [c["state"] for c in reply["cards"]] == ["applied", "dismissed", "applied", "proposed", "proposed"], "the last event wins"
+        # The next question's replay tells the model which of its proposals were taken.
+        fast = FakeProvider(responses=['{"say": "Noted.", "cards": []}'])
+        server.assistant_provider = fast
+        _asked(server, slug, "And now?")
+        replayed = json.loads([m for m in fast.calls[0]["messages"] if m["role"] == "assistant"][1]["content"])
+        assert [c.get("applied") for c in replayed["cards"]] == [True, None, True, None, None]
+        assert replayed["cards"][0]["name"] == "north_legs"
     finally:
         server.stop()
 
@@ -332,8 +454,8 @@ def test_the_api_passes_the_screen_and_the_run_to_the_assistant(study):
     try:
         provider = FakeProvider(responses=[json.dumps({"say": "Three cases.", "cards": []})])
         server.assistant_provider = provider
-        status, answer = call(server, "POST", f"/api/studies/{root.name}/assistant", {"message": "Why?", "screen": "results", "run": run})
-        assert status == 200 and answer["say"] == "Three cases." and answer["cards"] == []
+        answer = _asked(server, root.name, "Why?", screen="results", run=run)
+        assert answer["state"] == "done" and answer["say"] == "Three cases." and answer["cards"] == []
         prompt = provider.calls[0]["messages"][1]["content"]
         assert "Screen: results" in prompt and "held-back" in prompt
     finally:
