@@ -340,3 +340,50 @@ def test_a_study_travels_as_one_zip(home):
         home.import_study(_zip({"study.yaml": b"study: 1\nname: Broken\n"}), "x.zip")
     assert home.slugs() == ["travel", "travel-2"], "a refused import leaves nothing behind"
     assert not any(p.name.startswith(".") for p in home.studies_dir.iterdir() if p.name != ".trash")
+
+
+def test_the_keys_file_is_private_to_the_user(home):
+    import os
+    import stat
+    import sys
+
+    home.set_keys({"OPENROUTER_API_KEY": "sk-test"})
+    path = home.root / ".env"
+    assert path.is_file()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_a_path_outside_the_study_is_refused_when_saved(home):
+    slug = _demo_study(home)
+    with pytest.raises(AppError, match="is not a file of this study") as caught:
+        home.save_step(slug, {"inputs": {"today": "C:/Windows/notepad.exe"}})
+    assert caught.value.status == 400
+    with pytest.raises(AppError, match="is not a file of this study"):
+        home.save_step(slug, {"cases": {"training": ["../other/x.json"], "test": []}})
+    with pytest.raises(AppError, match="is not a file of this study"):
+        home.save_step(slug, {"cases": {"training": [], "test": ["/etc/passwd"]}})
+    with pytest.raises(AppError, match="is not a file of this study"):
+        home.save_step(slug, {"inputs": {"today": "cases/x.json"}})  # an input lives under inputs/
+    with pytest.raises(AppError, match="is not a file of this study"):
+        home.save_step(slug, {"cases": {"training": ["inputs/x.json"], "test": []}})
+    home.save_step(slug, {"cases": {"training": ["cases/x.json"], "test": []}, "inputs": {"today": "inputs/t.json"}})
+    study = load_study(home.study_root(slug))
+    assert study.training == ["cases/x.json"] and study.inputs == {"today": "inputs/t.json"}
+
+
+def test_removing_an_input_with_a_hostile_path_deletes_nothing(home, tmp_path):
+    import yaml
+
+    slug = _demo_study(home)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me", encoding="utf-8")
+    path = home.study_root(slug) / "study.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["inputs"] = {"today": str(victim)}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    with pytest.raises(AppError):
+        home.remove_input(slug, "today")
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    with pytest.raises(AppError):
+        home.remove_input(slug, "today")  # still refused: nothing was saved either

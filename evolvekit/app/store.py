@@ -228,6 +228,8 @@ class Home:
         lines = ["# API keys for evolvekit's app. Written by the app; it never shows them again."]
         lines += [f"{name}={value}" for name, value in sorted(values.items())]
         _atomic_write(self.root / ".env", "\n".join(lines) + "\n")
+        if os.name == "posix":  # the user's eyes only; Windows has no mode bits to set
+            os.chmod(self.root / ".env", 0o600)
         self.export_keys()
 
     def export_keys(self) -> None:
@@ -350,6 +352,13 @@ class Home:
             updated = Study.parse(document)
         except HarnessError as exc:
             raise AppError(str(exc)) from None
+        # Every path that enters study.yaml is judged as text first: a case
+        # lives under cases/, an input under inputs/, nothing points outside.
+        for label, paths, folder in (("cases.training", updated.training, "cases/"),
+                                     ("cases.test", updated.test, "cases/"),
+                                     ("inputs", updated.inputs.values(), "inputs/")):
+            for value in paths:
+                _study_file(root, label, value, folder)
         save_study(updated, root)
 
     # -- managing studies: the trash, the archive, copies, the zip ---------------------
@@ -671,7 +680,7 @@ class Home:
         root, study, _ = self.load(slug)
         path = study.inputs.pop(input_name, None)
         if path:
-            (root / path).unlink(missing_ok=True)
+            _study_file(root, "inputs", path, "inputs/").unlink(missing_ok=True)
         save_study(study, root)
 
     @staticmethod
@@ -824,6 +833,18 @@ def split_words(held: int, total: int) -> str:
     if held < 5:
         return f"{held} held back: a fair answer for a clear, consistent gain."
     return f"{held} held back: a firm answer."
+
+
+def _study_file(root: Path, label: str, relative: str, folder: str) -> Path:
+    """`relative`, a path from study.yaml, resolved inside `root` and under
+    `folder`; refused as a 400 that names the field otherwise."""
+    refusal = AppError(f"{label}: {relative!r} is not a file of this study")
+    if not isinstance(relative, str) or not relative.startswith(folder):
+        raise refusal
+    try:
+        return safe_relative(root, relative)
+    except AppError:
+        raise refusal from None
 
 
 def safe_relative(root: Path, relative: str) -> Path:
