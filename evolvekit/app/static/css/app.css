@@ -105,6 +105,7 @@ main { outline: none; }
 .btn-secondary:active { background: var(--surface-wash); }
 .btn-quiet { background: transparent; color: var(--accent-ink); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
 .btn-quiet:hover { background: var(--surface-panel); }
+.btn[aria-busy="true"] { cursor: progress; opacity: .7; }
 .btn:disabled { background: transparent; color: var(--ink-3); border: 1.5px solid var(--line-rule); cursor: not-allowed; }
 .btn-quiet:disabled { border: 0; }
 .btn.on-accent.btn-primary { background: var(--on-accent); color: var(--accent); }
@@ -331,7 +332,7 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .drawer { position: fixed; top: 64px; right: 0; bottom: 0; width: 420px; max-width: 100vw; z-index: 25; background: var(--surface-raised); box-shadow: var(--elev-2);
   display: flex; flex-direction: column; animation: slide-in var(--dur-base) var(--ease-enter); }
 .drawer.is-wide { width: 560px; }
-@keyframes slide-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes slide-in { from { transform: translateX(24px); } to { transform: none; } }
 .drawer-head { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 16px; border-bottom: 1px solid var(--line-rule); min-height: 57px; }
 .drawer-titles { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .drawer-titles h2 { outline: none; }

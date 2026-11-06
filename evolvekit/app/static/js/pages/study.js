@@ -95,7 +95,13 @@
     var planned = c.runs_per_case && heldCount() ? c.runs_per_case * heldCount() : null;
     return Object.assign({}, c, { planned: planned });
   }
-  function bestPct() { var b = (st.status.best || {}).pct; return b != null && b > 0 ? b : null; }
+  function bestPct() {
+    var t = st.tries, last = t && (t.best || []).slice(-1)[0];
+    if (last && last.id !== t.base) return last.pct > 0 ? last.pct : null;
+    if (t && t.available && t.combinations.length) return null; // tries, and no full look beat today yet
+    var b = (st.status.best || {}).pct;
+    return b != null && b > 0 ? b : null;
+  }
 
   function strip() {
     var s = st.status, d = decisionOf(), f = (st.results && st.results.final) || {}, keep = EK.keepWords({ what: whatOf() });
@@ -170,6 +176,10 @@
     if (!best || best.id === t.base) return "";
     var ago = Math.max(0, t.now_h - best.h);
     return "Found " + (ago < 1 ? Math.max(1, Math.round(ago * 60)) + " min" : EK.hours(ago)) + " ago, on the " + EK.plural(t.cases.length, "study case") + ".";
+  }
+  function settingsText() {
+    return fetch(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run)), { headers: { "X-Evolvekit-Token": EK._token } })
+      .then(function (r) { if (!r.ok) throw new Error("The settings file could not be read"); return r.text(); });
   }
   function hasExport(name) { return ((st.results && st.results.downloads) || []).some(function (d) { return d.name === name; }); }
 
@@ -401,10 +411,11 @@
     });
     var keepIt = d !== "use";
     return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">Hand it over</h2>
-      ${keepIt ? html`<p class="type-body strong">Nothing to change: ${EK.keepWords({ what: whatOf() }).replace(/^Keep /, "keep ")}.</p>
-        <p class="type-small ink-2">Below is what the search found. It is not proven on held-back cases: use it at your own risk.</p>` : ""}
+      ${keepIt ? html`<p class="type-body strong">Nothing to change: ${EK.keepWords({ what: whatOf() }).replace(/^Keep /, "keep ")}${(r.context || {}).compared_with ? " (" + r.context.compared_with + ")" : ""}.</p>
+        <p class="type-small ink-2">Hand over today’s settings. Below them is what the search found: not proven on held-back cases, so not recommended.</p>` : ""}
       ${changedTable()}
-      <div class="actions">${hasExport("settings_json") ? EK.button(keepIt ? "Show the new settings" : "Show the settings file", { kind: "secondary", act: "show-settings" }) : ""}
+      <div class="actions">${keepIt && hasExport("settings_json") ? EK.button("Show today’s settings", { act: "show-today" }) : ""}
+        ${hasExport("settings_json") ? EK.button(keepIt ? "Settings found, not recommended" : "Show the settings file", { kind: "secondary", act: "show-settings" }) : ""}
         ${EK.button("Copy a summary", { kind: "secondary", act: "copy-summary" })}
         ${EK.link("Open the report", { href: EK.withToken(EK.studyPath(st.slug, "/download/report?run=" + EK.q(st.run) + "&view=1")), target: "_blank" })}</div>
       <div class="link-row">${dl}${EK.link("Save the study as zip", { href: EK.withToken(EK.studyPath(st.slug, "/download/study")), download: true })}</div></section>`;
@@ -458,7 +469,7 @@
   function notices() {
     var s = st.status, out = [];
     if (s.phase === "search" && /again/.test(s.sentence || "")) out.push(EK.notice("info", "Continued where it stopped, after a restart."));
-    if (s.busy_line && isLive()) out.push(EK.notice("warning", "Your computer is busy. Tries may run slower.", { text: "What is busy?", act: "busy" }));
+    if (s.busy_line && isLive()) out.push(EK.notice("warning", "Your computer is busy. Tries may run slower.", { text: "Is it still fair?", act: "busy" }));
     var latest = (st.doc.runs || []).slice(-1)[0];
     if (latest && latest.id !== st.run) out.push(EK.notice("info", "An older run of this study.", { text: "See the latest", act: "latest" }));
     return EK.join(out);
@@ -547,9 +558,23 @@
         var text = (st.results && st.results.summary_text) || "";
         EK.copy(text).then(function (ok) { EK.toast(ok ? "done" : "error", ok ? "Summary copied" : "Could not copy"); });
       },
+      "show-today": function () {
+        return settingsText().then(function (text) {
+          var today = text;
+          try {
+            var parsed = JSON.parse(text);
+            ((st.results && st.results.changed) || []).forEach(function (c) { if (c.changed && c.name in parsed && c.old !== undefined) parsed[c.name] = c.old; });
+            today = JSON.stringify(parsed, null, 2);
+          } catch (e) { /* not JSON: shown as it is */ }
+          EK.openDrawer({ title: "Today’s settings", sub: ((st.results || {}).context || {}).compared_with || "What the application runs with now", wide: true,
+            body: html`<p class="type-small ink-2">The verdict says keep these. Send this file.</p><pre class="code">${today}</pre><div class="actions">${EK.button("Copy", { act: "copy" })}</div>`,
+            acts: { copy: function () { EK.copy(today).then(function (ok) { EK.toast(ok ? "done" : "error", ok ? "Copied" : "Could not copy"); }); } } });
+        }).catch(EK.fail);
+      },
       "show-settings": function () {
-        fetch(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run)), { headers: { "X-Evolvekit-Token": EK._token } }).then(function (r) { return r.text(); }).then(function (text) {
-          EK.openDrawer({ title: "The settings file", sub: "What the application runs with", wide: true,
+        var keepIt = decisionOf() !== "use";
+        return settingsText().then(function (text) {
+          EK.openDrawer({ title: keepIt ? "Settings the search found" : "The settings file", sub: keepIt ? "Not recommended: not proven on held-back cases" : "Use these in the application", wide: true,
             body: html`<pre class="code">${text}</pre><div class="actions">${EK.button("Copy", { kind: "secondary", act: "copy" })}${EK.button("Save it", { act: "save" })}</div>`,
             acts: { copy: function () { EK.copy(text).then(function (ok) { EK.toast(ok ? "done" : "error", ok ? "Copied" : "Could not copy"); }); },
               save: function () { location.href = EK.withToken(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run))); } } });
@@ -559,7 +584,11 @@
         EK.openDrawer({ title: "The rule", body: html`<p class="type-body">${(st.results && st.results.final && st.results.final.rule) || "The app says use it when the chance of a gain is at least 9 in 10 and the worst plausible case is within 1 % of today."}</p>
           <p class="type-small ink-2">The final check runs the best combination and today’s ${whatOf()} on the held-back cases, which the search never saw.</p>` });
       },
-      busy: function () { EK.openDrawer({ title: "Your computer is busy", body: html`<p class="type-body">${st.status.busy_line}</p>` }); },
+      busy: function () {
+        EK.openDrawer({ title: "Your computer is busy", body: html`<p class="type-body">Other programs used this computer while the study ran.</p>
+          <p class="type-body">Tries then take longer and may find a little less. The answer stays fair: the final check runs today’s settings and the new ones side by side, under the same load.</p>
+          <p class="type-small ink-2">You need not stop the study. For the best result, close heavy programs while it runs.</p>` });
+      },
       latest: function () { EK.go(EK.studyHref(st.slug)); },
       runs: runsDrawer
     };

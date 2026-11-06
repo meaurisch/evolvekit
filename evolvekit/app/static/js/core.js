@@ -56,7 +56,13 @@
       if (attr === "data-act" && target.tagName === "A") ev.preventDefault();
       if (attr === "data-submit") ev.preventDefault();
       if (target.disabled || target.getAttribute("aria-disabled") === "true") return;
-      fn(target, ev);
+      var done = fn(target, ev);
+      if (done && typeof done.then === "function" && target.tagName === "BUTTON") {
+        target.disabled = true;
+        target.setAttribute("aria-busy", "true");
+        var settle = function () { target.disabled = false; target.removeAttribute("aria-busy"); };
+        done.then(settle, settle);
+      }
     }
     el.addEventListener("click", function (ev) { run("data-act", ev); });
     el.addEventListener("change", function (ev) { run("data-change", ev); });

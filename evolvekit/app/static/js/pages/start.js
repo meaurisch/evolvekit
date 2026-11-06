@@ -196,7 +196,7 @@
     if (st.finding) line = html`<div class="app-line" role="status"><span class="breathe">${EK.gl("folder", 20)}</span><div class="app-line-words"><span class="app-line-title">Looking for ${label}…</span>
       <span class="type-small ink-2">On this computer. Up to 10 s.</span></div></div>`;
     else if (app) line = html`<div class="app-line">${EK.icon("good", 20)}<div class="app-line-words"><span class="app-line-title">${(st.harness || harnessOf(st.pick) || {}).title || label} ${app.version || ""}</span>
-      <span class="type-small ink-2">${app.mine ? app.path : "Found on this computer"}</span></div>${EK.button("Other", { kind: "quiet", size: "s", act: "other-app" })}</div>`;
+      <span class="type-small ink-2"${EK.attrs({ title: app.path })}>${app.mine ? "Ready on this computer" : "Found on this computer"}</span></div>${EK.button("Other", { kind: "quiet", size: "s", act: "other-app" })}</div>`;
     else {
       var near = (st.found || []).filter(function (x) { return x.version; })[0] || (st.found || [])[0];
       line = html`<div class="app-line" role="alert">${EK.icon("warning", 20)}<div class="app-line-words"><span class="app-line-title">${label} not found</span>
@@ -327,7 +327,7 @@
       },
       "other-app": function () { appDrawer(main); },
       next: function () {
-        ensureStudy().then(function () {
+        return ensureStudy().then(function () {
           var d = st.doc;
           var smallest = (d.cases || []).filter(function (c) { return c.set === "training"; })[0];
           var stale = !d.preview || d.preview.state === "none" || d.preview.state === "interrupted" ||

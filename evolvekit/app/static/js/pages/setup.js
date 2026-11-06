@@ -31,7 +31,7 @@
     return EK.get(EK.studyPath(st.slug)).then(function (doc) { st.doc = doc; return loadPlan(); }).then(function () { draw(main); });
   }
   function save(changes, main) {
-    return EK.patch(EK.studyPath(st.slug), changes).then(function (doc) { st.doc = doc; return loadPlan(); }).then(function () {
+    return EK.patch(EK.studyPath(st.slug), changes).then(function (doc) { st.doc = doc; draw(main); return loadPlan(); }).then(function () {
       draw(main);
       if (EK.drawerKind() && redrawDrawer) redrawDrawer();
     }).catch(EK.fail);
@@ -307,6 +307,7 @@
           return html`<button type="button" class="filter-chip" aria-pressed="${g === st.group ? "true" : "false"}" data-act="group" data-arg="${g}">${g}</button>`;
         })}</div>` : ""}
         <p class="type-small ink-2">${n} tuned · ${all - n} keep today’s values · recommended first</p>
+        <p class="type-small ink-2">Tune: the search tries values. Fixed: always the value you set. Default: the application’s own value.</p>
         <div>${rows()}</div>${inputs.map(settingsInput)}`;
     }
     function settingsInput(name) {
@@ -563,7 +564,7 @@
         var hours = h + m / 60;
         if (hours <= 0) { EK.toast("error", "Time in total: more than 0"); return; }
         var cap = EK.readNumber(document.getElementById("t-ai-cap").value);
-        save({ limits: { time_per_case_s: unit === "min" ? per * 60 : per, retries: Number(document.getElementById("t-retries").value), runs_per_case: Number(document.getElementById("t-runs").value) },
+        return save({ limits: { time_per_case_s: unit === "min" ? per * 60 : per, retries: Number(document.getElementById("t-retries").value), runs_per_case: Number(document.getElementById("t-runs").value) },
           budget: { hours: Math.round(hours * 1000) / 1000, ai: { enabled: document.getElementById("t-ai").checked, max_usd: cap == null ? 1 : cap } } }, main).then(function () { EK.closeDrawer(); EK.toast("done", "Saved"); });
       },
       expert: function () {

@@ -228,3 +228,27 @@ defaults; the new file is not proven.
   legend never repeats a count; a setting's tip gives its own name
   (`penalty_decrease`); *held back* is explained where it is first used;
   Pepper's news clears itself; a measure without a label reads as words.
+
+## The redesign, round 2 — 7/10, no blocker (2026-11-06)
+
+| Getting started | Knowing what to do next | Setting up | Confidence while it ran | Understanding the result | Handing it over |
+|---|---|---|---|---|---|
+| 8 | 7 | 7 | 6 | 7 | 6 |
+
+The same task; again *keep today's settings* (0.47 % better on the held-back
+cases, chance under 9 in 10, at worst 2.57 % worse).
+
+- **(major) Which file to send on a keep.** *Show today's settings* is the
+  first button of *Hand it over* on a keep — the file the verdict says to
+  keep, named after the starting point (*PyVRP's own defaults*); the search's
+  settings sit beside it as *Settings found, not recommended*.
+- **(major) The busy warning.** *Is it still fair?* says that the final check
+  runs today's settings and the new ones side by side under the same load,
+  and that the study need not stop.
+- **Found N min ago kept resetting.** The strip's best so far and when it was
+  found come from the same place now: the full looks of the Tries view.
+- **Small ones.** A button whose action takes a moment is disabled and busy
+  until it is done; Save in a drawer shows its result at once; the What to
+  tune drawer says what Tune, Fixed and Default mean; the application reads
+  *Ready on this computer*, its path behind *Other*; drawers slide in without
+  fading, so nothing shows through.
