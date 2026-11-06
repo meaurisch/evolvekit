@@ -110,7 +110,8 @@
     } else if (s.phase === "search") {
       var b = bestPct();
       Object.assign(x, { kicker: (cardState().continued ? "Searching again · " : "Searching · ") + roundWord(), head: b ? "Best so far: " + EK.better(b) : "Nothing better yet",
-        tag: b ? "Not checked yet" : "", sub: s.now || s.sentence, caption: (s.time && s.time.finish_at ? "Done around " + s.time.finish_at : "") + (left ? " · " + left : ""),
+        tag: b ? "Not checked yet" : "", sub: foundWords() || s.now || s.sentence,
+        caption: EK.capital(roundWord()) + (s.time && s.time.finish_at ? " · done around " + s.time.finish_at : left ? " · " + left : ""),
         acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
     } else if (s.phase === "check") {
       Object.assign(x, { kicker: "Final check" + (ch && ch.planned ? " · " + ch.pairs + " of " + ch.planned + " runs" : ""), head: "No answer yet",
@@ -160,6 +161,13 @@
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Finished", head: "No final check", sub: f.line || "There is no final check for this run.", acts: [] });
     }
     return x;
+  }
+  /** "Found 14 min ago, on the 10 study cases." for the best so far, from the tries. */
+  function foundWords() {
+    var t = st.tries, best = t && (t.best || []).slice(-1)[0];
+    if (!best || best.id === t.base) return "";
+    var ago = Math.max(0, t.now_h - best.h);
+    return "Found " + (ago < 1 ? Math.max(1, Math.round(ago * 60)) + " min" : EK.hours(ago)) + " ago, on the " + EK.plural(t.cases.length, "study case") + ".";
   }
   function hasExport(name) { return ((st.results && st.results.downloads) || []).some(function (d) { return d.name === name; }); }
 
@@ -243,7 +251,8 @@
     var keepWord = whatOf() === "data" ? "today’s data" : "today’s settings";
     if (st.view === "tries") {
       var say = sayLine(t, family);
-      var p = EK.triesPlot(t, { W: W, H: phone ? 250 : 380, phone: phone, chosen: st.chosen, family: family, keepWord: keepWord });
+      var planH = isLive() && st.status.time && st.status.time.hours ? st.status.time.hours * 0.85 : 0;
+      var p = EK.triesPlot(t, { W: W, H: phone ? 250 : 380, phone: phone, chosen: st.chosen, family: family, keepWord: keepWord, planH: planH });
       plotPoints = [{ el: "tries", points: p.points }];
       return html`${say ? html`<p class="type-body view-say">${say}</p>` : ""}${EK.raw(p.svg)}${EK.triesLegend(t, { family: family })}`;
     }

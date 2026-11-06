@@ -68,7 +68,7 @@
     var hi = 5, lo = -6;
     combos.forEach(function (c) { if (c.pct != null && c.full) hi = Math.max(hi, Math.ceil(c.pct + 1)); });
     hi = Math.min(hi, 50);
-    var end = Math.max(d.end_h, 1 / 3600);
+    var end = Math.max(d.end_h, done ? 0 : o.planH || 0, 1 / 3600); // while it runs, the axis spans the planned time
     function X(h) { return l + h / end * (W - l - r); }
     function Y(p) { return top + (hi - Math.max(lo, Math.min(hi, p))) / (hi - lo) * (H - top - b); }
     var base = H - b, out = [], points = [];

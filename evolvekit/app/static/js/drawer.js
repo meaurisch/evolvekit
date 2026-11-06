@@ -173,15 +173,17 @@
         return;
       }
       if (a.say) out.push(EK.chatBubble(a.say));
-      var usable = 0;
+      var usable = (a.cards || []).filter(function (c) { return (c.state || "proposed") === "proposed" && c.ok !== false; }).length;
+      if ((a.cards || []).length) {
+        out.push(html`<div class="actions" style="justify-content:space-between"><span class="type-small ink-2">${EK.plural(a.cards.length, "proposal")}</span>
+          ${usable >= 2 ? EK.button("Apply all", { kind: "secondary", size: "s", act: "card-apply-all", arg: a.turn, label: "Apply all " + usable }) : ""}</div>`);
+      }
       (a.cards || []).forEach(function (c, i) {
         var key = cardKey(a.turn, i), state = c.state || "proposed";
-        if (state === "proposed" && c.ok !== false) usable++;
         if (ask.editing[key]) state = "edited";
         out.push(EK.proposalCard({ key: key, kindWord: KIND_WORD[c.kind] || "Note", title: cardTitle(c), detail: cardDetail(c), state: state,
           check: c.problem || c.note || (c.value != null ? "Today: " + c.value : ""), problem: c.ok === false ? c.problem : null, editor: state === "edited" ? editor(c, key) : null }));
       });
-      if (usable >= 2) out.push(html`<div>${EK.button("Apply all " + usable, { kind: "secondary", size: "s", act: "card-apply-all", arg: a.turn })}</div>`);
     });
     if (ask.thinking && !questions.some(function (q) { return q.id === ask.thinking; })) out.push(EK.thinkingRow());
     return EK.join(out);

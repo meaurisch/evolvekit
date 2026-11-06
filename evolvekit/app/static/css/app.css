@@ -231,6 +231,10 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .choice-card { position: relative; flex: 1 1 220px; display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; min-height: 44px; border: 1.5px solid var(--line-edge);
   border-radius: var(--radius-1); background: var(--surface-page); cursor: pointer; color: var(--ink-1); }
 .choice-card:hover { background: var(--surface-panel); }
+.choice-group.is-tight { gap: 10px; }
+.choice-group.is-tight .choice-card { flex: 1 1 150px; padding: 12px 14px; }
+.choice-group.is-tight .choice-card.is-on { padding: 11.5px 13.5px; }
+.choice-group.is-tight .choice-title { font-size: 15px; line-height: 20px; }
 .choice-card.is-on { border: 2px solid var(--ink-1); background: var(--surface-wash); padding: 13.5px 15.5px; }
 .choice-card.is-disabled { border-color: var(--line-rule); color: var(--ink-3); background: transparent; cursor: not-allowed; }
 .choice-card:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }

@@ -282,7 +282,7 @@
   };
 
   /** KindChoice: a radio group drawn as cards. options: [{value, title, sub, disabled}] */
-  EK.kindChoice = function (name, legend, options, selected, change) {
+  EK.kindChoice = function (name, legend, options, selected, change, tight) {
     var out = options.map(function (op) {
       var on = op.value === selected;
       return html`<label class="choice-card${on ? " is-on" : ""}${op.disabled ? " is-disabled" : ""}">
@@ -290,7 +290,7 @@
         <svg class="radio-dot" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="8.5" fill="none" style="stroke:var(--ink-1)" stroke-width="1.8"/>${on ? raw('<circle cx="10" cy="10" r="4.5" style="fill:var(--ink-1)"/>') : ""}</svg>
         <span class="choice-words"><span class="choice-title">${op.title}</span>${op.sub ? html`<span class="type-small ink-2">${op.sub}</span>` : ""}</span></label>`;
     });
-    return html`<fieldset class="choice-group"><legend class="sr-only">${legend}</legend>${out}</fieldset>`;
+    return html`<fieldset class="choice-group${tight ? " is-tight" : ""}"><legend class="sr-only">${legend}</legend>${out}</fieldset>`;
   };
 
   /** A numbered block of Start a study: number, title, its control. */
@@ -367,7 +367,7 @@
 
   /** ServiceChoice: the AI services as radio cards. */
   EK.serviceChoice = function (services, selected, change) {
-    return EK.kindChoice("service", "Service", services, selected, change);
+    return EK.kindChoice("service", "Service", services, selected, change, true);
   };
 
   /** A drawer docked on the right (560 px for Set up, 420 px for Ask Pepper), full screen on a phone with Back. */
