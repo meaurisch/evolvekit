@@ -177,7 +177,8 @@
     var W = o.W, phone = !!o.phone, rowH = phone ? 30 : 34, l = phone ? 64 : 200, r = phone ? 54 : 120, top = 34;
     var cases = d.cases, n = cases.length, H = top + n * rowH + 26;
     var res = EK.caseResults(d), A = -6, B = 6;
-    Object.keys(res).forEach(function (k) { B = Math.max(B, Math.min(30, Math.ceil(res[k].pct))); A = Math.min(A, Math.max(-30, Math.floor(res[k].pct))); });
+    // As drawn: worse than -6 % is pinned to the left edge; the better side grows with the best result, up to +20 %.
+    Object.keys(res).forEach(function (k) { if (res[k].full) B = Math.max(B, Math.min(20, Math.ceil(res[k].pct))); });
     function X(v) { return l + (Math.max(A, Math.min(B, v)) - A) / (B - A) * (W - l - r); }
     function Y(i) { return top + i * rowH + rowH / 2; }
     var out = [], points = [];

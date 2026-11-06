@@ -1484,7 +1484,10 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
     except Exception:  # noqa: BLE001 - a card must render even for a damaged study
         goal = {"says": "the goal", "direction": "lower"}
     plan = _plan(run_dir, job) or {}
-    document = (document_of(run_dir) or {}) if document_of is not None and (run_dir / "events.jsonl").exists() else {}
+    # How far a run got is read from its status document, which is not free on a long run: only for a
+    # card that shows it (running, stopped, failed), never for a finished one.
+    wants = state in ACTIVE or state in ("stopped", "failed")
+    document = (document_of(run_dir) or {}) if wants and document_of is not None and (run_dir / "events.jsonl").exists() else {}
     last = ((document.get("health") or {}).get("generation") or {}).get("last_finished")
     facts: dict[str, Any] = {"phase": state, "what": _kind_of(study),
                              "rounds": {"done": max(0, int(last)) if isinstance(last, int) else 0,

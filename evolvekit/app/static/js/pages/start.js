@@ -177,8 +177,8 @@
   // ------------------------------------------------------------------ drawing
   function caseItems() {
     return (st.doc ? st.doc.cases : []).map(function (c) {
-      return { name: c.name, short: c.name.split(/[-_.\s]/)[0].slice(0, 6), size: c.bytes || 0, held: c.set === "test", refused: c.inspected && c.inspected.ok === false };
-    });
+      return { name: c.name, short: EK.shortCase(c.name), size: c.bytes || 0, held: c.set === "test", refused: c.inspected && c.inspected.ok === false };
+    }).sort(function (a, b) { return a.size - b.size || (a.name < b.name ? -1 : 1); });
   }
   function appBlock() {
     var app = chosenApp(), label = appLabel();
@@ -186,7 +186,7 @@
       return html`<div class="app-line" role="alert">${EK.icon("warning", 20)}<div class="app-line-words"><span class="app-line-title">No application found</span>
         <span class="type-small ink-2">Add one from a harness zip.</span></div>${EK.link("Add a harness", { href: "#/" })}</div>`;
     }
-    var picker = !st.harness && st.harnesses.length > 1 ? html`<div class="field"><label class="field-label" for="pick-harness">What to tune</label>
+    var picker = !st.harness && st.harnesses.length > 1 ? html`<div class="field"><label class="field-label" for="pick-harness">Which application</label>
       <select class="input" id="pick-harness" data-change="harness">${st.harnesses.map(function (h) {
         return html`<option value="${h.id}"${EK.attrs({ selected: h.id === st.pick })}>${h.title}</option>`;
       })}</select></div>` : "";

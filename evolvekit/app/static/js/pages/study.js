@@ -130,7 +130,7 @@
       Object.assign(x, { tone: "accent", mark: "use", kickerTone: "", kicker: "Final check done · " + EK.plural(f.n || heldCount(), "case"), head: "Use it: " + EK.better(f.mean),
         sub: EK.rangeCaption({ decision: "use", chance: f.chance, ci95: f.ci95 }).split(" · at best")[0], right: "range",
         range: [f.mean, f.ci95 && f.ci95[0], f.ci95 && f.ci95[1]], caption: "Likely range, on the final check", rule: true,
-        acts: [hasExport("settings_json") ? { text: "Save the settings file", act: "save-settings" } : null, { text: "Copy a summary", kind: "secondary", act: "copy-summary" }].filter(Boolean) });
+        acts: [hasExport("settings_json") ? { text: "Save settings file", act: "save-settings" } : null, { text: "Copy", kind: "secondary", act: "copy-summary", label: "Copy a summary" }].filter(Boolean) });
     } else if (d === "keep") {
       Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Final check done · " + EK.plural(f.n || heldCount(), "held-back case"), head: keep,
         sub: f.mean != null ? EK.capital(EK.better(f.mean)) + ", but not sure enough." : "Not proven on new cases.", right: "range",
@@ -186,7 +186,9 @@
     var cs = cardState(), phase = EK.pepperPhase(cs), x = strip();
     var finished = cs.kind === "finished";
     var announce = null;
-    if (st.phase && st.phase !== phase && finished) announce = phase === "butterfly" ? "I’m out! " + x.head + ", checked on " + EK.plural(((st.results || {}).final || {}).n || heldCount(), "case") + "." : "I’m out. " + x.head + ".";
+    var seenKey = "evolvekit.hatched." + st.slug + "/" + st.run, seen = true;
+    try { seen = !!localStorage.getItem(seenKey); if (finished && !seen) localStorage.setItem(seenKey, "1"); } catch (e) { seen = true; }
+    if (((st.phase && st.phase !== phase) || !seen) && finished) announce = phase === "butterfly" ? "I’m out! " + x.head + ", checked on " + EK.plural(((st.results || {}).final || {}).n || heldCount(), "case") + "." : "I’m out. " + x.head + ".";
     if (st.phase && st.phase !== phase && !finished && phase === "cocoon") announce = "Halfway. I’m in my cocoon now.";
     EK.companion.show({ phase: phase, slug: st.slug, say: x.head + ". " + (x.sub || ""), announce: announce, finished: finished });
     if (st.phase && st.phase !== phase && finished) notify(x.head);
@@ -239,9 +241,10 @@
     var family = !!st.chosen && decisionOf() === "use";
     var keepWord = whatOf() === "data" ? "today’s data" : "today’s settings";
     if (st.view === "tries") {
+      var say = sayLine(t, family);
       var p = EK.triesPlot(t, { W: W, H: phone ? 250 : 380, phone: phone, chosen: st.chosen, family: family, keepWord: keepWord });
       plotPoints = [{ el: "tries", points: p.points }];
-      return html`${EK.raw(p.svg)}${EK.triesLegend(t, { family: family })}`;
+      return html`${say ? html`<p class="type-body view-say">${say}</p>` : ""}${EK.raw(p.svg)}${EK.triesLegend(t, { family: family })}`;
     }
     if (st.view === "cases") {
       var cv = EK.casesView(t, { W: W, phone: phone, chosen: st.chosen });
@@ -266,6 +269,17 @@
     return html`<p class="type-small ink-2">${EK.plural(params.length, "setting")} tuned, the ones that moved the result most first. The band: values in tries over 1 % better.</p>
       <div class="settings-grid">${panels}</div>
       ${params.length > 6 && !st.showAllSettings ? html`<p>${EK.link("Show all " + params.length, { act: "all-settings" })}</p>` : ""}`;
+  }
+  /** One sentence over the Tries plot: what is new, or what is marked. */
+  function sayLine(t, family) {
+    var d = decisionOf();
+    if (family) return "The chosen combination and its family, back to today’s " + whatOf() + ".";
+    if (d && st.chosen) return "The checked combination is marked.";
+    var best = (t.best || []).slice(-1)[0], running = (t.running || []).length;
+    if (!isLive() || !best) return "";
+    var ago = Math.max(0, t.now_h - best.h);
+    var when = best.id === t.base ? "" : ago < 1 ? "A new best " + Math.max(1, Math.round(ago * 60)) + " min ago." : "Nothing better for " + EK.hours(ago) + ".";
+    return (when + (running ? " " + EK.plural(running, "try", "tries") + " running now." : "")).trim();
   }
   function drawView() {
     var panel = document.getElementById("view-panel");

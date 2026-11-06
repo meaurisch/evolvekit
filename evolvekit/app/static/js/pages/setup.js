@@ -403,7 +403,7 @@
         var x = harnessKpis[k], on = chosen === k, today = todayValue(k);
         return html`<label class="goal-option${on ? " is-on" : ""}"><input type="radio" name="goal1" value="${k}"${EK.attrs({ checked: on })} data-change="pick">
           <span class="goal-words"><span class="goal-title">${x.label}</span><span class="type-small ink-2">${dirWords(x.direction)}${x.unit ? " · " + x.unit : ""}${today != null ? " · today " + today : ""}</span>
-          ${on && x.help ? html`<span class="type-small">${x.help}</span>` : ""}</span></label>`;
+</span></label>`;
       });
       var templates = st.h.kpi_templates || {};
       var blanks = Object.keys(templates).map(function (t) {
@@ -423,7 +423,7 @@
             return html`<label class="sr-only" for="${id}">${spec.label || p}</label><input id="${id}" inputmode="decimal" placeholder="${spec.label || p}" value="${params[p] == null ? "" : params[p]}" data-change="blank" data-arg="${t}" data-arg2="${p}">`;
           })}</span>`;
         }
-        var label = x.label.replace(/\{(\w+)\}/g, function (_, p) { return params[p] != null && params[p] !== "" ? params[p] : (x.params[p] && x.params[p].label) || "…"; });
+        var label = x.label.replace(/\{(\w+)\}/g, function (_, p) { return params[p] != null && params[p] !== "" ? params[p] : "…"; });
         return html`<label class="goal-option${on ? " is-on" : ""}"><input type="radio" name="goal1" value="tpl:${t}"${EK.attrs({ checked: on })} data-change="pick-blank" data-arg="${t}">
           <span class="goal-words"><span class="goal-title">${label}</span><span class="type-small ink-2">${dirWords(x.direction)}</span>${fill}</span></label>`;
       });

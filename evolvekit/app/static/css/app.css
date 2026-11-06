@@ -454,7 +454,7 @@ body.drawer-open .companion-host { display: none; }
 .cmp-side { display: flex; gap: 10px; align-items: flex-start; min-width: 0; }
 .cmp-side > div { min-width: 0; flex: 1; }
 .cmp-note { grid-column: 2 / -1; }
-.cmp-tag { flex: none; width: 24px; height: 24px; display: grid !important; place-items: center; border: 1.5px solid var(--ink-1); border-radius: var(--radius-full); font: 700 12px/1 var(--sans); }
+.cmp-tag { flex: none; width: 24px; height: 24px; place-items: center; border: 1.5px solid var(--ink-1); border-radius: var(--radius-full); font: 700 12px/1 var(--sans); }
 .verdict-line { display: flex; gap: 12px; align-items: flex-start; }
 .verdict-line > div { display: flex; flex-direction: column; gap: 2px; }
 .case-pair { display: block; width: 100%; height: auto; }
@@ -462,6 +462,7 @@ body.drawer-open .companion-host { display: none; }
   .compare-head { grid-template-columns: 1fr; gap: 10px; }
   .compare-row { grid-template-columns: 1fr; gap: 10px; padding: 14px 0; }
   .cmp-note { grid-column: 1; }
+  .cmp-tag.phone-only { display: grid !important; }
 }
 
 /* ------------------------------------------------------------------ the locked page */
