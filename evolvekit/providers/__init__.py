@@ -46,4 +46,8 @@ def build_provider(model_cfg: ModelConfig, *, base_dir: Path | None = None) -> P
         from evolvekit.providers.claude_cli import ClaudeCliProvider
 
         return ClaudeCliProvider(**options)
+    if model_cfg.provider == "copilot-cli":
+        from evolvekit.providers.copilot_cli import CopilotCliProvider
+
+        return CopilotCliProvider(**options)
     raise ProviderError(f"unknown provider {model_cfg.provider!r}")

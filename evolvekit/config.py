@@ -1134,7 +1134,7 @@ class EvaluateConfig:
 # models
 # --------------------------------------------------------------------------
 
-PROVIDER_NAMES = ("azure", "openrouter", "claude-cli", "fake")
+PROVIDER_NAMES = ("azure", "openrouter", "claude-cli", "copilot-cli", "fake")
 
 
 @dataclass(frozen=True)
@@ -1909,9 +1909,9 @@ def _check_embedding_route(config: Config) -> None:
             "search.novelty.near.method: 'embedding' requires a models.embed "
             "slot naming a backend with an embeddings API"
         )
-    if slot.provider == "claude-cli":
+    if slot.provider in ("claude-cli", "copilot-cli"):
         raise ConfigError(
-            "models.embed.provider: 'claude-cli' has no embeddings API; use "
+            f"models.embed.provider: {slot.provider!r} has no embeddings API; use "
             "'azure' or 'openrouter', or set search.novelty.near.method to "
             "'local'"
         )

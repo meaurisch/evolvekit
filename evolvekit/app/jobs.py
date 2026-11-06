@@ -67,9 +67,10 @@ one launched: the pid was recycled, by a reboot or by chance."""
 EXPORT_TIMEOUT_S = 300
 MAX_CONTINUE_HOURS = 48.0
 """The most a finished run is given at a time when it goes on."""
-REPORTS_COST = ("openrouter", "claude-cli")
+REPORTS_COST = ("openrouter", "claude-cli", "copilot-cli")
 """The providers that say what every call cost, so the dollar cap of AI search
-help holds without a price in the table."""
+help holds without a price in the table. `copilot-cli` counts Copilot
+requests, not dollars, and reports 0.0: the cap holds trivially."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 _BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB

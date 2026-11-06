@@ -67,6 +67,16 @@ def test_unknown_provider(minimal_raw, tmp_path):
         build(raw, tmp_path)
 
 
+def test_copilot_cli_is_a_provider_without_embeddings(minimal_raw, tmp_path):
+    raw = copy.deepcopy(minimal_raw)
+    raw["models"]["small"] = {"provider": "copilot-cli", "model": "gpt-5"}
+    assert build(raw, tmp_path).models.small.provider == "copilot-cli"
+    raw["search"] = {"novelty": {"near": {"method": "embedding"}}}
+    raw["models"]["embed"] = {"provider": "copilot-cli", "model": "x"}
+    with pytest.raises(ConfigError, match="'copilot-cli' has no embeddings API"):
+        build(raw, tmp_path)
+
+
 def test_negative_price_is_rejected(minimal_raw, tmp_path):
     raw = copy.deepcopy(minimal_raw)
     raw["models"]["small"]["price_in_per_mtok"] = -1

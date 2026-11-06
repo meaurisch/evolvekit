@@ -513,3 +513,76 @@ def test_the_api_applies_a_list_of_cards_and_records_their_fate(study):
         assert call(server, "POST", f"/api/studies/{slug}/cards", {"cards": "no"})[0] == 400
     finally:
         server.stop()
+
+
+# ---------------------------------------------------------------------------
+# GitHub Copilot CLI: no key, Copilot requests instead of dollars
+# ---------------------------------------------------------------------------
+
+
+def _copilot_home(tmp_path, monkeypatch, runner) -> Home:
+    """A home set to copilot-cli, whose provider answers through `runner`."""
+    from evolvekit.providers.copilot_cli import CopilotCliProvider
+
+    home = Home(tmp_path / "home")
+    home.save_settings({"provider": "copilot-cli", "models": {"assistant": "", "search": ""}})
+    provider = CopilotCliProvider(runner=runner, executable="copilot", windows=False)
+    provider._resolve = lambda: (["copilot"], False)  # type: ignore[method-assign]
+    monkeypatch.setattr(assistant, "_provider", lambda h: (provider, assistant._config("copilot-cli", "", {})))
+    return home
+
+
+def _answers(stdout: str = "", *, returncode: int = 0, stderr: str = ""):
+    import subprocess
+
+    return lambda argv, **options: subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "state", "words"),
+    [
+        ("Error: not logged in, run /login", "not_signed_in", "Copilot CLI is not signed in"),
+        ("Access denied by policy settings", "policy_blocked", "organisation's Copilot policy"),
+        ("Error: model gpt-99 is not available", "failed", "gpt-99"),
+    ],
+)
+def test_the_copilot_check_says_why_it_cannot_answer(tmp_path, monkeypatch, stderr, state, words):
+    home = _copilot_home(tmp_path, monkeypatch, _answers(returncode=1, stderr=stderr))
+    result = assistant.check_model(home)
+    assert result["ok"] is False and result["state"] == state and words in result["reason"]
+
+
+def test_the_copilot_check_says_when_the_cli_is_not_installed(tmp_path, monkeypatch):
+    from evolvekit.providers import copilot_cli
+
+    home = Home(tmp_path / "home")
+    home.save_settings({"provider": "copilot-cli", "models": {"assistant": "", "search": ""}})
+    monkeypatch.setattr(copilot_cli.shutil, "which", lambda name: None)
+    monkeypatch.setenv("COPILOT_CLI_PATH", str(tmp_path / "no-copilot-here"))
+    result = assistant.check_model(home)
+    assert result == {"ok": False, "state": "missing",
+                      "reason": "GitHub Copilot CLI is not installed: install it with npm install -g @github/copilot"}
+
+
+def test_the_copilot_check_needs_no_key_and_counts_one_request(tmp_path, monkeypatch):
+    for name in ("OPENROUTER_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    home = _copilot_home(tmp_path, monkeypatch, _answers('{"ready": true}'))
+    result = assistant.check_model(home)
+    assert result["ok"] is True and result["requests"] == 1 and result["usd"] == 0.0
+    assert result["model"] == "", "the CLI's own default model"
+
+
+def test_a_copilot_answer_carries_its_requests(study, monkeypatch, tmp_path):
+    home, root = study
+    for name in ("OPENROUTER_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    copilot = _copilot_home(tmp_path / "other", monkeypatch, _answers(json.dumps(GOOD)))
+    home.save_settings(copilot.settings())
+    answer = assistant.ask(home, root, "Weights on the north")
+    assert "needs_key" not in answer, "copilot-cli needs no key"
+    assert answer["usd"] == 0.0 and answer["requests"] == 1 and answer["total_usd"] == 0.0
+    assistant.ask(home, root, "Again")
+    history = assistant.history(root)
+    assert history["turns"][-1]["requests"] == 1 and history["total_requests"] == 2
+    assert "requests" not in assistant.ask(home, root, "Priced", provider=_Priced()), "dollar providers are unchanged"

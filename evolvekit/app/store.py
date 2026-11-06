@@ -42,12 +42,15 @@ _STEP_OF = {
     "name": 1, "harness": 1, "template": 1, "application": 2, "cases": 3, "inputs": 4, "vary": 4,
     "constraints": 4, "kpis": 5, "goal": 5, "guardrails": 5, "limits": 6, "budget": 6, "plan": 6,
 }
-PROVIDERS = ("openrouter", "azure", "claude-cli")
+PROVIDERS = ("openrouter", "azure", "claude-cli", "copilot-cli")
 KEY_NAMES = {
     "openrouter": ("OPENROUTER_API_KEY",),
     "azure": ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"),
     "claude-cli": (),
+    "copilot-cli": (),
 }
+DEFAULT_MODEL_FREE = ("claude-cli", "copilot-cli")
+"""The providers whose model may be left empty: the CLI's own default model."""
 DEFAULT_MODEL = "anthropic/claude-sonnet-5"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "provider": "openrouter",
@@ -57,7 +60,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 """`prices`: `{model: [in, out]}`, USD per million tokens, for models the app
 does not know the price of (`evolvekit/app/prices.py`). `models.<role>` may be
-empty for `claude-cli` only: the CLI's own default model."""
+empty for `claude-cli` and `copilot-cli` only: the CLI's own default model."""
 _SET_BY_APP: set[str] = set()
 """The key names `Home.export_keys` put into this process's environment, so
 that a key the app no longer keeps is taken out again."""
@@ -140,7 +143,7 @@ class Home:
             merged["provider"] = stored["provider"]
         for role in ("assistant", "search"):
             value = (stored.get("models") or {}).get(role)
-            if isinstance(value, str) and (value.strip() or merged["provider"] == "claude-cli"):
+            if isinstance(value, str) and (value.strip() or merged["provider"] in DEFAULT_MODEL_FREE):
                 merged["models"][role] = value.strip()
         prices = stored.get("prices")
         if isinstance(prices, dict):
@@ -164,7 +167,7 @@ class Home:
                 raise AppError(f"models.{role}: the model's name, such as {DEFAULT_MODEL}")
             if not value.strip() and current["provider"] == "azure":
                 raise AppError(f"models.{role}: the deployment name on your Azure OpenAI resource")
-            if not value.strip() and current["provider"] != "claude-cli":
+            if not value.strip() and current["provider"] not in DEFAULT_MODEL_FREE:
                 raise AppError(f"models.{role}: the model's name, such as {DEFAULT_MODEL}")
             current["models"][role] = value.strip()
         if "prices" in changes:
