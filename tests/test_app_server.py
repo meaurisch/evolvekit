@@ -232,7 +232,7 @@ def test_a_study_through_its_steps(app):
     status, document = call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Tours"})
     assert status == 200 and document["slug"] == "tours"
     assert {p["step"] for p in document["problems"]} == {2, 3}
-    assert document["state"] == {"kind": "draft", "line": "draft · step 1 of 7"}
+    assert document["state"] == {"kind": "draft", "line": "draft · step 1 of 7", "step": 1, "what": "settings"}
 
     status, answer = call(app, "POST", "/api/studies/tours/application", {"path": str(ROOT / "nowhere.py")})
     assert answer["probe"]["ok"] is False and "nothing at" in answer["probe"]["message"]

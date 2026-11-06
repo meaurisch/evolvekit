@@ -68,6 +68,8 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     assert words_for([3.0, 3.1, 2.9, -1.4])["decision"] == "keep", "the chance is high, the worst case beyond 1 %"
     assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "1 in 20 or less"
     assert jobs._chance_words(0.5) == "about 10 in 20" and jobs._chance_words(None) == ""
+    assert jobs._chance_words(0.897) == "under 9 in 10", "a keep never reads like the rule's 9 in 10"
+    assert jobs._chance_words(0.9) == "about 18 in 20" and jobs._chance_words(0.947) == "about 19 in 20"
     decided = words_for([-9.0, 11.5, -0.4], decision="use")
     assert decided["decision"] == "use" and decided["state"] == "confirmed", "the run's own decision, when it has one"
 
@@ -303,7 +305,14 @@ def test_every_run_of_a_study_has_its_line_and_kind(tmp_path):
     assert all(r["phase"] == "done" and r["started_at"] and r["finished_at"] for r in listed)
     # One run's words on their own, and the card's: the latest run's.
     first = jobs.run_line(root, study, root / "runs" / "20260101-000000")
-    assert first == {"kind": "finished", "run": "20260101-000000", "line": "finished · probably better: 4.2 % lower tour length"}
+    assert {k: first[k] for k in ("kind", "run", "line")} == {
+        "kind": "finished", "run": "20260101-000000", "line": "finished · probably better: 4.2 % lower tour length"}
+    # ... and the facts the page draws the card from: the decision, its numbers, Pepper's phase from them.
+    assert first["decision"] == "use" and first["phase"] == "done" and first["what"] == "settings"
+    assert first["mean"] is not None and first["n"] >= 1
+    last = jobs.run_line(root, study, root / "runs" / "20260103-000000")
+    assert last["decision"] == "keep" and last["mean"] == 0.4
+    assert [r["decision"] for r in listed] == ["use", "keep", "keep"]
     assert jobs.state_line(root, study) == jobs.run_line(root, study, root / "runs" / "20260103-000000")
     assert jobs.state_line(root, study)["run"] == "20260103-000000"
 
