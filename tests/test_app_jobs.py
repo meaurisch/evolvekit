@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 import re
+import shutil
 import socket
 import time
 from datetime import datetime, timedelta, timezone
@@ -273,6 +274,56 @@ def test_the_app_offers_to_continue_a_run_that_died(app):
     assert final["rounds"]["done"] == 4 and final["time"]["used_s"] > 0
     listed = call(app, "GET", f"/api/studies/{slug}")[1]["runs"]
     assert [r["id"] for r in listed] == [s["run"]], "the same run, continued: not a second one"
+
+
+# -- a finished run goes on with more time
+
+
+@pytest.mark.slow
+def test_a_finished_run_goes_on_with_more_time(app):
+    slug, other = _ready_study(app, "More time"), _ready_study(app, "Other")
+    status, started = call(app, "POST", f"/api/studies/{slug}/start")
+    assert status == 200, started
+    final = _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] in ("done", "failed", "stopped"), timeout=180)
+    assert final["phase"] == "done" and final["can_continue"] is True, final
+    rounds = final["rounds"]["done"]
+    assert call(app, "GET", f"/api/studies/{slug}/results")[1]["can_continue"] is True
+    # Not while another study has the computer, and not with hours that make no sense.
+    fake = _fake_active_run(app, other)
+    status, body = call(app, "POST", f"/api/studies/{slug}/continue", {"run": final["run"], "hours": 0.01})
+    assert status == 409 and "'Other' is running" in body["error"], body
+    shutil.rmtree(fake)
+    for hours in (0, -1, 49, "two"):
+        assert call(app, "POST", f"/api/studies/{slug}/continue", {"run": final["run"], "hours": hours})[0] == 400, hours
+    status, body = call(app, "POST", f"/api/studies/{slug}/continue", {"run": final["run"], "hours": 0.01})
+    assert status == 200 and body == {"run": final["run"], "continued": True}, body
+    assert call(app, "GET", f"/api/studies/{slug}/status")[1]["phase"] in ("starting", "search", "check", "done")
+    status, again = call(app, "POST", f"/api/studies/{slug}/continue", {"run": final["run"]})
+    assert status == 409, "it is running again: not twice"
+    more = _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] in ("done", "failed", "stopped"), timeout=180)
+    assert more["phase"] == "done" and more["rounds"]["done"] > rounds, more
+    assert more["can_continue"] is True and more["can_resume"] is False
+    listed = call(app, "GET", f"/api/studies/{slug}")[1]["runs"]
+    assert [r["id"] for r in listed] == [final["run"]], "the same run, continued: not a second one"
+
+
+def test_a_continued_run_says_so_on_the_card(tmp_path):
+    run_dir = tmp_path / "runs" / "r"; run_dir.mkdir(parents=True)
+    now = utc_now()
+    (run_dir / "job.json").write_text(json.dumps({
+        "phase": "search", "pid": os.getpid(), "started_at": "2026-01-01T00:00:00+00:00", "resumed_at": now, "continued_at": now,
+        "hours_added": 0.5, "plan": {"hours": 2.0, "generations": 3}, "search": {"generations": 3, "aborted": False}}), encoding="utf-8")
+    (run_dir / "launch.json").write_text(json.dumps({"pid": os.getpid(), "started_at": now, "host": socket.gethostname()}), encoding="utf-8")
+    line = jobs.run_line(tmp_path, None, run_dir)
+    assert line["kind"] == "running" and re.fullmatch(r"running · continued · (30|29) min left", line["line"]), line
+    assert jobs.can_continue(run_dir, jobs.phase(run_dir)) is False, "it is running"
+    (run_dir / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+    (run_dir / "evolvekit.yaml").write_text("x: 1\n", encoding="utf-8")
+    done = {"phase": "done", "search": {"generations": 3, "aborted": False}}
+    assert jobs.can_continue(run_dir, done) is True
+    assert jobs.can_continue(run_dir, {**done, "phase": "failed"}) is False
+    assert jobs.can_continue(run_dir, {**done, "search": {"generations": 3, "aborted": True}}) is False
+    assert jobs.can_continue(run_dir, {**done, "search": {"stop_reason": "stopped on request before the search began"}}) is False
 
 
 def test_a_resumed_run_is_starting_while_its_job_is_still_the_old_one(tmp_path):

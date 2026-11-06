@@ -2234,6 +2234,12 @@ async function renderResults(slug, run) {
     const doc = await api("POST", studyPath(`/next${runQuery}`), { name: `${current.doc.study.name} (next)` });
     location.hash = `#/study/${doc.slug}/4`;
   }, e.currentTarget) }, "Start a new study from this result");
+  // The same run, given the study's hours once more: the search goes on from its best, then the final check runs again.
+  const moreHours = (current.doc.study.budget || {}).hours;
+  const more = r.can_continue && moreHours ? h("button", { class: "btn", type: "button", title: "The rounds done are kept; the search goes on from here for that much more time, then the final check runs again", onclick: (e) => guarded(async () => {
+    await api("POST", studyPath("/continue"), { run: r.run, hours: moreHours });
+    toast("Searching on."); location.hash = `#/study/${slug}/running${runQuery}`;
+  }, e.currentTarget) }, `Continue for another ${duration(moreHours * 3600)}`) : null;
   const ctx = r.context;
   view.replaceChildren(h("div", { class: "narrow" },
     h("h1", {}, r.study),
@@ -2267,7 +2273,10 @@ async function renderResults(slug, run) {
       h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads,
       h("p", { class: "faint", style: "margin:14px 0 0" }, "The study itself — its cases, choices and harness, not the runs — as one file to pass on: ",
         h("a", { href: studyPath("/download/study"), download: "" }, "Save as zip"), ".")),
-    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again),
+    h("h2", {}, "Next steps"), h("div", { class: "card" },
+      more ? h("p", { class: "muted", style: "margin-top:0" }, "Give this run more time: the search goes on from its best, and the final check runs again.") : null,
+      more ? h("div", { class: "row", style: "margin-bottom:14px" }, more) : null,
+      h("p", { class: "muted", style: more ? "" : "margin-top:0" }, "Search again from here: the same cases and choices, starting from this result."), again),
     h("h2", {}, allRuns.length === 1 ? "This study's run" : "This study's runs"),
     h("div", { class: "card" }, runsList, h("div", { style: "margin-top:12px" }, compareRow)),
     assistantPanel({ screen: "results", run: r.run, open: false })));

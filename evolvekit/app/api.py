@@ -572,6 +572,17 @@ def final_check(req: Request) -> dict[str, Any]:
     return jobs.resume_final_check(req.home, root, _run(req, root), int(seeds) if seeds is not None else None)
 
 
+def continue_run(req: Request) -> dict[str, Any]:
+    """`{"run": RUN, "hours": H}`: a finished run searched on for H hours
+    more (the study's hours when not said), then checked again."""
+    root, _, _ = req.home.load(req.params["slug"])
+    body = req.json()
+    run = body.get("run") or _run(req, root)
+    if not isinstance(run, str):
+        raise AppError("run: the name of a run")
+    return jobs.continue_run(req.home, root, run, body.get("hours"))
+
+
 def status(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
     return jobs.status(root, _run(req, root), req.server.status_document)
@@ -649,6 +660,7 @@ ROUTES = [
     route("POST", "/api/studies/{slug}/start")(start),
     route("POST", "/api/studies/{slug}/stop")(stop),
     route("POST", "/api/studies/{slug}/final-check")(final_check),
+    route("POST", "/api/studies/{slug}/continue")(continue_run),
     route("GET", "/api/studies/{slug}/status")(status),
     route("GET", "/api/studies/{slug}/results")(results),
     route("GET", "/api/studies/{slug}/download/{export}")(download),

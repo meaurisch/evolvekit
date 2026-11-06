@@ -47,6 +47,17 @@ opened again at any time:
 A study folder is self-contained: copy it to another computer, point it at
 the application there, and it runs.
 
+On the home page every study card has a menu (⋯): *Rename*; *Duplicate* — a
+new study with the setup and the cases, not the runs; *Archive* — kept, but
+out of the way, under **Archived** at the bottom of the page, until
+*Unarchive*; and *Delete*. Nothing is deleted at once: a deleted study waits
+in the trash for 7 days — an *Undo* bar offers it back for ten seconds, and
+after that the **Deleted:** line at the bottom of the home page has *Restore*
+for each. A study that is running, or waiting its turn, can be neither
+renamed, archived nor deleted. A study travels as one `.zip` — *Save as zip*
+on the review step and under the results — and dropped on the home page of
+another library, where harnesses are dropped, it becomes a study there.
+
 ## A study, step by step
 
 **New study** asks three questions: which application (a *harness*
@@ -129,7 +140,8 @@ The app runs one study at a time. A study started while another runs says
 *Waiting for '…' to finish* and starts by itself when its turn comes; **Stop**
 takes it out of the line. A run that was continued after it died says
 *Searching again, from where it stopped* and goes on with the rounds it had
-left.
+left; one given more time from its results says *Searching on, with more
+time*, and its card *running · continued · 12 min left*.
 
 ## The results
 
@@ -171,8 +183,22 @@ width:
    *Open the report* — the same on one page with every number and the settings
    file, to read in the browser or send as `report.html`; *Show the settings*;
    and the files: the settings for the application (and the same as
-   command-line flags), the data changes, the changed requests.
-7. **Next steps**: a new study that starts where this one ended.
+   command-line flags), the data changes, the changed requests; and the study
+   itself — its cases, choices and harness, not the runs — as one zip to pass
+   on (*Save as zip*).
+7. **Next steps**: *Continue for another 2 h* — the same run goes on with
+   the study's hours once more: the rounds done are kept, the search goes on
+   from its best, and then the final check runs again (a best that stayed the
+   same keeps the check it had). Not while another study runs. And a new
+   study that starts where this one ended.
+8. **This study's runs**: every run of the study, newest first, each with
+   its verdict in the card's words (*finished · probably better: 3.1 % lower
+   real cost*, *finished · not proven on the held-back cases*, *stopped*),
+   the one shown marked; open any. *Compare this run* puts it beside another
+   run of this study, or another study that has run: two columns — the goal,
+   the final check, every held-back case, what changed — rows aligned by
+   label; a run with no final check says so in its column. *Compare* on the
+   home page does the same for two studies.
 
 ## The assistant
 
@@ -239,6 +265,7 @@ everything it does.
 | *… is thin* under the plan | take one of the fixes it offers, or accept that the search may miss the best |
 | *fewer than 3 rounds* | take one of the three ways out the plan offers |
 | *Not proven on the held-back cases* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
+| *Keep your current settings* and you have time | *Continue for another …*: the search goes on from its best, and the check runs again |
 | *the starting point breaks a guardrail* | the guardrail is stricter than today's plans: loosen it, or give the application more time per case |
 | *It failed* after a restart of the computer | *Continue where it stopped*: the run goes on from its last round |
 | *It failed* | the message says why; fix that, then *Start it again* |
@@ -260,7 +287,18 @@ ones by their `index` in the turn), `plan`, `tune-only`, `test-run`, `start` (wi
 `{"resume": RUN}`: that run goes on where it stopped; while another study
 runs, the run is queued and the server starts it later), `stop` (on a queued
 run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,
-with N runs per case), `status`, `results`, `download/{export}`
-(`download/report?view=1` opens the report in the browser) and `next`; and
-each run's dashboard at `/studies/{name}/runs/{run}/dashboard/`. A run is
-`python -m evolvekit.app.job STUDY RUN`, started so that it outlives the app.
+with N runs per case), `continue` (`{"run": RUN, "hours": H}`: a finished
+run searches on for H hours more, at most 48, then checks again; 409 while
+anything runs), `status`, `results`, `download/{export}`
+(`download/report?view=1` opens the report in the browser; `download/study`
+is the study as a zip) and `next`; and each run's dashboard at
+`/studies/{name}/runs/{run}/dashboard/`. Managing studies: `DELETE
+/api/studies/{name}` moves one to the trash (409 while it runs or waits) and
+`POST /api/trash/{entry}/restore` brings it back; `POST
+/api/studies/{name}/duplicate` with `{name}` copies the setup and the cases;
+a `PATCH` with `{"archived": true}` shelves it; `POST /api/studies` with a
+zip body imports a study (refused without `study.yaml`, or with a member
+outside its folder); `POST …/cases/{name}/restore` brings a removed case
+back; `GET /api/compare?a=<name>[/<run>]&b=<name>[/<run>]` is two runs side
+by side. A run is `python -m evolvekit.app.job STUDY RUN`, started so that it
+outlives the app.

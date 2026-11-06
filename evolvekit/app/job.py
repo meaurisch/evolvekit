@@ -4,6 +4,7 @@
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID --check    the final check again, after a stop
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID --check --seeds 6    ... with 6 runs per case
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID --resume   the search again from where it stopped, then the check
+    python -m evolvekit.app.job STUDY_FOLDER RUN_ID --continue --hours 2    a finished search on for 2 hours more, then the check again
 
 Everything it does is `evolvekit.harness.execute`; this module only reads the
 models the app chose (`runs/<id>/models.json`, when AI search help is on) and
@@ -18,7 +19,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from evolvekit.harness.execute import JOB, Job, final_check, read_job, resume_study, run_study
+from evolvekit.harness.execute import JOB, Job, continue_study, final_check, read_job, resume_study, run_study
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="run the final check again")
     parser.add_argument("--seeds", type=int, default=None, help="with --check: runs per case")
     parser.add_argument("--resume", action="store_true", help="continue a stopped or dead search where it was")
+    parser.add_argument("--continue", dest="more", action="store_true", help="a finished search on, with --hours more")
+    parser.add_argument("--hours", type=float, default=None, help="with --continue: how much more time")
     args = parser.parse_args(argv)
     root = Path(args.study).resolve()
     run_dir = root / "runs" / args.run
@@ -41,8 +44,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             models_path = run_dir / "models.json"
             models = json.loads(models_path.read_text(encoding="utf-8")) if models_path.is_file() else None
-            run = resume_study if args.resume else run_study
-            job = run(root, args.run, models=models, log=log)
+            if args.more:
+                if args.hours is None:
+                    parser.error("--continue needs --hours")
+                job = continue_study(root, args.run, hours=args.hours, models=models, log=log)
+            else:
+                run = resume_study if args.resume else run_study
+                job = run(root, args.run, models=models, log=log)
     except Exception as exc:  # noqa: BLE001 - job.json must say how it ended, whatever ended it
         traceback.print_exc()
         state = read_job(run_dir)

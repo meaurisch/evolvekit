@@ -62,6 +62,7 @@ __all__ = [
     "PREVIEW_TIME_LIMIT_S",
     "preview_time_limit",
     "Job",
+    "continue_study",
     "final_check",
     "plan_for",
     "preview",
@@ -216,12 +217,13 @@ def read_preview(root: str | Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def plan_for(study: Study, harness: Harness, measured: dict[str, Any]) -> Plan:
-    """The automatic plan, from the preview's measured time."""
+def plan_for(study: Study, harness: Harness, measured: dict[str, Any], *, hours: float | None = None) -> Plan:
+    """The automatic plan, from the preview's measured time; for the study's
+    hours, or for `hours` (a run continued with more time)."""
     overrides = None if study.plan.get("auto", True) else {k: v for k, v in study.plan.items() if k != "auto"}
     return make_plan(
         training=len(study.training), test=len(study.test), runs_per_case=study.limits.runs_per_case,
-        time_limit_s=float(study.limits.time_per_case_s), hours=float(study.budget.hours),
+        time_limit_s=float(study.limits.time_per_case_s), hours=float(study.budget.hours if hours is None else hours),
         overhead_s=float(measured.get("overhead_s") or 0.0), measured_s=float(measured.get("wall_s") or study.limits.time_per_case_s),
         accepts_time_limit=harness.time_limit.accepts, overrides=overrides,
     )
@@ -469,6 +471,95 @@ def resume_study(
     return job.state
 
 
+def continue_study(
+    root: str | Path,
+    run_id: str,
+    *,
+    hours: float,
+    models: dict[str, Any] | None = None,
+    log: Callable[[str], None] = print,
+) -> dict[str, Any]:
+    """A run that finished -- `done`, or `stopped` with its search on record
+    -- searched on for `hours` more on the same directory, then checked
+    again. The extra time buys as many rounds as the plan would give a
+    study of `hours` with this run's measured numbers (at least one), and the
+    engine runs exactly those, bounded by the time: `budget.max_hours` is
+    rewritten for this session to what the run has used plus `hours`, so
+    the clock the engine keeps across sessions ends `hours` from now, and its
+    patience grows by the rounds so a plateau the first session reached does
+    not end this one at once. The final check runs again in the same
+    `confirm/final/` directory: a candidate it has measured already costs
+    nothing more. `job.json` keeps the run's first `started_at` and gains
+    `continued_at` and `hours_added`.
+
+    `models` is accepted as `run_study` takes it, and is not needed: the
+    compiled `evolvekit.yaml` in the run directory holds the models the run
+    was started with. Returns the final `job.json`."""
+    from evolvekit.events import read_events
+    from evolvekit.search.driver import Driver
+    from evolvekit.stopping import active_seconds
+
+    root = Path(root)
+    run_dir = root / "runs" / run_id
+    state = read_job(run_dir) or {}
+    search = state.get("search") or {}
+    if (state.get("phase") not in ("done", "stopped") or not search or search.get("aborted")
+            or not (run_dir / CONFIG).is_file() or not (run_dir / "runs.jsonl").is_file()):
+        raise HarnessError(f"runs/{run_id}: the search has not finished, so there is nothing to continue from")
+    hours = float(hours)
+    if not hours > 0:
+        raise HarnessError("hours: more than 0")
+    study = run_study_of(root, run_dir)
+    harness = study_harness(root)
+    stored = state.get("plan") or _read_plan(run_dir)
+    rounds = max(1, _more_plan(study, harness, stored, hours).rounds)
+    before = max((int(r.get("generation") or 0) for r in read_jsonl(run_dir / "runs.jsonl")), default=0)
+    (run_dir / STOP_REQUEST).unlink(missing_ok=True)
+    job = Job.resume(run_dir, {**state, "plan": stored, "run_id": run_id, "study": study.name}, "search")
+    for old in ("error", "final", "check"):  # how the last session ended; this one says anew
+        job.state.pop(old, None)
+    # The same moment as `resumed_at`: a resume after this one is younger.
+    job.update(continued_at=job.state["resumed_at"], hours_added=hours)
+    log(f"continuing runs/{run_id} for {hours:g} h more: {rounds} round(s), then the final check again")
+    try:
+        config = load_config(run_dir / CONFIG)
+        used_h = active_seconds(read_events(run_dir)) / 3600.0
+        config = replace(
+            config,
+            budget=replace(config.budget, max_hours=used_h + hours,
+                           max_full_evals_per_day=config.budget.max_full_evals_per_day
+                           + rounds * config.search.children_per_generation),
+            stop=replace(config.stop, patience=config.stop.patience + rounds),
+        )
+        summary = Driver(config, run_dir=run_dir, log=log).run(generations=rounds)
+        job.update(search={
+            "stop_reason": summary.stop_reason, "generations": before + summary.generations,
+            "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
+        })
+        if summary.aborted:
+            job.finish("failed", error=summary.stop_reason)
+            return job.state
+        if summary.stop_reason == "stopped on request":
+            job.finish("stopped")
+            return job.state
+        _final_check(study, _check_plan(stored, study), config, run_dir, job, log)
+    except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
+        job.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    return job.state
+
+
+def _more_plan(study: Study, harness: Harness, stored: dict[str, Any], hours: float) -> Plan:
+    """The plan `hours` would buy this run: `plan_for` on the run's own
+    measured numbers (`run_s` from `plan.json`, which is the time limit plus
+    the overhead the preview measured, or the whole measured run when the
+    application does not stop itself), not today's preview."""
+    limit = float(study.limits.time_per_case_s)
+    run_s = float(stored.get("run_s") or limit)
+    numbers = {"overhead_s": max(0.0, run_s - limit) if harness.time_limit.accepts else 0.0, "wall_s": run_s}
+    return plan_for(study, harness, numbers, hours=hours)
+
+
 def _read_plan(run_dir: Path) -> dict[str, Any]:
     try:
         loaded = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
@@ -512,14 +603,18 @@ def _extend_check(
 
 def _time_left(job: Job, plan: Plan) -> Callable[[], float]:
     """Seconds of the study's hours left, counted from the run's start: the
-    extension of the check stays inside the time the study was given."""
+    extension of the check stays inside the time the study was given. A run
+    continued with more time counts the hours added from the continuation."""
+    moment, hours = job.state.get("started_at"), float(plan.hours)
+    if job.state.get("continued_at") and job.state.get("hours_added"):
+        moment, hours = job.state["continued_at"], float(job.state["hours_added"])
     try:
-        started = datetime.fromisoformat(str(job.state["started_at"]))
-    except (KeyError, ValueError, TypeError):
+        started = datetime.fromisoformat(str(moment))
+    except (ValueError, TypeError):
         return lambda: 0.0
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
-    return lambda: float(plan.hours) * 3600.0 - (datetime.now(timezone.utc) - started).total_seconds()
+    return lambda: hours * 3600.0 - (datetime.now(timezone.utc) - started).total_seconds()
 
 
 def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,

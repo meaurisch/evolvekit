@@ -16,7 +16,7 @@ import pytest
 
 from evolvekit.confirm import paired_summary
 from evolvekit.harness.execute import (
-    Job, _extend_check, final_check, preview, read_job, read_preview, resume_study, run_study, run_test,
+    Job, _extend_check, continue_study, final_check, preview, read_job, read_preview, resume_study, run_study, run_test,
 )
 from evolvekit.harness.library import create_study
 from evolvekit.harness.plan import CHECK_SEEDS, Plan
@@ -203,6 +203,24 @@ def test_a_stopped_search_is_resumed_to_the_end_of_its_plan(tmp_path):
     assert resumed["resumed_at"] and resumed["final"]
     assert resumed["started_at"] == job["started_at"], "the time budget counts from the first start"
     assert read_job(run_dir) == resumed
+
+
+@pytest.mark.slow
+def test_a_finished_study_goes_on_with_more_time(tmp_path):
+    folder = _study(tmp_path)
+    _fix_plan(folder)
+    run_dir = folder / "runs" / "r5"
+    job = run_study(folder, "r5", log=lambda _m: None)
+    assert job["phase"] == "done", job
+    before = job["search"]["generations"]
+    more = continue_study(folder, "r5", hours=0.004, log=lambda _m: None)
+    assert more["phase"] == "done", more
+    assert more["search"]["generations"] > before, "the rounds of the first session and the new ones, in all"
+    assert more["final"] and more["continued_at"] and more["hours_added"] == 0.004
+    assert more["started_at"] == job["started_at"], "the same run, with more time: not a second one"
+    assert read_job(run_dir) == more
+    with pytest.raises(Exception, match="not finished"):
+        continue_study(folder, "nowhere", hours=0.004, log=lambda _m: None)
 
 
 # -- the check adds runs on its own ----------------------------------------

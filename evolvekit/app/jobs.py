@@ -34,7 +34,7 @@ from evolvekit.app import AppError
 from evolvekit.app.prices import price_of
 from evolvekit.confirm import BASELINE, RULE_WORDS, decide, t_cdf
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
-from evolvekit.harness.compile import STUDY_RUN
+from evolvekit.harness.compile import CONFIG, STUDY_RUN
 from evolvekit.harness.execute import read_job, run_study_of, runner_command
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
@@ -43,9 +43,9 @@ from evolvekit.ledger import read_jsonl
 from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
-__all__ = ["active_run", "can_resume", "download", "latest_run", "launch_queued", "next_study", "phase", "report_html",
-           "results", "resume_final_check", "run_alive", "run_line", "running", "runs", "start", "state_line", "status",
-           "stop"]
+__all__ = ["active_run", "can_continue", "can_resume", "continue_run", "download", "latest_run", "launch_queued",
+           "next_study", "phase", "report_html", "results", "resume_final_check", "run_alive", "run_line", "running", "runs",
+           "start", "state_line", "status", "stop"]
 
 LAUNCH = "launch.json"
 MODELS = "models.json"
@@ -63,6 +63,8 @@ LAUNCH_SLACK_S = 120.0
 """A process that started this long after its launch was written is not the
 one launched: the pid was recycled, by a reboot or by chance."""
 EXPORT_TIMEOUT_S = 300
+MAX_CONTINUE_HOURS = 48.0
+"""The most a finished run is given at a time when it goes on."""
 REPORTS_COST = ("openrouter", "claude-cli")
 """The providers that say what every call cost, so the dollar cap of AI search
 help holds without a price in the table."""
@@ -327,6 +329,38 @@ def can_resume(run_dir: Path, job: dict[str, Any]) -> bool:
     return not search or int(search.get("generations") or 0) < planned
 
 
+def can_continue(run_dir: Path, job: dict[str, Any]) -> bool:
+    """Whether a run can go on with more time (`continue_run`): it ended --
+    done, or stopped -- with a search on record that was not aborted, on a
+    directory that still holds the compiled study and the runs."""
+    if job.get("phase") not in ("done", "stopped"):
+        return False
+    search = job.get("search") or {}
+    if not search or search.get("aborted") or search.get("generations") is None:
+        return False
+    return (run_dir / "runs.jsonl").is_file() and (run_dir / CONFIG).is_file()
+
+
+def continue_run(home: Any, root: Path, run: str, hours: float | None = None) -> dict[str, Any]:
+    """A finished run searched on for `hours` more (the study's hours when not
+    said), then checked again (`job.py --continue --hours H`). Launched at
+    once, so not while any study's run has the computer."""
+    run_dir = _run_dir(root, run)
+    if running(root):
+        raise AppError("the study is already running", 409)
+    if not can_continue(run_dir, phase(run_dir)):
+        raise AppError("this run did not finish its search, so it cannot be given more time", 409)
+    if hours is None:
+        hours = load_study(root).budget.hours
+    if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not 0 < float(hours) <= MAX_CONTINUE_HOURS:
+        raise AppError(f"hours: a number of hours, more than 0 and at most {MAX_CONTINUE_HOURS:g}", 400)
+    with _launch_guard:
+        _one_at_a_time(home)
+        (run_dir / STOP_REQUEST).unlink(missing_ok=True)
+        _launch(home, root, run_dir, ["--continue", "--hours", f"{float(hours):g}"])
+    return {"run": run, "continued": True}
+
+
 def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]:
     """Start the study: a new run, or with `resume` the run of that name
     again from where it stopped (`job.py --resume`). A stop request left in
@@ -532,6 +566,23 @@ def _started(job: dict[str, Any], run_dir: Path) -> datetime | None:
         return None
 
 
+def _continued(job: dict[str, Any]) -> bool:
+    """Whether the run's latest session is a continuation with more time
+    (`execute.continue_study`): `continued_at` is the session's own
+    `resumed_at`; a resume after it, of a continuation that died, is younger."""
+    moment = job.get("continued_at")
+    return bool(moment) and str(job.get("resumed_at") or moment) <= str(moment)
+
+
+def _window(job: dict[str, Any], run_dir: Path, hours: float) -> tuple[datetime | None, float]:
+    """When the run's time started and how much there is: the run's start
+    and `hours` -- or, continued with more time, the continuation and the
+    hours added."""
+    if _continued(job) and job.get("hours_added"):
+        return _moment(job["continued_at"]), float(job["hours_added"])
+    return _started(job, run_dir), hours
+
+
 def _failures_in_words(reasons: list[dict[str, Any]], limit_s: float) -> list[dict[str, Any]]:
     grouped = []
     stopped_at = limit_s * 1.5 + 30  # the stage timeout of a harness run (compile.py)
@@ -582,8 +633,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     health, progress = document.get("health") or {}, document.get("progress") or {}
     rows = _rows(run_dir)  # read once: the seed, the closest try and the gated count all come from here
     goal = _goal(study, harness)
-    started = _started(job, run_dir)
-    hours = float(plan.get("hours") or study.budget.hours)
+    started, hours = _window(job, run_dir, float(plan.get("hours") or study.budget.hours))
     finished = job.get("phase") in ("done", "stopped", "failed")
     ended = _moment(job.get("finished_at") or job.get("updated_at")) if finished else None
     used = ((ended or _now()) - started).total_seconds() if started else None
@@ -641,7 +691,8 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     sentences = {
         "queued": f"Waiting for '{waiting}' to finish." if waiting else "Waiting for its turn.",
         "starting": "Starting.",
-        "search": ("Searching again, from where it stopped." if job.get("resumed_at")
+        "search": ("Searching on, with more time." if _continued(job)
+                   else "Searching again, from where it stopped." if job.get("resumed_at")
                    else "Searching for better " + _what(study) + "."),
         "check": "Checking the best on the cases the search never saw.",
         "done": "Finished.",
@@ -677,6 +728,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "can_check": (bool(job.get("search")) and job.get("phase") in ("stopped", "failed") and bool(study.test)
                       and (run_dir / "runs.jsonl").is_file()),
         "can_resume": can_resume(run_dir, job),
+        "can_continue": can_continue(run_dir, job),
         "dashboard": f"/studies/{root.name}/runs/{run}/dashboard/",
     }
 
@@ -1151,6 +1203,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "context": context,
         "best_id": (best or {}).get("id"), "is_seed": bool(best and seed and best.get("id") == seed.get("id")),
         "cases": {"training": list(study.training), "test": list(study.test)},
+        "can_continue": can_continue(run_dir, job),
     }
     data["summary_text"] = _summary_text(data)
     return data
@@ -1374,10 +1427,10 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         waiting = _waiting_for(root)
         return {"kind": "queued", "run": run_dir.name, "line": "queued" + (f" · after {waiting}" if waiting else "")}
     if state in ACTIVE:
-        started = _started(job, run_dir)
-        hours = float((_plan(run_dir, job) or {}).get("hours") or (study.budget.hours if study is not None else 0))
+        started, hours = _window(job, run_dir, float((_plan(run_dir, job) or {}).get("hours")
+                                                      or (study.budget.hours if study is not None else 0)))
         left = max(0.0, hours * 3600 - (_now() - started).total_seconds()) if started and hours else None
-        line = "running" + (f" · {_duration(left)} left" if left is not None else "")
+        line = "running" + (" · continued" if _continued(job) else "") + (f" · {_duration(left)} left" if left is not None else "")
         if document_of is not None and (run_dir / "events.jsonl").exists():
             pct = (((document_of(run_dir) or {}).get("progress") or {}).get("improvement") or {}).get("pct")
             if pct is not None and pct > 0:
