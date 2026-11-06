@@ -63,3 +63,119 @@ def test_the_fonts_ship_with_their_licences(font):
     assert path.read_bytes()[:4] == b"wOF2"
     licence = STATIC / "fonts" / ("OFL-" + font.split("-")[0] + ".txt")
     assert "SIL OPEN FONT LICENSE" in licence.read_text(encoding="utf-8").upper()
+
+
+# ---------------------------------------------------------------------------
+# the page's scripts
+# ---------------------------------------------------------------------------
+
+SCRIPTS = sorted((STATIC / "js").rglob("*.js"))
+SOURCE = "\n".join(p.read_text(encoding="utf-8") for p in SCRIPTS)
+
+COMPONENTS = [
+    "appBar", "button", "notice", "toast", "undoBar", "studyCard", "dropZone", "kindChoice", "caseStrip", "summaryRow",
+    "planBar", "tuneDrawer", "settingRow", "infoTip", "goalPicker", "serviceChoice", "numberUnit", "statusStrip",
+    "runTimeline", "intervalStrip", "verdictMark", "triesPlot", "casesView", "settingsPanel", "hoverCard", "chosenChip",
+    "companion", "assistantDrawer", "proposalCard", "chatBubble", "compareView", "casePair", "runList", "lockedPage",
+    "viewTabs", "textInput", "pepper", "mark",
+]
+
+
+@pytest.mark.parametrize("name", COMPONENTS)
+def test_every_component_of_the_design_is_one_function_with_its_name(name):
+    assert re.search(rf"(EK\.{name}\s*=|function {name}\s*\()", SOURCE), f"{name}: no function of that name in static/js"
+
+
+def test_the_page_loads_only_files_that_exist_and_ship():
+    import tomllib
+
+    page = (STATIC / "app.html").read_text(encoding="utf-8")
+    loaded = re.findall(r'(?:src|href)="(static/[^"]+)"', page)
+    assert loaded, "the page loads its scripts and styles"
+    globs = tomllib.loads((STATIC.parents[2] / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]["evolvekit"]
+    for rel in loaded:
+        path = STATIC / rel[len("static/"):]
+        assert path.is_file(), rel
+        inside = path.relative_to(STATIC.parents[1]).as_posix()
+        assert any(Path(inside).match(g) for g in globs), f"{rel} is not in pyproject's package-data"
+    for script in SCRIPTS:
+        assert f"static/js/{script.relative_to(STATIC / 'js').as_posix()}" in loaded, f"{script.name} is never loaded"
+    assert "http://" not in page and "https://" not in page, "nothing loads from the internet"
+    for css in (STATIC / "css").glob("*.css"):
+        assert not re.search(r"url\(\s*['\"]?https?:", css.read_text(encoding="utf-8")), css.name
+
+
+def test_every_script_parses():
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+    for script in SCRIPTS:
+        done = subprocess.run([node, "--check", str(script)], capture_output=True, text=True)
+        assert done.returncode == 0, f"{script.name}: {done.stderr}"
+
+
+BANNED = ["KPI", "seed", "generation", "instance", "config", "baseline", "confidence interval", "p-value"]
+"""Words never on screen (the design's word rules); SQL only inside the expert box."""
+
+
+def _without_code(text: str) -> str:
+    """A template literal with its ${...} parts (code, braces nested) taken out."""
+    out, depth, i = [], 0, 0
+    while i < len(text):
+        if depth == 0 and text.startswith("${", i):
+            depth, i = 1, i + 2
+            continue
+        if depth:
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+            if depth == 0:
+                out.append(" ")
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _visible_strings(source: str) -> list[str]:
+    """The string literals of the page's scripts that hold words: what can reach the screen."""
+    found = re.findall(r'"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`|' + r"'((?:[^'\\\n]|\\.)*)'", source)
+    out = []
+    for a, b, c in found:
+        text = _without_code(a or b or c)
+        text = re.sub(r"<[^>]*>", " ", text)
+        if re.search(r"[A-Za-z]{3,} [A-Za-z]{2,}", text):
+            out.append(text)
+    return out
+
+
+@pytest.mark.parametrize("word", BANNED)
+def test_no_banned_word_reaches_the_screen(word):
+    strings = _visible_strings(SOURCE) + _visible_strings((STATIC / "app.html").read_text(encoding="utf-8"))
+    hits = [s for s in strings if re.search(rf"\b{re.escape(word)}s?\b", s, re.I)]
+    assert not hits, f"{word!r} on screen: {hits[:3]}"
+
+
+def test_sql_shows_only_in_the_expert_box():
+    hits = [s for s in _visible_strings(SOURCE) if re.search(r"\bSQL\b", s)]
+    allowed = ("for experts", "SQL returning", "(SQL", "the SQL")
+    assert hits and all(any(a in s for a in allowed) for s in hits), hits
+
+
+def test_every_route_the_old_page_used_is_still_reachable():
+    """Everything the app could do stays reachable: each API route has a caller in the page."""
+    from evolvekit.app import api
+
+    unused = {"/api/harnesses/{}"}  # read by tests and tools, never by the page (as before the redesign)
+    for method, pattern, _ in api.ROUTES:
+        literal = re.sub(r"\(\?P<\w+>\[\^/\]\+\)", "{}", pattern.pattern)
+        if literal in unused:
+            continue
+        words = [part for part in literal.split("/") if part and part != "{}" and part not in ("api", "studies")]
+        if not words:  # /api/studies/{slug}: the study itself, read and changed through EK.studyPath(slug)
+            assert "EK.studyPath(" in SOURCE
+            continue
+        last = words[-1]
+        assert re.search(rf"[\"'/]{re.escape(last)}[\"'/?]", SOURCE), f"{method} {literal}: nothing in the page calls it"

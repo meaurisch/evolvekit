@@ -1,0 +1,121 @@
+/* evolvekit app: what a study's state says, in the design's words.
+   One place decides the verdict mark, Pepper's phase and the card's lines, so
+   Home, the Study page and the companion never disagree. The rule itself is
+   the server's: the page says "use it" only when the final check's decision
+   is "use" (`decision` from the run). */
+(function () {
+  "use strict";
+  var EK = window.EK;
+
+  /** The verdict mark for a decision: use, keep, worse, none (one case, nothing to check), open (no answer yet), error. */
+  EK.markOf = function (s) {
+    if (!s) return "open";
+    if (s.kind === "failed" || s.kind === "broken") return "error";
+    if (s.kind !== "finished") return "open";
+    return { use: "use", keep: "keep", worse: "worse", single: "none", none: "none", skipped: "none" }[s.decision] || (s.tone === "bad" ? "worse" : s.tone === "warn" ? "keep" : "none");
+  };
+
+  /** Pepper's phase. Every finished study hatches: bright on use it, dull on every other answer.
+      A final check that was stopped stays in the cocoon, asleep. */
+  EK.pepperPhase = function (s) {
+    if (!s) return "egg";
+    if (s.kind === "draft" || s.kind === "queued" || s.kind === "broken") return "egg";
+    if (s.kind === "finished") return s.decision === "use" ? "butterfly" : "butterfly-dull";
+    if (s.check_stopped) return "cocoon-asleep";
+    if (s.phase === "check") return "cocoon-late";
+    if (s.phase === "starting") return "egg";
+    var r = s.rounds || {};
+    if (s.kind === "running") {
+      if (s.continued || !r.planned) return "caterpillar";
+      return (r.done || 0) >= r.planned / 2 ? "cocoon" : "caterpillar";
+    }
+    return "caterpillar"; // stopped or failed in the search
+  };
+
+  /** "Keep today's settings" or "Keep today's data", by what the study changes. */
+  EK.keepWords = function (s) {
+    return s && s.what === "data" ? "Keep today’s data" : "Keep today’s settings";
+  };
+
+  /** The answer's headline and its second line, from the decision and the numbers. */
+  EK.answerWords = function (s) {
+    var d = s.decision, mean = s.mean, ci = s.ci95 || [], chance = EK.chanceWords(s.chance);
+    if (d === "use") return { head: "Use it: " + EK.better(mean), sub: EK.capital(chance || "") + (ci.length ? (chance ? " · " : "") + "at worst " + EK.better(ci[0]) : "") };
+    if (d === "keep") return { head: EK.keepWords(s), sub: (mean != null ? EK.better(mean) + ", but not sure enough" : "Not proven on new cases") };
+    if (d === "worse") return { head: "Worse: " + EK.better(mean), sub: EK.keepWords(s) + "." };
+    if (d === "single") return { head: (mean != null ? EK.better(mean) : "A number") + " on one case", sub: "One case gives no range, so no answer." };
+    if (d === "skipped") return { head: "Nothing beat the starting point", sub: EK.keepWords(s) + "." };
+    return { head: "No answer", sub: s.line || "" };
+  };
+
+  /** The caption under a range: the chance and the worst case, or why there is no range. */
+  EK.rangeCaption = function (s) {
+    var ci = s.ci95;
+    if (!ci) return "One case: a number, no range";
+    if (s.decision === "keep" && s.chance != null && s.chance < 0.9) return "Chance under 9 in 10 · at worst " + EK.better(ci[0]) + " · at best " + EK.better(ci[1]);
+    var range = EK.rangeWords(ci[0], ci[1]);
+    return s.chance != null ? EK.capital(EK.chanceWords(s.chance)) + " · " + range.charAt(0).toLowerCase() + range.slice(1) : range;
+  };
+
+  /** A Home card from one study of GET /api/home. */
+  EK.cardOf = function (s) {
+    var phase = EK.pepperPhase(s), r = s.rounds || {};
+    var c = { slug: s.slug, name: s.name, mark: EK.markOf(s), pepper: phase, archived: !!s.archived };
+    var round = r.planned ? "round " + Math.min((r.done || 0) + 1, r.planned) + " of " + r.planned : (r.done ? "round " + (r.done + 1) : "");
+    if (s.kind === "draft") {
+      c.kicker = "Draft";
+      c.head = s.step >= 4 ? "Set up not finished" : "Cases still to add";
+      c.sub = s.harness || "";
+      c.pepper = "egg";
+      c.href = (s.step >= 4 ? "#/setup/" : "#/start/") + EK.q(s.slug);
+    } else if (s.kind === "queued") {
+      c.kicker = "Queued";
+      c.head = s.waiting_for ? "Starts after " + s.waiting_for : "Waits for its turn";
+      c.sub = "Starts by itself" + (s.hours ? " · about " + EK.hours(s.hours) : "");
+      c.timeline = { rounds: r.planned || 1, done: 0, queued: true };
+    } else if (s.kind === "running") {
+      c.kickerTone = "accent";
+      if (s.phase === "check") {
+        c.kicker = "Final check" + (s.check && s.check.planned ? " · " + s.check.done + " of " + s.check.planned + " runs" : "");
+        c.head = "No answer yet";
+        c.sub = "Checking on held-back cases" + (s.finish_at ? " · done around " + s.finish_at : "");
+      } else if (s.continued) {
+        c.kicker = "Searching again" + (round ? " · " + round : "");
+        c.head = "Continued after a restart";
+        c.sub = "Nothing lost" + (s.finish_at ? " · done around " + s.finish_at : "");
+      } else {
+        c.kicker = s.phase === "starting" ? "Starting" : "Running" + (round ? " · " + round : "");
+        c.head = s.best_pct != null && s.best_pct > 0 ? "Best so far: " + EK.better(s.best_pct) : "Nothing better yet";
+        c.sub = "Not checked yet" + (s.finish_at ? " · done around " + s.finish_at : "");
+      }
+      c.timeline = { rounds: r.planned || Math.max(1, (r.done || 0) + 1), done: r.done || 0, running: s.phase === "check" ? null : (r.done || 0) + 1,
+        check: s.phase === "check" && s.check ? [s.check.done, s.check.planned] : null };
+    } else if (s.kind === "finished") {
+      var w = EK.answerWords(s);
+      c.kicker = "Finished" + (s.n ? " · " + EK.plural(s.n, "held-back case") : "");
+      c.head = w.head;
+      c.sub = s.decision === "use" || s.decision === "keep" ? EK.rangeCaption(s) : w.sub;
+      if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
+    } else if (s.kind === "stopped") {
+      c.kicker = s.check_stopped ? "Final check stopped" : "Stopped" + (r.done ? " · round " + (r.done + 1) : "");
+      c.head = s.check_stopped ? "No answer yet" : s.best_pct != null && s.best_pct > 0 ? "Best so far: " + EK.better(s.best_pct) : "Stopped by you";
+      c.sub = s.check_stopped ? "The runs so far are kept." : "Not checked yet";
+      c.timeline = { rounds: r.planned || Math.max(1, r.done || 1), done: r.done || 0, stoppedAt: (r.done || 0) + 1 };
+    } else if (s.kind === "failed") {
+      c.kicker = "Stopped by an error";
+      c.kickerTone = "critical";
+      c.head = r.done != null ? "The study stopped in round " + ((r.done || 0) + 1) : "The study stopped";
+      c.sub = s.error ? String(s.error).split("\n")[0].slice(0, 90) : "Tries up to the stop are kept.";
+      c.timeline = { rounds: r.planned || Math.max(1, (r.done || 0) + 1), done: r.done || 0, running: (r.done || 0) + 1, failed: true };
+    } else {
+      c.kicker = "Cannot be read";
+      c.kickerTone = "critical";
+      c.head = "This study cannot be opened";
+      c.sub = s.line || "";
+      c.pepper = null;
+    }
+    if (s.archived) c.kicker = "Archived · " + c.kicker.charAt(0).toLowerCase() + c.kicker.slice(1);
+    if (!c.href) c.href = s.kind === "broken" ? "#/" : EK.studyHref(s.slug, null);
+    return c;
+  };
+})();
