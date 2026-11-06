@@ -20,6 +20,8 @@
       if (!st.doc.runs || !st.doc.runs.length) { location.replace(((st.doc.study.step || 1) >= 4 ? "#/setup/" : "#/start/") + EK.q(slug)); return; }
       return load().then(function () {
         if (!EK.isCurrent(gen)) return;
+        EK.hoverEscape = hoverEscape;
+        EK.onStudyChanged = function () { load().then(function () { if (EK.isCurrent(gen)) update(main); }); };
         draw(main);
         if (st.openRuns) runsDrawer();
         EK.every(2500, function () {
@@ -368,12 +370,12 @@
       svg.addEventListener("blur", function () { setTimeout(function () { if (!document.activeElement || !document.activeElement.closest || !document.activeElement.closest("#hover-card")) hide(); }, 0); });
     });
   }
-  EK.hoverEscape = function () {
+  function hoverEscape() {
     var card = document.getElementById("hover-card");
     if (!card) return false;
     card.remove();
     return true;
-  };
+  }
   function choose(id) {
     st.chosen = id; st.chosenSet = true;
     var c = combo(id);
@@ -511,7 +513,7 @@
       },
       choose: function (el) { choose(el.getAttribute("data-arg")); },
       unchoose: function () { unchoose(); var t = EK.$(".tab.is-on", main); if (t) t.focus(); },
-      "hover-close": function () { EK.hoverEscape(); },
+      "hover-close": function () { hoverEscape(); },
       "all-settings": function () { st.showAllSettings = true; st.lastPlot = ""; drawView(); },
       stop: function () {
         var queued = st.status.phase === "queued";

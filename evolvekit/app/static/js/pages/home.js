@@ -55,8 +55,8 @@
           data = n;
           var grid = EK.$(".home-cards", main);
           if (grid && !EK.$(".menu:not([hidden])", main)) {
-            var active = document.activeElement && document.activeElement.closest(".study-card");
-            if (!active) { draw(main, query); }
+            var busy = document.activeElement && document.activeElement !== main && main.contains(document.activeElement);
+            if (!busy && !document.body.classList.contains("drawer-open")) { EK._moveFocus = false; draw(main, query); }
           }
         }).catch(function () { /* the next poll tries again */ });
       });

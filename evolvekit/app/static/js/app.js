@@ -131,6 +131,8 @@
     EK.clearTimers();
     EK.hideUndo();
     EK.closeMenus();
+    EK.onStudyChanged = null;
+    EK.hoverEscape = null;
     if (EK.closeDrawer) EK.closeDrawer({ keepAssistant: true, quiet: true });
     var name = r.path[0] || "home";
     var page = { "": "home", home: "home", start: "start", setup: "setup", study: "study", compare: "compare", settings: "settings" }[name] || "home";
