@@ -232,7 +232,8 @@
       out.push(html`<div class="held-line">${warn ? EK.icon("warning", 18) : ""}<span>${words}</span>
         ${cases.length < 3 ? EK.button("Add cases", { kind: "secondary", size: "s", act: "choose-files" })
           : held < 3 && d.suggested_test > held ? EK.button("Hold back " + d.suggested_test, { kind: "secondary", size: "s", act: "hold", arg: d.suggested_test }) : ""}
-        ${EK.link("Which ones?", { act: "which" })}</div>`);
+        ${EK.link("Which ones?", { act: "which" })}</div>
+        <p class="type-small ink-2">Held back: kept aside, never searched on. The final check tries the result on them.</p>`);
     } else {
       out.push(html`<p class="type-small ink-2">${EK.link("Use the sample cases", { act: "samples" })} · ${EK.link("A folder on this computer", { act: "folder-path" })}</p>`);
     }
@@ -355,12 +356,25 @@
   function folderPathDrawer(main) {
     EK.openDrawer({ title: "A folder of cases", sub: "On this computer",
       body: html`<form class="sub-section" data-submit="go">${EK.textInput({ id: "folder-path", label: "Folder", mono: true, placeholder: "C:\\…\\cases" })}
-        <div>${EK.button("Add the cases in it", { type: "submit" })}</div></form>`,
+        <div>${EK.button("Add the cases in it", { type: "submit" })}</div><p class="type-small tone-critical" id="folder-say" role="status" style="overflow-wrap:anywhere"></p></form>`,
       acts: { go: function () {
-        var path = document.getElementById("folder-path").value.trim().replace(/^"|"$/g, "");
+        var box = document.getElementById("folder-path"), path = box.value.trim().replace(/^"|"$/g, "");
         if (!path) return;
-        ensureStudy().then(function () { return importFolder(path, main); }).then(function () { EK.closeDrawer(); }).catch(EK.fail);
+        var say = document.getElementById("folder-say");
+        say.textContent = "Looking in the folder…";
+        ensureStudy().then(function () {
+          return EK.post(EK.studyPath(st.slug, "/import"), { folder: path });
+        }).then(function (res) {
+          EK.closeDrawer();
+          st.doc = res.study;
+          var added = res.imported.added.length, skipped = res.imported.skipped.length;
+          EK.toast(added ? "done" : "error", EK.plural(added, "case") + " added" + (skipped ? ", " + skipped + " left out" : ""));
+          if (skipped) st.refused = { names: res.imported.skipped, formats: (st.harness.cases || {}).formats || [] };
+          draw(main);
+          return firstSplit(main).then(function () { inspectIfNeeded(main); });
+        }).catch(function (err) { say.textContent = err.message; box.focus(); });
       } } });
+    setTimeout(function () { var box = document.getElementById("folder-path"); if (box) box.focus(); }, 260);
   }
 
   function appDrawer(main) {

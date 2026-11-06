@@ -441,6 +441,10 @@
       if (o.announce && was !== pep.phase && !EK.reducedMotion()) pep.bubble = o.announce;
       if (o.announce && was !== pep.phase && EK.reducedMotion()) pep.bubble = o.announce;
       if (was !== pep.phase || o.redraw) draw();
+      if (o.announce) {
+        clearTimeout(pep.timer);
+        pep.timer = setTimeout(function () { if (pep.bubble === o.announce) { pep.bubble = null; draw(); } }, 9000);
+      }
     },
     onRoute: function (page, slug) {
       if (slug !== pep.slug) { pep.bubble = null; }

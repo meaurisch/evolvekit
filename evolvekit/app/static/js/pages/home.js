@@ -74,7 +74,7 @@
     if (!data.studies.length && !trash.length) {
       body = html`<div class="hero"><div aria-hidden="true">${EK.pepper("egg", EK.isPhone() ? 200 : 280)}</div>
         <h1 class="type-display" id="page-title" tabindex="-1">No studies yet</h1>
-        <p class="type-body ink-2">Start one in three choices. Pepper hatches at the end.</p>
+        <p class="type-body ink-2">Start one in a few steps. Pepper, the butterfly, follows it.</p>
         <div class="actions" style="justify-content:center;margin-top:8px">${newBtn}${EK.button("Open a study zip", { kind: "secondary", act: "pick-zip" })}</div></div>
         <div style="display:flex;justify-content:center"><div style="width:100%;max-width:560px">${dropZone()}</div></div>${links()}`;
     } else {

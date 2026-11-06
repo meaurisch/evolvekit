@@ -343,6 +343,7 @@
     return html`<div class="info-tip" role="note" id="${id}" hidden><span class="info-title">${s.label || s.name}</span>
       ${s.help ? html`<span class="type-small">${s.help}</span>` : ""}
       <span class="type-small ink-2">Today: ${today}${tries ? " · tries " + tries : ""}</span>
+      <span class="type-small ink-2">Its own name: <span class="mono">${s.name}</span></span>
       ${s.explain ? html`<details class="more-detail"><summary>More detail</summary><p class="type-small">${s.explain}</p></details>` : ""}</div>`;
   };
 
@@ -393,7 +394,7 @@
   EK.chosenChip = function (c) {
     if (!c) return html`<span class="type-small ink-3 chip-hint">Click a dot to follow it</span>`;
     return html`<div class="chip"><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.5"/></svg>
-      <span class="chip-text"><span class="wide-only">Combination </span><span class="phone-only">No. </span>${c.n} · ${EK.better(c.pct)}</span>
+      <span class="chip-text"><span class="wide-only">Combination </span><span class="phone-only">No. </span>${c.n} · ${EK.better(c.pct)}<span class="wide-only"> on study cases</span></span>
       <button type="button" class="chip-close" aria-label="Stop following combination ${c.n}" data-act="unchoose">${EK.gl("close", 14)}</button></div>`;
   };
 

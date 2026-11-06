@@ -91,7 +91,7 @@
       var t = (st.h.kpi_templates || {})[k.template];
       if (t) return t.label.replace(/\{(\w+)\}/g, function (_, p) { return (k.params || {})[p] != null ? k.params[p] : "…"; });
     }
-    return k.says || name;
+    return k.says || String(name).replace(/_/g, " ").replace(/^./, function (c) { return c.toUpperCase(); });
   }
   function kpiDirection(name) {
     var k = (study().kpis || {})[name] || {}, h = (st.h.kpis || {})[name];
@@ -169,7 +169,8 @@
       return html`<span class="type-small">${kpiLabel(k)} <strong class="type-data" style="font-size:14px">${EK.num(kpis[k])}</strong></span>`;
     })}</div>`;
     if (t.state === "running") {
-      var secs = t.started_at ? Math.round((Date.now() - new Date(t.started_at)) / 1000) : 0;
+      var began = typeof t.started_at === "number" ? t.started_at * 1000 : t.started_at ? new Date(t.started_at).getTime() : Date.now();
+      var secs = Math.max(0, Math.round((Date.now() - began) / 1000));
       var frac = t.expected_s ? Math.min(0.95, secs / t.expected_s) : 0.4;
       return html`<div class="test-run" id="test-run-box" role="status"><div class="test-run-line"><span class="type-label accent-ink">Test run</span>
         <span class="type-small ink-2">${secs} s${t.expected_s ? " of about " + Math.round(t.expected_s) + " s" : ""}</span></div>

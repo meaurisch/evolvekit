@@ -108,7 +108,7 @@
         acts: [{ text: "Remove from queue", kind: "secondary", act: "stop" }] });
     } else if (s.phase === "starting") {
       Object.assign(x, { kicker: "Starting", head: "Measuring " + keep.replace(/^Keep /, "").replace("today’s", "today’s"), sub: s.now || "Getting ready.",
-        caption: "Then " + EK.plural((s.rounds || {}).planned || 0, "round") + " and the final check", acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
+        caption: (s.rounds || {}).planned ? "Then " + EK.plural(s.rounds.planned, "round") + " and the final check" : "Then the search and the final check", acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
     } else if (s.phase === "search") {
       var b = bestPct();
       Object.assign(x, { kicker: (cardState().continued ? "Searching again · " : "Searching · ") + roundWord(), head: b ? "Best so far: " + EK.better(b) : "Nothing better yet",
@@ -137,12 +137,12 @@
         acts: [hasExport("settings_json") ? { text: "Save settings file", act: "save-settings" } : null, { text: "Copy", kind: "secondary", act: "copy-summary", label: "Copy a summary" }].filter(Boolean) });
     } else if (d === "keep") {
       Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Final check done · " + EK.plural(f.n || heldCount(), "held-back case"), head: keep,
-        sub: f.mean != null ? EK.capital(EK.better(f.mean)) + ", but not sure enough." : "Not proven on new cases.", right: "range",
+        sub: f.mean != null ? EK.capital(EK.better(f.mean)) + " on held-back cases, but not sure enough." : "Not proven on new cases.", right: "range",
         range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
         acts: [f.recheck ? { text: "Check with more runs", kind: "secondary", act: "recheck" } : null].filter(Boolean) });
     } else if (d === "worse") {
       Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Final check done · " + EK.plural(f.n || heldCount(), "case"), head: "Worse: " + EK.better(f.mean),
-        sub: keep + ".", right: "range", range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95 }), rule: true,
+        sub: "On held-back cases. " + keep + ".", right: "range", range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95 }), rule: true,
         acts: [{ text: "Start a new study", kind: "secondary", act: "next" }] });
     } else if (d === "single") {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Final check done · 1 held-back case", head: EK.capital(EK.better(f.mean)) + " on one case",
@@ -186,7 +186,7 @@
     return html`<section class="status-strip${acc ? " is-accent" : ""}" aria-label="Status" aria-live="polite" aria-atomic="true">
       <div class="strip-main">${EK.verdictMark(x.mark, phone ? 36 : 44, acc)}<div class="strip-words">
         <span class="type-label${x.kickerTone === "accent" && !acc ? " accent-ink" : x.kickerTone === "critical" ? " tone-critical" : ""}">${x.kicker}</span>
-        <p class="${acc ? "type-display" : "strip-head"}">${EK.figures(x.head)}${x.tag ? html`<span class="strip-tag">${x.tag}</span>` : ""}</p>
+        <p class="${acc ? "type-display" : "strip-head"}">${EK.figures(x.head)}${x.tag ? html` <span class="strip-tag">${x.tag}</span>` : ""}</p>
         <p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p></div></div>
       <div class="strip-side">${vis}${x.caption ? html`<span class="type-small${acc ? "" : " ink-2"}">${x.caption}</span>` : ""}
         ${acts.length ? html`<div class="actions">${acts}</div>` : ""}${rule}</div></section>`;
@@ -399,10 +399,12 @@
     var dl = (r.downloads || []).map(function (x) {
       return EK.link(x.label, { href: EK.withToken(EK.studyPath(st.slug, "/download/" + EK.q(x.name) + "?run=" + EK.q(st.run))), download: true, icon: EK.gl("file", 18) });
     });
-    return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">${d === "use" ? "Hand it over" : "What the search found"}</h2>
-      ${d !== "use" ? html`<p class="type-small ink-2">Not proven on held-back cases. Use it at your own risk.</p>` : ""}
+    var keepIt = d !== "use";
+    return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">Hand it over</h2>
+      ${keepIt ? html`<p class="type-body strong">Nothing to change: ${EK.keepWords({ what: whatOf() }).replace(/^Keep /, "keep ")}.</p>
+        <p class="type-small ink-2">Below is what the search found. It is not proven on held-back cases: use it at your own risk.</p>` : ""}
       ${changedTable()}
-      <div class="actions">${hasExport("settings_json") ? EK.button("Show the settings file", { kind: "secondary", act: "show-settings" }) : ""}
+      <div class="actions">${hasExport("settings_json") ? EK.button(keepIt ? "Show the new settings" : "Show the settings file", { kind: "secondary", act: "show-settings" }) : ""}
         ${EK.button("Copy a summary", { kind: "secondary", act: "copy-summary" })}
         ${EK.link("Open the report", { href: EK.withToken(EK.studyPath(st.slug, "/download/report?run=" + EK.q(st.run) + "&view=1")), target: "_blank" })}</div>
       <div class="link-row">${dl}${EK.link("Save the study as zip", { href: EK.withToken(EK.studyPath(st.slug, "/download/study")), download: true })}</div></section>`;

@@ -698,7 +698,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         now_line = (f"The final check: {_runs_word(on)} per case so far on the held-back cases; "
                     "it adds runs while time remains and the answer is open.")
     elif stage and isinstance(current, int):
-        cases = len(study.training)
+        # The cases of the stage that is running: a quick look runs on a few of the study's cases.
+        per_combination = int(stage.get("runs_planned") or 0) // max(1, int(stage.get("candidates") or 1))
+        cases = max(1, per_combination // max(1, study.limits.runs_per_case)) if per_combination else len(study.training)
         on = f"on {cases} case{'s' if cases != 1 else ''}"
         runs = f"{stage.get('runs_done')} of {stage.get('runs_planned')} runs done"
         count = stage.get("candidates") or 0
