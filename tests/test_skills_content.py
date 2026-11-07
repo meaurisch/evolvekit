@@ -197,6 +197,8 @@ HAND_OVER_QUEUED = ("Your study is queued behind <name>: <url>. It starts when t
 MEASURES_RULE = "Measures come from the harness by name, `{from: harness}`, or from its templates; never write SQL for a measure."
 THIN_PLAN_RULE = ("A plan with fewer than 3 rounds is thin: show its three ways out, start nothing, and wait for "
                   "the engineer's choice; in a one-shot run, say so and end.")
+STOP_BEFORE_MAKING = ("Do not go on to step 3 until every question has an answer: with one missing, nothing is made "
+                      "— no `study new`, no file — and your whole message is that question.")
 THIN_COMPILE = ("On a thin plan `study compile` exits 2 with `plan: … fewer than 3 rounds …`; the sentences after "
                 "it are the ways out — relay them, change nothing in `study.yaml` yourself.")
 THIN_WARNING = ("K is the number of entries under `problem.parameters` in the compiled `runs/<id>/evolvekit.yaml` "
@@ -254,6 +256,15 @@ def test_study_skill_has_the_completeness_rule():
     for sentence in COMPLETENESS:
         assert sentence in interview
     assert len(re.findall(r"^\s*- \[ \] ", interview, re.M)) == 8, "the interview is a checklist of eight questions"
+
+
+def test_study_skill_makes_nothing_before_the_interview_is_complete():
+    body = _body(STUDY)
+    assert STOP_BEFORE_MAKING in _section(body, "2. Interview")
+    assert _section(body, "3. Make the study").lstrip().startswith("Only when the interview is complete")
+    first_new = min(body.find(f"`{c}") if f"`{c}" in body else body.find(c)
+                    for c in commands_in(body) if command_variants(c)[0][:2] == ["study", "new"])
+    assert 0 <= body.find(STOP_BEFORE_MAKING) < first_new, "the stop comes before the first `study new` command"
 
 
 def test_study_skill_has_the_hand_over():

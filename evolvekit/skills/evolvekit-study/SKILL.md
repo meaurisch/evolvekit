@@ -36,9 +36,11 @@ One unanswered question stops you with that question, in one message.
 Several unanswered: ask them all in that one message.
 In a one-shot run, where no answer can come, say what is missing and end.
 Decide nothing about the goal or the total time alone.
+Do not go on to step 3 until every question has an answer: with one missing, nothing is made — no `study new`, no file — and your whole message is that question.
 
 ## 3. Make the study
 
+Only when the interview is complete: every line of the checklist answered, by the request or by the engineer.
 Pick the template whose goal matches the measure and direction from the interview (`--template T`, T the file's name without `.yaml`).
 With none fitting, leave out `--template`: the study starts blank.
 
