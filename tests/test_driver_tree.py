@@ -6,17 +6,20 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from tree_helpers import SOLVER, change, git, head, make_repo
+from tree_helpers import SOLVER, change, diff_text, git, head, make_repo
 
 from evolvekit import tree
 from evolvekit.candidate import Candidate
 from evolvekit.config import ConfigError, build_config
+from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.cascade import Cascade
+from evolvekit.evaluate.stages import build_argv, render_app
 from evolvekit.ledger import read_jsonl
 from evolvekit.search import driver as driver_module
 from evolvekit.search.driver import Driver
@@ -384,3 +387,125 @@ def test_the_tree_identity_holds_build_and_app(project, tmp_path):
     identity = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")._problem_identity()
     assert identity["tree"] == {"base": base, "open": ["solver.py"], "build": '{python} -c "pass"',
                                 "app": "{tree}/solver.py"}
+
+
+# -- command stages on trees: {candidate} is the tree, {app} the program inside it --
+
+
+def test_argv_substitutes_tree_and_app():
+    folder = Path("C:/runs/run 1/work/trees/g001-c0002/examples/cli-solver")
+    app = render_app("{tree}/solver.py", folder)
+    assert app == str(folder / "solver.py")
+    argv = build_argv("{python} runner.py --app {app} --tree {candidate} --case {instance}",
+                      candidate=folder, inputs=(), out=Path("o.json"), instance="../../cases/a.json", app=app)
+    assert argv == [sys.executable, "runner.py", "--app", app, "--tree", str(folder), "--case", "../../cases/a.json"]
+    with pytest.raises(ValueError, match=r"\{app\}: the problem names no program"):
+        build_argv("{python} {app}", candidate=folder, inputs=(), out=Path("o.json"))
+
+
+def test_cache_keys_a_tree_by_its_commit(tmp_path):
+    common = dict(stage_id="s", command="c", reading=(), candidate_path=tmp_path, inputs=(), instance="a", seed=0,
+                  private=False)
+    assert EvalCache.key(**common, source_id="1" * 40) != EvalCache.key(**common, source_id="2" * 40)
+    assert EvalCache.key(**common, source_id="1" * 40) == EvalCache.key(
+        **{**common, "candidate_path": tmp_path / "x"}, source_id="1" * 40)
+
+
+def test_the_same_commit_in_two_trees_is_run_once(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base)
+    raw["problem"]["tree"]["app"] = "{tree}/solver.py"
+    raw["evaluate"]["stages"][-1]["command"] = "{python} {app} {instance}"
+    config = build_config(raw, base_dir=tmp_path)
+    three, four = _values(repo, 3, 4)
+    kid = Candidate(id="g001-c0001", generation=1, block=three, source="", operator="diff")
+    other = Candidate(id="g001-c0002", generation=1, block=four, source="", operator="diff")
+
+    def evaluate(run: str, *kids: Candidate) -> tuple[dict, dict]:
+        events: list[tuple[str, dict]] = []
+        cascade = Cascade(config, work_dir=tmp_path / run / "work",
+                          on_event=lambda type, **fields: events.append((type, fields)))
+        try:
+            results = cascade.evaluate_generation(list(kids))
+            folders = {cid: made.path for cid, made in cascade._trees.items()}
+        finally:
+            tree.remove_all(tmp_path / run)
+        cached = {(f["candidate_id"], f["instance"]): f["cached"] for t, f in events if t == "eval_finished"}
+        return {k.id: (results[k.id].commit, results[k.id].kpis.get("value"), folders[k.id]) for k in kids}, cached
+
+    first, cached = evaluate("one", kid)
+    assert set(cached.values()) == {False}
+    # The second run's cache starts as the first one's: the same commit in
+    # another folder is a lookup, another commit is run.
+    shutil.copytree(tmp_path / "one" / "work" / "cache", tmp_path / "two" / "work" / "cache")
+    second, cached = evaluate("two", kid, other)
+    assert second[kid.id][:2] == first[kid.id][:2] == (first[kid.id][0], 3) and first[kid.id][0]
+    assert second[kid.id][2] != first[kid.id][2]
+    assert second[other.id][0] != first[kid.id][0] and second[other.id][1] == 4
+    assert cached == {("g001-c0001", "a"): True, ("g001-c0001", "b"): True,
+                      ("g001-c0002", "a"): False, ("g001-c0002", "b"): False}
+
+
+def test_demo_tour_code_candidate_runs_from_its_tree(tmp_path):
+    old = git(ROOT, "show", "HEAD:examples/cli-solver/solver.py") + "\n"
+    new = old.replace('"settings": {', '"banner": "from the tree", "settings": {')
+    diff = diff_text("examples/cli-solver/solver.py", old, new)
+    raw = {"problem": {"tree": {"repo": str(ROOT / "examples" / "cli-solver"), "base": "HEAD",
+                                "open": ["solver.py"], "app": "{tree}/solver.py"}},
+           "evaluate": {"stages": [{"id": "static", "kind": "builtin-static"},
+                                   {"id": "run", "kind": "command", "kpis_from": "stdout", "normalize": "none",
+                                    "command": "{python} {app} --instance {instance} --time-limit 0.2",
+                                    "instances": [str(ROOT / "examples" / "cli-solver" / "data" / "a-40.json")]}],
+                        "score": {"objective": "length", "direction": "minimize"}},
+           "search": {"operators": {"param_lhs": 1.0}}}
+    config = build_config(raw, base_dir=tmp_path)
+    events: list[tuple[str, dict]] = []
+    cascade = Cascade(config, work_dir=tmp_path / "run" / "work",
+                      on_event=lambda type, **fields: events.append((type, fields)))
+    child = Candidate(id="g001-c0002", generation=1, block=diff, source="", operator="diff")
+    try:
+        result = cascade.evaluate_generation([child])[child.id]
+        assert not result.rejected, result.last_failure
+        # A per-instance stage keeps each run's log apart: the run's own event names it.
+        logs = [f["stdout_log"] for t, f in events if t == "eval_finished" and f["stage"] == "run"]
+        assert len(logs) == 1
+        assert '"banner": "from the tree"' in (tmp_path / "run" / logs[0]).read_text(encoding="utf-8")
+        assert result.commit and git(ROOT, "rev-parse", result.commit + "^") == git(ROOT, "rev-parse", "HEAD")
+        assert ROOT.joinpath("examples", "cli-solver", "solver.py").read_text(encoding="utf-8").count("banner") == 0
+    finally:
+        tree.remove_all(tmp_path / "run")
+
+
+def _app_raw(repo: Path, base: str, **keys) -> dict:
+    raw = _raw(repo, base, **keys)
+    raw["problem"]["tree"]["app"] = "{tree}/solver.py"
+    raw["evaluate"]["stages"][-1]["command"] = "{python} {app} {instance} {seed}"  # confirm needs {seed}
+    return raw
+
+
+def test_the_final_check_runs_app_from_each_tree_and_caches_by_commit(project, tmp_path, monkeypatch):
+    from evolvekit.confirm import confirm
+
+    repo, base = project
+    scripted(monkeypatch, [change(repo, {"app dir/solver.py": SOLVER.replace("VALUE = 5", "VALUE = 3")})] * 2)
+    config = build_config(_app_raw(repo, base, generations=1), base_dir=tmp_path)
+    Driver(config, run_dir=tmp_path / "run").run()
+    first = confirm(config, tmp_path / "run", seeds=[101], label="one", log=lambda _m: None)
+    assert first.candidates and all(r["ok"] and not r["cached"] for r in first.runs)
+    values = {(r["configuration"], r["kpis"]["value"]) for r in first.runs}
+    assert values == {("baseline", 5.0), (first.candidates[0], 3.0)}
+    # Another label checks the same commits out in other folders: with the
+    # first one's cache, every run is a lookup.
+    confirm_dir = tmp_path / "run" / "confirm"
+    shutil.copytree(confirm_dir / "one" / "work" / "cache", confirm_dir / "two" / "work" / "cache")
+    second = confirm(config, tmp_path / "run", seeds=[101], label="two", log=lambda _m: None)
+    assert len(second.runs) == len(first.runs) and all(r["ok"] and r["cached"] for r in second.runs)
+
+
+def test_preflight_runs_app_from_the_starting_point_tree(project, tmp_path):
+    from evolvekit.preflight import preflight
+
+    repo, base = project
+    report = preflight(build_config(_app_raw(repo, base), base_dir=tmp_path), work_dir=tmp_path / "pf")
+    assert not report.failures, report.failures
+    assert report.stages[-1].kpis["value"] == 5.0

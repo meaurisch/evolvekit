@@ -20,6 +20,7 @@ import os
 import re
 import math
 import shlex
+import string
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,8 @@ __all__ = [
     "run_command_stage",
     "static_checks",
     "build_argv",
+    "render_app",
+    "on_tree",
     "Configuration",
     "UnitContext",
     "STDERR_LIMIT",
@@ -239,6 +242,37 @@ def build_command(template: str, *, tree: Path) -> list[str]:
     if not tokens:
         raise ValueError("the build command is empty")
     return [token.replace("{tree}", str(tree)).replace("{python}", sys.executable) for token in tokens]
+
+
+def render_app(template: str, tree: Path) -> str:
+    """`problem.tree.app` for one candidate: `{tree}` is the candidate's tree
+    folder, and the result is what a command stage's `{app}` becomes."""
+    return str(Path(template.replace("{tree}", str(tree))))
+
+
+def on_tree(problem: ProblemConfig, made: "Tree | None") -> dict[str, str | None]:
+    """What a command stage on a candidate's tree takes beyond its folder:
+    `app` (what `{app}` is, `None` when `problem.tree.app` names nothing) and
+    `source_id` (the tree's commit, which keys the cache). Empty for a
+    skeleton or parameters problem, or a candidate without a tree; spread
+    into `run_command_stage` or a `Job`."""
+    if made is None or problem.tree is None:
+        return {}
+    app = render_app(problem.tree.app, made.path) if problem.tree.app else None
+    return {"app": app, "source_id": made.commit}
+
+
+def _tree_source(source_id: str | None, app: str | None, candidate: Path) -> str | None:
+    """What stands for a tree candidate in a cache key: its commit, and the
+    program inside the tree relative to the tree's folder -- so the same
+    commit in two folders is one entry, and another `problem.tree.app` is not."""
+    if source_id is None or app is None:
+        return source_id
+    try:
+        inside = Path(app).relative_to(candidate).as_posix()
+    except ValueError:  # a program outside the tree is the same file in every folder
+        inside = app
+    return f"{source_id}:{inside}"
 
 
 def _last_line(text: str) -> str:
@@ -468,6 +502,7 @@ def build_argv(
     params_flags: list[str] | None = None,
     params_json: Path | None = None,
     instance: str | None = None,
+    app: str | None = None,
 ) -> list[str]:
     """Split the template first, substitute second.
 
@@ -485,6 +520,10 @@ def build_argv(
     to happen after the split. `{params_json}` is the path of a JSON file with
     the same values, for a solver that would rather read a file. Only as a
     whole token, though: see `embedded_params`, which the config check shares.
+
+    For a tree problem, `{candidate}` is the candidate's tree folder and
+    `{app}` the program inside it (`render_app` of `problem.tree.app`); a
+    command that names `{app}` when there is none is refused here.
     """
     tokens = shlex.split(command, posix=True)
     if not tokens:
@@ -492,6 +531,8 @@ def build_argv(
     embedded = embedded_params(command)
     if embedded is not None:
         raise ValueError(embedded)
+    if app is None and any(field == "app" for token in tokens for field in _fields(token)):
+        raise ValueError("{app}: the problem names no program in the tree (problem.tree.app)")
     flags = list(params_flags or [])
     mapping = {
         "candidate": str(candidate),
@@ -501,6 +542,7 @@ def build_argv(
         "python": sys.executable,
         "instance": instance or "",
         "params_json": str(params_json) if params_json is not None else "",
+        "app": app or "",
     }
     argv: list[str] = []
     for token in tokens:
@@ -509,6 +551,14 @@ def build_argv(
         else:
             argv.append(token.format(**mapping))
     return argv
+
+
+def _fields(token: str) -> list[str]:
+    """The placeholders a token names (`{{` and `}}` are literal braces)."""
+    try:
+        return [field for _, field, _, _ in string.Formatter().parse(token) if field is not None]
+    except ValueError:  # an unbalanced brace: `format` says so with the token itself
+        return []
 
 
 def run_command_stage(
@@ -524,6 +574,8 @@ def run_command_stage(
     configuration: "Configuration | None" = None,
     cache: "EvalCache | None" = None,
     cancel: "threading.Event | None" = None,
+    app: str | None = None,
+    source_id: str | None = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -542,6 +594,9 @@ def run_command_stage(
 
     `cancel`, once set, stops the run in flight and starts no other: the
     outcome is then *abandoned*, not failed (`evolvekit/stopping.py`).
+
+    For a tree problem, `app` is what `{app}` becomes and `source_id` the
+    tree's commit, which keys the cache instead of the folder.
     """
     if stage.seeds <= 1:
         return _run_once(
@@ -557,6 +612,8 @@ def run_command_stage(
             configuration=configuration,
             cache=cache,
             cancel=cancel,
+            app=app,
+            source_id=source_id,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -573,6 +630,8 @@ def run_command_stage(
             configuration=configuration,
             cache=cache,
             cancel=cancel,
+            app=app,
+            source_id=source_id,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -665,6 +724,8 @@ def _run_once(
     unit: "UnitContext | None" = None,
     cache: "EvalCache | None" = None,
     cancel: "threading.Event | AnyEvent | None" = None,
+    app: str | None = None,
+    source_id: str | None = None,
 ) -> StageOutcome:
     """One evaluator run, announced to `observer` before and after.
 
@@ -700,6 +761,7 @@ def _run_once(
             seed=seed,
             private=private,
             cwd=cwd,
+            source_id=_tree_source(source_id, app, candidate_path),
         )
         known = cache.load(key, stage.id, private, timeout=stage.timeout)
         if known is not None and _missing_required(known.kpis, required_kpis) is not None:
@@ -720,6 +782,7 @@ def _run_once(
             configuration=configuration,
             unit=unit,
             cancel=halt,
+            app=app,
         )
         outcome.host_busy = load.stop()
     if cache is not None and key is not None and not outcome.cached:
@@ -736,6 +799,7 @@ def _run_once(
                 out=out_path,
                 seed=seed,
                 instance=unit.instance if unit is not None else None,
+                app=app,
                 **_substitutions(configuration),
             )
         )
@@ -784,6 +848,7 @@ def _execute_once(
     configuration: "Configuration | None" = None,
     unit: "UnitContext | None" = None,
     cancel: "threading.Event | AnyEvent | None" = None,
+    app: str | None = None,
 ) -> StageOutcome:
     """Run one external evaluator and read the KPI JSON it wrote to `{out}`."""
     started = time.perf_counter()
@@ -797,6 +862,7 @@ def _execute_once(
             out=out_path,
             seed=seed,
             instance=unit.instance if unit is not None else None,
+            app=app,
             **_substitutions(configuration),
         )
     except (ValueError, KeyError, IndexError) as exc:

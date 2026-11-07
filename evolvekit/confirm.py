@@ -51,7 +51,7 @@ from evolvekit.candidate import SEED_OPERATOR, Candidate, splice_block
 from evolvekit.config import Config, ConfigError, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, run_instance_stage
-from evolvekit.evaluate.stages import Configuration, restore_build, run_build_stage, run_static_stage
+from evolvekit.evaluate.stages import Configuration, on_tree, restore_build, run_build_stage, run_static_stage
 from evolvekit.events import EventLog, Heartbeat
 from evolvekit.leaderboard import rank
 from evolvekit.ledger import read_jsonl
@@ -458,7 +458,9 @@ def confirm(
                 if any(job.candidate_id == safe for job in jobs):
                     safe = f"{safe}.{index}"
                 path, configuration, tree_made = _materialise(config, row, work, safe)
-                jobs.append(Job(safe, path, configuration=configuration, observer=observer_for(name)))
+                # On a tree, `{app}` is the program inside it and the cache keys it by its commit.
+                jobs.append(Job(safe, path, configuration=configuration, observer=observer_for(name),
+                                **on_tree(config.problem, tree_made)))
                 made.append(tree_made)
             _compare(config, comparison, stage, jobs, made, work=work, seeds=seeds, label=label, log=log,
                      events=events, heartbeat=heartbeat, stop=stop)

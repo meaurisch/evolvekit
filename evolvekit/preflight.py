@@ -39,6 +39,7 @@ from evolvekit.evaluate.fanout import Job, run_instance_stage
 from evolvekit.evaluate.process import can_pin
 from evolvekit.evaluate.stages import (
     Configuration,
+    on_tree,
     restore_build,
     run_build_stage,
     run_command_stage,
@@ -284,10 +285,12 @@ def _command_stage(
     candidate_path: Path,
     configuration: Configuration | None,
     work_dir: Path,
+    app: str | None = None,
 ) -> bool:
     """The seed through one command stage and its hold-out; False when that
-    failed or broke a gate (nothing downstream is then worth running)."""
-    outcome = _run_command(config, stage, candidate_path, configuration, work_dir, private=False)
+    failed or broke a gate (nothing downstream is then worth running). `app`
+    is what `{app}` is on a tree problem: the program inside the seed's tree."""
+    outcome = _run_command(config, stage, candidate_path, configuration, work_dir, private=False, app=app)
     report.stages.append(_stage_report(stage, outcome))
     if not outcome.ok:
         report.failures.append(f"stage {stage.id}: {outcome.failure}")
@@ -296,7 +299,7 @@ def _command_stage(
         return False
 
     if stage.private_inputs or stage.private_instances:
-        private = _run_command(config, stage, candidate_path, configuration, work_dir, private=True)
+        private = _run_command(config, stage, candidate_path, configuration, work_dir, private=True, app=app)
         report.stages.append(_stage_report(stage, private))
         if not private.ok:
             report.failures.append(
@@ -328,7 +331,8 @@ def _run_tree_stages(config: Config, report: PreflightReport, work_dir: Path) ->
                 outcome = run_tree_static_stage(made.path, "", None, stage, config.problem, prefix=repo.prefix)
             elif stage.kind == "builtin-build":
                 outcome = run_build_stage(made, stage, config.problem)
-            elif _command_stage(config, report, stage, made.path, None, work_dir):
+            elif _command_stage(config, report, stage, made.path, None, work_dir,
+                                app=on_tree(config.problem, made).get("app")):
                 continue
             else:
                 return
@@ -370,10 +374,11 @@ def _run_command(
     work_dir: Path,
     *,
     private: bool,
+    app: str | None = None,
 ) -> StageOutcome:
     """The seed through one command stage, the way a run would put it through."""
     if stage.fans_out:
-        job = Job("seed", candidate_path, configuration=configuration)
+        job = Job("seed", candidate_path, configuration=configuration, app=app)
         return run_instance_stage(
             [job], stage, out_dir=work_dir, cwd=config.base_dir, private=private,
             required_kpis=config.evaluate.required_kpis,
@@ -387,6 +392,7 @@ def _run_command(
         private=private,
         required_kpis=config.evaluate.required_kpis,
         configuration=configuration,
+        app=app,
     )
 
 

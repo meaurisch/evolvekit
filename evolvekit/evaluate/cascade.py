@@ -31,6 +31,7 @@ from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
     STDERR_LIMIT,
     Configuration,
+    on_tree,
     run_build_stage,
     run_command_stage,
     run_static_stage,
@@ -393,6 +394,11 @@ class Cascade:
         self._trees[cid] = made
         return made.path
 
+    def _on_tree(self, candidate_id: str) -> dict[str, str | None]:
+        """`app` and `source_id` for a command stage on the candidate's tree
+        (`on_tree`); nothing for a skeleton or parameters problem."""
+        return on_tree(self.config.problem, self._trees.get(candidate_id))
+
     def _run_stage(
         self, stage: StageConfig, candidate: Candidate, path: Path
     ) -> StageOutcome:
@@ -428,6 +434,7 @@ class Cascade:
             configuration=self._configurations.get(candidate.id),
             cache=self.cache,
             cancel=self.stop,
+            **self._on_tree(candidate.id),
         )
         if self._is_final(stage) and self.budget is not None and not outcome.abandoned:
             self.budget.record_full_eval()
@@ -496,6 +503,7 @@ class Cascade:
                         candidate_path=paths[c.id],
                         configuration=self._configurations.get(c.id),
                         observer=self._observer(c.id, stage, private=private),
+                        **self._on_tree(c.id),
                     )
                     for c in admitted
                 ],
@@ -797,6 +805,7 @@ class Cascade:
                     configuration=self._configurations.get(cid),
                     cache=self.cache,
                     cancel=self.stop,
+                    **self._on_tree(cid),
                 )
             )
             result = results[cid]
