@@ -449,6 +449,18 @@ def build_parser() -> argparse.ArgumentParser:
     s_wait.add_argument("--timeout", type=float, help="give up after this many seconds (exit 4; default: no limit)")
     s_wait.add_argument("--home", help=home_help)
     s_wait.add_argument("--json", action="store_true", help="print the verdict document")
+    s_verdict = study.add_parser("verdict", help="the final check's answer: the verdict and what to do about it")
+    s_verdict.add_argument("slug", help="the study's name in the library home")
+    s_verdict.add_argument("--run", help="a run's id (default: the latest)")
+    s_verdict.add_argument("--home", help=home_help)
+    s_verdict.add_argument("--json", action="store_true", help="print the verdict document")
+    s_report = study.add_parser("report", help="the report of a run: the verdict document, or --markdown for people")
+    s_report.add_argument("slug", help="the study's name in the library home")
+    s_report.add_argument("--run", help="a run's id (default: the latest)")
+    s_report.add_argument("--home", help=home_help)
+    form = s_report.add_mutually_exclusive_group()
+    form.add_argument("--markdown", action="store_true", help="the report as Markdown")
+    form.add_argument("--json", action="store_true", help="the verdict document (the default)")
     for name, text in (("preview", "solve the smallest training case at the starting values"),
                        ("compile", "compile the study into runs/<id>/evolvekit.yaml, with the automatic plan"),
                        ("run", "compile, search, and check the best on the held-back cases")):
@@ -964,6 +976,33 @@ def _run_of(root: Path, run: str | None = None) -> str:
     return run
 
 
+def _say_verdict(document: dict) -> None:
+    """The verdict's sentence, then what to do about it, one per line."""
+    print(document["line"])
+    if document.get("advice"):
+        print(document["advice"])
+
+
+def _verdict_command(command: str, args: argparse.Namespace) -> int:
+    """`study verdict` and `study report`: from the verdict document."""
+    from evolvekit.app import jobs
+    from evolvekit.app.report import render_report
+    from evolvekit.app.verdict import build_verdict
+
+    root = _home(args).study_root(args.slug)
+    document = build_verdict(root, args.run)
+    if command == "verdict":
+        if args.json:
+            print(json.dumps(document))
+        else:
+            _say_verdict(document)
+    elif args.markdown:
+        print(render_report(document, jobs.results(root, document["run"], build_status)), end="")
+    else:
+        print(json.dumps(document))
+    return 0
+
+
 def _wait(home, slug: str, timeout: float | None, as_json: bool) -> int:
     """`study wait`: until the latest run has ended -- 0 done (the verdict),
     1 stopped or failed, 4 when `timeout` seconds pass first."""
@@ -999,9 +1038,7 @@ def _wait(home, slug: str, timeout: float | None, as_json: bool) -> int:
     if as_json:
         print(json.dumps(document))
     elif state == "done":
-        print(document["line"])
-        if document.get("advice"):
-            print(document["advice"])
+        _say_verdict(document)
     else:
         print(jobs.run_line(root, study, run_dir, build_status)["line"])
     if state != "done" and job.get("error"):
@@ -1117,6 +1154,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _study_library_command(command, args)
     if command in ("start", "stop", "status", "watch", "wait"):
         return _study_run_command(command, args)
+    if command in ("verdict", "report"):
+        return _verdict_command(command, args)
     folder = _study_root(args.directory, args)
     if command == "preview":
         result = execute.preview(folder)
