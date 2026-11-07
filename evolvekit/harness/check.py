@@ -7,6 +7,10 @@ From cheap to expensive, stopping where going on would only repeat a failure:
 3. `describe`, and drift: settings the installed application has that the
    harness lacks, settings the harness declares that it no longer has, and
    defaults that changed -- each one sentence naming the key to edit;
+   then, for a harness with `code:`, its source: `repo` inside a git
+   repository (resolved against the folder being checked), `open` matching
+   files git tracks, a clean checkout of `HEAD` that builds (with `build`)
+   and solves the first sample -- in a scratch worktree, removed after;
 4. for up to three sample cases: `inspect`; a short solve at the defaults;
    the tables the runner produces against the declaration; every ready-made
    KPI finite; every KPI template instantiated with its first choice; every
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import shutil
 import sqlite3
@@ -37,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from evolvekit.harness import HarnessError
-from evolvekit.harness.manifest import Harness, load_harness
+from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
 from evolvekit.harness.probe import probe_application
 from evolvekit.harness.sdk import evk_harness as evk
 
@@ -205,6 +210,177 @@ def _trap(harness: Harness) -> list[Check]:
     return checks or [_pass("trap", "no template aims at a KPI its own data changes distort")]
 
 
+# --- code: the source a code study may change (design §5.1) --------------------------
+
+CODE_FILES_SHOWN = 5
+ONE_AT_A_TIME = "code studies on this harness try one combination at a time"
+CHECKOUT_ID = "check"
+"""The clean checkout's name under the scratch folder's `work/trees/`."""
+
+
+def _sample_cases(harness: Harness, samples: int) -> list[Path]:
+    return sorted(p for p in (harness.root / "samples").glob("*") if p.suffix.lower() in harness.cases.formats)[:samples]
+
+
+def _same_file(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _build_argv(harness: Harness, app: str, folder: Path) -> list[str]:
+    """`code.build` as argv for one folder (`{tree}`): `{python}` is the application's
+    Python for a python harness (as a study's compile writes it), evolvekit's otherwise."""
+    from evolvekit.evaluate.stages import build_command
+    from evolvekit.harness.compile import _quoted
+
+    assert harness.code is not None
+    template = harness.code.build
+    if harness.application.kind == "python":
+        template = template.replace("{python}", _quoted(app))
+    return build_command(template, tree=folder)
+
+
+def _last_line(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1][:300] if lines else ""
+
+
+def _run_build(argv: list[str], *, cwd: Path, timeout: float, logs: Path) -> tuple[str | None, float]:
+    """Run a build; `(None, seconds)` when it worked, else `(why, seconds)` with its last line."""
+    from evolvekit.evaluate.process import read_tail, run_bounded
+
+    out, err = logs / "build.stdout.log", logs / "build.stderr.log"
+    run = run_bounded(argv, timeout=timeout, cwd=cwd, stdout_path=out, stderr_path=err)
+    if run.error is not None:
+        return f"could not run {argv[0]!r}: {run.error}", run.duration_s
+    if run.timed_out:
+        return f"no answer within {timeout:g} s", run.duration_s
+    if run.returncode != 0:
+        said = _last_line(read_tail(err, 4000)) or _last_line(read_tail(out, 4000))
+        return f"exit code {run.returncode}" + (f": {said}" if said else ""), run.duration_s
+    return None, run.duration_s
+
+
+def _put_back(harness: Harness, app: str, checkout: Path, base: str, logs: Path) -> list[Check]:
+    """Decision 31: a build that installs into a shared interpreter (one naming
+    `{python}`) is run once more on the engineer's own checkout, so the
+    interpreter never points at the removed clean checkout. A failure is a warning."""
+    code = harness.code
+    assert code is not None
+    if "{python}" not in code.build:
+        return []
+    said: list[str] = []
+    if harness.application.kind == "program" or _same_file(app, sys.executable):
+        # `{python}` is evolvekit's own interpreter: the stage's own restore, as a study does it.
+        from evolvekit.config import ProblemConfig, TreeConfig
+        from evolvekit.evaluate.stages import restore_build
+
+        problem = ProblemConfig(skeleton=None, tree=TreeConfig(
+            repo=checkout, base=base, open=code.open, build=code.build, build_timeout_s=code.build_timeout_s))
+        restore_build(problem, log=lambda line: said.append(line.removeprefix("warning: "))
+                      if line.startswith("warning:") else None)
+    else:
+        # Another interpreter: `restore_build` can only name evolvekit's, so the same build, by hand.
+        try:
+            reason, _ = _run_build(_build_argv(harness, app, checkout), cwd=checkout,
+                                   timeout=code.build_timeout_s, logs=logs)
+        except ValueError as exc:
+            reason = str(exc)
+        if reason is not None:
+            said.append(f"{checkout} could not be built back into the application's Python (build: {reason}); it "
+                        "may still run the clean checkout's code")
+    return [_warn("code.restore", line, f"run the build in {checkout} yourself: {code.build}") for line in said]
+
+
+def _code_checks(harness: Harness, app: str, scratch: Path) -> list[Check]:
+    """`code:`, from cheap to expensive, stopping after a failure: the repository,
+    the open files, a clean checkout of `HEAD` (in `scratch`, removed after), its
+    build, and the first sample solved from it. The engineer's checkout is never
+    written (a worktree under `scratch` only)."""
+    from evolvekit import tree
+
+    code = harness.code
+    assert code is not None
+    checks: list[Check] = []
+    folder = resolve_code_repo(harness.root, code)
+    try:
+        repo = tree.Repo(folder)
+        commit = tree.resolve_commit(repo, "HEAD")
+    except tree.TreeError as exc:
+        return [_fail("code.repo", f"code.repo: {exc}",
+                      "point code.repo at a folder inside a git repository (git init, then commit it)")]
+    checks.append(_pass("code.repo", f"code.repo is {repo.path}, in the git repository {repo.toplevel}"))
+    try:
+        listed = [name for name in tree._git(repo.path, "ls-files", "-z", "--cached", "--", ".").split("\0") if name]
+    except tree.TreeError as exc:
+        return checks + [_fail("code.open", f"code.open: the source's files cannot be listed: {exc}",
+                               "run git ls-files in code.repo by hand and fix what it says")]
+    matched: list[str] = []
+    for glob in code.open:
+        pattern = tree._glob(glob)  # matched as the static stage matches a change (`tree.touches_only`)
+        found = [name for name in listed if pattern.fullmatch(name)]
+        if not found:
+            return checks + [_fail("code.open", f"code.open: no file of the source matches {glob}",
+                                   f"name files that git tracks under {repo.path}, relative to it")]
+        matched += [name for name in found if name not in matched]
+    shown = ", ".join(matched[:CODE_FILES_SHOWN])
+    more = f" and {len(matched) - CODE_FILES_SHOWN} more" if len(matched) > CODE_FILES_SHOWN else ""
+    checks.append(_pass("code.open", f"code.open matches {len(matched)} file(s): {shown}{more}"))
+    scratch = Path(scratch)
+    try:
+        made = tree.materialise(scratch, repo=repo, base=commit, diff="", candidate_id=CHECKOUT_ID)
+    except tree.TreeError as exc:
+        tree.remove_all(scratch)
+        return checks + [_fail("code.checkout", f"code.repo: a clean checkout of {repo.toplevel} at {commit[:12]} "
+                               f"could not be made: {exc}", "run git worktree add by hand and fix what it says")]
+    found: list[Check] = []
+    put_back: list[Check] = []
+    try:
+        found = _from_checkout(harness, app, made, scratch, f"{repo.toplevel} at {commit[:12]}")
+    finally:
+        tree.remove_all(scratch)
+        if code.build:
+            put_back = _put_back(harness, app, repo.path, commit, scratch / "restore")
+    checks += found + put_back
+    if code.build and not any(c.severity == "failure" for c in found):
+        checks.append(_pass("code.one_at_a_time", ONE_AT_A_TIME))
+    return checks
+
+
+def _from_checkout(harness: Harness, app: str, made: Any, scratch: Path, where: str) -> list[Check]:
+    """The build and the first sample in a clean checkout (`made`, a `tree.Tree`); stops after a failure."""
+    from evolvekit.evaluate.stages import render_app
+
+    code = harness.code
+    assert code is not None
+    checks: list[Check] = []
+    if code.build:
+        try:
+            reason, took = _run_build(_build_argv(harness, app, made.path), cwd=made.path,
+                                      timeout=code.build_timeout_s, logs=scratch / "build")
+        except ValueError as exc:
+            reason, took = f"bad command: {exc}", 0.0
+        if reason is not None:
+            return [_fail("code.build", f"code.build: a clean checkout does not build: {reason}",
+                          "run the build by hand in a clean checkout and fix it")]
+        checks.append(_pass("code.build", f"code.build: a clean checkout builds in {took:.1f} s"))
+    cases = _sample_cases(harness, 1)
+    if not cases:
+        return checks + [_warn("code.samples", "the harness has no sample cases, so nothing was solved from a clean "
+                               "checkout", f"put a few small cases ({', '.join(harness.cases.formats)}) in samples/")]
+    in_tree = render_app(code.app, made.path) if harness.application.kind == "program" else app
+    solving = scratch / "solve"
+    solving.mkdir(parents=True, exist_ok=True)
+    runner = _Runner(harness, in_tree, solving)
+    limit = max(harness.time_limit.min_s, min(1.0, harness.time_limit.default_s))
+    done, _ = runner.solve(cases[0], _study_run(harness), {}, "code", limit)
+    if done.returncode != 0:
+        return checks + [_fail("code.samples", f"code.samples: {cases[0].name} does not solve from a clean checkout: "
+                               f"{runner.said(done)}",
+                               f"run runner.py solve by hand on the sample with --app {in_tree} and fix what it says")]
+    return checks + [_pass("code.samples", f"the samples solve from a clean checkout of {where} "
+                           f"(tried on {cases[0].name})")]
+
+
 def _tables(harness: Harness, columns_file: Path, where: str) -> list[Check]:
     try:
         produced = json.loads(columns_file.read_text(encoding="utf-8"))
@@ -358,7 +534,9 @@ def check_harness(folder: str | Path, app: str | None = None, *, samples: int = 
             return checks + [_fail("describe", f"runner.py describe failed: {runner.said(described)}", "run it by hand and fix it")]
         checks.append(_pass("describe", f"runner.py describe answers (SDK {answer.get('sdk')}, Python {answer.get('python')})"))
         checks += _drift(harness, answer.get("discover"))
-        cases = sorted(p for p in (harness.root / "samples").glob("*") if p.suffix.lower() in harness.cases.formats)[:samples]
+        if harness.code is not None:
+            checks += _code_checks(harness, app, Path(scratch) / "code")
+        cases = _sample_cases(harness, samples)
         if not cases:
             return checks + [_warn("samples", "the harness has no sample cases, so nothing was solved",
                                    f"put a few small cases ({', '.join(harness.cases.formats)}) in samples/")]

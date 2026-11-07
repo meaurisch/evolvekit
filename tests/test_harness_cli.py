@@ -25,7 +25,7 @@ SOLVER = ROOT / "examples" / "cli-solver" / "solver.py"
 def test_list_shows_the_built_in_harnesses(capsys, tmp_path):
     assert main(["harness", "list", "--home", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert "demo-tour" in out and "1.0.0" in out and "built-in" in out
+    assert "demo-tour" in out and "1.1.0" in out and "built-in" in out
 
 
 @pytest.mark.parametrize("kind", ["python", "program"])
@@ -73,13 +73,13 @@ def test_pack_and_install(tmp_path):
     (source / "__pycache__").mkdir(exist_ok=True)
     (source / "__pycache__" / "runner.cpython-313.pyc").write_bytes(b"cache")
     archive = pack_harness(source, tmp_path)
-    assert archive.name == "demo-tour-1.0.0.zip"
+    assert archive.name == "demo-tour-1.1.0.zip"
     names = zipfile.ZipFile(archive).namelist()
-    assert "demo-tour-1.0.0/harness.yaml" in names and "demo-tour-1.0.0/samples/town-40.json" in names
+    assert "demo-tour-1.1.0/harness.yaml" in names and "demo-tour-1.1.0/samples/town-40.json" in names
     assert not any("__pycache__" in name for name in names)
     home = tmp_path / "home"
     installed = install_harness(archive, home)
-    assert installed.root == (home / "harnesses" / "demo-tour-1.0.0").resolve()
+    assert installed.root == (home / "harnesses" / "demo-tour-1.1.0").resolve()
 
 
 def test_a_zip_that_would_write_outside_its_folder_is_refused(tmp_path):
