@@ -404,6 +404,24 @@ def build_parser() -> argparse.ArgumentParser:
     s_new.add_argument("--dir", help="write a standalone study folder here instead of into the library home")
     s_new.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_new.add_argument("--json", action="store_true", help='print {"slug", "root"} and nothing else')
+    s_app = study.add_parser("application", help="say where a study's application is, or list the ones found here")
+    s_app.add_argument("slug", help="the study's name in the library home")
+    s_app.add_argument("path", nargs="?", help="the full path to the application")
+    s_app.add_argument("--detect", action="store_true", help="list the applications found on this computer")
+    s_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_app.add_argument("--json", action="store_true", help="print JSON and nothing else")
+    s_list = study.add_parser("list", help="the studies in the library home")
+    s_list.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_list.add_argument("--json", action="store_true", help='print a list of {"slug", "name", "harness", "state"}')
+    s_check = study.add_parser("check", help="name what is still missing before the study can run")
+    s_check.add_argument("slug", help="the study's name in the library home")
+    s_check.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_cases = study.add_parser("cases", help="add cases to a study and hold some back for the final check")
+    s_cases.add_argument("slug", help="the study's name in the library home")
+    s_cases.add_argument("--add", nargs="+", required=True, metavar="FILE", help="the case files to add")
+    s_cases.add_argument("--hold-back", type=int, help="how many cases to hold back (default: the suggestion)")
+    s_cases.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_cases.add_argument("--json", action="store_true", help='print {"added", "refused", "test"} and nothing else')
     for name, text in (("preview", "solve the smallest training case at the starting values"),
                        ("compile", "compile the study into runs/<id>/evolvekit.yaml, with the automatic plan"),
                        ("run", "compile, search, and check the best on the held-back cases")):
@@ -839,6 +857,60 @@ def _study_root(value: str, args: argparse.Namespace) -> Path:
     return _home(args).study_root(value)
 
 
+def _study_library_command(command: str, args: argparse.Namespace) -> int:
+    from evolvekit.app import jobs
+    from evolvekit.app.detect import detect
+
+    home = _home(args)
+    if command == "list":
+        rows = []
+        for slug in home.slugs():
+            root, study, harness = home.load(slug)
+            rows.append({"slug": slug, "name": study.name, "harness": harness.title,
+                         "state": jobs.state_line(root, study)["line"]})
+        if args.json:
+            print(json.dumps(rows))
+        for row in [] if args.json else rows:
+            print(f"{row['slug']}  {row['name']}  {row['harness']}  {row['state']}")
+        return 0
+    slug = args.slug
+    if command == "check":
+        problems = home.problems(slug)
+        for problem in problems:
+            print(f"{problem['key']}: {problem['text']}" if problem["key"] != problem["text"] else problem["text"],
+                  file=sys.stderr)
+        return 2 if problems else 0
+    if command == "application":
+        if args.detect:
+            _, _, harness = home.load(slug)
+            found = detect(harness, recent=home.settings()["recent_applications"])
+            if args.json:
+                print(json.dumps(found))
+            for item in [] if args.json else found:
+                print(f"{item['message']}  {item['path']}")
+            return 0
+        if not args.path:
+            raise AppError("path: where the application is (or --detect to look for it)")
+        answer = home.set_application(slug, args.path)
+        if args.json:
+            print(json.dumps(answer))
+        elif answer["ok"]:
+            print(f"{answer['path']}" + (f" (version {answer['version']})" if answer["version"] else ""))
+        if not answer["ok"]:
+            print(answer["message"], file=sys.stderr)
+            return 1
+        return 0
+    result = home.add_cases(slug, [Path(f) for f in args.add], hold_back=args.hold_back)
+    if args.json:
+        print(json.dumps(result))
+    else:
+        n = len(result["added"])
+        print(f"{n} case{'' if n == 1 else 's'} added, {len(result['test'])} held back")
+    for refused in result["refused"]:
+        print(refused["reason"], file=sys.stderr)
+    return 1 if result["refused"] else 0
+
+
 def cmd_study(args: argparse.Namespace) -> int:
     from evolvekit.harness import execute, library
     from evolvekit.harness.compile import write_run
@@ -846,7 +918,6 @@ def cmd_study(args: argparse.Namespace) -> int:
 
     command = args.study_command
     if command == "new":
-        # Task 4: args.app goes to Home.set_application
         if args.dir:
             folder = Path(args.dir)
             study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name, args.template)
@@ -860,11 +931,19 @@ def cmd_study(args: argparse.Namespace) -> int:
             return 0
         home = _home(args)
         slug = home.create_study(args.harness, args.template, args.name)
+        if args.app:
+            answer = home.set_application(slug, args.app)
+            if not answer["ok"]:
+                print(f"{answer['message']} (the study {slug} is made; say where the application is with "
+                      f"study application {slug} PATH)", file=sys.stderr)
+                return 1
         if args.json:
             print(json.dumps({"slug": slug, "root": str(home.study_root(slug))}))
         else:
             print(slug)
         return 0
+    if command in ("application", "list", "check", "cases"):
+        return _study_library_command(command, args)
     folder = _study_root(args.directory, args)
     if command == "preview":
         result = execute.preview(folder)

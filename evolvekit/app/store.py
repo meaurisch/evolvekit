@@ -32,6 +32,7 @@ from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import runner_command
 from evolvekit.harness.library import HarnessEntry, create_study, find_harnesses, install_harness, slugify
 from evolvekit.harness.manifest import Harness, load_harness
+from evolvekit.harness.probe import probe_application
 from evolvekit.harness.study import Study, load_study, save_study, study_problems
 from evolvekit.ledger import _atomic_write
 
@@ -562,6 +563,43 @@ class Home:
             study.training.append(relative)
             save_study(study, root)
         return {"name": name, "inspected": self.inspect_case(slug, name, force=True)}
+
+    def set_application(self, slug: str, path: str) -> dict[str, Any]:
+        """Ask the program at `path` whether it is the application and, when it
+        is, record its path and version in the study and among the paths used
+        before. The answer is `{path, ok, message, version, python}`."""
+        root, study, pinned = self.load(slug)
+        path = str(path or "").strip().strip('"')
+        if not path:
+            raise AppError("path: where the application is")
+        if not Path(path).is_absolute():
+            raise AppError(f"give the full path to the application; {path!r} is not one")
+        probe = probe_application(pinned, path)
+        answer = {"path": path, "ok": probe.ok, "message": probe.message, "version": probe.version, "python": probe.python}
+        if probe.ok:
+            study.application_path = str(Path(path))
+            study.application_version = probe.version or ""
+            save_study(study, root)
+            self.remember_application(str(Path(path)))
+        return answer
+
+    def add_cases(self, slug: str, files: list[Path], *, hold_back: int | None = None) -> dict[str, Any]:
+        """Put the files in the study as cases (a file the harness cannot read
+        is refused, the others still go in), then hold `hold_back` of the
+        study's cases back for the final check (default: the suggestion)."""
+        added: list[str] = []
+        refused: list[dict[str, str]] = []
+        for file in files:
+            file = Path(file)
+            try:
+                added.append(self.put_case(slug, file.name, file.read_bytes())["name"])
+            except OSError as exc:
+                refused.append({"file": file.name, "reason": f"{file.name}: cannot be read ({exc.strerror or exc})"})
+            except AppError as exc:
+                refused.append({"file": file.name, "reason": str(exc)})
+        count = self.suggested_test_count(slug) if hold_back is None else hold_back
+        test = [Path(c).name for c in self.split(slug, count)] if added or hold_back is not None else []
+        return {"added": added, "refused": refused, "test": test}
 
     def delete_case(self, slug: str, filename: str) -> None:
         """Take the case out of the study: the file waits in `<study>/.trash/cases/`
