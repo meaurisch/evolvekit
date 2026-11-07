@@ -60,7 +60,7 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study report SLUG [--run ID] [--markdown \| --json]` | the report of a run: the verdict document, or `--markdown` for people | |
 | `evolvekit study open SLUG [--no-browser]` | print the study's address in the app (starting the app if none runs) and open it | |
 | `evolvekit skill list` | the skills that ship with evolvekit | |
-| `evolvekit skill install [--dir DIR] [--force]` | write the skills into a project (`.agents/skills`, with a pointer in `.claude/skills`) | |
+| `evolvekit skill install [--dir DIR] [--force]` | write the skills into a project (`.agents/skills`, with a pointer for a tool that reads only its own skills folder) | |
 
 Exit codes: 0 success; 1 a problem the message names; 2 a configuration or validation error, and `study check` with problems; 4 a timeout. `harness check` and `doctor` have their own, in the table.
 

@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from evolvekit.app.store import Home
 from evolvekit.app.verdict import DECISIONS
 from evolvekit.cli import build_parser
+from evolvekit.skills import frontmatter
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "evolvekit" / "skills"
@@ -173,3 +175,140 @@ def _assert_parses(words: list[str], capsys) -> None:
         build_parser().parse_args([*prefix, "--help"])
     assert exit_.value.code == 0
     capsys.readouterr()
+
+
+# The study skill (Task 2).
+
+SAMPLES = sorted((ROOT / "harnesses" / "demo-tour" / "samples").glob("*.json"))
+VENDORS = ("claude", "anthropic", "copilot", "github", "openai", "codex", "cursor", "gemini", "chatgpt",
+           "microsoft", "azure", "openrouter")
+STUDY_STEPS = ["1. Ground", "2. Interview", "3. Make the study", "4. Show the plan", "5. Start and hand over",
+               "6. Report the verdict", "When it goes wrong"]
+COMPLETENESS = (
+    "Ask only what the request did not say.",
+    "A request that answers every question is complete: go on without asking.",
+    "One unanswered question stops you with that question, in one message.",
+    "In a one-shot run, where no answer can come, say what is missing and end.",
+)
+HAND_OVER = ("Your study is running: <url>. It tries about N combinations in R rounds and ends around HH:MM; "
+             "the answer is on the Study page.")
+HAND_OVER_QUEUED = ("Your study is queued behind <name>: <url>. It starts when that study finishes; "
+                    "the answer is on the Study page.")
+MEASURES_RULE = "Measures come from the harness by name, `{from: harness}`, or from its templates; never write SQL for a measure."
+THIN_PLAN_RULE = ("A plan with fewer than 3 rounds is thin: show its three ways out, start nothing, and wait for "
+                  "the engineer's choice; in a one-shot run, say so and end.")
+STUDY_PATH = re.compile(r"`((?:study\.yaml|cases/|inputs/|runs/)[^`\s]*)`")
+RUN_FILES = ("job.json", "job.log", "downloads/", "confirm/final/", "evolvekit.yaml")
+
+
+def test_study_skill_frontmatter():
+    _check_frontmatter(STUDY, "evolvekit-study", ("use evolvekit", "tune", "start"))
+
+
+def test_study_skill_length():
+    _check_length(STUDY)
+
+
+def test_study_skill_commands_parse(capsys):
+    _check_commands(STUDY, capsys)
+    named = {tuple(w[:2]) for c in commands_in(_body(STUDY)) for w in command_variants(c)}
+    wanted = {("doctor",)} | {("study", step) for step in ("new", "application", "cases", "check", "preview",
+                                                           "compile", "start", "open", "wait", "verdict",
+                                                           "report", "status")}
+    assert wanted - named == set()
+
+
+def test_study_skill_has_the_six_steps():
+    assert _headings(STUDY) == STUDY_STEPS
+
+
+def test_study_skill_paths_exist_in_a_fresh_study(tmp_path):
+    home = Home(tmp_path / "home")
+    slug = home.create_study("demo-tour", "tune", "Gate")
+    home.add_cases(slug, SAMPLES, hold_back=2)
+    root = home.study_root(slug)
+    named = STUDY_PATH.findall(_body(STUDY))
+    assert "study.yaml" in named and "cases/" in named and "runs/<id>/job.log" in named
+    run_file = re.compile(r"runs/<id>/(" + "|".join(map(re.escape, RUN_FILES)) + ")")
+    for path in named:
+        if path.startswith("runs/"):
+            assert run_file.fullmatch(path), f"{path} is not a file a run writes"
+        else:
+            assert (root / path).exists(), f"{path} is not in a fresh study"
+
+
+def test_study_skill_has_the_reporting_rule():
+    body = _body(STUDY)
+    assert REPORTING_RULE in body and PRE_VERDICT_RULE in body
+    assert "on the cases it learned from" in body
+    assert REPORTING_RULE in _text(REFERENCE)
+
+
+def test_study_skill_has_the_completeness_rule():
+    interview = _section(_body(STUDY), "2. Interview")
+    for sentence in COMPLETENESS:
+        assert sentence in interview
+    assert len(re.findall(r"^\s*- \[ \] ", interview, re.M)) == 8, "the interview is a checklist of eight questions"
+
+
+def test_study_skill_has_the_hand_over():
+    hand_over = _section(_body(STUDY), "5. Start and hand over")
+    assert HAND_OVER in hand_over and HAND_OVER_QUEUED in hand_over
+    assert "study wait SLUG --timeout 600" in hand_over
+
+
+def test_study_skill_takes_measures_from_the_harness():
+    body = _body(STUDY)
+    assert MEASURES_RULE in body and "evolvekit study check SLUG" in body
+
+
+def test_study_skill_stops_on_a_thin_plan():
+    assert THIN_PLAN_RULE in _section(_body(STUDY), "4. Show the plan")
+
+
+def test_study_skill_says_what_to_do_when_it_goes_wrong():
+    wrong = _section(_body(STUDY), "When it goes wrong")
+    for phrase in ("evolvekit-harness", "evolvekit study check SLUG", "ways out", "evolvekit doctor",
+                   "evolvekit study status SLUG", "runs/<id>/job.log"):
+        assert phrase in wrong, phrase
+
+
+def test_skills_use_the_apps_words():
+    for path in (STUDY, HARNESS):
+        assert NEVER_SAID.findall(_prose(_body(path))) == [], path.parent.name
+
+
+@pytest.mark.parametrize("path", sorted(SKILLS.rglob("*.md")), ids=lambda p: p.relative_to(SKILLS).as_posix())
+def test_no_vendor_names(path):
+    text = _text(path).lower()
+    assert [v for v in VENDORS if v in text] == []
+
+
+def _check_frontmatter(path: Path, name: str, triggers: tuple[str, ...]) -> None:
+    meta = frontmatter(_text(path))
+    assert set(meta) == {"name", "description"}
+    assert meta["name"] == name == path.parent.name
+    description = meta["description"]
+    assert len(description) < 1024
+    assert "\n" not in description
+    assert not description.startswith("Use when"), "the description starts with what the skill is for"
+    assert description.rsplit(". ", 1)[-1].startswith("Use when"), "the description ends with 'Use when …'"
+    for trigger in triggers:
+        assert trigger in description.lower(), trigger
+
+
+def _check_length(path: Path) -> None:
+    lines = len(_body(path).splitlines())
+    assert lines <= 150, f"{path.parent.name}: the body is {lines} lines"
+
+
+def _check_commands(path: Path, capsys) -> None:
+    commands = commands_in(_body(path))
+    assert commands, f"{path.parent.name} names no command"
+    for command in commands:
+        for words in command_variants(command):
+            _assert_parses(words, capsys)
+
+
+def _headings(path: Path) -> list[str]:
+    return re.findall(r"^## (.+?)\s*$", _body(path), re.M)
