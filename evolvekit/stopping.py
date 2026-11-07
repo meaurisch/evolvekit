@@ -130,6 +130,10 @@ class RunStop:
         """The run's active seconds so far, earlier sessions included."""
         return self.used_s + max(0.0, self._clock() - self._began)
 
+    def left_s(self) -> float | None:
+        """Seconds left under `budget.max_hours`, or `None` without one."""
+        return None if self.max_s is None else max(0.0, self.max_s - self.elapsed_s())
+
     def trigger(self, reason: str) -> None:
         with self._lock:
             if self.reason is None:

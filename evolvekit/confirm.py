@@ -45,17 +45,20 @@ import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import fmean, stdev
-from typing import Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from evolvekit.candidate import SEED_OPERATOR, Candidate, splice_block
 from evolvekit.config import Config, ConfigError, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, run_instance_stage
-from evolvekit.evaluate.stages import Configuration, run_static_stage
+from evolvekit.evaluate.stages import Configuration, restore_build, run_build_stage, run_static_stage
 from evolvekit.events import EventLog, Heartbeat
 from evolvekit.leaderboard import rank
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import run_lock
+
+if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
+    from evolvekit.tree import Tree
 
 __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
@@ -441,16 +444,37 @@ def confirm(
                 })
         return observe
 
-    jobs = []
-    for index, (name, row) in enumerate([(BASELINE, seed_row), *[(str(r["id"]), r) for r in chosen]]):
-        # A name like `ID@a/run` is for people; files are named by one that is
-        # safe as a file name (and unique, whatever it folded together).
-        safe = re.sub(r"[^A-Za-z0-9@._-]+", "_", name)
-        if any(job.candidate_id == safe for job in jobs):
-            safe = f"{safe}.{index}"
-        path, configuration = _materialise(config, row, work, safe)
-        jobs.append(Job(safe, path, configuration=configuration, observer=observer_for(name)))
+    # The directory's own lock: `status` reads "alive" off it, and two
+    # confirmations under one label would overwrite each other's results (and,
+    # for a tree problem, each other's trees).
+    with run_lock(out_dir):
+        try:
+            jobs: list[Job] = []
+            made: list[Tree | None] = []
+            for index, (name, row) in enumerate([(BASELINE, seed_row), *[(str(r["id"]), r) for r in chosen]]):
+                # A name like `ID@a/run` is for people; files are named by one that is
+                # safe as a file name (and unique, whatever it folded together).
+                safe = re.sub(r"[^A-Za-z0-9@._-]+", "_", name)
+                if any(job.candidate_id == safe for job in jobs):
+                    safe = f"{safe}.{index}"
+                path, configuration, tree_made = _materialise(config, row, work, safe)
+                jobs.append(Job(safe, path, configuration=configuration, observer=observer_for(name)))
+                made.append(tree_made)
+            _compare(config, comparison, stage, jobs, made, work=work, seeds=seeds, label=label, log=log,
+                     events=events, heartbeat=heartbeat, stop=stop)
+        finally:
+            if config.problem.tree is not None:
+                _put_trees_back(config, work, log)
+    return comparison
 
+
+def _compare(
+    config: Config, comparison: Comparison, stage: StageConfig, jobs: list[Job], made: list[Tree | None], *,
+    work: Path, seeds: Sequence[int], label: str, log: Callable[[str], None], events: EventLog,
+    heartbeat: Heartbeat, stop: threading.Event | None,
+) -> None:
+    """Every configuration's runs, then the statistics and the files."""
+    out_dir = work.parent
     planned = len(jobs) * len(stage.instances) * len(seeds)
     log(
         f"confirm '{label}': {len(jobs)} configuration(s) x {len(stage.instances)} instance(s) x "
@@ -463,38 +487,84 @@ def confirm(
                  "final": True, "instances": list(stage.instance_names()), "normalize": None,
                  "workers": stage.workers, "pin_cpus": list(stage.pin_cpus), "retries": stage.retries}],
     )
-    # The directory's own lock: `status` reads "alive" off it, and two
-    # confirmations under one label would overwrite each other's results.
-    with run_lock(out_dir):
-        heartbeat.start(phase="evaluating")
-        try:
-            events.emit("stage_started", stage=stage.id, private=False, candidates=[BASELINE, *comparison.candidates],
-                        runs_per_candidate=len(stage.instances) * len(seeds), workers=stage.workers)
+    heartbeat.start(phase="evaluating")
+    try:
+        events.emit("stage_started", stage=stage.id, private=False, candidates=[BASELINE, *comparison.candidates],
+                    runs_per_candidate=len(stage.instances) * len(seeds), workers=stage.workers)
+
+        def run(batch: list[Job]) -> None:
             run_instance_stage(
-                jobs, stage, out_dir=work / "stage_out", cwd=config.base_dir,
+                batch, stage, out_dir=work / "stage_out", cwd=config.base_dir,
                 required_kpis=config.evaluate.required_kpis, cache=EvalCache(work / "cache"),
                 seeds=list(seeds), keep_going=True, stop=stop,
             )
-            events.emit("stage_finished", stage=stage.id, private=False, candidates=len(jobs),
-                        failed=sum(1 for r in comparison.runs if not r["ok"]), duration_s=None)
-            if stop is not None and stop.is_set():
-                raise ConfirmStopped(
-                    f"the comparison '{label}' was stopped; its finished runs are kept, and running it "
-                    "again finishes it"
-                )
-        except BaseException as exc:
-            interrupted = isinstance(exc, (KeyboardInterrupt, ConfirmStopped))
-            events.emit("run_interrupted" if interrupted else "run_crashed", error=f"{type(exc).__name__}: {exc}")
-            heartbeat.stop(phase="interrupted" if interrupted else "crashed")
-            raise
 
-        _analyse(comparison)
-        (out_dir / "results.json").write_text(json.dumps(comparison.runs, indent=1), encoding="utf-8")
-        (out_dir / "comparison.json").write_text(json.dumps(comparison.to_json(), indent=1), encoding="utf-8")
-        (out_dir / "comparison.md").write_text(render_markdown(comparison), encoding="utf-8", newline="\n")
-        events.emit("run_finished", stop_reason="comparison finished", candidates=len(jobs))
-        heartbeat.stop(phase="finished")
-    return comparison
+        tree = config.problem.tree
+        if tree is not None and tree.build:
+            # One shared interpreter holds one build: each tree is built right
+            # before its own runs, the starting point first.
+            build = _build_stage(config)
+            names = [BASELINE, *comparison.candidates]
+            for job, tree_made, name in zip(jobs, made, names):
+                if stop is not None and stop.is_set():
+                    break
+                assert tree_made is not None
+                outcome = run_build_stage(tree_made, build, config.problem, cancel=stop)
+                if outcome.abandoned:
+                    break
+                if not outcome.ok:
+                    if name == BASELINE:
+                        raise ValueError(f"the starting point no longer builds: {outcome.failure}")
+                    log(f"{name}: {outcome.failure}; its runs count as failed")
+                    comparison.runs.extend(
+                        {"configuration": name, "instance": instance, "seed": seed, "ok": False, "cached": False,
+                         "kpis": {}, "failure": outcome.failure}
+                        for instance in stage.instance_names() for seed in seeds
+                    )
+                    continue
+                run([job])
+        else:
+            run(jobs)
+        events.emit("stage_finished", stage=stage.id, private=False, candidates=len(jobs),
+                    failed=sum(1 for r in comparison.runs if not r["ok"]), duration_s=None)
+        if stop is not None and stop.is_set():
+            raise ConfirmStopped(
+                f"the comparison '{label}' was stopped; its finished runs are kept, and running it "
+                "again finishes it"
+            )
+    except BaseException as exc:
+        interrupted = isinstance(exc, (KeyboardInterrupt, ConfirmStopped))
+        events.emit("run_interrupted" if interrupted else "run_crashed", error=f"{type(exc).__name__}: {exc}")
+        heartbeat.stop(phase="interrupted" if interrupted else "crashed")
+        raise
+
+    _analyse(comparison)
+    (out_dir / "results.json").write_text(json.dumps(comparison.runs, indent=1), encoding="utf-8")
+    (out_dir / "comparison.json").write_text(json.dumps(comparison.to_json(), indent=1), encoding="utf-8")
+    (out_dir / "comparison.md").write_text(render_markdown(comparison), encoding="utf-8", newline="\n")
+    events.emit("run_finished", stop_reason="comparison finished", candidates=len(jobs))
+    heartbeat.stop(phase="finished")
+
+
+def _build_stage(config: Config) -> StageConfig:
+    """The config's `builtin-build` stage, or one made from `problem.tree`."""
+    found = next((s for s in config.evaluate.stages if s.kind == "builtin-build"), None)
+    if found is not None:
+        return found
+    assert config.problem.tree is not None
+    return StageConfig(id="build", kind="builtin-build", timeout=config.problem.tree.build_timeout_s)
+
+
+def _put_trees_back(config: Config, work: Path, log: Callable[[str], None]) -> None:
+    """The final check's trees removed, and the engineer's checkout built back
+    into the shared interpreter (decision 31); neither ever raises."""
+    from evolvekit import tree
+
+    try:
+        tree.remove_all(work.parent)
+    except Exception as exc:  # noqa: BLE001 - it must not hide the comparison's own error
+        log(f"warning: the final check's folders were not all removed ({exc})")
+    restore_build(config.problem, log=log)
 
 
 def _with_instances(config: Config, stage: StageConfig, instances: Sequence[str]) -> StageConfig:
@@ -510,11 +580,23 @@ def _with_instances(config: Config, stage: StageConfig, instances: Sequence[str]
     return replace(stage, instances=tuple(expanded))
 
 
-def _materialise(config: Config, row: dict[str, Any], work: Path, name: str) -> tuple[Path, Configuration | None]:
+def _materialise(
+    config: Config, row: dict[str, Any], work: Path, name: str
+) -> tuple[Path, Configuration | None, Tree | None]:
     """The candidate as a module on disk and, for a declared parameter space,
     as the flags and the JSON file a command is given -- validated again, the
-    way the static stage validates it in a run."""
+    way the static stage validates it in a run. For a tree problem, its diff
+    checked out as a tree under `<work>/trees/` (its folder is `{candidate}`)."""
     candidate = Candidate.from_record(row)
+    if config.problem.tree is not None:
+        from evolvekit import tree
+
+        try:
+            made = tree.materialise(work.parent, repo=tree.Repo(config.problem.tree.repo),
+                                    base=config.problem.tree.base, diff=candidate.block, candidate_id=name)
+        except tree.TreeError as exc:
+            raise ValueError(f"{name}: the recorded change no longer applies -- {exc}") from None
+        return made.path, None, made
     source = splice_block(
         config.problem.skeleton_source(), candidate.block, config.problem.block_start, config.problem.block_end
     )
@@ -524,14 +606,14 @@ def _materialise(config: Config, row: dict[str, Any], work: Path, name: str) -> 
     path.write_text(source, encoding="utf-8", newline="\n")
     static = next((s for s in config.evaluate.stages if s.kind == "builtin-static"), None)
     if static is None or config.problem.parameters is None:
-        return path, None
+        return path, None, None
     outcome = run_static_stage(path, source, static, config.problem)
     if not outcome.ok or outcome.params is None:
         raise ValueError(f"{name}: the recorded candidate no longer passes the static stage -- {outcome.failure}")
     json_path = path.with_suffix(".params.json")
     json_path.write_text(json.dumps(outcome.params, indent=2) + "\n", encoding="utf-8", newline="\n")
     flags = tuple(config.problem.parameters.render_flags(outcome.params))
-    return path, Configuration(flags=flags, json_path=json_path)
+    return path, Configuration(flags=flags, json_path=json_path), None
 
 
 _PAIR_COUNTS = ("finished_pairs", "candidate_failed_pairs", "baseline_failed_pairs", "both_failed_pairs",

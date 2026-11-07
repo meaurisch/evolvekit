@@ -37,7 +37,14 @@ from evolvekit.config import Config, ModelConfig, StageConfig
 from evolvekit.evaluate.cascade import race_warnings
 from evolvekit.evaluate.fanout import Job, run_instance_stage
 from evolvekit.evaluate.process import can_pin
-from evolvekit.evaluate.stages import Configuration, run_command_stage, run_static_stage
+from evolvekit.evaluate.stages import (
+    Configuration,
+    restore_build,
+    run_build_stage,
+    run_command_stage,
+    run_static_stage,
+    run_tree_static_stage,
+)
 from evolvekit.evaluate.types import StageOutcome
 from evolvekit.ledger import price_completion
 from evolvekit.providers import Provider, ProviderError, build_provider
@@ -226,6 +233,11 @@ def _run_stages(
     work_dir: Path,
     candidate: Path | None = None,
 ) -> None:
+    if config.problem.tree is not None:
+        if candidate is not None:
+            raise ValueError("a code study's preflight runs its starting point; it takes no candidate file")
+        _run_tree_stages(config, report, work_dir)
+        return
     if candidate is not None:
         source = candidate.read_text(encoding="utf-8")
     else:
@@ -261,25 +273,73 @@ def _run_stages(
                     json_path=json_path,
                 )
             continue
-
-        outcome = _run_command(config, stage, candidate_path, configuration, work_dir, private=False)
-        report.stages.append(_stage_report(stage, outcome))
-        if not outcome.ok:
-            report.failures.append(f"stage {stage.id}: {outcome.failure}")
-            return
-        if _seed_breaks_a_gate(config, report, f"stage {stage.id}", outcome):
+        if not _command_stage(config, report, stage, candidate_path, configuration, work_dir):
             return
 
-        if stage.private_inputs or stage.private_instances:
-            private = _run_command(config, stage, candidate_path, configuration, work_dir, private=True)
-            report.stages.append(_stage_report(stage, private))
-            if not private.ok:
-                report.failures.append(
-                    f"stage {stage.id} hold-out: {private.failure}"
-                )
+
+def _command_stage(
+    config: Config,
+    report: PreflightReport,
+    stage: StageConfig,
+    candidate_path: Path,
+    configuration: Configuration | None,
+    work_dir: Path,
+) -> bool:
+    """The seed through one command stage and its hold-out; False when that
+    failed or broke a gate (nothing downstream is then worth running)."""
+    outcome = _run_command(config, stage, candidate_path, configuration, work_dir, private=False)
+    report.stages.append(_stage_report(stage, outcome))
+    if not outcome.ok:
+        report.failures.append(f"stage {stage.id}: {outcome.failure}")
+        return False
+    if _seed_breaks_a_gate(config, report, f"stage {stage.id}", outcome):
+        return False
+
+    if stage.private_inputs or stage.private_instances:
+        private = _run_command(config, stage, candidate_path, configuration, work_dir, private=True)
+        report.stages.append(_stage_report(stage, private))
+        if not private.ok:
+            report.failures.append(
+                f"stage {stage.id} hold-out: {private.failure}"
+            )
+            return False
+        if _seed_breaks_a_gate(config, report, f"stage {stage.id} hold-out", private):
+            return False
+    return True
+
+
+def _run_tree_stages(config: Config, report: PreflightReport, work_dir: Path) -> None:
+    """A tree problem's starting point (the empty diff) checked out as a tree
+    under `work_dir`, through every stage as a run would put it, and removed
+    again; with a build, the engineer's checkout is built back at the end."""
+    from evolvekit import tree
+
+    problem = config.problem.tree
+    assert problem is not None
+    try:
+        repo = tree.Repo(problem.repo)
+        try:
+            made = tree.materialise(work_dir, repo=repo, base=problem.base, diff="", candidate_id="seed")
+        except tree.TreeError as exc:
+            report.failures.append(f"the starting point could not be checked out: {exc}")
+            return
+        for stage in config.evaluate.stages:
+            if stage.kind == "builtin-static":
+                outcome = run_tree_static_stage(made.path, "", None, stage, config.problem, prefix=repo.prefix)
+            elif stage.kind == "builtin-build":
+                outcome = run_build_stage(made, stage, config.problem)
+            elif _command_stage(config, report, stage, made.path, None, work_dir):
+                continue
+            else:
                 return
-            if _seed_breaks_a_gate(config, report, f"stage {stage.id} hold-out", private):
+            report.stages.append(_stage_report(stage, outcome))
+            if not outcome.ok:
+                what = "does not build" if stage.kind == "builtin-build" else "does not pass the static stage"
+                report.failures.append(f"stage {stage.id}: the seed {what} -- {outcome.failure}")
                 return
+    finally:
+        tree.remove_all(work_dir)
+        restore_build(config.problem, log=report.warnings.append)
 
 
 def _seed_breaks_a_gate(config: Config, report: PreflightReport, where: str, outcome: StageOutcome) -> bool:

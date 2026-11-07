@@ -15,7 +15,7 @@ from tree_helpers import SOLVER, change, git, head, make_repo
 
 from evolvekit import tree
 from evolvekit.candidate import Candidate
-from evolvekit.config import STAGE_KINDS, ConfigError, build_config
+from evolvekit.config import ConfigError, build_config
 from evolvekit.evaluate.cascade import Cascade
 from evolvekit.ledger import read_jsonl
 from evolvekit.search import driver as driver_module
@@ -34,9 +34,7 @@ def project(tmp_path):
 
 
 def _raw(repo: Path, base: str, *, build: str = "", workers: int = 1, generations: int = 2) -> dict:
-    # `builtin-build` is Task 3's stage kind: until it exists, a build only makes
-    # the driver evaluate one candidate at a time.
-    build_stage = [{"id": "build", "kind": "builtin-build"}] if build and "builtin-build" in STAGE_KINDS else []
+    build_stage = [{"id": "build", "kind": "builtin-build"}] if build else []
     return {
         "problem": {"description": "Make VALUE small.",
                     "tree": {"repo": str(repo / "app dir"), "base": base, "open": ["solver.py"],
@@ -358,6 +356,7 @@ def test_build_and_top_k_are_refused_together(project, tmp_path):
             "candidates are built one at a time")):
         build_config(raw, base_dir=tmp_path)
     del raw["problem"]["tree"]["build"]
+    raw["evaluate"]["stages"] = [s for s in raw["evaluate"]["stages"] if s["kind"] != "builtin-build"]
     assert build_config(raw, base_dir=tmp_path), "without a build, top-k ranks a whole round"
 
 

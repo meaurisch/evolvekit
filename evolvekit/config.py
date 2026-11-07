@@ -442,7 +442,7 @@ class PromoteRule:
         return " or ".join(parts) if parts else "all"
 
 
-STAGE_KINDS = ("builtin-static", "command")
+STAGE_KINDS = ("builtin-static", "builtin-build", "command")
 NORMALIZE_MODES = ("baseline", "none")
 KPI_SOURCES = ("file", "stdout")
 
@@ -636,6 +636,17 @@ class StageConfig:
                 f"{path}.kpis_from: must be one of {list(KPI_SOURCES)}, got {kpis_from!r}"
             )
         kpi_patterns = _parse_kpi_patterns(data.get("kpi_patterns"), f"{path}.kpi_patterns")
+        if kind == "builtin-build":
+            # It runs `problem.tree.build` for `problem.tree.build_timeout_s`
+            # (`_tree_rules`), and has no score to promote by.
+            for key, where in (("command", "problem.tree.build"), ("timeout", "problem.tree.build_timeout_s")):
+                if key in data:
+                    raise ConfigError(f"{path}.{key}: a builtin-build stage takes it from {where}; remove `{key}`")
+            if data.get("promote") is not None:
+                raise ConfigError(
+                    f"{path}.promote: the build stage has no score to rank by, so it promotes everything "
+                    "that builds; remove the `promote` key"
+                )
         if kind == "command":
             if not command.strip():
                 raise ConfigError(f"{path}.command: required when kind is 'command'")
@@ -1162,6 +1173,9 @@ class EvaluateConfig:
                 "by, so it must promote everything it does not reject; remove the "
                 "`promote` key"
             )
+        for i, stage in enumerate(stages):
+            if stage.kind == "builtin-build" and i != 1:
+                raise ConfigError(f"evaluate.stages[{i}].kind: builtin-build comes right after the static stage")
         for i, stage in enumerate(stages[:-1]):
             if stage.private_inputs:
                 raise ConfigError(
@@ -1834,12 +1848,21 @@ def _tree_rules(config: Config) -> Config:
     candidate's block is a diff: it is switched off rather than refused, so a
     config written with the default (`local`) still loads. A build makes the
     driver evaluate one candidate at a time, so `top_k_per_generation` would
-    rank a round of one and promote everyone: refused.
+    rank a round of one and promote everyone: refused. A `builtin-build` stage
+    runs that build, under its timeout; without a build it has nothing to run.
     """
     tree = config.problem.tree
+    for index, stage in enumerate(config.evaluate.stages):
+        if stage.kind == "builtin-build" and (tree is None or not tree.build):
+            raise ConfigError(
+                f"evaluate.stages[{index}]: a builtin-build stage runs problem.tree.build, and the problem gives none"
+            )
     if tree is None:
         return config
     if tree.build:
+        stages = tuple(replace(stage, timeout=tree.build_timeout_s) if stage.kind == "builtin-build" else stage
+                       for stage in config.evaluate.stages)
+        config = replace(config, evaluate=replace(config.evaluate, stages=stages))
         for index, stage in enumerate(config.evaluate.stages):
             if stage.promote.top_k_per_generation is not None:
                 raise ConfigError(

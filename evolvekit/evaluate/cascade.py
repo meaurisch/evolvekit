@@ -31,6 +31,7 @@ from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
     STDERR_LIMIT,
     Configuration,
+    run_build_stage,
     run_command_stage,
     run_static_stage,
     run_tree_static_stage,
@@ -162,12 +163,16 @@ class Cascade:
         signatures: BehaviourIndex | None = None,
         on_event: Callable[..., Any] | None = None,
         stop: threading.Event | None = None,
+        time_left: Callable[[], float | None] | None = None,
     ) -> None:
         self.config = config
         self.stop = stop
         """The run's own stop (`evolvekit/stopping.py`): once set, evaluations
         in flight are stopped, none is started, and what did not finish is
         abandoned rather than failed."""
+        self.time_left = time_left
+        """The run's time left in seconds (`None`: no time budget): what a
+        build may take at most, beside `problem.tree.build_timeout_s`."""
         self.on_event = on_event
         """`on_event(type, **fields)`, called for every evaluator run as it starts
         and ends. The driver points it at the run's event log."""
@@ -391,6 +396,13 @@ class Cascade:
     def _run_stage(
         self, stage: StageConfig, candidate: Candidate, path: Path
     ) -> StageOutcome:
+        if stage.kind == "builtin-build":
+            # Only a candidate whose tree was made gets here: the static stage
+            # refused the others.
+            return run_build_stage(
+                self._trees[candidate.id], stage, self.config.problem, cancel=self.stop,
+                time_left_s=self.time_left() if self.time_left is not None else None,
+            )
         if stage.kind == "builtin-static" and self.repo is not None:
             return run_tree_static_stage(
                 path, candidate.block, self._tree_errors.get(candidate.id), stage, self.config.problem,
@@ -709,9 +721,12 @@ class Cascade:
             return
         if not outcome.ok:
             result.last_failure = _artefact(outcome)
-            if stage.kind == "builtin-static":
+            if stage.kind in ("builtin-static", "builtin-build"):
                 result.rejected = True
                 result.reject_reason = outcome.failure
+            if stage.kind == "builtin-build" and outcome.stderr.strip():
+                # What the next prompt shows: the build's own last words.
+                result.feedback[stage.id] = outcome.stderr[-FEEDBACK_LIMIT:]
             result.score = self.config.evaluate.failure_score
             result.ranking_score = result.score
             return
@@ -723,8 +738,8 @@ class Cascade:
         result.kpi_cv.update(outcome.kpi_cv)
         if outcome.text_feedback:
             result.feedback[stage.id] = outcome.text_feedback
-        if stage.kind == "builtin-static":
-            # No objective KPI here; a static pass carries no score of its own.
+        if stage.kind in ("builtin-static", "builtin-build"):
+            # No objective KPI here; a static pass or a build carries no score of its own.
             return
         if self.config.evaluate.score.levels:
             score, penalty_total, terms = self._level_score(stage.id, result.kpis), 0.0, {}

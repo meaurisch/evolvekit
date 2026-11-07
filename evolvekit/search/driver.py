@@ -43,6 +43,7 @@ from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage, race_warnings
 from evolvekit.evaluate.signature import BehaviourIndex
+from evolvekit.evaluate.stages import restore_build
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
 from evolvekit.ledger import Ledger
@@ -184,6 +185,7 @@ class Driver:
             signatures=self.behaviour,
             on_event=self._on_evaluation,
             stop=self.run_stop.event,
+            time_left=self.run_stop.left_s,
         )
         self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
         self.breadth = AdaptiveBreadth.from_config(config.search)
@@ -571,6 +573,10 @@ class Driver:
                         self._remove_trees(keep={best_now.id} if best_now else set())
                     except Exception as exc:  # noqa: BLE001
                         print(f"evolvekit: the run's trees were not all removed ({exc})", file=sys.stderr)
+                if self.repo is not None and self.config.problem.tree.build:
+                    # The search built candidates into the shared interpreter:
+                    # it is pointed back at the engineer's checkout (decision 31).
+                    restore_build(self.config.problem, log=self.log)
             best = summary.best
             self.events.emit(
                 "run_finished",

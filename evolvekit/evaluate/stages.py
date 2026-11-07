@@ -1,9 +1,11 @@
-"""The two stage kinds: `builtin-static` and `command`.
+"""The three stage kinds: `builtin-static`, `builtin-build` and `command`.
 
 `builtin-static` is the only rung allowed to hard-reject: a syntax error, a
 forbidden import, a missing required function, or a module that blows up on
 import means the candidate never enters the archive. Everything downstream is
-a penalty or a `failure_score`, never a `None`.
+a penalty or a `failure_score`, never a `None` -- except `builtin-build`, which
+a tree problem with `problem.tree.build` has right after it: a change that
+does not build is refused too, with the build's own last words as the feedback.
 
 The static stage never `exec`s candidate code in this process -- v1 did, and
 that is one unsandboxed `import os` away from a bad afternoon. The optional
@@ -14,17 +16,19 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import math
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, stdev
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from evolvekit.config import ProblemConfig, StageConfig, embedded_params
 from evolvekit.evaluate.cache import EvalCache
@@ -33,9 +37,15 @@ from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
 from evolvekit.stopping import AnyEvent
 
+if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
+    from evolvekit.tree import Tree
+
 __all__ = [
     "run_static_stage",
     "run_tree_static_stage",
+    "run_build_stage",
+    "restore_build",
+    "build_command",
     "run_command_stage",
     "static_checks",
     "build_argv",
@@ -208,6 +218,136 @@ def run_tree_static_stage(
         failure="; ".join(problems) if problems else None,
         duration_s=time.perf_counter() - started,
     )
+
+
+# --- builtin-build ---------------------------------------------------------------
+
+_BUILT: tuple[str, str, str] | None = None
+"""What the shared interpreter holds now, as `(build, tree folder, commit)`, or
+`None` when nobody knows. In memory and for this process only (decision 31):
+nothing on disk claims a build, so a resumed run builds again. One entry, not a
+set: a build that installs into one interpreter replaces the one before."""
+_BUILT_LOCK = threading.Lock()
+
+
+def build_command(template: str, *, tree: Path) -> list[str]:
+    """`problem.tree.build` as argv: split first, then `{tree}` and `{python}`
+    substituted (as `build_argv` does, so a Windows path keeps its backslashes
+    and a folder with a space stays one argument). Other braces are the
+    command's own."""
+    tokens = shlex.split(template, posix=True)
+    if not tokens:
+        raise ValueError("the build command is empty")
+    return [token.replace("{tree}", str(tree)).replace("{python}", sys.executable) for token in tokens]
+
+
+def _last_line(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1][:300] if lines else ""
+
+
+def _forget_build() -> None:
+    global _BUILT
+    with _BUILT_LOCK:
+        _BUILT = None
+
+
+def run_build_stage(
+    tree: "Tree",
+    stage: StageConfig,
+    problem: ProblemConfig,
+    *,
+    cancel: "threading.Event | AnyEvent | None" = None,
+    time_left_s: float | None = None,
+) -> StageOutcome:
+    """Run `problem.tree.build` in a candidate's tree (design §5.1, §5.3).
+
+    Once per commit: when the shared interpreter already holds this tree's
+    build, nothing runs and the outcome is `cached`. A failure is `build: exit
+    code N: <its last stderr line>` (or `build: no answer within T s`) with the
+    stderr tail; the cascade makes it a hard reject. The bound is the stage's
+    timeout (`problem.tree.build_timeout_s`), or `time_left_s` when the study
+    has less time left than that; a build the study's time or `cancel` ends is
+    abandoned, not failed, and its whole process tree is killed (`run_bounded`).
+    """
+    global _BUILT
+    assert problem.tree is not None and problem.tree.build
+    key = (problem.tree.build, os.path.normcase(os.path.abspath(tree.path)), tree.commit)
+    with _BUILT_LOCK:
+        if _BUILT == key:
+            return StageOutcome(stage_id=stage.id, ok=True, cached=True)
+        _BUILT = None  # from here on the interpreter holds whatever this build leaves
+    limit, short = stage.timeout, False
+    if time_left_s is not None and time_left_s < limit:
+        limit, short = max(0.0, time_left_s), True
+    if (cancel is not None and cancel.is_set()) or limit <= 0:
+        return StageOutcome(stage_id=stage.id, ok=False, abandoned=True,
+                            failure="called off before it started: the run was stopped")
+    started = time.perf_counter()
+    try:
+        argv = build_command(problem.tree.build, tree=tree.path)
+    except ValueError as exc:
+        return StageOutcome(stage_id=stage.id, ok=False, failure=f"build: bad command: {exc}")
+    # Beside the command stages' logs (`<work>/stage_out/`), not in `trees/`.
+    logs = tree.worktree.parent.parent / "stage_out"
+    stdout_path = logs / f"{tree.worktree.name}.{stage.id}.stdout.log"
+    stderr_path = logs / f"{tree.worktree.name}.{stage.id}.stderr.log"
+    run = run_bounded(argv, timeout=limit, cwd=tree.path, stdout_path=stdout_path, stderr_path=stderr_path,
+                      cancel=cancel)  # type: ignore[arg-type]  # anything with `is_set()`
+    stderr, stdout = read_tail(stderr_path, STDERR_LIMIT), read_tail(stdout_path, STDERR_LIMIT)
+    fields = dict(stage_id=stage.id, stderr=stderr, stdout=stdout, duration_s=time.perf_counter() - started,
+                  argv=tuple(argv), stdout_log=str(stdout_path), stderr_log=str(stderr_path))
+    if run.cancelled:
+        return StageOutcome(ok=False, abandoned=True, failure="called off: the run was stopped while this built",
+                            **fields)
+    if run.timed_out and short:
+        return StageOutcome(ok=False, abandoned=True, failure="the study's time ran out while this built", **fields)
+    if run.error is not None:
+        return StageOutcome(ok=False, failure=f"build: could not run {argv[0]!r}: {run.error}", **fields)
+    if run.timed_out:
+        return StageOutcome(ok=False, failure=f"build: no answer within {limit:g} s", **fields)
+    if run.returncode != 0:
+        said = _last_line(stderr) or _last_line(stdout)
+        return StageOutcome(ok=False, failure=f"build: exit code {run.returncode}" + (f": {said}" if said else ""),
+                            **fields)
+    with _BUILT_LOCK:
+        _BUILT = key
+    return StageOutcome(ok=True, **fields)
+
+
+def restore_build(problem: ProblemConfig, *, log: Callable[[str], None]) -> None:
+    """Build the engineer's own checkout (the folder `problem.tree.repo` names)
+    back into the shared interpreter (decision 31), so it never points at a
+    candidate's tree once that tree is removed.
+
+    Called in a `finally` wherever candidates were built: the search, the final
+    check, a preflight. A failure is one warning through `log`, never raised:
+    it must not hide what the run itself ended with.
+    """
+    tree = problem.tree
+    if tree is None or not tree.build:
+        return
+    _forget_build()
+    checkout = Path(tree.repo)
+    try:
+        argv = build_command(tree.build, tree=checkout)
+        with tempfile.TemporaryDirectory(prefix="evolvekit-build-", ignore_cleanup_errors=True) as scratch:
+            out, err = Path(scratch) / "build.stdout.log", Path(scratch) / "build.stderr.log"
+            run = run_bounded(argv, timeout=tree.build_timeout_s, cwd=checkout, stdout_path=out, stderr_path=err)
+            said = _last_line(read_tail(err, STDERR_LIMIT)) or _last_line(read_tail(out, STDERR_LIMIT))
+        if run.error is not None:
+            reason: str | None = f"could not run {argv[0]!r}: {run.error}"
+        elif run.timed_out:
+            reason = f"no answer within {tree.build_timeout_s:g} s"
+        elif run.returncode != 0:
+            reason = f"exit code {run.returncode}" + (f": {said}" if said else "")
+        else:
+            reason = None
+    except Exception as exc:  # noqa: BLE001 - a warning, whatever it was
+        reason = str(exc) or type(exc).__name__
+    if reason is not None:
+        log(f"warning: {checkout} could not be built back into the application's Python (build: {reason}); "
+            f"it may still run a removed combination's code. Run the build there yourself: {tree.build}")
 
 
 def _import_check(candidate_path: Path, timeout: float) -> str | None:
