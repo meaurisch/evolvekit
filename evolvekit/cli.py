@@ -408,6 +408,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--app", metavar="PATH", help="also ask every harness whether this application is its own")
     p_doctor.add_argument("--json", action="store_true", help="print the checks as a JSON list")
 
+    p_skill = sub.add_parser("skill", help="the skills that ship with evolvekit: list and install them")
+    skill = p_skill.add_subparsers(dest="skill_command", required=True)
+    skill.add_parser("list", help="the skills that ship with evolvekit")
+    k_install = skill.add_parser("install", help="write the skills into a project (.agents/skills, with a pointer in .claude/skills)")
+    k_install.add_argument("--dir", default=".", help="the project folder (default: the current folder)")
+    k_install.add_argument("--force", action="store_true", help="overwrite files that exist")
+
     p_study = sub.add_parser("study", help="make, preview, compile and run studies")
     study = p_study.add_subparsers(dest="study_command", required=True)
     s_new = study.add_parser("new", help="a new study folder from a harness (and a template)")
@@ -1270,7 +1277,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if all(item["ok"] for item in results) else 1
 
 
+def cmd_skill(args: argparse.Namespace) -> int:
+    from evolvekit import skills
+
+    if args.skill_command == "list":
+        for name in skills.available():
+            print(name)
+        return 0
+    target = Path(args.dir)
+    result = skills.install(target, force=args.force)
+    for verb, key, suffix in (("wrote", "written", ""), ("skipped", "skipped", " (exists)")):
+        for path in result[key]:
+            print(f"{verb} {path.relative_to(target).as_posix()}{suffix}")
+    return 0
+
+
 _COMMANDS = {
+    "skill": cmd_skill,
     "doctor": cmd_doctor,
     "confirm": cmd_confirm,
     "export": cmd_export,
