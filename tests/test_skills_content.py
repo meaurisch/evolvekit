@@ -451,6 +451,9 @@ def test_harness_skill_round_b3_sentences():
 
 # The suite is complete (Task 4).
 
+RULE_THREE = ("The plan before the start: `study compile`'s line is shown before `study start`. A request complete "
+              "as first sent then starts without a further question, one completed by the engineer's answers waits "
+              "for a yes after the plan line, and a thin plan never starts.")
 PHASES = ("queued", "starting", "search", "check", "done", "stopped", "failed")
 
 
@@ -486,6 +489,8 @@ def test_reference_rules_three_and_four():
     three = re.search(r"^3\. (.+)$", rules, re.M)
     four = re.search(r"^4\. (.+)$", rules, re.M)
     assert three and "study compile" in three.group(1) and "before `study start`" in three.group(1)
+    assert three.group(1) == RULE_THREE
+    assert len(re.findall(r"[.;?!](?:\s|$)", three.group(1).replace("…", ""))) == 2, "Rule 3 is two sentences"
     assert four and "{from: harness}" in four.group(1) and "never SQL" in four.group(1)
 
 

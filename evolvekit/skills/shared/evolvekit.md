@@ -111,7 +111,7 @@ The `decision` values:
 
 1. Report only the verdict's line and its advice, word for word, and add no sentence that claims more. The gain on the training cases is named only as "on the cases it learned from" (`learned_from`), and only when asked.
 2. Until the verdict exists, write no "better", "improved", "faster" or "cheaper", and no percentage.
-3. The plan before the start: `study compile`'s line is shown before `study start`. A complete request with a plan that fits starts; anything else waits for the engineer.
+3. The plan before the start: `study compile`'s line is shown before `study start`. A request complete as first sent then starts without a further question, one completed by the engineer's answers waits for a yes after the plan line, and a thin plan never starts.
 4. Measures come from the harness by name (`{from: harness}`) or from its templates; never SQL in a study.
 5. Never edit `evk_harness.py`: it is evolvekit's SDK, copied in by `harness new`; fix a failing check in `runner.py` or `harness.yaml`.
 6. The comparability trap: a data change that alters what the application sees (costs, weights) alters every measure computed from it. Such measures are `changes_with_levers: true`, and a data study is judged by a measure of the untouched request.
