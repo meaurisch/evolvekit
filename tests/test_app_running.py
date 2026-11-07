@@ -42,3 +42,9 @@ def test_running_ignores_pid_of_another_program(tmp_path):
     finally:
         other.kill()
         other.wait()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows has no mode bits to set")
+def test_the_file_is_private_to_the_user(tmp_path):
+    path = write_running(tmp_path, pid=os.getpid(), port=8780, url="http://127.0.0.1:8780/?token=x")
+    assert path.stat().st_mode & 0o777 == 0o600

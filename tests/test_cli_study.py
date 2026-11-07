@@ -530,13 +530,17 @@ def test_open_starts_an_app_when_none_runs(tmp_path, monkeypatch, capsys):
     _new(home)
     capsys.readouterr()
     calls, servers = [], []
+    recorded = threading.Event()  # set once the server is in `servers`: app.json is seen before that
 
     def start_app(argv, **kwargs):
         calls.append(list(argv))
 
         def serve():
-            server = AppServer(home, port=0)  # writes app.json
-            servers.append(server)
+            try:
+                server = AppServer(home, port=0)  # writes app.json
+                servers.append(server)
+            finally:
+                recorded.set()
             server.start()
 
         threading.Thread(target=serve, daemon=True).start()
@@ -545,9 +549,12 @@ def test_open_starts_an_app_when_none_runs(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(detach, "spawn_detached", start_app)
     try:
         assert main(["study", "open", "depot-a", "--no-browser", "--home", str(home)]) == 0
+        assert recorded.wait(10)
         assert len(calls) == 1 and calls[0][-4:] == ["app", "--home", str(home), "--no-browser"]
         assert capsys.readouterr().out == servers[0].url_with_token + "#/study/depot-a\n"
     finally:
+        if calls:
+            recorded.wait(10)
         for server in servers:
             server.stop()
 

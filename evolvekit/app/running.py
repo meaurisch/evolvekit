@@ -28,7 +28,14 @@ def write_running(home_root: Path, *, pid: int, port: int, url: str, host: str =
     path = Path(home_root) / APP_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f"{APP_FILE}.{os.getpid()}.tmp")
-    temp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    # The file carries the launch's key: the user's eyes only, like .env (made
+    # 0600 from the start, so the key is never readable by others, even in the
+    # temp file; Windows has no mode bits and ignores the mode).
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(fd, "w", encoding="utf-8") as out:
+        out.write(json.dumps(doc, indent=2))
+    if os.name == "posix":  # a temp file left from an earlier write keeps its old mode
+        os.chmod(temp, 0o600)
     os.replace(temp, path)
     return path
 
