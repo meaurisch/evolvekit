@@ -111,6 +111,22 @@ def test_page_held_back_rows_equal_the_verdict_rows(use_run):
     assert rows[0]["change_pct"] == pytest.approx(4.78)
 
 
+def test_results_learned_figure_is_the_verdict_learned_from(use_run):
+    """The chosen combination's chip reads the verdict's own learned-from figure
+    (the change of the plain averages), not the search's average of per-case changes."""
+    root, run = use_run
+    path = root / "runs" / run / "runs.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows[0]["kpis"].update({"tour_length": 1.0, "tour_length_raw": 100.0})
+    rows[1]["kpis"].update({"tour_length": 0.9257, "tour_length_raw": 92.5})
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    v = build_verdict(root, run)
+    r = jobs.results(root, run, document_of)
+    assert v["learned_from"]["pct"] == pytest.approx(7.5)
+    assert r["learned_pct"] == v["learned_from"]["pct"]
+    assert r["improvement_pct"] == pytest.approx(4.2), "the search's own figure stays for the Tries plot"
+
+
 def test_advice_for_use_says_use(use_run):
     assert build_verdict(*use_run)["advice"].startswith("Use the new settings")
 

@@ -332,10 +332,10 @@
     var c = chosenCombo();
     return html`${EK.chosenChip(c, chipFigure(c))}${c ? EK.button("Details", { kind: "quiet", size: "s", act: "details", arg: c.id, label: "Details of combination " + c.n }) : ""}`;
   }
-  /** The chip's figure: the verdict document's `learned_from` for the best combination, else its own. */
+  /** The chip's figure: the verdict document's `learned_from` (`learned_pct`) for the best combination, else its own. */
   function chipFigure(c) {
-    var r = st.results, best = c && r && r.best_id === c.id && r.improvement_pct != null;
-    return { pct: best ? r.improvement_pct : null, direction: (goalOf() || {}).direction };
+    var r = st.results, best = c && r && r.best_id === c.id && r.learned_pct != null;
+    return { pct: best ? r.learned_pct : null, direction: (goalOf() || {}).direction };
   }
   function chosenCombo() { var c = st.chosen && combo(st.chosen); return c && !c.base ? c : null; }
 
@@ -453,7 +453,7 @@
         <div class="fact"><span class="type-label">Time in total</span><span>${EK.hours(c.hours)}${c.took ? " · took " + c.took : ""}</span></div>
         <div class="fact"><span class="type-label">Combinations</span><span>${c.tried != null ? EK.int(c.tried) + " tried" : ""}</span></div>
         <div class="fact"><span class="type-label">Starting point</span><span>${c.compared_with || ""}</span></div></div>`);
-      if (r.final && r.final.line) parts.push(html`<p class="type-body">${r.final.line}</p>${r.final.next ? html`<p class="type-small ink-2">${r.final.next}</p>` : ""}`);
+      if (r.final && r.final.next) parts.push(html`<p class="type-small ink-2">${r.final.next}</p>`);
       if (r.final && r.final.recheck) parts.push(html`<div class="actions">${EK.button(r.final.recheck.label, { kind: r.final.recheck.over ? "quiet" : "secondary", act: "recheck" })}</div><p class="type-small ink-2">${r.final.recheck.why}</p>`);
       var dir = (goalOf() || {}).direction, measure = (goalOf() || {}).label || "the measure";
       var table = function (title, rows, change) {
@@ -635,7 +635,7 @@
             ${params.map(function (p) { return html`<tr><td>${labelOf(p.name)}</td><td>${EK.valueText(p, p.default)}</td><td class="new">${EK.valueText(p, p.value)}</td></tr>`; })}</tbody></table></div>`
             : html`<p class="type-small ink-2">Nothing: these are today’s settings.</p>`}</div>
         <div class="sub-section"><h3 class="type-heading">Case by case</h3><div class="cases-wrap"><table class="changed-table"><tbody>
-          ${Object.keys(per).sort().map(function (cs) { return html`<tr><td class="mono">${cs}</td><td>${EK.better(per[cs])}</td></tr>`; })}</tbody></table></div></div>
+          ${Object.keys(per).sort().map(function (cs) { return html`<tr><td class="mono">${cs}</td><td>${EK.change(per[cs], chipFigure(c).direction)}</td></tr>`; })}</tbody></table></div></div>
         ${failed.length ? html`<div class="sub-section"><h3 class="type-heading">${EK.plural(failed.length, "failed run")}</h3>
           ${failed.slice(0, 6).map(function (e) {
             var out = (e.stderr_tail || e.stdout_tail || "").trim();

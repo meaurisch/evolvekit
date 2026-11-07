@@ -199,7 +199,9 @@ def test_the_study_page_headline_is_the_verdict_line_and_advice():
     results document's `final.line` and `final.advice`, verbatim."""
     body = _strip_branches(STUDY_PAGE)
     finished = body[body.index('d === "use"'):]
-    assert "head: verdictHead" in finished and "sub: verdictSub" in finished
+    heads, subs = re.findall(r"head: ([^,]+),", finished), re.findall(r"sub: ([^,]+),", finished)
+    assert len(heads) >= 7 and set(heads) == {"verdictHead(f)"}, heads
+    assert len(subs) == len(heads) and set(subs) == {"verdictSub(f)"}, subs
     assert "function verdictHead" in STUDY_PAGE and "f.line" in STUDY_PAGE[STUDY_PAGE.index("function verdictHead"):]
     assert "f.advice" in STUDY_PAGE[STUDY_PAGE.index("function verdictSub"):]
     for old in ("EK.better(f.mean)", "on one case", "One case gives no range, so no answer.", "but not sure enough"):
@@ -214,7 +216,9 @@ def test_no_figure_on_the_study_page_says_better():
     assert "EK.better" not in chip and "on the cases it learned from, not checked" in chip
     assert "EK.change(x.change_pct" in STUDY_PAGE, "the held-back table: one decimal, the measure's direction"
     assert "mean of the paired runs" in STUDY_PAGE, "the table's column says what its figure is"
-    assert "improvement_pct" in STUDY_PAGE, "the chip of the best: the document's learned_from figure"
+    drawer = STUDY_PAGE[STUDY_PAGE.index("function comboDrawer"):STUDY_PAGE.index("function runsDrawer")]
+    assert "EK.better" not in drawer, "the combination drawer: one decimal and the direction, in every row"
+    assert "Details shows" not in STUDY_PAGE and "${r.final.line}" not in STUDY_PAGE, "the line is the headline, once"
 
 
 def test_the_change_words_round_like_the_report():

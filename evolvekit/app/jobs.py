@@ -1124,10 +1124,13 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "took": _duration(used_s) if used_s is not None else None,
         "compared_with": baseline,
     }
+    # The learned-from figure is the verdict's own (the change of the plain averages), as the report
+    # says it; `pct` is the search's figure (the average of the per-case changes), kept for the Tries plot.
+    learned_pct = verdict_doc._learned_pct(seed, best, goal)
     # The headline, the advice, the decision and its numbers are the verdict
     # document's, so the page and `build_verdict` cannot say two things.
     verdict = verdict_doc._document(root, run_dir, study, harness, job, final, comparison, by_case["held"], changed,
-                                    facts, pct)
+                                    facts, learned_pct)
     final["line"], final["advice"] = verdict["line"], verdict["advice"]
     # The held-back table's change is the document's: the paired mean over the final check's runs.
     paired = {row["name"]: row["change_pct"] for row in verdict["by_case"]}
@@ -1140,7 +1143,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
             final[key] = verdict[name]
     data = {
         "run": run, "phase": job.get("phase"), "study": study.name, "harness": harness.title,
-        "headline": headline, "improvement_pct": pct, "goal": goal, "final": final, "kpis": kpis,
+        "headline": headline, "improvement_pct": pct, "learned_pct": learned_pct, "goal": goal, "final": final, "kpis": kpis,
         "guardrails": guardrails, "rules": rules, "changed": changed, "downloads": downloads, "by_case": by_case,
         "context": context,
         "best_id": (best or {}).get("id"), "is_seed": bool(best and seed and best.get("id") == seed.get("id")),

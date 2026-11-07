@@ -173,9 +173,11 @@ must keep), **Data changes** and AI help.
 The **status strip** at the top says the study's one answer right now —
 *Searching · round 7 of 12 · Best so far: 1.95 % better · Not checked yet* —
 and becomes the verdict when the final check has decided. Nothing says *use
-it* before then. The verdict's two sentences are the verdict document's
-`line` and `advice`, word for word, as `evolvekit study verdict` prints
-them: the page never composes its own. The app decides by one fixed rule, stated under the answer:
+it* before then. Once there is a verdict, the strip's headline and the
+sentence under it are the verdict's own `line` and `advice`, word for word,
+as `evolvekit study verdict` prints them: the page never composes its own.
+While the final check runs there is no verdict yet, so the strip says *No
+answer yet*. The app decides by one fixed rule, stated under the answer:
 *use it at 9 in 10 or better, worst within 1 %* — the chance of a gain at
 least 9 in 10 and the worst plausible case within 1 % of today. Every
 estimate shows its likely range as a band through *today*, with both ends
