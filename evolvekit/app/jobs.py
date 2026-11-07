@@ -161,8 +161,9 @@ def phase(run_dir: Path) -> dict[str, Any]:
     """`job.json`, with the phase corrected for a process that is gone."""
     job = read_job(run_dir)
     launch = _read(run_dir / LAUNCH) or {}
-    if not launch and (run_dir / QUEUED).is_file():
-        # Waiting its turn: a launch, once there is one, is the newer word.
+    if not launch and job is None and (run_dir / QUEUED).is_file():
+        # Waiting its turn: a launch or a job, once there is one, is the newer
+        # word -- a run that started is never queued again.
         return {"phase": "queued", "queued_at": (_read(run_dir / QUEUED) or {}).get("queued_at")}
     if launch.get("pending"):
         # A launch under way (`_mark_pending`), in this process or another:
@@ -341,8 +342,11 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys
     _mark_pending(run_dir)
     try:
         pid = _spawn(env, argv, root, run_dir)
-    except Exception:
-        # Nothing was launched: the run reads as it did before.
+    except AppError:
+        # The launcher printed no pid: nothing was launched, and the run
+        # reads as it did before. Any other failure (a launcher that timed
+        # out) may have started the run: the marker stays, and the run's
+        # own job.json, or the marker's age, says what became of it.
         if previous is None:
             (run_dir / LAUNCH).unlink(missing_ok=True)
         else:
@@ -524,8 +528,10 @@ def launch_queued(home: Any) -> str | None:
         (run_dir / QUEUED).unlink(missing_ok=True)
         try:
             _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir))
-        except Exception:
-            # Queued again, as it was: the next tick tries once more.
+        except AppError:
+            # The launcher started nothing: queued again, as it was, and the
+            # next tick tries once more. Any other failure may have started
+            # the run, so it is never queued again (`_launch` keeps the marker).
             if waited is not None:
                 (run_dir / QUEUED).write_text(waited, encoding="utf-8")
             (run_dir / LAUNCH).unlink(missing_ok=True)
@@ -537,11 +543,15 @@ def stop(root: Path, run: str) -> dict[str, Any]:
     run_dir = _run_dir(root, run)
     state = phase(run_dir).get("phase")
     if state == "queued":
-        # It never started: nothing to keep. The directory goes, and the
-        # study is a draft again.
+        # It never started: nothing to keep. The dequeue claims the run as a
+        # launch does (`launch_queued`), so a launch in another process and
+        # this stop cannot both win: the directory goes only when this claim
+        # does, and the study is a draft again.
         with _launch_guard:
-            shutil.rmtree(run_dir, ignore_errors=True)
-        return {"stopping": False, "dequeued": True}
+            if _mark_pending(run_dir, exclusive=True):
+                shutil.rmtree(run_dir, ignore_errors=True)
+                return {"stopping": False, "dequeued": True}
+        state = phase(run_dir).get("phase")  # claimed by a launch meanwhile: it is starting
     if state not in ACTIVE:
         raise AppError("the run is not running", 409)
     (run_dir / STOP_REQUEST).write_text("stop\n", encoding="utf-8")

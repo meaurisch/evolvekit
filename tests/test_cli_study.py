@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from evolvekit.cli import main
+from evolvekit.stopping import STOP_REQUEST
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -368,6 +369,98 @@ def test_pending_marker_expires(tmp_path):
     (run_dir / "job.log").write_text("Traceback ...\nOSError: no such program\n", encoding="utf-8")
     job = jobs.phase(run_dir)
     assert job["phase"] == "failed" and "did not start" in job["error"] and "no such program" in job["error"]
+
+
+def _pending(run_dir):
+    (run_dir / "launch.json").write_text(json.dumps({
+        "pending": True, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}), encoding="utf-8")
+
+
+def test_launch_queued_skips_a_run_claimed_meanwhile(tmp_path, monkeypatch):
+    from evolvekit.app import jobs
+    from evolvekit.app.store import Home
+
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+    asked = []
+
+    def nothing_active(home):  # another process claims the run between the scan and the claim
+        asked.append(1)
+        if len(asked) == 2:
+            _pending(run_dir)
+        return None
+
+    spawned = []
+    monkeypatch.setattr(jobs, "active_run", nothing_active)
+    monkeypatch.setattr(jobs, "_spawn", lambda *args, **kwargs: spawned.append(args) or 4242)
+    assert jobs.launch_queued(Home(tmp_path)) is None
+    assert spawned == [] and len(asked) == 2
+    assert (run_dir / "queued.json").is_file() and json.loads((run_dir / "launch.json").read_text())["pending"] is True
+
+
+def test_a_launch_that_started_nothing_queues_the_run_again(tmp_path, monkeypatch):
+    from evolvekit.app import AppError, jobs
+    from evolvekit.app.store import Home
+
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+
+    def no_pid(*args, **kwargs):
+        raise AppError("the run could not be started: no message", 500)
+
+    monkeypatch.setattr(jobs, "_spawn", no_pid)
+    with pytest.raises(AppError):
+        jobs.launch_queued(Home(tmp_path))
+    assert (run_dir / "queued.json").is_file() and not (run_dir / "launch.json").exists()
+    assert jobs.phase(run_dir)["phase"] == "queued"
+
+
+def test_a_run_that_may_have_started_is_never_queued_again(tmp_path, monkeypatch):
+    from evolvekit.app import jobs
+    from evolvekit.app.store import Home
+
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+
+    def started_then_timed_out(env, argv, root, run_dir):  # the job began; the launcher never said its pid
+        (run_dir / "job.json").write_text(json.dumps({
+            "phase": "search", "pid": os.getpid(), "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }), encoding="utf-8")
+        raise RuntimeError("the launcher timed out")
+
+    monkeypatch.setattr(jobs, "_spawn", started_then_timed_out)
+    with pytest.raises(RuntimeError):
+        jobs.launch_queued(Home(tmp_path))
+    assert not (run_dir / "queued.json").exists()
+    assert jobs.phase(run_dir)["phase"] != "queued"
+    assert jobs.launch_queued(Home(tmp_path)) is None, "the run is not launched a second time"
+    # A queued.json that comes back anyway never outweighs the run's own job.
+    (run_dir / "launch.json").unlink()
+    (run_dir / "queued.json").write_text(json.dumps({"queued_at": "2026-01-01T00:00:01+00:00"}), encoding="utf-8")
+    assert jobs.phase(run_dir)["phase"] != "queued"
+
+
+def test_stop_leaves_a_run_claimed_by_a_launch(tmp_path, monkeypatch):
+    from evolvekit.app import jobs
+
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+    read = jobs.phase
+    calls = []
+
+    def claimed_after_the_first_look(path):  # a launch in another process claims the run meanwhile
+        calls.append(1)
+        if len(calls) == 1:
+            answer = read(path)
+            _pending(run_dir)
+            return answer
+        return read(path)
+
+    monkeypatch.setattr(jobs, "phase", claimed_after_the_first_look)
+    answer = jobs.stop(tmp_path / "studies" / "depot-a", run_dir.name)
+    assert run_dir.is_dir() and (run_dir / "launch.json").is_file()
+    assert answer == {"stopping": True, "run": run_dir.name}, "a run that is starting is asked to stop"
+    assert (run_dir / STOP_REQUEST).is_file()
 
 
 def test_wait_ticks_the_queue(tmp_path, monkeypatch, capsys):
