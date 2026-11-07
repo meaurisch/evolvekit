@@ -439,6 +439,7 @@ SAMPLES_NOT_PRIVATE = ("Samples are small made-up cases in the engineer's format
 def test_harness_skill_round_b3_sentences():
     body = _body(HARNESS)
     assert SMOKE_YOURSELF in _section(body, "6. Smoke test")
+    assert "evolvekit-study" not in _section(body, "6. Smoke test"), "the smoke test is said in its own words"
     assert SAMPLES_NOT_PRIVATE in _section(body, "4. Write it, in this order")
     interview = _section(body, "2. Interview")
     assert "(questions 1–3)" in interview.split("- [ ]", 1)[0], "reading the files first is for questions 1–3"

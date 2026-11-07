@@ -66,7 +66,7 @@ evolvekit harness check harness/ --app PATH --json
 
 ## 6. Smoke test
 
-Make a study from the template written in step 4, on the samples, as the `evolvekit-study` skill's step 3 does:
+The smoke test: make a study on the samples with the template you wrote (T), check it and preview one case:
 
 ```
 evolvekit study new "Smoke test" --harness harness/ --template T --app PATH --json
