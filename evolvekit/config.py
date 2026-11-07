@@ -12,7 +12,7 @@ import os
 import re
 import shlex
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 import yaml
@@ -26,6 +26,7 @@ __all__ = [
     "DEFAULT_SIGNATURE_IGNORE",
     "Config",
     "ProblemConfig",
+    "TreeConfig",
     "StageConfig",
     "PromoteRule",
     "LevelConfig",
@@ -189,6 +190,60 @@ two numbers and in nothing else."""
 
 
 @dataclass(frozen=True)
+class TreeConfig:
+    """A source tree the search may change (design §5.3): a candidate is a
+    unified diff against `base`, checked out as a git worktree.
+
+    `repo` is a folder inside a git repository (absolute); `open` the files a
+    candidate may change, as globs relative to it. `base` is a commit by the
+    time a config is loaded: a ref, or `working`, is resolved once, here.
+    """
+
+    repo: Path
+    base: str
+    open: tuple[str, ...]
+    build: str = ""
+    """Run in a candidate's tree before it is used (`builtin-build`). With a
+    build, the driver evaluates one candidate at a time."""
+    build_timeout_s: float = 600.0
+    app: str = ""
+    """The program inside a candidate's tree, as `{tree}/...`: what `{app}` is."""
+
+    @staticmethod
+    def parse(raw: Any, path: str = "problem.tree") -> "TreeConfig":
+        data = _as_mapping(raw, path)
+        _reject_unknown(data, {"repo", "base", "open", "build", "build_timeout_s", "app"}, path)
+        repo = _as_str(_require(data, "repo", path), f"{path}.repo")
+        if not (PurePosixPath(repo).is_absolute() or PureWindowsPath(repo).is_absolute()):
+            raise ConfigError(f"{path}.repo: give the full path to the source folder; {repo!r} is relative")
+        base = _as_str(_require(data, "base", path), f"{path}.base").strip()
+        files = _as_list(data.get("open"), f"{path}.open")
+        if not files:
+            raise ConfigError(f"{path}.open: name at least one file the search may change")
+        open_ = tuple(_as_str(v, f"{path}.open[{i}]").strip() for i, v in enumerate(files))
+        build = data.get("build") or ""
+        if not isinstance(build, str):
+            raise ConfigError(f"{path}.build: expected a command, got {build!r}")
+        app = data.get("app") or ""
+        if not isinstance(app, str):
+            raise ConfigError(f"{path}.app: expected a path such as '{{tree}}/solver.py', got {app!r}")
+        timeout = _as_positive(data.get("build_timeout_s", 600.0), f"{path}.build_timeout_s")
+        # Only a tree problem needs git: imported here, never for a skeleton.
+        from evolvekit import tree
+
+        try:
+            located = tree.Repo(repo)
+        except tree.TreeError as exc:
+            raise ConfigError(f"{path}.repo: {exc}") from None
+        try:
+            base = tree.resolve_base(located, base)
+        except tree.TreeError as exc:
+            raise ConfigError(f"{path}.base: {exc}") from None
+        return TreeConfig(repo=Path(repo), base=base, open=open_, build=build.strip(),
+                          build_timeout_s=timeout, app=app.strip())
+
+
+@dataclass(frozen=True)
 class ProblemConfig:
     """The human-written skeleton and the fenced region the loop may rewrite.
 
@@ -223,9 +278,14 @@ class ProblemConfig:
     an external command. It replaces `skeleton`: the one function a candidate
     may change, `configure()`, is generated from it, its values are validated
     in the static stage and handed to the stage command as `{params}`."""
+    tree: TreeConfig | None = None
+    """A source tree (`TreeConfig`): it replaces `skeleton`, and a candidate is
+    a diff against its base commit instead of an evolve block."""
 
     def skeleton_source(self) -> str:
-        """The skeleton's text: the user's file, or the generated one."""
+        """The skeleton's text: the user's file, or the generated one (none for a tree)."""
+        if self.tree is not None:
+            return ""
         if self.parameters is not None:
             return self.parameters.render_skeleton(self.block_start, self.block_end)
         assert self.skeleton is not None  # `parse` guarantees one of the two
@@ -247,11 +307,23 @@ class ProblemConfig:
             "forbidden_imports",
             "parameters",
             "parameter_constraints",
+            "tree",
         }
         _reject_unknown(data, known, "problem")
         parameters: ParameterSpace | None = None
         skeleton: Path | None = None
-        if data.get("parameters") is not None:
+        tree: TreeConfig | None = None
+        if data.get("tree") is not None:
+            if data.get("skeleton") is not None or data.get("parameters") is not None:
+                # Code and tuned settings in one candidate are left for later (Decision D6).
+                raise ConfigError("problem: give one of `skeleton`, `parameters` or `tree`")
+            if data.get("parameter_constraints") is not None:
+                raise ConfigError(
+                    "problem.parameter_constraints: conditions on the values of `problem.parameters`, "
+                    "and this config declares none. Declare the parameters, or remove the constraints"
+                )
+            tree = TreeConfig.parse(data["tree"])
+        elif data.get("parameters") is not None:
             if data.get("skeleton") is not None:
                 raise ConfigError(
                     "problem: give either `skeleton` (a program with an evolve block) "
@@ -304,6 +376,7 @@ class ProblemConfig:
             )
             or (("configure",) if parameters is not None else ()),
             parameters=parameters,
+            tree=tree,
             forbidden_imports=(
                 DEFAULT_FORBIDDEN_IMPORTS
                 if forbidden is None
@@ -1820,6 +1893,7 @@ def _check_parameter_placeholders(config: Config) -> None:
     configuration and the search optimises noise.
     """
     declared = config.problem.parameters is not None
+    tree = config.problem.tree
     for index, stage in enumerate(config.evaluate.stages):
         if stage.kind != "command":
             continue
@@ -1830,6 +1904,17 @@ def _check_parameter_placeholders(config: Config) -> None:
                 f"{path}: uses {uses[0]} but `problem.parameters` declares no "
                 "parameters to substitute"
             )
+        if tree is not None:
+            # `{candidate}` is the candidate's tree, `{app}` the program inside it.
+            # With a build, the tree is installed where the command finds it.
+            if "{app}" in stage.command and not tree.app:
+                raise ConfigError(f"{path}: uses {{app}} but problem.tree.app names no program")
+            if not tree.build and "{candidate}" not in stage.command and "{app}" not in stage.command:
+                raise ConfigError(
+                    f"{path}: must contain the {{candidate}} placeholder (the candidate's tree) or "
+                    "{app} (the program inside it, problem.tree.app)"
+                )
+            continue
         if not declared and "{candidate}" not in stage.command:
             raise ConfigError(f"{path}: must contain the {{candidate}} placeholder")
         if declared and not uses and "{candidate}" not in stage.command:

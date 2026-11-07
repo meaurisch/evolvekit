@@ -190,11 +190,23 @@ class Driver:
         self._log_sink = log or (lambda _msg: None)
         self._providers = providers or {}
 
-        skeleton = config.problem.skeleton_source()
-        self.prefix, self.seed_block, self.suffix = extract_block(
-            skeleton, config.problem.block_start, config.problem.block_end
-        )
-        self.skeleton_source = skeleton
+        key: Callable[[str], str] | None = None
+        if config.problem.tree is not None:
+            # A tree problem: a candidate is a diff against the base, the seed
+            # the empty diff, and two diffs are the same change when they
+            # normalise alike. Only here is `evolvekit.tree` (and git) needed.
+            from evolvekit import tree
+
+            self.repo: tree.Repo | None = tree.Repo(config.problem.tree.repo)
+            self.prefix = self.suffix = self.seed_block = self.skeleton_source = ""
+            key = tree.normalise_diff
+        else:
+            self.repo = None
+            skeleton = config.problem.skeleton_source()
+            self.prefix, self.seed_block, self.suffix = extract_block(
+                skeleton, config.problem.block_start, config.problem.block_end
+            )
+            self.skeleton_source = skeleton
         self.archive: list[Candidate] = []
         self.grid = Archive.from_config(config.search.archive)
         near_cfg = config.search.novelty.near
@@ -206,6 +218,7 @@ class Driver:
                 on_call=self._bill_embedding,
             ),
             threshold=near_cfg.threshold,
+            key=key,
         )
         self.scratchpad = Scratchpad(self.ledger.run_dir, config.search.scratchpad_every)
         self.results: dict[str, EvalResult] = {}
@@ -245,7 +258,8 @@ class Driver:
         number of workers -- those may change between sessions of one run."""
         config = self.config
         space = config.problem.parameters
-        return {
+        tree_problem = config.problem.tree
+        identity = {
             "skeleton_sha": hashlib.sha256(self.skeleton_source.encode("utf-8")).hexdigest()[:16],
             "parameters": [
                 {"name": p.name, "type": p.type, "choices": list(p.choices)} for p in space
@@ -266,6 +280,10 @@ class Driver:
                 for stage in config.evaluate.stages
             ],
         }
+        if tree_problem is not None:
+            # Only for a tree, so a skeleton run's identity reads as it always did.
+            identity["tree"] = {"base": tree_problem.base, "open": list(tree_problem.open)}
+        return identity
 
     def _check_same_problem(self) -> None:
         """Refuse to continue a run directory with a different problem.
@@ -287,8 +305,9 @@ class Driver:
         if recorded is None:
             return  # a run directory from before this was recorded
         now = _comparable(self._problem_identity())
-        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "levels", "gates", "stages")
-                   if recorded.get(key) != now[key]]
+        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "levels", "gates", "stages",
+                                   "tree")
+                   if recorded.get(key) != now.get(key)]
         if not changed:
             return
         detail = []
@@ -307,7 +326,8 @@ class Driver:
              "objective": f"the objective is now {now['objective']!r}, was {recorded.get('objective')!r}",
              "direction": f"the direction is now {now['direction']!r}",
              "gates": "the gates changed (evaluate.gates), so earlier candidates were judged by other rules",
-             "levels": "the levels changed (evaluate.score.levels), so earlier scores rank by other rules"}[key]
+             "levels": "the levels changed (evaluate.score.levels), so earlier scores rank by other rules",
+             "tree": "the source's starting commit or its open files changed"}[key]
             for key in changed if key != "stages"
         ]
         raise ValueError(
@@ -408,7 +428,14 @@ class Driver:
         self._counter += 1
         return f"g{generation:03d}-c{self._counter:04d}"
 
-    def _make_source(self, block: str) -> str:
+    def _make_source(self, block: str, candidate_id: str = "") -> str:
+        """A skeleton's candidate: its module's text. A tree's: the path of its
+        folder (`{tree}`), which the cascade makes when it evaluates it."""
+        if self.repo is not None:
+            from evolvekit import tree
+
+            folder = tree.tree_dir(self.ledger.run_dir, candidate_id)
+            return str(folder / self.repo.prefix if self.repo.prefix else folder)
         return splice_block(
             self.skeleton_source,
             block,
@@ -459,7 +486,7 @@ class Driver:
         last_generation = 0
         for row in rows:
             candidate = Candidate.from_record(row)
-            candidate.source = self._make_source(candidate.block)
+            candidate.source = self._make_source(candidate.block, candidate.id)
             self.archive.append(candidate)
             self.by_id[candidate.id] = candidate
             if not candidate.rejected:
@@ -778,7 +805,7 @@ class Driver:
                 continue
             if child.id in self.by_id:
                 continue  # recorded before the run died
-            child.source = self._make_source(child.block)
+            child.source = self._make_source(child.block, child.id)
             suffix = child.id.rsplit("c", 1)[-1]
             if suffix.isdigit():
                 self._counter = max(self._counter, int(suffix))
@@ -794,6 +821,8 @@ class Driver:
 
     def _finalise(self, summary: RunSummary) -> RunSummary:
         summary.best = self.best
+        if self.repo is not None:
+            self._remove_trees(keep={summary.best.id} if summary.best else set())
         summary.rejected = sum(1 for c in self.archive if c.rejected)
         summary.no_ops = self.grid.no_ops
         summary.duplicates = self.grid.duplicates
@@ -812,6 +841,18 @@ class Driver:
         summary.children_per_generation = self.children_per_generation
         self._snapshot_archive()
         return summary
+
+    def _remove_trees(self, *, keep: set[str]) -> None:
+        """Every tree of the run but the best's (design §5.3). A tree still held
+        open by another program stays, and is said so once; never an error."""
+        from evolvekit import tree
+
+        tree.remove_all(self.ledger.run_dir, keep=keep)
+        root = tree.tree_dir(self.ledger.run_dir, "-").parent
+        if not root.is_dir():
+            return
+        for folder in sorted(p for p in root.iterdir() if p.is_dir() and p.name not in keep):
+            self.log(f"a combination's folder is still in use and stays: {folder}")
 
     # -- resume: what the run directory has already used up -------------
 
@@ -912,11 +953,12 @@ class Driver:
             print(f"evolvekit: archive.json not refreshed ({exc}); the run goes on", file=sys.stderr)
 
     def _seed_candidate(self) -> Candidate:
+        candidate_id = self._next_id(0)
         return Candidate(
-            id=self._next_id(0),
+            id=candidate_id,
             generation=0,
             block=self.seed_block,
-            source=self.skeleton_source,
+            source=self.skeleton_source if self.repo is None else self._make_source("", candidate_id),
             operator=SEED_OPERATOR,
             model="human",
             provider="human",
@@ -1160,7 +1202,7 @@ class Driver:
             id=candidate_id,
             generation=generation,
             block=outcome.block if outcome.ok else parent.block,
-            source=self._make_source(outcome.block if outcome.ok else parent.block),
+            source=self._make_source(outcome.block if outcome.ok else parent.block, candidate_id),
             operator=outcome.mode if outcome.ok and outcome.mode else operator,
             model=(
                 outcome.completion.model
@@ -1413,12 +1455,25 @@ class Driver:
         resumed run evaluates it again, its finished runs from the cache."""
         if not candidates:
             return False
-        results = self.cascade.evaluate_generation(candidates, self._archive_scores())
+        tree_problem = self.config.problem.tree
+        if tree_problem is not None and tree_problem.build:
+            # A build installs one tree where the commands find it, so two
+            # candidates cannot be evaluated at once: one after the other, in
+            # order (a stage's `workers` still run one candidate's cases together).
+            prior = self._archive_scores()
+            results: dict[str, EvalResult] = {}
+            for candidate in candidates:
+                results.update(self.cascade.evaluate_generation([candidate], prior))
+                if any(result.abandoned for result in results.values()):
+                    return True
+        else:
+            results = self.cascade.evaluate_generation(candidates, self._archive_scores())
         if any(result.abandoned for result in results.values()):
             return True
         for candidate in candidates:
             result = results[candidate.id]
             self.results[candidate.id] = result
+            candidate.commit = result.commit
             candidate.score = result.score
             candidate.params = result.params
             candidate.competes = result.competes
@@ -1447,6 +1502,20 @@ class Driver:
             if not candidate.rejected:
                 self.novelty.add(candidate.id, candidate.block)
             self._record(candidate)
+        if tree_problem is not None:
+            # A refused or raced-out candidate's tree is of no further use;
+            # the others stay until the run ends (`_finalise`).
+            from evolvekit import tree
+
+            for candidate in candidates:
+                if candidate.rejected or candidate.raced_out:
+                    self._remove_tree(tree, candidate.id)
+        return False
+
+    def _remove_tree(self, tree, candidate_id: str) -> bool:
+        if tree.remove(self.ledger.run_dir, candidate_id):
+            return True
+        self.log(f"a combination's folder is still in use and stays: {tree.tree_dir(self.ledger.run_dir, candidate_id)}")
         return False
 
     def _note_behavioural_twin(self, candidate: Candidate) -> None:

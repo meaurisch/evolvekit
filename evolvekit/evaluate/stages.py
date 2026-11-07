@@ -35,6 +35,7 @@ from evolvekit.stopping import AnyEvent
 
 __all__ = [
     "run_static_stage",
+    "run_tree_static_stage",
     "run_command_stage",
     "static_checks",
     "build_argv",
@@ -153,6 +154,58 @@ def run_static_stage(
         params=params,
         failure="; ".join(problems) if problems else None,
         stderr=stderr[-STDERR_LIMIT:],
+        duration_s=time.perf_counter() - started,
+    )
+
+
+def run_tree_static_stage(
+    tree_path: Path,
+    diff: str,
+    error: str | None,
+    stage: StageConfig,
+    problem: ProblemConfig,
+    *,
+    prefix: str,
+) -> StageOutcome:
+    """Stage 0 for a tree problem: the change applied, it changes only the open
+    files, and every Python file it changes still parses. Nothing is imported.
+
+    `tree_path` is `{tree}`, the repo's folder inside the candidate's worktree;
+    `error` what materialising it said, when it could not be made. `prefix` is
+    that folder relative to the repository (`Repo.prefix`).
+    """
+    from evolvekit.tree import changed_files, touches_only
+
+    started = time.perf_counter()
+    assert problem.tree is not None
+    problems: list[str] = []
+    if error is not None:
+        problems.append(error)
+    outside = touches_only(diff, problem.tree.open, prefix=prefix)
+    if outside:
+        problems.append(
+            f"changes files outside the open files: {', '.join(outside)} "
+            f"(only {', '.join(problem.tree.open)} may change)"
+        )
+    if error is None:
+        for name in changed_files(diff):
+            if not name.endswith(".py") or not name.startswith(prefix):
+                continue
+            relative = name[len(prefix):]
+            path = Path(tree_path) / relative
+            if not path.is_file():
+                continue  # deleted by the change
+            try:
+                ast.parse(path.read_bytes(), filename=relative)
+            except SyntaxError as exc:
+                problems.append(f"SyntaxError in {relative}: {exc.msg} (line {exc.lineno})")
+            except ValueError as exc:  # a null byte
+                problems.append(f"SyntaxError in {relative}: {exc}")
+    return StageOutcome(
+        stage_id=stage.id,
+        ok=not problems,
+        kpis={"static_problems": float(len(problems))},
+        failure="; ".join(problems) if problems else None,
         duration_s=time.perf_counter() - started,
     )
 

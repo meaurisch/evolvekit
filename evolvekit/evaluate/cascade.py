@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 from statistics import fmean, quantiles
-from typing import Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
@@ -33,9 +33,13 @@ from evolvekit.evaluate.stages import (
     Configuration,
     run_command_stage,
     run_static_stage,
+    run_tree_static_stage,
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
 from evolvekit.ledger import _atomic_write
+
+if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
+    from evolvekit.tree import Repo, Tree
 
 __all__ = [
     "Cascade",
@@ -195,6 +199,16 @@ class Cascade:
         }
         """Per stage, what `evaluate.score.levels` are measured from: the
         seed's values (`evaluate/levels.py`). On disk for the same reason."""
+        self._trees: dict[str, Tree] = {}
+        """Per candidate, its worktree (`problem.tree`): made by `_materialise`."""
+        self._tree_errors: dict[str, str] = {}
+        """Per candidate whose tree could not be made, why: the static stage
+        refuses it with that sentence."""
+        self.repo: Repo | None = None
+        if config.problem.tree is not None:
+            from evolvekit import tree
+
+            self.repo = tree.Repo(config.problem.tree.repo)
 
     # -- public ----------------------------------------------------------
 
@@ -209,6 +223,10 @@ class Cascade:
             c.id: EvalResult(score=self.config.evaluate.failure_score) for c in candidates
         }
         paths = {c.id: self._materialise(c) for c in candidates}
+        for cid in paths:
+            made = self._trees.get(cid)
+            if made is not None:
+                results[cid].commit = made.commit
 
         stages = self.config.evaluate.stages
         alive = [c.id for c in candidates]
@@ -341,13 +359,43 @@ class Cascade:
         )
 
     def _materialise(self, candidate: Candidate) -> Path:
+        if self.repo is not None:
+            return self._materialise_tree(candidate)
         path = self.candidates_dir / f"{candidate.id}.py"
         path.write_text(candidate.source, encoding="utf-8", newline="\n")
         return path
 
+    def _materialise_tree(self, candidate: Candidate) -> Path:
+        """The candidate's diff as a worktree with a commit; its folder is `{tree}`.
+
+        A diff that does not apply makes no tree: the static stage refuses the
+        candidate with the reason, and the path returned does not exist."""
+        from evolvekit import tree
+
+        assert self.repo is not None and self.config.problem.tree is not None
+        cid = candidate.id
+        self._trees.pop(cid, None)
+        self._tree_errors.pop(cid, None)
+        try:
+            made = tree.materialise(
+                self.work_dir.parent, repo=self.repo, base=self.config.problem.tree.base,
+                diff=candidate.block, candidate_id=cid,
+            )
+        except tree.TreeError as exc:
+            self._tree_errors[cid] = str(exc)
+            folder = tree.tree_dir(self.work_dir.parent, cid)
+            return folder / self.repo.prefix if self.repo.prefix else folder
+        self._trees[cid] = made
+        return made.path
+
     def _run_stage(
         self, stage: StageConfig, candidate: Candidate, path: Path
     ) -> StageOutcome:
+        if stage.kind == "builtin-static" and self.repo is not None:
+            return run_tree_static_stage(
+                path, candidate.block, self._tree_errors.get(candidate.id), stage, self.config.problem,
+                prefix=self.repo.prefix,
+            )
         if stage.kind == "builtin-static":
             return run_static_stage(path, candidate.source, stage, self.config.problem)
         if self._final_stage_blocked(stage):

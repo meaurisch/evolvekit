@@ -157,6 +157,10 @@ class Candidate:
     never ranked, archived or bred from. True by default because a row written
     before this field existed says nothing either way; `Driver.resume` settles
     those with `cascade.finished_final_stage`."""
+    commit: str | None = None
+    """For a tree problem (`problem.tree`): the commit the candidate's diff made
+    on the base -- the base itself for the empty diff. `None` for a skeleton,
+    and for a candidate refused before its tree was made."""
 
     @property
     def complexity(self) -> int:
