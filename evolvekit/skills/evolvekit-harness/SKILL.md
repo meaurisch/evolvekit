@@ -27,6 +27,7 @@ Answer from the application and its files first; ask the engineer only what neit
 - [ ] What do people call things? → the words the labels, tables and columns use.
 - [ ] What must never reach a model? → those columns get `private: true`.
 
+Ask the five questions in one message before you write or copy anything, unless the request already answers them; an application that evolvekit already has a harness for (`evolvekit harness list`, or the probe accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to reuse it, and if yes hand over to `evolvekit-study`.
 A request that answers every question is complete: go on without asking.
 One unanswered question stops you with that question, in one message.
 In a one-shot run, where no answer can come, say what is missing and end.
@@ -41,6 +42,7 @@ In a one-shot run, where no answer can come, say what is missing and end.
 ## 4. Write it, in this order
 
 Run step 5's check after each item.
+Write only what the interview named: no lever, template, data change, request format or retry the engineer did not ask for; a smaller harness that passes beats a fuller one.
 
 1. `harness.yaml`, tables first: the request tables (`source: request`, a case as the application receives it) and the solution tables (`source: solution`). Every column has a `type`, a `unit` and a one-line `describe`. Use the people's words, units in the names (`distance_m`), a stable id per row. Give `private: true` to what must never reach a model (names, addresses, coordinates); `categorical: true` only to values safe to show one.
 2. `runner.py`: `read_case` builds the request tables, `solve` builds the problem from `case.tables` and keeps to the time limit, `solution_tables` builds the solution tables; `discover()`, optional, reports what the installed application offers (its version, its settings and their defaults). It runs under the application's Python (or evolvekit's, for a program) and imports only `evk_harness`, never the `evolvekit` package. A value the application cannot take raises `evk.InvalidValues("…")`, a sentence.
@@ -50,6 +52,8 @@ Run step 5's check after each item.
 6. Samples: `samples/` holds 3–10 small cases that solve in a second or two, with the script that makes them next to them.
 
 ## 5. Check until it exits 0
+
+Run `evolvekit harness check harness/ --app PATH --json` — without `--app` it exits 2 before checking anything — and quote the exact command and its exit code in your answer.
 
 ```
 evolvekit harness check harness/ --app PATH --json
@@ -75,7 +79,7 @@ evolvekit study preview SLUG
 - The `--json` line of `study new` gives `slug`: use it as SLUG.
 - Put the case format's extension (from `cases.formats`) in place of `.json`, so the script beside the samples is not offered as a case.
 - `study check` must exit 0 and `study preview` must solve a sample. A failure here is the harness's fault: fix it in `harness/`, go back to step 5, then make the smoke test again.
-- Say the preview's line to the engineer. The study stays in the library home as a draft; start nothing.
+- Say which values the smoke test used (the harness's default time per case, the template's budget, the cases held back), that they are for the smoke test only, and quote the `study preview` line. The study stays in the library home as a draft; start nothing.
 
 ## 7. Every later change
 

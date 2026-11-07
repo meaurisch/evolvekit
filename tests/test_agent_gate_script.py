@@ -59,6 +59,24 @@ def test_build_fixture_layout(tmp_path):
     assert not (bare / "harness").exists() and (bare / "solver.py").is_file()
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_no_harness_fixture_is_a_program_evolvekit_does_not_know(tmp_path):
+    bare = tmp_path / "bare"
+    build_fixture(bare, home=tmp_path / "home", harness=False)
+    solver = bare / "solver.py"
+    version = subprocess.run([sys.executable, str(solver), "--version"], capture_output=True, text=True, check=True)
+    assert version.stdout.strip() == "tour-solver 0.9"
+    check = subprocess.run([sys.executable, "-m", "evolvekit", "harness", "check", str(ROOT / "harnesses" / "demo-tour"),
+                            "--app", str(solver), "--json"], capture_output=True, text=True, cwd=ROOT)
+    assert check.returncode == 2
+    probe = next(c for c in json.loads(check.stdout)["checks"] if c["id"] == "probe")
+    assert probe["ok"] is False and "tour-solver 0.9" in probe["message"]
+    for name in SAMPLES:
+        solved = subprocess.run([sys.executable, str(solver), "--instance", str(bare / "cases" / name),
+                                 "--time-limit", "0.2"], capture_output=True, text=True, timeout=60)
+        assert solved.returncode == 0 and solved.stdout.strip(), (name, solved.stderr)
+
+
 def test_sentences():
     assert "ten minutes in total" in DEFAULT_SENTENCE
     assert MISSING_TIME_SENTENCE == DEFAULT_SENTENCE.replace("ten minutes in total; ", "")

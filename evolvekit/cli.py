@@ -1383,6 +1383,9 @@ def cmd_study(args: argparse.Namespace) -> int:
         plan = execute.plan_for(study, harness, execute.measured(folder))
         run_dir = write_run(study, harness, plan, folder, args.run_id or datetime.now().strftime("%Y%m%d-%H%M%S"))
         print(f"compiled into {run_dir}: {plan.summary()}")
+        if not Path(args.directory).is_dir():  # a name in the library home: start it as the skills say
+            _say_next(args, f"study start {args.directory}")
+            return 0
         print(f"run it with  python -m evolvekit run --config {run_dir / 'evolvekit.yaml'} --run-dir {run_dir}")
         return 0
     job = execute.run_study(folder, args.run_id)

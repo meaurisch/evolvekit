@@ -397,6 +397,28 @@ def test_harness_skill_pins_the_interview_smoke_test_and_exits():
     assert "(when `runner.py` has `discover()`)" in _section(body, "7. Every later change")
 
 
+# Round B1: interview first, write only what was asked, check with --app, the smoke test says its values.
+
+ASK_FIRST = ("Ask the five questions in one message before you write or copy anything, unless the request already "
+             "answers them; an application that evolvekit already has a harness for (`evolvekit harness list`, or "
+             "the probe accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to "
+             "reuse it, and if yes hand over to `evolvekit-study`.")
+ONLY_WHAT_WAS_ASKED = ("Write only what the interview named: no lever, template, data change, request format or retry "
+                       "the engineer did not ask for; a smaller harness that passes beats a fuller one.")
+CHECK_WITH_APP = ("Run `evolvekit harness check harness/ --app PATH --json` — without `--app` it exits 2 before "
+                  "checking anything — and quote the exact command and its exit code in your answer.")
+SMOKE_VALUES = ("Say which values the smoke test used (the harness's default time per case, the template's budget, "
+                "the cases held back), that they are for the smoke test only, and quote the `study preview` line.")
+
+
+def test_harness_skill_round_b1_sentences():
+    body = _body(HARNESS)
+    assert ASK_FIRST in _section(body, "2. Interview")
+    assert ONLY_WHAT_WAS_ASKED in _section(body, "4. Write it, in this order")
+    assert CHECK_WITH_APP in _section(body, "5. Check until it exits 0")
+    assert SMOKE_VALUES in _section(body, "6. Smoke test")
+
+
 # The suite is complete (Task 4).
 
 PHASES = ("queued", "starting", "search", "check", "done", "stopped", "failed")

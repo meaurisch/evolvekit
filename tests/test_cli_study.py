@@ -267,6 +267,17 @@ def test_compiled_study_is_not_a_failed_run(tmp_path, capsys):
     assert jobs.latest_run(root) is None
 
 
+def test_compile_on_a_home_study_points_to_study_start(tmp_path, capsys):
+    _new(tmp_path, "Depot A", "--template", "tune", "--app", str(SOLVER))
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert main(["study", "compile", "depot-a", "--home", str(tmp_path)]) == 0
+    out, err = capsys.readouterr()
+    assert out.startswith("compiled into ")
+    assert f'next: evolvekit study start depot-a --home "{tmp_path}"' in err.splitlines()
+    assert "--config" not in out + err
+
+
 def test_study_cases_expands_a_pattern(tmp_path, capsys):
     _new(tmp_path)
     capsys.readouterr()

@@ -75,6 +75,10 @@ class ToolMissing(Exception):
     """The tool is not on PATH: the gate cannot run."""
 
 
+KNOWN_VERSION = 'version="cli-solver 1.0"'
+UNKNOWN_VERSION = 'version="tour-solver 0.9"'
+
+
 def build_fixture(repo: Path, *, home: Path, harness: bool = True) -> None:
     """The engineer's repository, with the skills installed, and an empty library home."""
     repo, home = Path(repo), Path(home)
@@ -88,7 +92,14 @@ def build_fixture(repo: Path, *, home: Path, harness: bool = True) -> None:
     if harness:
         shutil.copytree(ROOT / "harnesses" / "demo-tour", repo / "harness",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    shutil.copy2(ROOT / "examples" / "cli-solver" / "solver.py", repo / "solver.py")
+    solver = ROOT / "examples" / "cli-solver" / "solver.py"
+    if harness:
+        shutil.copy2(solver, repo / "solver.py")
+    else:  # a program evolvekit does not know: demo-tour's probe expects "cli-solver N.N" from --version
+        text = solver.read_text(encoding="utf-8")
+        assert text.count(KNOWN_VERSION) == 1, "examples/cli-solver/solver.py changed its --version text"
+        with open(repo / "solver.py", "w", encoding="utf-8", newline="") as handle:
+            handle.write(text.replace(KNOWN_VERSION, UNKNOWN_VERSION))
     (repo / "cases").mkdir()
     for sample in sorted((ROOT / "harnesses" / "demo-tour" / "samples").glob("*.json")):
         shutil.copy2(sample, repo / "cases" / sample.name)
@@ -385,7 +396,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep", action="store_true", help="leave the folder, the app and the run")
     parser.add_argument("--fixture", type=Path, metavar="DIR",
                         help="only build DIR/repo and DIR/home and print the lines to set there")
-    parser.add_argument("--no-harness", action="store_true", help="with --fixture: no harness/ in the repository")
+    parser.add_argument("--no-harness", action="store_true", help="with --fixture: no harness/ in the repository, and a solver.py "
+                        "evolvekit does not know (its --version says tour-solver 0.9)")
     parser.add_argument("--shell", choices=SHELLS, default="bash", help="with --fixture: the printed lines' syntax")
     parser.add_argument("--force", action="store_true", help="with --fixture: build DIR/repo and DIR/home again")
     args = parser.parse_args(argv)
