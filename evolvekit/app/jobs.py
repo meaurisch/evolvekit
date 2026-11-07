@@ -146,7 +146,7 @@ def _run_dirs(root: Path) -> list[Path]:
     def started(path: Path) -> str:
         launch, job = _read(path / LAUNCH) or {}, read_job(path) or {}
         queued = (_read(path / QUEUED) or {}) if not launch else {}
-        return str(launch.get("started_at") or job.get("started_at") or queued.get("queued_at") or "")
+        return str(launch.get("started_at") or job.get("started_at") or launch.get("at") or queued.get("queued_at") or "")
 
     return sorted(found, key=lambda p: (started(p), p.name))
 
@@ -164,6 +164,21 @@ def phase(run_dir: Path) -> dict[str, Any]:
     if not launch and (run_dir / QUEUED).is_file():
         # Waiting its turn: a launch, once there is one, is the newer word.
         return {"phase": "queued", "queued_at": (_read(run_dir / QUEUED) or {}).get("queued_at")}
+    if launch.get("pending"):
+        # A launch under way (`_mark_pending`), in this process or another:
+        # starting while it is young; a launcher that never wrote the real
+        # launch within LAUNCH_SLACK_S did not start the run.
+        at = _moment(launch.get("at"))
+        young = at is not None and (_now() - _utc(at)).total_seconds() < LAUNCH_SLACK_S
+        if job is None:
+            if young:
+                return {"phase": "starting", "started_at": launch.get("at")}
+            return {"phase": "failed", "started_at": launch.get("at"),
+                    "error": f"the run did not start: {_log_tail(run_dir)}"}
+        if young and job.get("phase") in ("done", "stopped", "failed"):
+            # Resumed, continued or checked again: the old job is still the last word.
+            return {"phase": "starting", "started_at": job.get("started_at"), "plan": job.get("plan")}
+        launch = {}  # the job, written after the marker, is the newer word
     if job is None:
         if launch and run_alive(run_dir, launch.get("pid"), launch.get("started_at"), launch.get("host")):
             return {"phase": "starting", "started_at": launch.get("started_at")}
@@ -317,16 +332,54 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys
     if with_keys:
         env.update(home.job_environment())
     argv = [sys.executable, "-m", "evolvekit.app.job", str(root), run_dir.name, *extra]
+    try:
+        previous: str | None = (run_dir / LAUNCH).read_text(encoding="utf-8")
+    except OSError:
+        previous = None
+    # The pending marker: between here and the real launch below, any process
+    # that asks (the app's ticker, `study wait`) sees the run as starting.
+    _mark_pending(run_dir)
+    try:
+        pid = _spawn(env, argv, root, run_dir)
+    except Exception:
+        # Nothing was launched: the run reads as it did before.
+        if previous is None:
+            (run_dir / LAUNCH).unlink(missing_ok=True)
+        else:
+            (run_dir / LAUNCH).write_text(previous, encoding="utf-8")
+        raise
+    _record_launch(run_dir, pid, argv)
+    return pid
+
+
+def _mark_pending(run_dir: Path, *, exclusive: bool = False) -> bool:
+    """Write `launch.json` as `{"pending": true, "at": iso}`: a launch is
+    under way. With `exclusive`, only when there is no `launch.json` yet --
+    the claim on a queued run, which one process wins; False when another
+    process holds it."""
+    text = json.dumps({"pending": True, "at": _now().isoformat(timespec="seconds")}, indent=2)
+    try:
+        with open(run_dir / LAUNCH, "x" if exclusive else "w", encoding="utf-8") as out:
+            out.write(text)
+    except FileExistsError:
+        return False
+    return True
+
+
+def _spawn(env: dict[str, str], argv: list[str], root: Path, run_dir: Path) -> int:
+    """The launcher, run to its end: the pid of the detached run it started."""
     done = subprocess.run([sys.executable, "-c", _LAUNCHER, json.dumps(argv), str(root), str(run_dir / LOG)],
                           env=env, capture_output=True, text=True, timeout=60)
     try:
-        pid = int(done.stdout.strip().splitlines()[-1])
+        return int(done.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError):
         said = (done.stderr.strip().splitlines() or ["no message"])[-1]
         raise AppError(f"the run could not be started: {said}", 500) from None
+
+
+def _record_launch(run_dir: Path, pid: int, argv: list[str]) -> None:
     (run_dir / LAUNCH).write_text(json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
                                               "host": socket.gethostname(), "argv": argv[1:]}, indent=2), encoding="utf-8")
-    return pid
 
 
 def _wants_keys(root: Path, run_dir: Path) -> bool:
@@ -442,7 +495,12 @@ def _one_at_a_time(home: Any) -> None:
 def launch_queued(home: Any) -> str | None:
     """Launch the run that has waited longest across the home, when nothing is
     active; `"slug/run"` of what was launched, or None. The server calls
-    this every few seconds."""
+    this every few seconds, and so do `evolvekit study wait` and `watch`.
+
+    Two processes may ask at once (the app's ticker, a terminal that waits):
+    `active_run` is asked again just before the launch, and the launch
+    claims the run by creating its pending `launch.json` exclusively, so
+    the same queued run is never launched twice."""
     with _launch_guard:
         if active_run(home) is not None:
             return None
@@ -456,8 +514,22 @@ def launch_queued(home: Any) -> str | None:
             return None
         _, slug, run_dir = min(waiting)
         root = run_dir.parent.parent
-        _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir))
-        (run_dir / QUEUED).unlink(missing_ok=True)  # the launch is the newer word anyway
+        if active_run(home) is not None or not _mark_pending(run_dir, exclusive=True):
+            return None  # another process launched something meanwhile
+        # The claim ends the wait: whoever reads the run from here on sees it starting.
+        try:
+            waited: str | None = (run_dir / QUEUED).read_text(encoding="utf-8")
+        except OSError:
+            waited = None
+        (run_dir / QUEUED).unlink(missing_ok=True)
+        try:
+            _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir))
+        except Exception:
+            # Queued again, as it was: the next tick tries once more.
+            if waited is not None:
+                (run_dir / QUEUED).write_text(waited, encoding="utf-8")
+            (run_dir / LAUNCH).unlink(missing_ok=True)
+            raise
         return f"{slug}/{run_dir.name}"
 
 

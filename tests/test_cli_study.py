@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from evolvekit.cli import main
 
@@ -210,3 +215,205 @@ def test_study_cases_default_hold_back_is_the_suggestion(tmp_path):
     assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--home", str(tmp_path)]) == 0
     home = Home(tmp_path)
     assert len(_study_yaml(tmp_path)["cases"]["test"]) == home.suggested_test_count("depot-a")
+
+
+# -- start, stop, status, watch and wait: the app's runner, from the terminal
+
+
+def _ready(home, name="Depot A", slug="depot-a"):
+    """A study that can start: the demo solver, the samples with one held
+    back, and the small plan of the app's tests (2 combinations, 2 rounds)."""
+    from evolvekit.app.store import Home
+
+    assert _new(home, name, "--template", "tune", "--app", str(SOLVER)) == 0
+    assert main(["study", "cases", slug, "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(home)]) == 0
+    doc = _study_yaml(home, slug)
+    Home(home).save_step(slug, {
+        "limits": {**(doc.get("limits") or {}), "time_per_case_s": 0.5, "retries": 1, "runs_per_case": 1},
+        "budget": {**(doc.get("budget") or {}), "hours": 0.05, "ai": {"enabled": False, "max_usd": 2.0}},
+        "plan": {**(doc.get("plan") or {}), "auto": False, "children": 2, "generations": 2},
+    })
+    return slug
+
+
+def _fake_active(home, slug, run="20260101-000000"):
+    """A run of `slug` that reads as starting: launched as this very process,
+    which is alive, and no job written yet -- nothing is really launched."""
+    run_dir = home / "studies" / slug / "runs" / run
+    run_dir.mkdir(parents=True)
+    (run_dir / "launch.json").write_text(json.dumps({
+        "pid": os.getpid(), "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "host": socket.gethostname()}), encoding="utf-8")
+    return run_dir
+
+
+def _queued(home, slug, run="20260101-000001"):
+    run_dir = home / "studies" / slug / "runs" / run
+    run_dir.mkdir(parents=True)
+    (run_dir / "queued.json").write_text(json.dumps({"queued_at": "2026-01-01T00:00:01+00:00"}), encoding="utf-8")
+    return run_dir
+
+
+@pytest.fixture
+def started_study(tmp_path):
+    _new(tmp_path)
+    _fake_active(tmp_path, "depot-a")
+    return tmp_path
+
+
+@pytest.fixture
+def app(tmp_path):
+    from evolvekit.app.server import AppServer
+
+    server = AppServer(tmp_path / "home", port=0)
+    server.start()
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+def finished_study(app):
+    home = app.home.root
+    slug = _ready(home)
+    run_dir = home / "studies" / slug / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "job.json").write_text(json.dumps({
+        "phase": "done", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00",
+        "finished_at": "2026-01-01T00:10:00+00:00", "plan": {"generations": 2, "rounds": 2, "hours": 0.05},
+        "search": {"stop_reason": "the plan's rounds are done", "generations": 2, "aborted": False},
+        "final": {"skipped": "no cases were held back"}}), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"id": "seed", "operator": "human-seed", "score": 100.0},
+        {"id": "c1", "operator": "mutate", "score": 90.0},
+    ]) + "\n", encoding="utf-8")
+    return slug
+
+
+@pytest.mark.slow
+def test_start_wait_verdict_round_trip(tmp_path, capsys):
+    from evolvekit.app.verdict import DECISIONS
+
+    slug = _ready(tmp_path)
+    capsys.readouterr()
+    assert main(["study", "start", slug, "--json", "--home", str(tmp_path)]) == 0
+    started = json.loads(capsys.readouterr().out)
+    assert started["started"] is True and started["run"]
+    code = main(["study", "wait", slug, "--json", "--timeout", "600", "--home", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    document = json.loads(out)
+    assert document["decision"] in DECISIONS and document["run"] == started["run"]
+    job = json.loads((tmp_path / "studies" / slug / "runs" / started["run"] / "job.json").read_text(encoding="utf-8"))
+    assert job["phase"] == "done"
+
+
+@pytest.mark.slow
+def test_watch_prints_documents_until_done(tmp_path, capsys):
+    slug = _ready(tmp_path)
+    capsys.readouterr()
+    assert main(["study", "start", slug, "--home", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.startswith("started run ")
+    assert main(["study", "watch", slug, "--json", "--every", "1", "--home", str(tmp_path)]) == 0
+    documents = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    assert documents and documents[-1]["phase"] in ("done", "stopped", "failed")
+
+
+def test_start_twice_is_refused(started_study, capsys):
+    assert main(["study", "start", "depot-a", "--home", str(started_study)]) == 1
+    assert "already running" in capsys.readouterr().err
+
+
+def test_start_queues_behind_another(tmp_path, capsys):
+    _new(tmp_path, "Depot B")
+    slug = _ready(tmp_path)
+    _fake_active(tmp_path, "depot-b")
+    capsys.readouterr()
+    assert main(["study", "start", slug, "--json", "--home", str(tmp_path)]) == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["queued"] is True
+    assert (tmp_path / "studies" / slug / "runs" / answer["run"] / "queued.json").is_file()
+    assert main(["study", "stop", slug, "--home", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert main(["study", "start", slug, "--home", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.strip() == ("queued behind Depot B; it starts when that study finishes "
+                                               "(the app or `evolvekit study wait` starts it)")
+
+
+def test_pending_marker_counts_as_active(tmp_path, monkeypatch):
+    from evolvekit.app import jobs
+    from evolvekit.app.store import Home
+
+    _ready(tmp_path, "Depot A", "depot-a")
+    _ready(tmp_path, "Depot B", "depot-b")
+    home = Home(tmp_path)
+    # The spawn happened, and the process that launched it has not written the launch yet.
+    monkeypatch.setattr(jobs, "_spawn", lambda *args, **kwargs: 2 ** 22 + 7)
+    monkeypatch.setattr(jobs, "_record_launch", lambda *args, **kwargs: None)
+    started = jobs.start(home, home.study_root("depot-a"))
+    run_dir = home.study_root("depot-a") / "runs" / started["run"]
+    assert json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))["pending"] is True
+    assert jobs.active_run(home) == ("depot-a", started["run"])
+    assert jobs.phase(run_dir)["phase"] == "starting"
+    assert jobs.start(home, home.study_root("depot-b"))["queued"] is True
+
+
+def test_pending_marker_expires(tmp_path):
+    from evolvekit.app import jobs
+
+    run_dir = tmp_path / "runs" / "r"
+    run_dir.mkdir(parents=True)
+    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds")
+    (run_dir / "launch.json").write_text(json.dumps({"pending": True, "at": old}), encoding="utf-8")
+    (run_dir / "job.log").write_text("Traceback ...\nOSError: no such program\n", encoding="utf-8")
+    job = jobs.phase(run_dir)
+    assert job["phase"] == "failed" and "did not start" in job["error"] and "no such program" in job["error"]
+
+
+def test_wait_ticks_the_queue(tmp_path, monkeypatch, capsys):
+    from evolvekit import cli
+    from evolvekit.app import jobs
+
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+    launched = []
+
+    def launch(home, root, run_dir, extra, *, with_keys):  # a run that stopped at once
+        launched.append(run_dir.name)
+        (run_dir / "launch.json").write_text(json.dumps({"pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:02+00:00"}),
+                                             encoding="utf-8")
+        (run_dir / "job.json").write_text(json.dumps({"phase": "stopped", "pid": 2 ** 22 + 7,
+                                                      "started_at": "2026-01-01T00:00:02+00:00"}), encoding="utf-8")
+        return 2 ** 22 + 7
+
+    monkeypatch.setattr(jobs, "_launch", launch)
+    monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.05)
+    assert main(["study", "wait", "depot-a", "--timeout", "5", "--home", str(tmp_path)]) == 1
+    assert launched == [run_dir.name]
+    assert not (run_dir / "queued.json").exists()
+
+
+def test_wait_timeout_exits_4(started_study, capsys):
+    assert main(["study", "wait", "depot-a", "--timeout", "1", "--home", str(started_study)]) == 4
+    assert capsys.readouterr().err.strip()
+
+
+def test_stop_dequeues_a_queued_run(tmp_path, capsys):
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+    capsys.readouterr()
+    assert main(["study", "stop", "depot-a", "--home", str(tmp_path)]) == 0
+    assert not run_dir.exists() and not (run_dir / "queued.json").exists()
+    assert "dequeued" in capsys.readouterr().out
+
+
+def test_status_json_equals_api_document(app, finished_study, capsys):
+    from test_app_server import call
+
+    capsys.readouterr()
+    assert main(["study", "status", finished_study, "--json", "--home", str(app.home.root)]) == 0
+    mine = json.loads(capsys.readouterr().out)
+    status, theirs = call(app, "GET", f"/api/studies/{finished_study}/status")
+    assert status == 200 and mine == theirs
+    assert main(["study", "status", finished_study, "--home", str(app.home.root)]) == 0
+    assert capsys.readouterr().out.strip().startswith("finished")

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -422,6 +423,32 @@ def build_parser() -> argparse.ArgumentParser:
     s_cases.add_argument("--hold-back", type=int, help="how many cases to hold back (default: the suggestion)")
     s_cases.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_cases.add_argument("--json", action="store_true", help='print {"added", "refused", "test"} and nothing else')
+    home_help = "the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)"
+    s_start = study.add_parser("start", help="start the study, as the app's Start does (queued while another study runs)")
+    s_start.add_argument("slug", help="the study's name in the library home")
+    s_start.add_argument("--wait", action="store_true", help="then wait until the run has ended, as study wait does")
+    s_start.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
+    s_start.add_argument("--home", help=home_help)
+    s_start.add_argument("--json", action="store_true", help='print {"run", "started"|"queued"} (one JSON document per line)')
+    s_stop = study.add_parser("stop", help="ask the study's running run to stop, or take back a queued one")
+    s_stop.add_argument("slug", help="the study's name in the library home")
+    s_stop.add_argument("--home", help=home_help)
+    s_stop.add_argument("--json", action="store_true", help="print JSON and nothing else")
+    s_status = study.add_parser("status", help="where the study's run is: the state line, or the app's status document")
+    s_status.add_argument("slug", help="the study's name in the library home")
+    s_status.add_argument("--run", help="a run's id (default: the latest)")
+    s_status.add_argument("--home", help=home_help)
+    s_status.add_argument("--json", action="store_true", help="print the document the app's Running screen reads")
+    s_watch = study.add_parser("watch", help="the status every few seconds until the run ends; starts a queued run")
+    s_watch.add_argument("slug", help="the study's name in the library home")
+    s_watch.add_argument("--every", type=float, default=5.0, help="seconds between looks (default 5)")
+    s_watch.add_argument("--home", help=home_help)
+    s_watch.add_argument("--json", action="store_true", help="print one status document per line")
+    s_wait = study.add_parser("wait", help="wait until the run has ended (exit 0 done, 1 stopped or failed, 4 timeout)")
+    s_wait.add_argument("slug", help="the study's name in the library home")
+    s_wait.add_argument("--timeout", type=float, help="give up after this many seconds (exit 4; default: no limit)")
+    s_wait.add_argument("--home", help=home_help)
+    s_wait.add_argument("--json", action="store_true", help="print the verdict document")
     for name, text in (("preview", "solve the smallest training case at the starting values"),
                        ("compile", "compile the study into runs/<id>/evolvekit.yaml, with the automatic plan"),
                        ("run", "compile, search, and check the best on the held-back cases")):
@@ -911,6 +938,150 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
     return 1 if result["refused"] else 0
 
 
+WAIT_EVERY_S = 2.0
+"""How often `study wait` looks at the run, and ticks the queue."""
+_ENDED = ("done", "stopped", "failed")
+
+
+def _tick_queue(home) -> None:
+    """Launch the run that waits longest when nothing is active, as the app's
+    ticker does, so a queued study starts with no app open. A launch that
+    fails is the app's to report too: the next tick tries again."""
+    from evolvekit.app import jobs
+
+    try:
+        jobs.launch_queued(home)
+    except AppError:
+        pass
+
+
+def _run_of(root: Path, run: str | None = None) -> str:
+    from evolvekit.app import jobs
+
+    run = run or jobs.latest_run(root)
+    if not run:
+        raise AppError("the study has not been started yet", 404)
+    return run
+
+
+def _wait(home, slug: str, timeout: float | None, as_json: bool) -> int:
+    """`study wait`: until the latest run has ended -- 0 done (the verdict),
+    1 stopped or failed, 4 when `timeout` seconds pass first."""
+    from evolvekit.app import jobs
+    from evolvekit.app.verdict import build_verdict
+
+    root, study, _ = home.load(slug)
+    run = _run_of(root)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the one check of a run's name
+    deadline = None if timeout is None else time.monotonic() + timeout
+    try:
+        while True:
+            _tick_queue(home)
+            state = jobs.phase(run_dir).get("phase")
+            if state in _ENDED:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                print(f"run {run} is still {state} after {timeout:g} s; it goes on "
+                      f"(evolvekit study wait {slug} waits again)", file=sys.stderr)
+                return 4
+            pause = WAIT_EVERY_S if deadline is None else min(WAIT_EVERY_S, deadline - time.monotonic())
+            time.sleep(max(0.0, pause))
+    except KeyboardInterrupt:
+        print(f"stopped waiting; run {run} goes on", file=sys.stderr)
+        return 130
+    job = jobs.phase(run_dir)
+    try:
+        document = build_verdict(root, run)
+    except (AppError, HarnessError):
+        if state == "done":
+            raise
+        document = {"study": slug, "run": run, "phase": state, "error": job.get("error")}
+    if as_json:
+        print(json.dumps(document))
+    elif state == "done":
+        print(document["line"])
+        if document.get("advice"):
+            print(document["advice"])
+    else:
+        print(jobs.run_line(root, study, run_dir, build_status)["line"])
+    if state != "done" and job.get("error"):
+        print(job["error"], file=sys.stderr)
+    return 0 if state == "done" else 1
+
+
+def _watch(home, slug: str, every: float, as_json: bool) -> int:
+    """`study watch`: the status every `every` seconds until the run ends --
+    a document per line with `as_json`, else the state line when it changes."""
+    from evolvekit.app import jobs
+
+    root, study, _ = home.load(slug)
+    run = _run_of(root)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the one check of a run's name
+    said = None
+    try:
+        while True:
+            _tick_queue(home)
+            if as_json:
+                document = jobs.status(root, run, build_status)
+                state = document.get("phase")
+                print(json.dumps(document), flush=True)
+            else:
+                state = jobs.phase(run_dir).get("phase")
+                line = jobs.run_line(root, study, run_dir, build_status)["line"]
+                if line != said:
+                    print(line, flush=True)
+                    said = line
+            if state in _ENDED:
+                return 0 if state == "done" else 1
+            time.sleep(max(0.0, every))
+    except KeyboardInterrupt:
+        print(f"stopped watching; run {run} goes on", file=sys.stderr)
+        return 130
+
+
+def _study_run_command(command: str, args: argparse.Namespace) -> int:
+    """`study start | stop | status | watch | wait`: the app's runner
+    (`evolvekit.app.jobs`), on disk, whether or not the app is open."""
+    from evolvekit.app import jobs
+
+    home = _home(args)
+    slug = args.slug
+    if command == "wait":
+        return _wait(home, slug, args.timeout, args.json)
+    if command == "watch":
+        return _watch(home, slug, args.every, args.json)
+    root, study, _ = home.load(slug)
+    if command == "start":
+        answer = jobs.start(home, root)
+        run = answer["run"]
+        if answer.get("queued"):
+            other = jobs._waiting_for(root) or "another study"  # noqa: SLF001 - the name the app's card shows
+            document = {"run": run, "queued": True}
+            line = (f"queued behind {other}; it starts when that study finishes "
+                    "(the app or `evolvekit study wait` starts it)")
+        else:
+            document, line = {"run": run, "started": True}, f"started run {run}"
+        print(json.dumps(document) if args.json else line, flush=True)
+        return _wait(home, slug, args.timeout, args.json) if args.wait else 0
+    if command == "stop":
+        run = _run_of(root)
+        answer = jobs.stop(root, run)
+        if args.json:
+            print(json.dumps(answer))
+        elif answer.get("dequeued"):
+            print(f"dequeued run {run}: it never started, and the study is a draft again")
+        else:
+            print(f"asked run {run} to stop (evolvekit study wait {slug} returns when it has)")
+        return 0
+    if args.json:
+        print(json.dumps(jobs.status(root, _run_of(root, args.run), build_status)))
+    elif args.run:
+        print(jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status)["line"])  # noqa: SLF001
+    else:
+        print(jobs.state_line(root, study, build_status)["line"])
+    return 0
+
+
 def cmd_study(args: argparse.Namespace) -> int:
     from evolvekit.harness import execute, library
     from evolvekit.harness.compile import write_run
@@ -944,6 +1115,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return 0
     if command in ("application", "list", "check", "cases"):
         return _study_library_command(command, args)
+    if command in ("start", "stop", "status", "watch", "wait"):
+        return _study_run_command(command, args)
     folder = _study_root(args.directory, args)
     if command == "preview":
         result = execute.preview(folder)
