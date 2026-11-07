@@ -218,9 +218,13 @@
     return isFinite(v) ? v : null;
   };
   EK.capital = function (s) { s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); };
-  /** Figures inside a serif heading switch to Overpass 700 (the design's rule). */
+  /** Figures inside a serif heading switch to Overpass 700 (the design's rule).
+      The figures are found in the plain text and each piece escaped once, so an
+      entity's digits (the 39 of &#39;) are never wrapped. */
   EK.figures = function (text) {
-    return raw(esc(text).replace(/(\d[\d.,]*\s?%?)/g, '<span class="fig">$1</span>'));
+    return raw(String(text == null ? "" : text).split(/(\d[\d.,]*\s?%?)/).map(function (bit, i) {
+      return i % 2 ? '<span class="fig">' + esc(bit) + "</span>" : esc(bit);
+    }).join(""));
   };
 
   // ------------------------------------------------------------------ toasts and the undo bar

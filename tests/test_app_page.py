@@ -252,3 +252,27 @@ def test_the_change_words_round_like_the_report():
     done = subprocess.run([node, "-e", script], capture_output=True, text=True, encoding="utf-8")
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == [_change(v, d) for v, d in cases]
+
+
+def test_the_verdict_words_are_escaped_once():
+    """`EK.figures` (the headline's path), run under node: an apostrophe is one
+    `&#39;`, never an entity whose digits were wrapped as a figure, and markup in
+    the words stays text."""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+    core = (STATIC / "js" / "core.js").read_text(encoding="utf-8")
+    lines = ["at worst 0.3 % worse than your starting point (Demo tour's own defaults).", "<b>&</b> 12"]
+    script = ("var window = {}, document = {addEventListener: function () {}}, navigator = {}, location = {href: 'http://127.0.0.1/', hash: '', search: ''};\n"
+              + core + "\nconsole.log(JSON.stringify(" + json.dumps(lines)
+              + ".map(function (t) { var E = window.EK; return String(E.html`<p>${E.figures(t)}</p>`); })));")
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert done.returncode == 0, done.stderr
+    tour, markup = json.loads(done.stdout)
+    assert tour == ('<p>at worst <span class="fig">0.3 %</span> worse than your starting point'
+                    " (Demo tour&#39;s own defaults).</p>"), tour
+    assert markup == '<p>&lt;b&gt;&amp;&lt;/b&gt; <span class="fig">12</span></p>', markup
