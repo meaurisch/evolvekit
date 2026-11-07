@@ -201,6 +201,8 @@ STOP_BEFORE_MAKING = ("Do not go on to step 3 until every question has an answer
                       "— no `study new`, no file — and your whole message is that question.")
 THIN_COMPILE = ("On a thin plan `study compile` exits 2 with `plan: … fewer than 3 rounds …`; the sentences after "
                 "it are the ways out — relay them, change nothing in `study.yaml` yourself.")
+SHOW_PLAN_FIRST = ("Put the plan line (rounds, combinations, held-back cases, done around) in your message before "
+                   "`study start`, whether or not you must wait for a yes.")
 THIN_WARNING = ("K is the number of entries under `problem.parameters` in the compiled `runs/<id>/evolvekit.yaml` "
                 "(the settings tuned). When N is under 6 × K, add: \"The app will call this plan thin: K settings in N "
                 "combinations; more time or fewer settings would sharpen it.\"")
@@ -282,6 +284,10 @@ def test_study_skill_stops_on_a_thin_plan():
     assert THIN_PLAN_RULE in _section(_body(STUDY), "4. Show the plan")
     assert THIN_COMPILE in _section(_body(STUDY), "4. Show the plan")
     assert "fewer than 3 rounds" in _section(_body(STUDY), "When it goes wrong")
+
+
+def test_study_skill_shows_the_plan_line_before_it_starts():
+    assert SHOW_PLAN_FIRST in _section(_body(STUDY), "4. Show the plan")
 
 
 def test_study_skill_says_where_the_thin_warning_comes_from():
