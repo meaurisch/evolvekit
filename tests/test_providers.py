@@ -236,6 +236,242 @@ def test_claude_cli_timeout_is_a_provider_error():
         provider.complete(MESSAGES, model="sonnet", max_tokens=8, temperature=1.0)
 
 
+# -- copilot-cli -----------------------------------------------------------
+
+
+def _copilot(stdout="OK", *, returncode=0, stderr="", seen=None, **kwargs):
+    """A CopilotCliProvider whose runner records the call and answers `stdout`."""
+    from evolvekit.providers.copilot_cli import CopilotCliProvider
+
+    def runner(argv, **options):
+        if seen is not None:
+            seen["argv"], seen["options"] = argv, options
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    kwargs.setdefault("windows", False)
+    provider = CopilotCliProvider(runner=runner, executable="copilot", **kwargs)
+    provider._resolve = lambda: (["copilot"], False)  # type: ignore[method-assign]
+    return provider
+
+
+def test_copilot_cli_builds_a_non_interactive_argv_with_the_system_prompt_folded_in():
+    seen: dict = {}
+    result = _copilot(seen=seen).complete(MESSAGES, model="claude-sonnet-4.5", max_tokens=64, temperature=1.0)
+    argv = seen["argv"]
+    assert argv[:2] == ["copilot", "-p"]
+    assert argv[2] == "you are an optimiser\n\nimprove this", "the CLI has no system-prompt flag"
+    for flag in ("-s", "--no-ask-user", "--deny-tool=shell", "--deny-tool=write", "--model=claude-sonnet-4.5"):
+        assert flag in argv
+    assert not any(a.startswith("--allow") for a in argv), "no tool is ever allowed"
+    assert seen["options"]["env"]["COPILOT_AUTO_UPDATE"] == "false"
+    assert seen["options"]["stdin"] is subprocess.DEVNULL
+    assert result.text == "OK" and result.provider == "copilot-cli"
+    assert result.usd == 0.0 and result.requests == 1
+    assert result.input_tokens > 0 and result.output_tokens > 0, "estimated when the CLI reports none"
+
+
+def test_copilot_cli_leaves_the_model_to_the_cli_when_it_is_empty():
+    seen: dict = {}
+    _copilot(seen=seen).complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+    assert not any(a.startswith("--model") for a in seen["argv"])
+
+
+def test_copilot_cli_names_the_roles_of_a_longer_conversation():
+    from evolvekit.providers.copilot_cli import CopilotCliProvider
+
+    prompt = CopilotCliProvider.build_prompt(
+        [{"role": "system", "content": "S"}, {"role": "user", "content": "a"},
+         {"role": "assistant", "content": "b"}, {"role": "user", "content": "c"}]
+    )
+    assert prompt == "S\n\n[user]\na\n\n[assistant]\nb\n\n[user]\nc"
+
+
+def test_copilot_cli_asks_for_json_and_reads_jsonl_tolerantly():
+    seen: dict = {}
+    lines = [
+        {"type": "session.start", "data": {"model": "gpt-5"}},
+        {"type": "user.message", "data": {"content": "improve this"}},
+        {"type": "assistant.message_delta", "data": {"content": "O"}},
+        {"type": "assistant.message", "data": {"content": "thinking aloud"}},
+        {"type": "assistant.message", "data": {"content": "OK", "model": "gpt-5"}},
+        {"type": "result", "usage": {"premiumRequests": 2, "inputTokens": 120, "outputTokens": 7}},
+    ]
+    stdout = "\n".join(json.dumps(line) for line in lines) + "\n"
+    result = _copilot(stdout, seen=seen, output_format="json").complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+    assert "--output-format=json" in seen["argv"] and "-s" not in seen["argv"]
+    assert result.text == "OK", "the last whole assistant message is the answer"
+    assert result.requests == 2 and result.usd == 0.0
+    assert (result.input_tokens, result.output_tokens) == (120, 7)
+    assert result.model == "gpt-5"
+
+
+def test_copilot_cli_reads_plain_text_and_never_parses_an_answer_that_is_json():
+    from evolvekit.providers.copilot_cli import parse_copilot_output
+
+    answer = '{"say": "hi", "cards": []}'
+    assert parse_copilot_output(answer, prompt="p", model="m").text == answer, "-s output is the answer itself"
+    assert parse_copilot_output(answer, prompt="p", model="m", jsonl=True).text == answer, "no answer in it: text"
+    mixed = parse_copilot_output('{"say": "hi"}\nand a second line', prompt="p", model="m", jsonl=True)
+    assert mixed.text == '{"say": "hi"}\nand a second line' and mixed.requests == 1 and mixed.model == "m"
+
+
+def test_copilot_cli_with_no_output_gave_no_answer():
+    from evolvekit.providers.copilot_cli import CopilotCliError
+
+    with pytest.raises(CopilotCliError, match="gave no answer") as caught:
+        _copilot("  \n").complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+    assert caught.value.kind == "failed"
+
+
+@pytest.mark.parametrize(
+    ("stderr", "kind", "words"),
+    [
+        ("Error: You are not logged in. Run `copilot` and use /login.", "not_signed_in", "not signed in"),
+        ("Failed to authenticate with GitHub", "not_signed_in", "/login"),
+        ("Error: Access denied by policy settings", "policy_blocked", "policy blocks the CLI"),
+        ("warming up\nError: model gpt-99 is not available\n", "failed", "model gpt-99 is not available"),
+        ("", "failed", "no output"),
+    ],
+)
+def test_copilot_cli_failures_say_what_kind_they_are(stderr, kind, words):
+    from evolvekit.providers.base import ProviderError
+    from evolvekit.providers.copilot_cli import CopilotCliError
+
+    provider = _copilot("", returncode=1, stderr=stderr)
+    with pytest.raises(CopilotCliError, match=words) as caught:
+        provider.complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+    assert caught.value.kind == kind
+    assert isinstance(caught.value, ProviderError), "the search loop's handling still applies"
+
+
+def test_copilot_cli_sign_in_trouble_on_a_clean_exit_is_still_not_signed_in():
+    from evolvekit.providers.copilot_cli import CopilotCliError
+
+    with pytest.raises(CopilotCliError) as caught:
+        _copilot("", stderr="Please run /login").complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+    assert caught.value.kind == "not_signed_in"
+
+
+def test_copilot_cli_that_is_not_installed_is_missing(monkeypatch):
+    from evolvekit.providers import copilot_cli
+
+    monkeypatch.setattr(copilot_cli.shutil, "which", lambda name: None)
+    provider = copilot_cli.CopilotCliProvider(executable="no-such-copilot-anywhere", windows=False)
+    with pytest.raises(copilot_cli.CopilotCliError, match="npm install -g @github/copilot") as caught:
+        provider.complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+    assert caught.value.kind == "missing"
+
+    def gone(argv, **options):
+        raise FileNotFoundError(argv[0])
+
+    vanished = _copilot()
+    vanished._runner = gone
+    with pytest.raises(copilot_cli.CopilotCliError) as caught:
+        vanished.complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+    assert caught.value.kind == "missing"
+
+
+def test_copilot_cli_timeout_is_a_failure():
+    from evolvekit.providers.copilot_cli import CopilotCliError
+
+    def runner(argv, **options):
+        raise subprocess.TimeoutExpired(argv, 1.0)
+
+    provider = _copilot(timeout=1.0)
+    provider._runner = runner
+    with pytest.raises(CopilotCliError, match="timed out") as caught:
+        provider.complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+    assert caught.value.kind == "failed"
+
+
+def test_copilot_cli_path_overrides_the_binary(monkeypatch):
+    from evolvekit.providers.copilot_cli import CopilotCliProvider
+
+    monkeypatch.setenv("COPILOT_CLI_PATH", "C:/tools/copilot.exe")
+    assert CopilotCliProvider()._executable == "C:/tools/copilot.exe"
+
+
+def _npm_tree(tmp_path, bin_field):
+    """npm's global layout: `<prefix>/copilot.cmd` and `<prefix>/node_modules/@github/copilot/`."""
+    prefix = tmp_path / "npm"
+    package = prefix / "node_modules" / "@github" / "copilot"
+    package.mkdir(parents=True)
+    (package / "npm-loader.js").write_text("// entry", encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"name": "@github/copilot", "bin": bin_field}), encoding="utf-8")
+    shim = prefix / "copilot.cmd"
+    shim.write_text("@echo off\r\nnode npm-loader.js %*\r\n", encoding="utf-8")
+    return shim
+
+
+@pytest.mark.parametrize("bin_field", ["npm-loader.js", {"copilot": "npm-loader.js"}])
+def test_copilot_cli_runs_the_package_script_behind_the_npm_shim(tmp_path, monkeypatch, bin_field):
+    from evolvekit.providers import copilot_cli
+
+    shim = _npm_tree(tmp_path, bin_field)
+    node = tmp_path / "nodejs" / "node.exe"
+    node.parent.mkdir()
+    node.write_text("", encoding="utf-8")
+    monkeypatch.setattr(copilot_cli.shutil, "which",
+                        lambda name: str(shim) if name == "copilot" else str(node) if name == "node" else None)
+    prefix, through_cmd = copilot_cli.resolve_command("copilot")
+    entry = shim.parent / "node_modules" / "@github" / "copilot" / "npm-loader.js"
+    assert prefix == [str(node), str(entry.resolve())] and through_cmd is False
+
+    (shim.parent / "node.exe").write_text("", encoding="utf-8")
+    prefix, _ = copilot_cli.resolve_command("copilot")
+    assert prefix[0] == str(shim.parent / "node.exe"), "the node next to the shim first, as npm's shim does"
+
+    seen: dict = {}
+
+    def runner(argv, **options):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "OK", "")
+
+    provider = copilot_cli.CopilotCliProvider(runner=runner, executable="copilot", windows=True)
+    provider.complete([{"role": "user", "content": 'say "hi" & echo ^%PATH%'}], model="", max_tokens=8, temperature=1.0)
+    assert seen["argv"][:4] == [str(shim.parent / "node.exe"), str(entry.resolve()), "-p", 'say "hi" & echo ^%PATH%']
+
+
+def test_copilot_cli_never_hands_a_prompt_to_a_shim_it_cannot_see_behind(tmp_path, monkeypatch):
+    from evolvekit.providers import copilot_cli
+
+    shim = tmp_path / "copilot.cmd"
+    shim.write_text("@echo off", encoding="utf-8")
+    monkeypatch.setattr(copilot_cli.shutil, "which", lambda name: str(shim) if name == "copilot" else None)
+    assert copilot_cli.resolve_command("copilot") == ([str(shim)], True)
+
+    def runner(argv, **options):
+        raise AssertionError("cmd.exe must never be given a prompt")
+
+    provider = copilot_cli.CopilotCliProvider(executable="copilot", windows=True, runner=runner)
+    with pytest.raises(copilot_cli.CopilotCliError, match="COPILOT_CLI_PATH"):
+        provider.complete(MESSAGES, model="", max_tokens=8, temperature=1.0)
+
+
+def test_copilot_cli_refuses_a_prompt_too_long_for_windows():
+    from evolvekit.providers.copilot_cli import MAX_DIRECT_COMMAND, CopilotCliError
+
+    provider = _copilot(windows=True)
+    long = [{"role": "user", "content": "x" * (MAX_DIRECT_COMMAND + 1)}]
+    with pytest.raises(CopilotCliError, match="too long") as caught:
+        provider.complete(long, model="", max_tokens=8, temperature=1.0)
+    assert caught.value.kind == "failed"
+    fits = provider.complete([{"role": "user", "content": "x" * 12_000}], model="", max_tokens=8, temperature=1.0)
+    assert fits.text == "OK", "a 12k big-step prompt fits"
+    assert _copilot(windows=False).complete(long, model="", max_tokens=8, temperature=1.0).text == "OK"
+
+
+def test_copilot_cli_has_no_embeddings_and_is_built_from_config():
+    from evolvekit.providers.base import ProviderError
+    from evolvekit.providers.copilot_cli import CopilotCliProvider
+
+    provider = build_provider(ModelConfig(role="strong", provider="copilot-cli", model="", price_in_per_mtok=0.0,
+                                          price_out_per_mtok=0.0, max_tokens=8, temperature=1.0))
+    assert isinstance(provider, CopilotCliProvider) and isinstance(provider, Provider)
+    with pytest.raises(ProviderError, match="no embeddings"):
+        provider.embed(["x"], model="m")
+
+
 # -- fake ------------------------------------------------------------------
 
 

@@ -197,3 +197,80 @@ better, keep today's rates — the app's own advice.
   cases; Copy falls back to the older clipboard way and then selects the text;
   "preview case" became "the smallest case"; "Deliveries per hour" says what
   it counts in plain words.
+
+## The redesign (stage 4), round 1 — 7/10, no blocker (2026-11-06)
+
+The same persona, note and protocol on the rebuilt page (Home, Start a study,
+Set up option A, the Study page), with ten delivery requests named like daily
+files (`requests-2026-03-02.json` …), 20 s per request and 30 minutes.
+
+| Getting started | Knowing what to do next | Setting up | Confidence while it ran | Understanding the result | Handing it over |
+|---|---|---|---|---|---|
+| 7 | 8 | 7 | 7 | 6 | 6 |
+
+**The run.** 6 cases learned from, 4 held back; 119 combinations in 30
+minutes. Keep today's settings: 0.47 % better on the held-back cases, chance
+under 9 in 10, at worst 2.57 % worse. The reviewer's answer: keep PyVRP's
+defaults; the new file is not proven.
+
+**Frictions, and what changed.**
+
+- **(major) Three "better" numbers.** The chosen combination's chip says *on
+  study cases*, the verdict *on held-back cases*.
+- **(major) Keep, but only the new file offered.** A keep now opens *Hand it
+  over* with *Nothing to change: keep today's settings*; the new settings are
+  shown as what the search found, at your own risk.
+- **(major) The folder box.** It takes focus once its drawer is open, says
+  what went wrong inside the drawer, and closes on success.
+- **Progress words.** The line counts the cases of the look that is running
+  (a quick look runs on 2 of 6), not all study cases.
+- **Small ones.** A test run's clock no longer reads a date as seconds; the
+  legend never repeats a count; a setting's tip gives its own name
+  (`penalty_decrease`); *held back* is explained where it is first used;
+  Pepper's news clears itself; a measure without a label reads as words.
+
+## The redesign, round 2 — 7/10, no blocker (2026-11-06)
+
+| Getting started | Knowing what to do next | Setting up | Confidence while it ran | Understanding the result | Handing it over |
+|---|---|---|---|---|---|
+| 8 | 7 | 7 | 6 | 7 | 6 |
+
+The same task; again *keep today's settings* (0.47 % better on the held-back
+cases, chance under 9 in 10, at worst 2.57 % worse).
+
+- **(major) Which file to send on a keep.** *Show today's settings* is the
+  first button of *Hand it over* on a keep — the file the verdict says to
+  keep, named after the starting point (*PyVRP's own defaults*); the search's
+  settings sit beside it as *Settings found, not recommended*.
+- **(major) The busy warning.** *Is it still fair?* says that the final check
+  runs today's settings and the new ones side by side under the same load,
+  and that the study need not stop.
+- **Found N min ago kept resetting.** The strip's best so far and when it was
+  found come from the same place now: the full looks of the Tries view.
+- **Small ones.** A button whose action takes a moment is disabled and busy
+  until it is done; Save in a drawer shows its result at once; the What to
+  tune drawer says what Tune, Fixed and Default mean; the application reads
+  *Ready on this computer*, its path behind *Other*; drawers slide in without
+  fading, so nothing shows through.
+
+## The redesign, round 3 — 8/10, no blocker: the gate passes (2026-11-06)
+
+| Getting started | Knowing what to do next | Setting up | Confidence while it ran | Understanding the result | Handing it over |
+|---|---|---|---|---|---|
+| 9 | 8 | 8 | 6 | 8 | 9 |
+
+Keep today's settings again (0.57 % better on the held-back cases, chance
+under 9 in 10, at worst 2.27 % worse); the reviewer sent today's settings
+with *Show today's settings*, "The verdict says keep these. Send this file."
+
+- **(major) The strip and the notices were rebuilt on every poll** — the
+  check for a change compared the new markup with the browser's copy of the
+  old, which never matches — so *Is it still fair?* could not be clicked and
+  the live region spoke every 2.5 s. They change now only when their words do.
+- **(major) The details said "no combination has beaten the starting point
+  yet" beside a best so far.** The server's sentence shows once the run is
+  over; while it runs, the strip alone says it.
+- **Pepper's update went stale.** An update you asked for follows the study
+  and goes away by itself after 12 s.
+- **Small ones.** The Settings view keeps its order while you look; the Goal
+  summary says how many cases are held back for the final check.

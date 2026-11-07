@@ -197,6 +197,12 @@ def test_prices_are_kept_per_model_and_checked(home):
 def test_an_empty_model_means_the_cli_default_and_is_refused_elsewhere(home):
     home.save_settings({"provider": "claude-cli", "models": {"assistant": "", "search": ""}})
     assert home.settings()["models"] == {"assistant": "", "search": ""}
+    home.save_settings({"provider": "copilot-cli", "models": {"assistant": "", "search": ""}})
+    assert home.settings()["provider"] == "copilot-cli"
+    assert home.settings()["models"] == {"assistant": "", "search": ""}, "Copilot's own default model"
+    from evolvekit.app.store import KEY_NAMES
+
+    assert KEY_NAMES["copilot-cli"] == (), "copilot-cli asks for no key"
     with pytest.raises(AppError, match="deployment name"):
         home.save_settings({"provider": "azure", "models": {"assistant": ""}})
     with pytest.raises(AppError, match="models.assistant"):

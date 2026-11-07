@@ -40,6 +40,9 @@ class Completion:
     """Provider-reported cost. When present the ledger trusts it over the
     configured price table (the `claude-cli` backend reports real spend)."""
     raw: dict[str, Any] | None = None
+    requests: float | None = None
+    """Requests counted against a plan rather than dollars (`copilot-cli`:
+    Copilot requests). `None` for every backend that bills in money."""
 
     @property
     def total_tokens(self) -> int:

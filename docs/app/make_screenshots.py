@@ -1,11 +1,11 @@
 """Screenshots of the app for docs/app.md: the screens it shows, a few in
 dark as well, and two at phone width.
 
-    python docs/app/make_screenshots.py --home LIBRARY --study SLUG [--running SLUG]
+    python docs/app/make_screenshots.py --home LIBRARY --study SLUG [--compare SLUG] [--running SLUG]
 
-LIBRARY is a library home with a finished study SLUG (the step pages and the
-results are taken from it) and, optionally, a study that is running right now
-(for the running page). The app is started on a free port inside this
+LIBRARY is a library home with a finished study SLUG (Set up and the Study
+page are taken from it), optionally a second finished study to compare it
+with, and a study that is running right now. The app is started on a free port inside this
 process, and a Chromium browser (Edge or Chrome) in headless mode takes each
 picture. The pictures were checked by eye in the in-app browser as well.
 """
@@ -37,19 +37,23 @@ px): given less, it lays the page out that wide anyway and crops the picture.
 The page itself is checked down to 360 px in a browser that emulates a phone."""
 
 
-def shots(study: str, running: str | None) -> list[tuple[str, str, tuple[int, int], tuple[str, ...]]]:
+def shots(study: str, running: str | None, other: str | None) -> list[tuple[str, str, tuple[int, int], tuple[str, ...]]]:
     """(name, route, window, themes): the pictures docs/app.md shows."""
     pages = [
         ("home", "#/", DESKTOP, ("light", "dark")),
-        ("application", f"#/study/{study}/2", DESKTOP, ("light",)),
-        ("change", f"#/study/{study}/4", DESKTOP, ("light",)),
-        ("goal", f"#/study/{study}/5", DESKTOP, ("light",)),
-        ("results", f"#/study/{study}/results", DESKTOP, ("light", "dark")),
+        ("start", "#/start", DESKTOP, ("light",)),
+        ("setup", f"#/setup/{study}", DESKTOP, ("light",)),
+        ("study", f"#/study/{study}", DESKTOP, ("light", "dark")),
+        ("study-cases", f"#/study/{study}?view=cases", DESKTOP, ("light",)),
+        ("study-settings", f"#/study/{study}?view=settings", DESKTOP, ("dark",)),
+        ("settings", "#/settings", DESKTOP, ("light",)),
         ("home-phone", "#/", PHONE, ("light",)),
-        ("results-phone", f"#/study/{study}/results", PHONE, ("light",)),
+        ("study-phone", f"#/study/{study}", PHONE, ("dark",)),
     ]
+    if other:
+        pages.insert(7, ("compare", f"#/compare?a={study}&b={other}", (1280, 1400), ("light",)))
     if running:
-        pages.insert(4, ("running", f"#/study/{running}/running", DESKTOP, ("light", "dark")))
+        pages.insert(4, ("running", f"#/study/{running}", DESKTOP, ("light", "dark")))
     return pages
 
 
@@ -72,6 +76,7 @@ def main() -> int:
     parser.add_argument("--home", required=True, type=Path)
     parser.add_argument("--study", required=True, help="a finished study in the library")
     parser.add_argument("--running", help="a study that is running now")
+    parser.add_argument("--compare", help="a second finished study, for Compare")
     parser.add_argument("--out", type=Path, default=HERE)
     parser.add_argument("--browser", default=next((b for b in BROWSERS if Path(b).exists()), None))
     args = parser.parse_args()
@@ -80,11 +85,11 @@ def main() -> int:
     server = AppServer(args.home, port=0)
     server.start()
     try:
-        for name, route, (width, height), themes in shots(args.study, args.running):
+        for name, route, (width, height), themes in shots(args.study, args.running, args.compare):
             for theme in themes:
                 target = args.out / f"{name}-{theme}.png"
                 target.unlink(missing_ok=True)
-                url = f"http://127.0.0.1:{server.port}/?theme={theme}{route}"
+                url = f"http://127.0.0.1:{server.port}/?theme={theme}&token={server.token}{route}"
                 # A profile of its own each time: a browser that finds its
                 # profile in use hands the page to that instance. And Edge's
                 # launcher returns at once, the picture a few seconds later:

@@ -32,7 +32,7 @@ from typing import Any, Callable
 from evolvekit.app import AppError
 from evolvekit.app.prices import price_of
 from evolvekit.app.store import safe_relative
-from evolvekit.confirm import BASELINE, RULE_WORDS, decide, t_cdf
+from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, t_cdf
 from evolvekit.evaluate.process import scrubbed_environment
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
 from evolvekit.harness import HarnessError
@@ -67,9 +67,10 @@ one launched: the pid was recycled, by a reboot or by chance."""
 EXPORT_TIMEOUT_S = 300
 MAX_CONTINUE_HOURS = 48.0
 """The most a finished run is given at a time when it goes on."""
-REPORTS_COST = ("openrouter", "claude-cli")
+REPORTS_COST = ("openrouter", "claude-cli", "copilot-cli")
 """The providers that say what every call cost, so the dollar cap of AI search
-help holds without a price in the table."""
+help holds without a price in the table. `copilot-cli` counts Copilot
+requests, not dollars, and reports 0.0: the cap holds trivially."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 _BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
@@ -199,7 +200,7 @@ def runs(root: Path) -> list[dict[str, Any]]:
         line = run_line(root, study, run_dir)
         listed.append({"id": run_dir.name, "phase": job.get("phase"), "started_at": job.get("started_at"),
                        "finished_at": job.get("finished_at"), "kind": line["kind"], "line": line["line"],
-                       "tone": line.get("tone")})
+                       "tone": line.get("tone"), "decision": line.get("decision")})
     return listed
 
 
@@ -623,7 +624,7 @@ def _failures_in_words(reasons: list[dict[str, Any]], limit_s: float) -> list[di
         elif "exit code 3" in low or "cannot read" in low:
             todo = "A case could not be read. Check the cases in step 3."
         else:
-            todo = "Runs failed with an error. Open the detailed dashboard to see the message; if every run fails, run the test run again."
+            todo = "Runs failed with an error. Show the output to see the message; if every run fails, run the test run again."
         grouped.append({"count": count, "stage": reason.get("stage"), "message": text, "todo": todo})
     return grouped
 
@@ -697,7 +698,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         now_line = (f"The final check: {_runs_word(on)} per case so far on the held-back cases; "
                     "it adds runs while time remains and the answer is open.")
     elif stage and isinstance(current, int):
-        cases = len(study.training)
+        # The cases of the stage that is running: a quick look runs on a few of the study's cases.
+        per_combination = int(stage.get("runs_planned") or 0) // max(1, int(stage.get("candidates") or 1))
+        cases = max(1, per_combination // max(1, study.limits.runs_per_case)) if per_combination else len(study.training)
         on = f"on {cases} case{'s' if cases != 1 else ''}"
         runs = f"{stage.get('runs_done')} of {stage.get('runs_planned')} runs done"
         count = stage.get("candidates") or 0
@@ -863,6 +866,10 @@ def _chance_words(p: float | None) -> str:
         return "almost certain"
     if p <= 0.05:
         return "1 in 20 or less"
+    if p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
+        # 0.897 would round to "about 18 in 20", which reads like the rule's
+        # 9 in 10 when the rule said no: say which side of it the chance is.
+        return f"under {round(USE_CHANCE * 10)} in 10"
     return f"about {round(p * 20)} in 20"
 
 
@@ -1423,11 +1430,38 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
     1 h 10 min left · 3.2 % better so far", "finished · probably better: 3.1 %
     lower real cost", "finished · not proven on the held-back cases". A draft
     is `study` as it is today; a run is described by the study it was
-    started with (the copy the latest run keeps)."""
+    started with (the copy the latest run keeps). Besides the words, the
+    facts the page draws the card from (`run_line`)."""
     dirs = _run_dirs(root)
     if not dirs:
-        return {"kind": "draft", "line": f"draft · step {max(1, min(study.step, 7))} of 7"}
+        return {"kind": "draft", "line": f"draft · step {max(1, min(study.step, 7))} of 7",
+                "step": max(1, min(study.step, 7)), "what": _kind_of(study)}
     return run_line(root, study, dirs[-1], document_of)
+
+
+def _kind_of(study: Study | None) -> str:
+    """"settings", "data" or "both": what a study changes, for "keep today's settings"."""
+    if study is None:
+        return "settings"
+    settings, data = bool(study.tuned_settings()), bool(study.data)
+    return "both" if settings and data else "data" if data else "settings"
+
+
+def _check_progress(run_dir: Path, job: dict[str, Any], plan: dict[str, Any], study: Study | None) -> dict[str, int] | None:
+    """How far the final check is: runs finished of runs planned (the
+    starting point and the best, on every held-back case, `seeds` times each),
+    counted from the check's own event log."""
+    seeds = int((job.get("check") or {}).get("seeds") or plan.get("check_seeds") or 0)
+    cases = len(study.test) if study is not None else 0
+    if not cases or not seeds:
+        return None
+    done = 0
+    events = run_dir / "confirm" / "final" / "events.jsonl"
+    if events.is_file():
+        with events.open(encoding="utf-8", errors="replace") as handle:
+            done = sum(1 for line in handle if '"eval_finished"' in line)
+    planned = 2 * cases * seeds
+    return {"done": min(done, planned), "planned": planned}
 
 
 def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None) -> dict[str, Any]:
@@ -1436,7 +1470,14 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
     by the study it was started with; `study` (today's) is the fallback for a
     run that kept no copy. Without `document_of`, a running run's line says
     how much time is left but not how far it got: that reads the run's
-    status document, which a list of runs need not pay for."""
+    status document, which a list of runs need not pay for.
+
+    The facts the page draws a card from ride along: `phase`, `rounds`
+    (done, planned), `what` (settings, data or both), and by state
+    `finish_at`, `left_s`, `hours`, `continued`, `best_pct`, `check`,
+    `waiting_for`; for a finished run its `decision` (use, keep, worse,
+    single, skipped) with `mean`, `ci95`, `chance` and `n` held-back cases;
+    `check_stopped` for a final check stopped before it decided."""
     job = phase(run_dir)
     state = job.get("phase")
     try:
@@ -1444,37 +1485,59 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         goal = _goal(study, load_harness(root / "harness"))
     except Exception:  # noqa: BLE001 - a card must render even for a damaged study
         goal = {"says": "the goal", "direction": "lower"}
+    plan = _plan(run_dir, job) or {}
+    # How far a run got is read from its status document, which is not free on a long run: only for a
+    # card that shows it (running, stopped, failed), never for a finished one.
+    wants = state in ACTIVE or state in ("stopped", "failed")
+    document = (document_of(run_dir) or {}) if wants and document_of is not None and (run_dir / "events.jsonl").exists() else {}
+    last = ((document.get("health") or {}).get("generation") or {}).get("last_finished")
+    facts: dict[str, Any] = {"phase": state, "what": _kind_of(study),
+                             "goal": {"says": goal.get("says"), "label": goal.get("label"), "direction": goal.get("direction")},
+                             "rounds": {"done": max(0, int(last)) if isinstance(last, int) else 0,
+                                        "planned": int(plan.get("rounds") or 0)}}
+    pct = ((document.get("progress") or {}).get("improvement") or {}).get("pct")
+    if isinstance(pct, (int, float)):
+        facts["best_pct"] = pct
     if state == "queued":
         waiting = _waiting_for(root)
-        return {"kind": "queued", "run": run_dir.name, "line": "queued" + (f" · after {waiting}" if waiting else "")}
+        return {"kind": "queued", "run": run_dir.name, "line": "queued" + (f" · after {waiting}" if waiting else ""),
+                **facts, "waiting_for": waiting, "hours": float(plan.get("hours") or (study.budget.hours if study is not None else 0))}
     if state in ACTIVE:
-        started, hours = _window(job, run_dir, float((_plan(run_dir, job) or {}).get("hours")
+        started, hours = _window(job, run_dir, float(plan.get("hours")
                                                       or (study.budget.hours if study is not None else 0)))
         left = max(0.0, hours * 3600 - (_now() - started).total_seconds()) if started and hours else None
         line = "running" + (" · continued" if _continued(job) else "") + (f" · {_duration(left)} left" if left is not None else "")
         if document_of is not None and (run_dir / "events.jsonl").exists():
-            pct = (((document_of(run_dir) or {}).get("progress") or {}).get("improvement") or {}).get("pct")
             if pct is not None and pct > 0:
                 line += f" · {_pct(pct)} better so far"
-        return {"kind": "running", "run": run_dir.name, "line": line}
+        facts.update({"left_s": left, "hours": hours, "continued": _continued(job) or bool(job.get("resumed_at")),
+                      "finish_at": (started + timedelta(hours=hours)).astimezone().strftime("%H:%M") if started and hours else None})
+        if state == "check":
+            facts["check"] = _check_progress(run_dir, job, plan, study)
+        return {"kind": "running", "run": run_dir.name, "line": line, **facts}
     if state == "done":
         final = job.get("final") or {}
         if final.get("skipped"):
             reason = str(final["skipped"]).split(":")[0].split(",")[0]  # "the starting point stayed the best"
-            return {"kind": "finished", "run": run_dir.name, "line": f"finished · {reason}"}
+            return {"kind": "finished", "run": run_dir.name, "line": f"finished · {reason}", **facts, "decision": "skipped"}
         comparison = _read(run_dir / final["comparison"]) if final.get("comparison") else None
         summary = (((comparison or {}).get("per_candidate") or {}).get(final.get("candidate") or "") or {}).get("summary") or {}
         mean = summary.get("mean")
         decision = _decision_of(final, summary) if summary else ("use" if final.get("confirmed") else "keep")
+        facts.update({"decision": decision, "mean": mean if isinstance(mean, (int, float)) else None,
+                      "ci95": summary.get("ci95"), "chance": _chance_of(summary) if summary else None,
+                      "n": int(summary.get("n") or 0)})
         if decision == "use":
             amount = f": {_pct(mean)} {_better_word(goal['direction'])} {goal['says']}" if isinstance(mean, (int, float)) else ""
-            return {"kind": "finished", "run": run_dir.name, "line": "finished · probably better" + amount}
+            return {"kind": "finished", "run": run_dir.name, "line": "finished · probably better" + amount, **facts}
         if decision == "worse":
-            return {"kind": "finished", "tone": "bad", "run": run_dir.name, "line": "finished · worse on the held-back cases"}
-        return {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not proven on the held-back cases"}
+            return {"kind": "finished", "tone": "bad", "run": run_dir.name, "line": "finished · worse on the held-back cases", **facts}
+        return {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not proven on the held-back cases", **facts}
     if state == "stopped":
-        return {"kind": "stopped", "run": run_dir.name, "line": "stopped"}
-    return {"kind": "failed", "run": run_dir.name, "line": "failed · " + str(job.get("error") or "see the run")[:80]}
+        return {"kind": "stopped", "run": run_dir.name, "line": "stopped", **facts,
+                "check_stopped": bool((job.get("final") or {}).get("stopped"))}
+    return {"kind": "failed", "run": run_dir.name, "line": "failed · " + str(job.get("error") or "see the run")[:80], **facts,
+            "error": str(job.get("error") or "")}
 
 
 def next_study(home: Any, root: Path, run: str, name: str = "") -> str:

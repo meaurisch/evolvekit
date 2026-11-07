@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from evolvekit.app import AppError, assistant, compare, jobs, work
+from evolvekit.app import AppError, assistant, compare, jobs, tries, work
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
 from evolvekit.harness import HarnessError
@@ -588,6 +588,29 @@ def status(req: Request) -> dict[str, Any]:
     return jobs.status(root, _run(req, root), req.server.status_document)
 
 
+def tries_of(req: Request) -> dict[str, Any]:
+    """Every try of a run, for the Study page's Tries, Cases and Settings views (`tries.digest`)."""
+    root, _, _ = req.home.load(req.params["slug"])
+    run = _run(req, root)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the run's folder, judged by name
+    return {"run": run, **tries.digest(run_dir)}
+
+
+def try_of(req: Request) -> dict[str, Any]:
+    """One combination of a run in full: what it set, every run of it, and what a
+    failed run printed (the last lines of its output) and was started with."""
+    from evolvekit.status import candidate_detail
+
+    root, _, _ = req.home.load(req.params["slug"])
+    run_dir = jobs._run_dir(root, _run(req, root))  # noqa: SLF001 - the run's folder, judged by name
+    detail = candidate_detail(run_dir, req.params["combination"])
+    if not detail:
+        raise AppError(f"there is no combination {req.params['combination']!r} in this run", 404)
+    keep = ("id", "generation", "operator", "parent_id", "rejected", "reject_reason", "last_failure", "gated",
+            "stages_reached", "kpis", "parameters", "evaluations")
+    return {key: detail.get(key) for key in keep}
+
+
 def results(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
     return jobs.results(root, _run(req, root), req.server.status_document)
@@ -663,6 +686,8 @@ ROUTES = [
     route("POST", "/api/studies/{slug}/continue")(continue_run),
     route("GET", "/api/studies/{slug}/status")(status),
     route("GET", "/api/studies/{slug}/results")(results),
+    route("GET", "/api/studies/{slug}/tries")(tries_of),
+    route("GET", "/api/studies/{slug}/tries/{combination}")(try_of),
     route("GET", "/api/studies/{slug}/download/{export}")(download),
     route("POST", "/api/studies/{slug}/next")(next_study),
 ]

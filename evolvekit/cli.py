@@ -116,7 +116,7 @@ evaluate:
 
 models:
   small:
-    provider: fake        # azure | openrouter | claude-cli | fake
+    provider: fake        # azure | openrouter | claude-cli | copilot-cli | fake
     model: fake-small
     price_in_per_mtok: 0.0
     price_out_per_mtok: 0.0
@@ -198,6 +198,11 @@ OPENROUTER_API_KEY=
 # No key: the `claude` CLI carries its own subscription auth.
 # Set this only if the binary is not on PATH.
 # CLAUDE_CLI_PATH=
+
+# --- copilot-cli ---
+# No key: sign in with `copilot`, then `/login`, or set COPILOT_GITHUB_TOKEN.
+# Set this only if the binary is not on PATH.
+# COPILOT_CLI_PATH=
 """
 
 

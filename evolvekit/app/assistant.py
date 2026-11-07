@@ -70,6 +70,9 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 JSON_MODE = ("openrouter", "azure")
 """The providers whose API takes `response_format={"type": "json_object"}`;
 `_parse` stays the fallback for the others, and for a model that ignores it."""
+STATES = ("missing", "not_signed_in", "policy_blocked", "failed")
+"""Why a CLI provider gave no answer (`CopilotCliError.kind`): `check_model`
+passes it on as `state`, so the page can say what to do."""
 
 SYSTEM = """\
 You help a consultant set up a study in evolvekit's app. A study tunes an application's settings, or
@@ -227,6 +230,8 @@ def failure_words(exc: BaseException) -> str:
     """Why the model gave no answer, in words people can act on."""
     text = str(exc)
     low = text.lower()
+    if getattr(exc, "kind", None) in STATES:
+        return text  # the provider's own sentence already says what to do
     if "finish_reason=length" in low:
         return "The model thought for too long and gave no answer. Ask again, perhaps in fewer words."
     if "401" in low or "unauthori" in low or "invalid api key" in low or "authentication" in low:
@@ -239,7 +244,12 @@ def failure_words(exc: BaseException) -> str:
 
 
 def check_model(home: Any) -> dict[str, Any]:
-    """Settings' test: one tiny question to the assistant's model."""
+    """Settings' test: one tiny question to the assistant's model.
+
+    `{"ok": True, "model", "seconds", "usd"}`, plus `"requests"` for a
+    provider that counts requests instead of dollars (`copilot-cli`); or
+    `{"ok": False, "reason"}`, plus `"state"` (one of `STATES`) when the
+    provider says why: not installed, not signed in, blocked by a policy."""
     import time
 
     settings, keys = home.settings(), home.keys()
@@ -252,21 +262,32 @@ def check_model(home: Any) -> dict[str, Any]:
         completion = provider.complete([{"role": "user", "content": 'Answer with the JSON {"ready": true} and nothing else.'}],
                                        model=config.model, max_tokens=MAX_TOKENS, temperature=0.0)
     except Exception as exc:  # noqa: BLE001 - the test says what went wrong
-        return {"ok": False, "reason": failure_words(exc)}
+        failed: dict[str, Any] = {"ok": False, "reason": failure_words(exc)}
+        if getattr(exc, "kind", None) in STATES:
+            failed["state"] = exc.kind  # type: ignore[attr-defined]
+        return failed
     usd = _cost(completion, config)
-    return {"ok": True, "model": config.model, "seconds": round(time.perf_counter() - started, 1),
-            "usd": None if usd is None else round(usd, 6)}
+    result = {"ok": True, "model": config.model, "seconds": round(time.perf_counter() - started, 1),
+              "usd": None if usd is None else round(usd, 6)}
+    if completion.requests is not None:
+        result["requests"] = _count(completion.requests)
+    return result
 
 
 def history(root: Path) -> dict[str, Any]:
     """The turns so far, each question followed by its answer and each card
     carrying its `state` (`proposed`, `applied` or `dismissed`); `total_usd`
     sums the costs that are known, and `unknown` counts the answers whose
-    cost nobody knew."""
+    cost nobody knew. `total_requests` sums the Copilot requests, when any
+    answer counted them (`copilot-cli`)."""
     turns = _folded(_entries(root))
     answers = [e for e in turns if e.get("role") == "assistant"]
-    return {"turns": turns, "total_usd": round(sum(float(e["usd"]) for e in answers if e.get("usd") is not None), 6),
-            "unknown": sum(1 for e in answers if "usd" in e and e["usd"] is None)}
+    out = {"turns": turns, "total_usd": round(sum(float(e["usd"]) for e in answers if e.get("usd") is not None), 6),
+           "unknown": sum(1 for e in answers if "usd" in e and e["usd"] is None)}
+    counted = [float(e["requests"]) for e in answers if isinstance(e.get("requests"), (int, float))]
+    if counted:
+        out["total_requests"] = _count(sum(counted))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +553,7 @@ def check_card(card: Any, study: Study, harness: Harness, root: Path, proposed: 
         if kind == "kpi":
             name = str(card.get("name") or "")
             if not _NAME.match(name) or name in study.kpis or name in tunables or name in proposed.get("twice", set()):
-                return fail(f"{name!r} cannot name a new KPI: lower case, and not taken")
+                return fail(f"{name!r} cannot name a new measure: lower case, and not taken")
             if card.get("direction") not in ("lower", "higher"):
                 return fail("direction is lower or higher")
             result = work.try_sql(root, str(card.get("sql") or ""), {}, str(card.get("rows_sql") or ""))
@@ -542,13 +563,13 @@ def check_card(card: Any, study: Study, harness: Harness, root: Path, proposed: 
         if kind == "weighted":
             name = str(card.get("name") or "")
             if not _NAME.match(name) or name in study.kpis or name in tunables or name in proposed.get("twice", set()):
-                return fail(f"{name!r} cannot name a new KPI: lower case, and not taken")
+                return fail(f"{name!r} cannot name a new measure: lower case, and not taken")
             parts = card.get("weighted")
             if not isinstance(parts, dict) or not parts:
-                return fail("name the KPIs and their weights")
+                return fail("name the measures and their weights")
             for part, weight in parts.items():
                 if part not in kpi_names and part not in harness.kpis:
-                    return fail(f"{part!r} is not a KPI of the study")
+                    return fail(f"{part!r} is not a measure of the study")
                 if not isinstance(weight, (int, float)) or isinstance(weight, bool):
                     return fail(f"the weight of {part} must be a number")
             return out
@@ -558,19 +579,19 @@ def check_card(card: Any, study: Study, harness: Harness, root: Path, proposed: 
                 return fail("a goal has one to four levels")
             for index, level in enumerate(levels):
                 if level.get("kpi") not in kpi_names and level.get("kpi") not in harness.kpis:
-                    return fail(f"{level.get('kpi')!r} is not a KPI of the study")
+                    return fail(f"{level.get('kpi')!r} is not a measure of the study")
                 if level.get("direction") not in ("lower", "higher"):
                     return fail("each level says lower or higher")
                 within = parse_within(level.get("equal_within"))
                 if within is None and index < len(levels) - 1:
                     return fail(f"level {index + 1} needs equal_within, so the next level can decide")
             if len({level["kpi"] for level in levels}) != len(levels):
-                return fail("each level is a different KPI")
+                return fail("each level is a different measure")
             return out
         if kind == "guardrail":
             kpi = card.get("kpi")
             if kpi not in kpi_names and kpi not in harness.kpis:
-                return fail(f"{kpi!r} is not a KPI of the study")
+                return fail(f"{kpi!r} is not a measure of the study")
             if (card.get("max") is None) == (card.get("min") is None):
                 return fail("a guardrail has max or min, one of them")
             return out
@@ -687,13 +708,19 @@ def ask(home: Any, root: Path, message: str, provider: Any = None, *, screen: st
     _append(root, {"id": turn, "role": "user", "text": message})
 
     usd: float | None = 0.0
+    requests: float | None = None  # Copilot requests, for a provider that counts them instead of dollars
     tokens, checked, say, raw_cards = 0, [], "", []
+
+    def counted(entry: dict[str, Any]) -> dict[str, Any]:
+        if requests is not None:
+            entry["requests"] = _count(requests)
+        return entry
     json_mode = {"response_format": {"type": "json_object"}} if getattr(provider, "name", "") in JSON_MODE else {}
 
     def thrown_away() -> dict[str, Any]:
         # The consultant cancelled while the model thought: its answer is not kept, what it cost is.
-        _append(root, {"role": "assistant", "turn": turn, "cancelled": True, "usd": _round(usd)})
-        return {"cancelled": True, "usd": _round(usd), "total_usd": history(root)["total_usd"], "turn": turn}
+        _append(root, counted({"role": "assistant", "turn": turn, "cancelled": True, "usd": _round(usd)}))
+        return counted({"cancelled": True, "usd": _round(usd), "total_usd": history(root)["total_usd"], "turn": turn})
 
     for attempt in range(1 + MAX_CORRECTIONS):
         try:
@@ -703,8 +730,11 @@ def ask(home: Any, root: Path, message: str, provider: Any = None, *, screen: st
             if cancelled is not None and cancelled.is_set():
                 return thrown_away()
             reason = failure_words(exc)
-            _append(root, {"role": "assistant", "turn": turn, "failed": reason, "usd": _round(usd)})
-            return {"failed": reason, "say": "", "cards": [], "usd": _round(usd), "total_usd": history(root)["total_usd"], "turn": turn}
+            _append(root, counted({"role": "assistant", "turn": turn, "failed": reason, "usd": _round(usd)}))
+            return counted({"failed": reason, "say": "", "cards": [], "usd": _round(usd),
+                            "total_usd": history(root)["total_usd"], "turn": turn})
+        if completion.requests is not None:
+            requests = (requests or 0.0) + float(completion.requests)
         cost = _cost(completion, config)
         usd = None if cost is None or usd is None else usd + cost  # one unknown call makes the answer's cost unknown
         tokens += completion.input_tokens + completion.output_tokens
@@ -732,13 +762,19 @@ def ask(home: Any, root: Path, message: str, provider: Any = None, *, screen: st
         if not card["ok"]:
             card["problem"] = (f"It could not be expressed: {card['problem']}. Try saying it differently, "
                                "or use a template or the forms.")
-    _append(root, {"role": "assistant", "turn": turn, "say": say, "raw_cards": raw_cards, "cards": checked,
-                   "usd": _round(usd), "tokens": tokens})
-    return {"say": say, "cards": checked, "usd": _round(usd), "total_usd": history(root)["total_usd"], "turn": turn}
+    _append(root, counted({"role": "assistant", "turn": turn, "say": say, "raw_cards": raw_cards, "cards": checked,
+                           "usd": _round(usd), "tokens": tokens}))
+    return counted({"say": say, "cards": checked, "usd": _round(usd), "total_usd": history(root)["total_usd"], "turn": turn})
 
 
 def _round(usd: float | None) -> float | None:
     return None if usd is None else round(usd, 6)
+
+
+def _count(requests: float) -> int | float:
+    """A request count as the page shows it: whole numbers without a `.0`."""
+    rounded = round(float(requests), 2)
+    return int(rounded) if rounded == int(rounded) else rounded
 
 
 # ---------------------------------------------------------------------------
