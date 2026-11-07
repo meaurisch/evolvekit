@@ -41,8 +41,10 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit harness discover (--program PATH \| --python PATH --module NAME) [--json]` | what an application exposes, before a harness exists: a first list of candidate settings | |
 | `evolvekit harness new DIR --from ID` | a new harness as a copy of the closest one | |
 | `evolvekit harness new DIR --kind program` | a runnable skeleton; the kinds are `program` and `python` (default) | |
+| `evolvekit harness pack DIR [--out OUT]` | zip a harness to share it; the zip goes next to the harness, or into OUT | |
+| `evolvekit harness install ARCHIVE [--home DIR]` | install a packed harness into the library home | |
 | `evolvekit harness check DIR --app PATH --json` | does the harness work with this application; prints `{"ok", "checks"}` | 0 all pass, 1 warnings only, 2 failures |
-| `evolvekit study new NAME --harness ID [--template T] [--app PATH] [--json]` | a new study folder in the library home from a harness (and a template) | |
+| `evolvekit study new NAME --harness ID [--template T] [--app PATH] [--json]` | a new study folder in the library home from a harness (and a template); `--dir PATH` writes a standalone study folder outside the home instead | |
 | `evolvekit study application SLUG PATH` | say where the study's application is | |
 | `evolvekit study application SLUG --detect` | list the applications found on this computer | |
 | `evolvekit study list [--json]` | the studies in the library home | |
@@ -62,7 +64,7 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit skill list` | the skills that ship with evolvekit | |
 | `evolvekit skill install [--dir DIR] [--force]` | write the skills into a project (`.agents/skills`, with a pointer for a tool that reads only its own skills folder) | |
 
-Exit codes: 0 success; 1 a problem the message names; 2 a configuration or validation error, and `study check` with problems; 4 a timeout. `harness check` and `doctor` have their own, in the table.
+Exit codes: 0 success; 1 a problem the message names; 2 a configuration or validation error, and `study check` with problems; 4 a timeout. `harness check` and `doctor` have their own, in the table. `main()` exits 3 when another run holds the run lock.
 
 ## The verdict document
 
@@ -78,13 +80,13 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `line` | the one sentence the app shows as the verdict |
 | `advice` | the one sentence after it, what to do |
 | `measure` | the deciding measure: its label, unit and direction |
-| `held_back` | how many held-back cases, and the runs per case |
+| `held_back` | `cases`, `runs_per_case`: how many held-back cases, and the runs per case |
 | `mean_pct`, `ci95_pct`, `worst_pct` | the paired change in percent of the starting point, its 95 % range, the worst case |
 | `chance`, `chance_words` | how likely the gain is real, and in words |
 | `levels` | with several goals: one entry per goal, `deciding: true` on the one that decided |
-| `learned_from` | the training cases and their gain, labelled as such |
+| `learned_from` | `cases`, `pct`: the training cases and their gain, labelled as such |
 | `rule` | the fixed rule in words |
-| `by_case` | one row per held-back case: start, best, change, outcome |
+| `by_case` | one row per held-back case, with `name`, `start`, `best`, `change_pct`, `outcome` |
 | `changed` | the settings and data changes of the best combination: from, to |
 | `files` | the exports that exist in `runs/<id>/downloads/` |
 | `started_at`, `finished_at`, `elapsed_s` | when and how long |

@@ -12,7 +12,7 @@ import pytest
 from evolvekit.app.store import Home
 from evolvekit.app.verdict import DECISIONS
 from evolvekit.cli import build_parser
-from evolvekit.skills import frontmatter
+from evolvekit.skills import available, frontmatter, install
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "evolvekit" / "skills"
@@ -378,3 +378,59 @@ def test_harness_skill_pins_the_interview_smoke_test_and_exits():
     assert "--template T" in _section(body, "6. Smoke test")
     assert CHECK_EXITS in _section(body, "5. Check until it exits 0")
     assert "(when `runner.py` has `discover()`)" in _section(body, "7. Every later change")
+
+
+# The suite is complete (Task 4).
+
+PHASES = ("queued", "starting", "search", "check", "done", "stopped", "failed")
+
+
+def test_installed_copies_equal_package(tmp_path):
+    install(tmp_path)
+    shared = REFERENCE.read_bytes().replace(b"\r\n", b"\n")
+    for name in available():
+        generic = tmp_path / ".agents" / "skills" / name
+        assert (generic / "SKILL.md").read_bytes() == (SKILLS / name / "SKILL.md").read_bytes().replace(b"\r\n", b"\n")
+        assert (generic / "references" / "evolvekit.md").read_bytes() == shared
+    files = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file())
+    assert files == sorted(f"{where}/skills/{name}/{leaf}" for name in available()
+                           for where, leaf in ((".agents", "SKILL.md"), (".agents", "references/evolvekit.md"),
+                                               (".claude", "SKILL.md")))
+
+
+def test_pointer_frontmatter_equals_skill(tmp_path):
+    install(tmp_path)
+    for name in available():
+        own = frontmatter(_text(SKILLS / name / "SKILL.md"))
+        pointer = frontmatter((tmp_path / ".claude" / "skills" / name / "SKILL.md").read_text(encoding="utf-8"))
+        assert pointer == own and set(own) == {"name", "description"}
+
+
+def test_vendor_names_are_absent_from_the_reference_and_both_skills():
+    for path in (REFERENCE, STUDY, HARNESS):
+        text = _text(path).lower()
+        assert [v for v in VENDORS if v in text] == [], path.name
+
+
+def test_reference_rules_three_and_four():
+    rules = _section(_text(REFERENCE), "Rules")
+    three = re.search(r"^3\. (.+)$", rules, re.M)
+    four = re.search(r"^4\. (.+)$", rules, re.M)
+    assert three and "study compile" in three.group(1) and "before `study start`" in three.group(1)
+    assert four and "{from: harness}" in four.group(1) and "never SQL" in four.group(1)
+
+
+def test_reference_lists_the_phases_and_the_nested_keys():
+    section = _section(_text(REFERENCE), "The verdict document")
+    spans = set(re.findall(r"`([^`]+)`", section))
+    assert set(PHASES) <= spans
+    assert {"cases", "runs_per_case", "pct", "name", "start", "best", "change_pct", "outcome"} <= spans
+
+
+def test_reference_names_the_extra_commands_and_the_lock_exit():
+    text = _text(REFERENCE)
+    commands = _section(text, "Commands")
+    assert "--dir PATH" in commands
+    named = {tuple(w[:2]) for c in commands_in(commands) for w in command_variants(c)}
+    assert {("harness", "pack"), ("harness", "install")} <= named
+    assert "exits 3 when another run holds the run lock" in commands
