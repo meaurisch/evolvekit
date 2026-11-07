@@ -1450,6 +1450,117 @@ generation before the strong model would have been tried.
 remember that a `seeds: N` stage's timeout is **per run**: `seeds: 2` with a
 `timeout: 12000` is up to six and a half hours of wall clock for one candidate.
 
+## Harnesses and studies
+
+Everything above sets evolvekit up for one problem by hand. A **harness** does
+that work once for one application — a solver, a simulator, any program with
+settings — so that tuning it becomes a set of choices instead of a config
+file; a **study** is one such set of choices, in a folder of its own.
+`evolvekit study run` compiles a study into an ordinary run directory, so
+everything in this README applies to it.
+
+Two harnesses come with evolvekit:
+
+| Harness | Application | Study templates |
+|---|---|---|
+| [`pyvrp`](harnesses/pyvrp/README.md) | PyVRP 0.14: the Python that has it installed | Tune solver settings · Route cost sets → deliveries per hour |
+| [`demo-tour`](harnesses/demo-tour/README.md) | `examples/cli-solver/solver.py` | Tune solver settings · Stop weights → a shorter real tour |
+
+A harness shows every case, and every solution, as **tables** — for PyVRP
+`tasks`, `vehicle_types`, `routes`, `visits` and a few more — and everything a
+study says is written against them: a KPI is SQL that returns one number, a
+data change selects its rows with an SQL condition (`class = 'van'`), a
+constraint is an expression over the tuned values or SQL over the changed
+request. The harness declares its settings (plain help for people, a longer
+explanation for a model), its **levers** — the data changes a study may make,
+scaling, setting or adding to a column — ready KPIs and KPI templates, exports
+and study templates. [docs/harness-authoring.md](docs/harness-authoring.md) is
+how to write one.
+
+### A study from the command line
+
+```
+python -m evolvekit study new studies/depot-a --harness pyvrp --template tune --name "Depot A settings"
+```
+
+writes `studies/depot-a/`: `study.yaml`, the harness pinned in `harness/` (an
+updated harness never changes a study that already exists), and empty
+`cases/` and `inputs/`. Put the requests in `cases/`, then fill in
+`study.yaml`:
+
+```yaml
+application:
+  path: C:/work/.venv-pyvrp/Scripts/python.exe   # absolute: the one path that is not relative
+cases:
+  training: [cases/mon.json, cases/tue.json, cases/wed.json]   # what the search sees
+  test: [cases/thu.json]                                      # held back for the final check
+limits:
+  time_per_case_s: 20      # PyVRP's time limit on each case
+budget:
+  hours: 0.5               # the whole study, final check included
+```
+
+and go:
+
+```
+python -m evolvekit study preview studies/depot-a    # one solve at the starting values
+python -m evolvekit study compile studies/depot-a    # the automatic plan, and runs/<id>/evolvekit.yaml
+python -m evolvekit study run studies/depot-a        # search, then the final check
+```
+
+- **The preview** solves the smallest training case at the starting values,
+  and keeps its tables (`preview/tables.sqlite`, with `orig_*` copies of the
+  request tables) and its timing.
+- **The automatic plan** turns that timing and `budget.hours` into rounds and
+  combinations per round, keeping back the time the final check needs. When
+  the hours buy fewer than three rounds it says so, with three concrete ways
+  out: fewer cases, a shorter time limit, or more hours.
+  `plan: {auto: false, children: 4, generations: 6}` overrides it.
+- **The run** is an ordinary run directory, `runs/<id>/`, with
+  `study-run.json` (what the harness's runner reads) and `job.json`, which
+  says where the job is: `search`, `check`, `done`, `stopped` or `failed`.
+  `python -m evolvekit stop --run-dir studies/depot-a/runs/<id>` ends it
+  cleanly.
+- **The final check** runs the best configuration against the starting point
+  on the held-back test cases, on seeds 1001–1003, with the paired statistics
+  of [`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export), in
+  `runs/<id>/confirm/final/`.
+
+What `study.yaml` can say:
+
+| Key | Says |
+|---|---|
+| `vary.settings` | per setting: `tune` (within the harness's range), `{tune: true, low, high, start}`, `{fixed: value}`, or `default` |
+| `vary.data` | data changes: `{lever, column, where, mode: scale \| set \| add, low, high, start}` |
+| `constraints` | `{says, expr}` over the tuned values (`truck_per_km >= van_per_km`), which the search never breaks; `{says, sql}` over the changed request, checked on every case before solving |
+| `kpis` | `{from: harness}`, `{template, params}`, `{sql, direction}`, or `{weighted: {kpi: weight}}` |
+| `goal.levels` | one KPI; or up to four in order of importance, each but the last with `equal_within` (`"1 %"` or a number), as in [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels); or one weighted KPI |
+| `guardrails` | `{kpi, max}` or `{kpi, min}`: a candidate that breaks one is out of the running, as a [gate](#gates-conditions-every-candidate-has-to-meet-evaluategates) |
+| `inputs` | the extra files a harness asks for, such as PyVRP's `solver_settings` to start from |
+
+**The comparability trap.** A data change that alters what the solver *sees*
+— costs, weights, penalties — also alters every KPI computed from what it
+saw. The harness marks those KPIs (`changes_with_levers`: PyVRP's
+`solver_cost`), and a study that varies data must judge success by a KPI of
+the untouched request instead (`real_cost`, `deliveries_per_hour`).
+`harness check` warns when a study template gets this wrong.
+
+### Harness commands
+
+```
+python -m evolvekit harness list                         # the installed and built-in harnesses
+python -m evolvekit harness new my-solver --from pyvrp   # a copy of the closest harness
+python -m evolvekit harness new my-solver --kind program # or a runnable skeleton to start from
+python -m evolvekit harness check my-solver --app PATH   # does it work with this application?
+python -m evolvekit harness pack my-solver               # my-solver-<version>.zip, to share
+python -m evolvekit harness install pyvrp-1.0.0.zip      # into the library home
+```
+
+`check` exits 0 when everything passes, 1 with warnings, 2 with failures;
+`--json` prints every check with a `fix`, for an AI coding tool to work
+through. The library home is `EVOLVEKIT_HOME`, else `~/evolvekit`; the
+harnesses in this repository's `harnesses/` folder are found as built-ins.
+
 ## Adding a problem
 
 1. **Write a skeleton.** A normal Python file with the part you want evolved
@@ -1728,6 +1839,15 @@ stochastic, Azure-backed evaluators.
   lineage, cell coordinates, no-op/duplicate/behavioural/near counts, a
   hold-out flag, an archive grid drawn as 2-D slices when it has more than two
   axes, and an inline-SVG chart of best score against cumulative USD.
+- **Harnesses and studies** (`evolvekit/harness/`, `harnesses/`) — the
+  harness format and its loader, the SDK every harness carries
+  (`evk_harness.py`: tables in a read-only SQLite database, data changes on
+  SQL-selected rows, constraints before solving, KPIs, weighted sums and
+  guardrails, exit codes that mean something), studies and their compilation
+  into ordinary run directories with an automatic plan and a final check,
+  `harness check` with drift detection, the `harness` and `study` commands,
+  and two harnesses: PyVRP 0.14 (27 settings, six levers, twelve KPIs, ten
+  tagged samples) and the demo tour.
 - **Examples** — `examples/binpacking/` is a three-stage cascade that runs
   offline in about ten seconds and improves on its seed twice, exercising every
   operator, all three novelty verdicts, the near-duplicate flag and both

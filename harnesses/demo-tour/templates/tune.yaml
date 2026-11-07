@@ -1,0 +1,10 @@
+title: Tune solver settings
+summary: Find the solver settings that give the shortest tours on your requests.
+vary:
+  settings: recommended
+kpis:
+  tour_length: {from: harness}
+  longest_leg: {from: harness}
+goal:
+  levels:
+    - {kpi: tour_length, direction: lower}

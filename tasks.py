@@ -61,7 +61,7 @@ def lint():
     """Undefined names, unused imports and variables, syntax errors: the rules
     that only ever find mistakes. Style is not checked, on purpose -- adopting a
     formatter is a decision for the whole repository, not for a drive-by."""
-    paths = [p for p in ("evolvekit", "tests", "examples", "benchmarks", "tasks.py") if (ROOT / p).exists()]
+    paths = [p for p in ("evolvekit", "tests", "examples", "benchmarks", "harnesses", "tasks.py") if (ROOT / p).exists()]
     return subprocess.call(
         [sys.executable, "-m", "ruff", "check", "--select", "F,E9", *paths], cwd=str(ROOT)
     )
