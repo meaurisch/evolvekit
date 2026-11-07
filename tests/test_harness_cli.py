@@ -63,7 +63,7 @@ def test_new_copies_the_closest_harness_by_id(tmp_path):
 def test_a_new_harness_needs_an_empty_folder(tmp_path, capsys):
     (tmp_path / "busy").mkdir()
     (tmp_path / "busy" / "x.txt").write_text("x")
-    assert main(["harness", "new", str(tmp_path / "busy")]) == 1
+    assert main(["harness", "new", str(tmp_path / "busy")]) == 2
     assert "must be new or empty" in capsys.readouterr().err
 
 
@@ -119,7 +119,7 @@ def test_a_study_that_is_not_ready_says_what_is_missing(tmp_path, capsys):
     folder = tmp_path / "study"
     main(["study", "new", "Tour", "--harness", str(DEMO), "--dir", str(folder)])
     capsys.readouterr()
-    assert main(["study", "compile", str(folder)]) == 1
+    assert main(["study", "compile", str(folder)]) == 2
     assert "error: application: say where the application is" in capsys.readouterr().err
 
 
