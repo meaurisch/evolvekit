@@ -88,7 +88,9 @@ def test_the_final_check_says_what_to_do():
     assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of 1 in 20 or less of a gain "
                              "(likely between 1.0 % and 8.0 % worse).")
     assert worse["advice"] == "Keep today's settings: the new settings did worse on cases the search never saw."
-    assert words(None, 2.0)["advice"].startswith("Keep today's settings: one held-back case is too few")
+    single = words(None, 2.0)
+    assert single["line"] == "Not proven, one held-back case: 2.0 % lower real cost.", "the decision first"
+    assert single["advice"].startswith("Keep today's settings: one held-back case is too few cases to tell")
     assert words([-1.0, 2.0], 0.5, what="data changes")["advice"].startswith("Keep today's data")
     assert words([-1.0, 2.0], 0.5, baseline="PyVRP's own defaults")["advice"] == \
         "Keep today's settings (PyVRP's own defaults) for now: the gain is not proven.", "named, when it is known"

@@ -8,6 +8,7 @@ improvement. It generates no sentence of interpretation."""
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -81,10 +82,12 @@ def _table(head: list[str], rows: list[list[Any]]) -> list[str]:
 _OUTCOME = {"better": "toward the goal", "worse": "away from the goal", "same": "the same", "failed": "did not finish"}
 
 
-def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None) -> str:
+def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None,
+                  root: Path | str | None = None) -> str:
     """The report as Markdown: the verdict, the held-back cases, what changed,
     how it ran, the rule and the files. `results` (the page's document) adds
-    the study's name and the application."""
+    the study's name and the application; `root`, the study folder, says
+    where the files' paths start."""
     results = results or {}
     measure = verdict.get("measure") or {}
     direction = measure.get("direction") or "lower"
@@ -144,7 +147,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
             ran.append(f"{label}: {value}")
     out += ["", "## How it ran", ""] + [f"- {line}" for line in ran]
 
-    out += ["", "## Files", ""]
+    # The paths stay relative to the study folder; the section's first line says which folder that is.
+    out += ["", "## Files" + (f", in the study folder {Path(root).resolve()}" if root is not None else ""), ""]
     files = verdict.get("files") or []
     out += [f"- {path}" for path in files] if files else ["No files yet."]
     return "\n".join(out) + "\n"

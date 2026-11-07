@@ -593,6 +593,56 @@ def test_wait_ticks_the_queue(tmp_path, monkeypatch, capsys):
     assert not (run_dir / "queued.json").exists()
 
 
+def test_wait_shows_the_state_line_as_it_changes(tmp_path, monkeypatch, capsys):
+    """For people, `wait` says on stderr what `watch` says, once per change, so a long wait is not a hang;
+    stdout stays the answer at the end."""
+    from evolvekit import cli
+    from evolvekit.app import AppError, jobs, verdict
+
+    _new(tmp_path)
+    _queued(tmp_path, "depot-a")
+    phases = iter(["queued", "search", "search", "search", "check", "stopped"])
+    lines = {"queued": "queued", "search": "running · round 1 of 2", "check": "running · final check",
+             "stopped": "stopped"}
+    current = {"phase": "queued"}
+
+    def phase(_run_dir):
+        current["phase"] = next(phases, "stopped")
+        return {"phase": current["phase"]}
+
+    def no_verdict(*_args, **_kwargs):
+        raise AppError("no final check", 404)
+
+    monkeypatch.setattr(jobs, "launch_queued", lambda home: None)
+    monkeypatch.setattr(jobs, "phase", phase)
+    monkeypatch.setattr(jobs, "run_line", lambda root, study, run_dir, document_of=None: {"line": lines[current["phase"]]})
+    monkeypatch.setattr(verdict, "build_verdict", no_verdict)
+    monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
+    capsys.readouterr()
+    assert main(["study", "wait", "depot-a", "--timeout", "5", "--home", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == ["queued", "running · round 1 of 2", "running · final check"], captured.err
+    assert captured.out == "stopped\n"
+
+
+def test_wait_json_shows_no_progress(tmp_path, monkeypatch, capsys):
+    from evolvekit import cli
+    from evolvekit.app import AppError, jobs, verdict
+
+    _new(tmp_path)
+    _queued(tmp_path, "depot-a")
+    phases = iter(["search", "check", "stopped"])
+    monkeypatch.setattr(jobs, "launch_queued", lambda home: None)
+    monkeypatch.setattr(jobs, "phase", lambda _d: {"phase": next(phases, "stopped")})
+    monkeypatch.setattr(jobs, "run_line", lambda *a, **k: {"line": "a state line"})
+    monkeypatch.setattr(verdict, "build_verdict", lambda *a, **k: (_ for _ in ()).throw(AppError("none", 404)))
+    monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
+    capsys.readouterr()
+    assert main(["study", "wait", "depot-a", "--json", "--timeout", "5", "--home", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == "" and json.loads(captured.out)["phase"] == "stopped"
+
+
 def test_a_fault_in_the_queue_does_not_end_wait(tmp_path, monkeypatch, capsys):
     from evolvekit import cli
     from evolvekit.app import jobs

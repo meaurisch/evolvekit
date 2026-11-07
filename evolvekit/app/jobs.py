@@ -1456,7 +1456,8 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         final = job.get("final") or {}
         if final.get("skipped"):
             reason = str(final["skipped"]).split(":")[0].split(",")[0]  # "the starting point stayed the best"
-            return {"kind": "finished", "run": run_dir.name, "line": f"finished · {reason}", **facts, "decision": "skipped"}
+            return _with_verdict(root, run_dir, document_of, {"kind": "finished", "run": run_dir.name,
+                                                              "line": f"finished · {reason}", **facts, "decision": "skipped"})
         comparison = _read(run_dir / final["comparison"]) if final.get("comparison") else None
         summary = (((comparison or {}).get("per_candidate") or {}).get(final.get("candidate") or "") or {}).get("summary") or {}
         mean = summary.get("mean")
@@ -1466,15 +1467,34 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
                       "n": int(summary.get("n") or 0)})
         if decision == "use":
             amount = f": {_pct(mean)} {_better_word(goal['direction'])} {goal['says']}" if isinstance(mean, (int, float)) else ""
-            return {"kind": "finished", "run": run_dir.name, "line": "finished · probably better" + amount, **facts}
-        if decision == "worse":
-            return {"kind": "finished", "tone": "bad", "run": run_dir.name, "line": "finished · worse on the held-back cases", **facts}
-        return {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not proven on the held-back cases", **facts}
+            card = {"kind": "finished", "run": run_dir.name, "line": "finished · probably better" + amount, **facts}
+        elif decision == "worse":
+            card = {"kind": "finished", "tone": "bad", "run": run_dir.name, "line": "finished · worse on the held-back cases", **facts}
+        else:
+            card = {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not proven on the held-back cases", **facts}
+        return _with_verdict(root, run_dir, document_of, card)
     if state == "stopped":
         return {"kind": "stopped", "run": run_dir.name, "line": "stopped", **facts,
                 "check_stopped": bool((job.get("final") or {}).get("stopped"))}
     return {"kind": "failed", "run": run_dir.name, "line": "failed · " + str(job.get("error") or "see the run")[:80], **facts,
             "error": str(job.get("error") or "")}
+
+
+def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, card: dict[str, Any]) -> dict[str, Any]:
+    """A finished card with the verdict's own words beside it (design 3.4): `verdict` holds the
+    document's `decision`, `line` and `advice`, and `says`, the decision in the state line's words
+    ("not proven on the held-back cases", "probably better"). Only with `document_of`, as the card
+    asks for it: a list of runs need not pay for a verdict per run; a run whose verdict cannot be
+    read keeps its card without one."""
+    if document_of is None:
+        return card
+    try:
+        document = verdict_doc.build_verdict(root, run_dir.name)
+    except Exception:  # noqa: BLE001 - a card must render even for a damaged run
+        return card
+    says = str(card["line"]).removeprefix("finished · ").split(":")[0]
+    return {**card, "verdict": {"decision": document.get("decision"), "line": document.get("line", ""),
+                                "advice": document.get("advice", ""), "says": says}}
 
 
 def next_study(home: Any, root: Path, run: str, name: str = "") -> str:

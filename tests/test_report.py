@@ -31,7 +31,7 @@ def _home(root):
 
 
 def _text(root):
-    return render_report(build_verdict(root, RUN), jobs.results(root, RUN, build_status))
+    return render_report(build_verdict(root, RUN), jobs.results(root, RUN, build_status), root=root)
 
 
 def test_report_markdown_sections(use_run):
@@ -53,7 +53,8 @@ def test_report_never_says_better_without_use(keep_run):
     root, _ = keep_run
     v = build_verdict(root, RUN)
     assert "better" in v["line"]
-    assert _text(root).count("better") == v["line"].count("better") + v["advice"].count("better")
+    text = _text(root).replace(str(root.resolve()), "<study folder>")  # a path, not a claim (pytest names it after the test)
+    assert text.count("better") == v["line"].count("better") + v["advice"].count("better")
 
 
 def test_report_numbers_use_the_verdict_wording(use_run):
@@ -128,6 +129,18 @@ def test_report_markdown_cli(use_run, capsys):
     import json
 
     assert json.loads(capsys.readouterr().out) == build_verdict(root, RUN)
+
+
+def test_report_files_say_which_folder_they_are_in(use_run):
+    """The paths stay relative; the section's first line names the study folder they are relative to."""
+    root, _ = use_run
+    downloads = root / "runs" / RUN / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    (downloads / "settings.json").write_text("{}", encoding="utf-8")
+    text = _text(root)
+    section = text[text.index("\n## Files") + 1:]
+    assert section.splitlines()[0] == f"## Files, in the study folder {root.resolve()}", section
+    assert f"- runs/{RUN}/downloads/settings.json" in section, "the paths stay relative to the study folder"
 
 
 def test_numbers_are_written_as_people_write_them():

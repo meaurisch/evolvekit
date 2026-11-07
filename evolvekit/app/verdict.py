@@ -164,9 +164,12 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                 "advice": f"{keep} for now: the gain is not proven."}
     word = better if mean >= 0 else worse
     if ci is None or decision == "single":
+        # The decision first, as every other line leads with its word; the runs were all on that one case.
+        on_it = f" (the {seeds} runs were all on it)" if seeds > 1 else ""
         return {**base, "state": "single",
-                "line": f"On the one held-back case: {_pct(mean)} {word} {goal['says']}.",
-                "advice": f"{keep}: one held-back case is too few to tell; a study that holds back three or more can."}
+                "line": f"Not proven, one held-back case: {_pct(mean)} {word} {goal['says']}.",
+                "advice": f"{keep}: one held-back case is too few cases to tell{on_it}; "
+                          "a study that holds back three or more can."}
     low, high = ci
     words = _chance_words(chance)
     sure = words == "almost certain"

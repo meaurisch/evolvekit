@@ -159,8 +159,28 @@ def test_verdict_none_when_start_stayed_best(run_of):
 
 
 def test_verdict_single_case(run_of):
+    """The decision first, as every other decision leads with its word; the advice says why."""
     v = build_verdict(*run_of("single"))
-    assert v["decision"] == "single" and v["line"].startswith("On the one held-back case")
+    assert v["decision"] == "single" and v["line"].startswith("Not proven, one held-back case: ")
+    assert v["line"].endswith(" lower tour length."), v["line"]
+    assert "one held-back case is too few cases to tell" in v["advice"]
+
+
+@pytest.mark.parametrize("decision", ["use", "keep", "worse", "single", "skipped", "none"])
+def test_home_card_carries_the_verdict_line_and_advice(decision, run_of):
+    """One world: the Home card's figure line and second line are the verdict's
+    own, and its label is the state line's words, never "better" unless the
+    verdict's line says so."""
+    root, run = run_of(decision)
+    v = build_verdict(root, run)
+    card = jobs.run_line(root, None, root / "runs" / run, document_of)
+    assert card["verdict"]["line"] == v["line"] and card["verdict"]["advice"] == v["advice"]
+    assert card["verdict"]["decision"] == v["decision"]
+    says = card["verdict"]["says"]
+    assert card["line"].startswith("finished · " + says), (card["line"], says)
+    if "better" not in v["line"].lower():
+        assert "better" not in says
+    assert jobs.run_line(root, None, root / "runs" / run).get("verdict") is None, "a list of runs does not pay for it"
 
 
 def test_verdict_levels_mark_the_deciding_level(use_run):

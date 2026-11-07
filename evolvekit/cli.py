@@ -1168,7 +1168,7 @@ def _verdict_command(command: str, args: argparse.Namespace) -> int:
         else:
             _say_verdict(document)
     elif args.markdown:
-        print(render_report(document, jobs.results(root, document["run"], build_status)), end="")
+        print(render_report(document, jobs.results(root, document["run"], build_status), root=root), end="")
     else:
         print(json.dumps(document))
     return 0
@@ -1176,8 +1176,9 @@ def _verdict_command(command: str, args: argparse.Namespace) -> int:
 
 def _wait(home, slug: str, timeout: float | None, as_json: bool, args: argparse.Namespace | None = None) -> int:
     """`study wait`: until the latest run has ended -- 0 done (the verdict),
-    1 stopped or failed, 4 when `timeout` seconds pass first. With `args`, a
-    run that is done says the next step on stderr."""
+    1 stopped or failed, 4 when `timeout` seconds pass first. For people (not
+    `as_json`), the state line on stderr whenever it changes, as `study watch`
+    prints it. With `args`, a run that is done says the next step on stderr."""
     from evolvekit.app import jobs
     from evolvekit.app.verdict import build_verdict
 
@@ -1185,6 +1186,7 @@ def _wait(home, slug: str, timeout: float | None, as_json: bool, args: argparse.
     run = _run_of(root)
     run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the one check of a run's name
     deadline = None if timeout is None else time.monotonic() + timeout
+    said = None
     try:
         while True:
             _tick_queue(home)
@@ -1193,6 +1195,12 @@ def _wait(home, slug: str, timeout: float | None, as_json: bool, args: argparse.
                 break
             if _gone(run_dir, state):
                 return _say_gone(run)
+            if not as_json:
+                # What `study watch` prints, on stderr and once per change: a long wait is not a hang.
+                line = jobs.run_line(root, study, run_dir, build_status)["line"]
+                if line != said:
+                    print(line, file=sys.stderr, flush=True)
+                    said = line
             if deadline is not None and time.monotonic() >= deadline:
                 print(f"run {run} is still {state} after {timeout:g} s; it goes on "
                       f"(evolvekit study wait {slug} waits again)", file=sys.stderr)

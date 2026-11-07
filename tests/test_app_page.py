@@ -208,6 +208,19 @@ def test_the_study_page_headline_is_the_verdict_line_and_advice():
         assert old not in finished, f"the page composes its own verdict again: {old!r}"
 
 
+def test_the_home_card_speaks_the_verdicts_words():
+    """One world: a finished card's lines are the verdict's `line` and `advice`
+    (the home document's `verdict`), its label the state line's words; the card
+    composes no verdict of its own."""
+    words = (STATIC / "js" / "words.js").read_text(encoding="utf-8")
+    card = words[words.index("EK.cardOf = function"):]
+    finished = card[card.index('s.kind === "finished"'):card.index('s.kind === "stopped"')]
+    assert "v.line" in finished and "v.advice" in finished and "v.says" in finished, finished
+    assert "s.verdict" in finished
+    for old in ("EK.answerWords", "EK.verdictWord", "EK.better", "on one case", "No answer"):
+        assert old not in finished, f"the card composes its own verdict again: {old!r}"
+
+
 def test_no_figure_on_the_study_page_says_better():
     """The same number, one way: one decimal, "lower"/"higher" by the measure's
     direction, in the chip and the held-back table; "better" only inside the line."""
