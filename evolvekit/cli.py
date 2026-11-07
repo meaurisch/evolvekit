@@ -461,6 +461,10 @@ def build_parser() -> argparse.ArgumentParser:
     form = s_report.add_mutually_exclusive_group()
     form.add_argument("--markdown", action="store_true", help="the report as Markdown")
     form.add_argument("--json", action="store_true", help="the verdict document (the default)")
+    s_open = study.add_parser("open", help="print the study's address in the app (starting the app if none runs) and open it")
+    s_open.add_argument("slug", help="the study's name in the library home")
+    s_open.add_argument("--no-browser", action="store_true", help="only print the address")
+    s_open.add_argument("--home", help=home_help)
     for name, text in (("preview", "solve the smallest training case at the starting values"),
                        ("compile", "compile the study into runs/<id>/evolvekit.yaml, with the automatic plan"),
                        ("run", "compile, search, and check the best on the held-back cases")):
@@ -983,6 +987,45 @@ def _say_verdict(document: dict) -> None:
         print(document["advice"])
 
 
+OPEN_WAIT_S = 15.0
+"""How long `study open` waits for an app it started to say it is running."""
+APP_LOG = "app.log"
+"""Where the output of an app that `study open` started goes, in the home."""
+
+
+def _study_open(args: argparse.Namespace) -> int:
+    """Print the study's address in the running app -- starting the app,
+    detached, when none runs -- and open it unless `--no-browser`."""
+    import subprocess
+
+    from evolvekit.app import detach
+    from evolvekit.app.running import read_running
+    from evolvekit.dashboard import open_in_browser
+
+    home = _home(args)
+    home.study_root(args.slug)  # no app is started for a study that is not there
+    running = read_running(home.root)
+    if running is None:
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        argv = [sys.executable, "-m", "evolvekit", "app", "--home", str(home.root), "--no-browser"]
+        try:
+            detach.spawn_detached(argv, cwd=home.root, env=env, log=home.root / APP_LOG)
+        except (detach.DetachError, subprocess.TimeoutExpired):
+            pass  # the wait below says so
+        deadline = time.monotonic() + OPEN_WAIT_S
+        while running is None and time.monotonic() < deadline:
+            time.sleep(0.2)
+            running = read_running(home.root)
+        if running is None:
+            print("the app did not start; run `evolvekit app` and look at its output", file=sys.stderr)
+            return 1
+    url = f"{running['url']}#/study/{args.slug}"
+    print(url, flush=True)
+    if not args.no_browser:
+        open_in_browser(url)
+    return 0
+
+
 def _verdict_command(command: str, args: argparse.Namespace) -> int:
     """`study verdict` and `study report`: from the verdict document."""
     from evolvekit.app import jobs
@@ -1156,6 +1199,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _study_run_command(command, args)
     if command in ("verdict", "report"):
         return _verdict_command(command, args)
+    if command == "open":
+        return _study_open(args)
     folder = _study_root(args.directory, args)
     if command == "preview":
         result = execute.preview(folder)

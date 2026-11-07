@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import secrets
 import sys
@@ -39,6 +40,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
 
 from evolvekit.app import AppError
+from evolvekit.app.running import clear_running, write_running
 from evolvekit.app.store import MAX_UPLOAD, Home
 
 __all__ = ["AppServer", "DEFAULT_PORT", "FileResponse", "PAGE", "Request"]
@@ -350,6 +352,9 @@ class AppServer:
         self.lock = threading.Lock()
         self._status_cache: dict[str, tuple[RunStamp, Any]] = {}
         self._server = self._bind(host, port)
+        # The app says it is running, so `study open` can find it: the file
+        # carries this launch's key, beside the home's .env (design §3.3).
+        write_running(self.home.root, pid=os.getpid(), port=self.port, url=self.url_with_token, host=host)
         self._thread: threading.Thread | None = None
         self._ticker: threading.Thread | None = None
         self._stopping = threading.Event()
@@ -436,6 +441,7 @@ class AppServer:
             self._thread.join(timeout=5)
             self._thread = None
         self._server.server_close()
+        clear_running(self.home.root, pid=os.getpid())
 
 
 def route(method: str, pattern: str) -> Callable[[Callable[[Request], Any]], tuple[str, re.Pattern[str], Callable[[Request], Any]]]:

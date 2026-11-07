@@ -442,3 +442,17 @@ def test_a_removed_case_can_be_restored(app):
     restored = next(c for c in document["cases"] if c["name"] == "town-40.json")
     assert restored["inspected"]["ok"] is True
     assert call(app, "POST", "/api/studies/cases/cases/town-40.json/restore")[0] == 404
+
+
+def test_app_writes_and_clears_running_file(tmp_path):
+    from evolvekit.app.running import read_running
+
+    home = tmp_path / "home"
+    server = AppServer(home, port=0)
+    try:
+        doc = read_running(home)
+        assert doc is not None
+        assert doc["port"] == server.port and doc["url"] == server.url_with_token
+    finally:
+        server.stop()
+    assert read_running(home) is None

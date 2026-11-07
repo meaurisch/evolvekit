@@ -20,7 +20,6 @@ import re
 import shutil
 import socket
 import sqlite3
-import subprocess
 import sys
 import threading
 import zipfile
@@ -29,7 +28,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Callable
 
-from evolvekit.app import AppError
+from evolvekit.app import AppError, detach
 from evolvekit.app.prices import price_of
 from evolvekit.app.store import safe_relative
 from evolvekit.app import verdict as verdict_doc
@@ -75,8 +74,6 @@ REPORTS_COST = ("openrouter", "claude-cli", "copilot-cli")
 help holds without a price in the table. `copilot-cli` counts Copilot
 requests, not dollars, and reports 0.0: the cap holds trivially."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
-_DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
-_BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
 DocumentOf = Callable[[Path], Any]
 _launch_guard = threading.Lock()
 """Held from the question "is anything active?" to the launch that answers
@@ -303,28 +300,11 @@ def _cap_holds(home: Any, study: Study) -> None:
                    "so the cap cannot hold: add its price under Settings › Models, or turn AI help off", 409)
 
 
-_LAUNCHER = r"""
-import json, os, subprocess, sys
-argv, cwd, log = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
-with open(log, "ab") as out:
-    options = dict(cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True)
-    if os.name == "nt":
-        try:
-            process = subprocess.Popen(argv, creationflags=%d, **options)
-        except OSError:
-            process = subprocess.Popen(argv, creationflags=%d, **options)
-    else:
-        process = subprocess.Popen(argv, start_new_session=True, **options)
-print(process.pid)
-""" % (_DETACHED | _BREAKAWAY, _DETACHED)
-
-
 def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys: bool) -> int:
-    """Start the run so that nothing that ends the app ends the run: through a
-    launcher that exits at once, so the run is nobody's child -- a host that
-    kills the app's process tree (a terminal, an IDE) does not reach it --
-    detached from any console, in a process group (or session) of its own,
-    and outside the app's job object where Windows allows that.
+    """Start the run so that nothing that ends the app ends the run, through
+    `detach.spawn_detached`: nobody's child, detached from any console, in a
+    process group (or session) of its own, outside the app's job object where
+    Windows allows that.
 
     The run's environment is the app's without its secrets (the app carries
     the API keys for its assistant), plus the keys the app keeps when
@@ -372,13 +352,10 @@ def _mark_pending(run_dir: Path, *, exclusive: bool = False) -> bool:
 
 def _spawn(env: dict[str, str], argv: list[str], root: Path, run_dir: Path) -> int:
     """The launcher, run to its end: the pid of the detached run it started."""
-    done = subprocess.run([sys.executable, "-c", _LAUNCHER, json.dumps(argv), str(root), str(run_dir / LOG)],
-                          env=env, capture_output=True, text=True, timeout=60)
     try:
-        return int(done.stdout.strip().splitlines()[-1])
-    except (IndexError, ValueError):
-        said = (done.stderr.strip().splitlines() or ["no message"])[-1]
-        raise AppError(f"the run could not be started: {said}", 500) from None
+        return detach.spawn_detached(argv, cwd=root, env=env, log=run_dir / LOG)
+    except detach.DetachError as exc:
+        raise AppError(f"the run could not be started: {exc}", 500) from None
 
 
 def _record_launch(run_dir: Path, pid: int, argv: list[str]) -> None:

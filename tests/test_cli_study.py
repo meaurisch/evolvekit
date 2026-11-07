@@ -510,3 +510,67 @@ def test_status_json_equals_api_document(app, finished_study, capsys):
     assert status == 200 and mine == theirs
     assert main(["study", "status", finished_study, "--home", str(app.home.root)]) == 0
     assert capsys.readouterr().out.strip().startswith("finished")
+
+
+def test_open_prints_study_url_of_running_app(app, capsys):
+    home = app.home.root
+    _new(home)
+    capsys.readouterr()
+    assert main(["study", "open", "depot-a", "--no-browser", "--home", str(home)]) == 0
+    assert capsys.readouterr().out == app.url_with_token + "#/study/depot-a\n"
+
+
+def test_open_starts_an_app_when_none_runs(tmp_path, monkeypatch, capsys):
+    import threading
+
+    from evolvekit.app import detach
+    from evolvekit.app.server import AppServer
+
+    home = tmp_path / "home"
+    _new(home)
+    capsys.readouterr()
+    calls, servers = [], []
+
+    def start_app(argv, **kwargs):
+        calls.append(list(argv))
+
+        def serve():
+            server = AppServer(home, port=0)  # writes app.json
+            servers.append(server)
+            server.start()
+
+        threading.Thread(target=serve, daemon=True).start()
+        return 4242
+
+    monkeypatch.setattr(detach, "spawn_detached", start_app)
+    try:
+        assert main(["study", "open", "depot-a", "--no-browser", "--home", str(home)]) == 0
+        assert len(calls) == 1 and calls[0][-4:] == ["app", "--home", str(home), "--no-browser"]
+        assert capsys.readouterr().out == servers[0].url_with_token + "#/study/depot-a\n"
+    finally:
+        for server in servers:
+            server.stop()
+
+
+def test_open_times_out_with_a_sentence(tmp_path, monkeypatch, capsys):
+    from evolvekit import cli
+    from evolvekit.app import detach
+
+    home = tmp_path / "home"
+    _new(home)
+    capsys.readouterr()
+    monkeypatch.setattr(detach, "spawn_detached", lambda argv, **kwargs: 4242)
+    monkeypatch.setattr(cli, "OPEN_WAIT_S", 1.0)
+    assert main(["study", "open", "depot-a", "--no-browser", "--home", str(home)]) == 1
+    assert "the app did not start; run `evolvekit app` and look at its output" in capsys.readouterr().err
+
+
+def test_open_refuses_a_study_that_is_not_there(tmp_path, monkeypatch, capsys):
+    from evolvekit.app import detach
+
+    def never(argv, **kwargs):
+        raise AssertionError("no app is started for a study that is not there")
+
+    monkeypatch.setattr(detach, "spawn_detached", never)
+    assert main(["study", "open", "nope", "--no-browser", "--home", str(tmp_path / "home")]) == 1
+    assert "there is no study" in capsys.readouterr().err

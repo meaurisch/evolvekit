@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from evolvekit.app import jobs
+from evolvekit.app import detach, jobs
 from evolvekit.app.server import AppServer
 from evolvekit.events import utc_now
 from test_app_server import call
@@ -503,7 +503,7 @@ def test_a_run_gets_the_api_keys_only_when_ai_help_is_on(tmp_path, monkeypatch):
         seen.append(kwargs["env"])
         return type("Done", (), {"stdout": "4242\n", "stderr": ""})()
 
-    monkeypatch.setattr(jobs.subprocess, "run", fake_run)
+    monkeypatch.setattr(detach.subprocess, "run", fake_run)  # the launcher runs in detach.spawn_detached
     jobs._launch(home, run_dir.parent.parent, run_dir, [], with_keys=False)
     jobs._launch(home, run_dir.parent.parent, run_dir, [], with_keys=True)
     assert "OPENROUTER_API_KEY" not in seen[0] and "OTHER_SECRET" not in seen[0]
