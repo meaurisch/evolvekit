@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
-    "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError",
+    "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError",
     "changed_files", "diff_between", "diff_stat", "git_version", "materialise", "normalise_diff", "remove",
     "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "touches_only", "tree_dir",
 ]
@@ -39,6 +39,7 @@ AUTHOR = ("evolvekit", "evolvekit@localhost")
 FIXED_DATE = "2000-01-01T00:00:00+0000"
 REMOVE_TRIES = 3
 REMOVE_WAIT_S = 1.0
+GIT_TIMEOUT_S = 300.0
 
 _MISSING = "git is not installed: code studies need git on PATH (git-scm.com)"
 # Inherited from a git hook (or a shell that set them), these would point every
@@ -46,12 +47,15 @@ _MISSING = "git is not installed: code studies need git on PATH (git-scm.com)"
 _LOCATING = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
              "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
 # evolvekit's own commits and checkouts: a fixed identity, no signing, none of the
-# repository's hooks (the folder named does not exist, so no hook is found).
+# repository's hooks (the folder named does not exist, so no hook is found), and
+# no background gc or maintenance started in the engineer's repository.
 _INTERNAL = ("-c", f"user.name={AUTHOR[0]}", "-c", f"user.email={AUTHOR[1]}", "-c", "commit.gpgsign=false",
-             "-c", "core.hooksPath=.evolvekit-no-hooks")
+             "-c", "core.hooksPath=.evolvekit-no-hooks", "-c", "gc.auto=0", "-c", "maintenance.auto=false")
+# Messages in English whatever the machine's language; never a prompt for credentials.
+_QUIET = {"LC_ALL": "C", "LANGUAGE": "C", "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
 # A diff `git apply` takes back whatever the engineer's diff settings say.
 _DIFF = ("--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative",
-         "--submodule=short", "--src-prefix=a/", "--dst-prefix=b/")
+         "--submodule=short", "--unified=3", "--src-prefix=a/", "--dst-prefix=b/")
 
 
 class TreeError(RuntimeError):
@@ -66,8 +70,9 @@ def _plain(line: str) -> str:
 
 
 def _git(cwd: Path | None, *args: str, identity: bool = False, env: Mapping[str, str] | None = None,
-         checkout_eol: bool = False) -> str:
-    """Run git and return its stdout as it is (no newline translation).
+         checkout_eol: bool = False, timeout: float | None = GIT_TIMEOUT_S) -> str:
+    """Run git and return its stdout as it is: no newline translation, and bytes that
+    are not UTF-8 kept as surrogates (`surrogateescape`), so a diff round-trips.
 
     `identity`: one of evolvekit's own commits or checkouts (fixed author and date,
     no hooks, no signing). `checkout_eol`: the call reads the engineer's own
@@ -78,7 +83,7 @@ def _git(cwd: Path | None, *args: str, identity: bool = False, env: Mapping[str,
         raise TreeError(f"{cwd}: no such folder")
     flags = GIT_FLAGS[2:] if checkout_eol else GIT_FLAGS
     full = {k: v for k, v in os.environ.items() if k not in _LOCATING}
-    full["GIT_TERMINAL_PROMPT"] = "0"
+    full.update(_QUIET)
     if identity:
         flags += _INTERNAL
         for role in ("AUTHOR", "COMMITTER"):
@@ -88,13 +93,17 @@ def _git(cwd: Path | None, *args: str, identity: bool = False, env: Mapping[str,
         full.update(env)
     try:
         done = subprocess.run(["git", *flags, *args], cwd=cwd, capture_output=True, env=full, check=False,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, timeout=timeout)
     except FileNotFoundError:
         raise TreeError(_MISSING) from None
+    except subprocess.TimeoutExpired:
+        words = [a for a in args if not a.startswith("-")]
+        command = " ".join(words[:2] if words[:1] == ["worktree"] else words[:1])
+        raise TreeError(f"git {command} did not finish in {timeout:g} s") from None
     if done.returncode:
         lines = done.stderr.decode("utf-8", errors="replace").strip().splitlines()
         raise TreeError(_plain(lines[-1].strip()) if lines else f"git {args[0]} stopped with exit code {done.returncode}")
-    return done.stdout.decode("utf-8", errors="replace")
+    return done.stdout.decode("utf-8", errors="surrogateescape")
 
 
 class Repo:
@@ -108,9 +117,10 @@ class Repo:
         try:
             out = _git(self.path, "rev-parse", "--show-toplevel", "--show-prefix")
         except TreeError as exc:
-            if "not a git repository" in str(exc):
-                raise TreeError(f"{self.path} is not inside a git repository") from None
-            raise
+            if str(exc) == _MISSING:
+                raise
+            reason = "" if "not a git repository" in str(exc) else f" ({exc})"
+            raise TreeError(f"{self.path} is not inside a git repository{reason}") from None
         lines = out.split("\n")
         self.toplevel = Path(lines[0].strip()).resolve()
         self.prefix = lines[1].rstrip("\r") if len(lines) > 1 else ""
@@ -183,17 +193,21 @@ def materialise(run_dir: Path, *, repo: Repo, base: str, diff: str, candidate_id
     The same change on the same base is the same commit (fixed author and date).
     A diff that does not apply raises `TreeError` and leaves no tree behind.
     """
-    worktree = tree_dir(run_dir, candidate_id)
-    if worktree.exists() and not remove(run_dir, candidate_id):  # a crashed earlier attempt
+    worktree, note = tree_dir(run_dir, candidate_id), _note(run_dir, candidate_id)
+    if (worktree.exists() or note.exists()) and not remove(run_dir, candidate_id):  # a crashed earlier attempt
         raise TreeError(f"{worktree} is still in use by another program; close it and try again")
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    # --force: the folder is gone, but a tree deleted without a prune may still be registered.
+    # --force: the folder is gone, but a tree deleted by hand may still be registered.
     _git(repo.toplevel, "worktree", "add", "--detach", "--force", "--quiet", os.path.abspath(worktree), base,
          identity=True)
+    entry = _entry_of(worktree)
+    if entry is not None:  # so `remove` can delete this entry, and only this one
+        note.write_text(str(entry), encoding="utf-8")
     path = worktree / repo.prefix if repo.prefix else worktree
     if diff.strip():
         patch = worktree.parent / f"{candidate_id}.patch"
-        patch.write_text(diff if diff.endswith("\n") else diff + "\n", encoding="utf-8", newline="\n")
+        patch.write_text(diff if diff.endswith("\n") else diff + "\n", encoding="utf-8",
+                         errors="surrogateescape", newline="\n")
         try:
             _git(worktree, "apply", "--index", "--whitespace=nowarn", "--recount", os.path.abspath(patch))
             _git(worktree, "commit", "--quiet", "--no-verify", "-m", f"evolvekit candidate {candidate_id}",
@@ -225,41 +239,72 @@ def _rmtree(path: str) -> None:
         shutil.rmtree(path, onerror=writable)
 
 
-def _common_dir(worktree: Path) -> Path | None:
-    """The repository a worktree belongs to, from its `.git` file."""
+def _note(run_dir: Path, candidate_id: str) -> Path:
+    """Beside a tree: the path of its entry in the repository (`<common>/worktrees/<name>`)."""
+    return tree_dir(run_dir, candidate_id).parent / f"{candidate_id}.gitdir"
+
+
+def _entry_of(worktree: Path) -> Path | None:
+    """A worktree's entry in its repository, from its `.git` file."""
     try:
         line = (worktree / ".git").read_text(encoding="utf-8").strip()
-        if not line.startswith("gitdir:"):
-            return None
-        entry = Path(line[len("gitdir:"):].strip())
-        entry = entry if entry.is_absolute() else worktree / entry
-        common = entry / (entry / "commondir").read_text(encoding="utf-8").strip()
     except OSError:
         return None
-    return Path(os.path.abspath(common))
+    if not line.startswith("gitdir:"):
+        return None
+    entry = Path(line[len("gitdir:"):].strip())
+    return Path(os.path.abspath(entry if entry.is_absolute() else worktree / entry))
+
+
+def _same(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _drop_entry(entry: Path, worktree: Path) -> None:
+    """Delete evolvekit's own entry, and only when it still names this tree.
+
+    This is what `git worktree prune` does for one entry; prune itself would also
+    drop the engineer's entries whose folders are missing (an unplugged drive).
+    """
+    try:
+        named = Path((entry / "gitdir").read_text(encoding="utf-8").strip())
+    except OSError:
+        return  # gone already, or not a worktree entry: nothing of ours to delete
+    if _same(named if named.is_absolute() else entry / named, worktree / ".git"):
+        _rmtree(_long(entry))
 
 
 def remove(run_dir: Path, candidate_id: str) -> bool:
-    """Delete a candidate's tree. False when it is still held open: the folder is kept."""
-    worktree = tree_dir(run_dir, candidate_id)
-    if not worktree.exists():
+    """Delete a candidate's tree and its entry in the repository.
+
+    False when the tree is still held open: the folder is kept, and a later call
+    finishes the job. The repository's other worktree entries are never touched.
+    """
+    worktree, note = tree_dir(run_dir, candidate_id), _note(run_dir, candidate_id)
+    if not worktree.exists() and not note.exists():
         return True
-    common = _common_dir(worktree)
-    for attempt in range(REMOVE_TRIES):
+    try:
+        entry: Path | None = Path(note.read_text(encoding="utf-8").strip())
+    except OSError:
+        entry = _entry_of(worktree)
+    attempt = 0
+    while worktree.exists():
         try:
             _rmtree(_long(worktree))
         except OSError:
             pass
-        if not worktree.exists():
-            if common is not None:
-                try:
-                    _git(common, "--git-dir", str(common), "worktree", "prune")
-                except TreeError:
-                    pass  # the folder is gone; a later prune clears the entry
-            return True
-        if attempt < REMOVE_TRIES - 1:
+        attempt += 1
+        if worktree.exists():
+            if attempt >= REMOVE_TRIES:
+                return False
             time.sleep(REMOVE_WAIT_S)
-    return False
+    if entry is not None:
+        try:
+            _drop_entry(entry, worktree)
+        except OSError:
+            return True  # the tree is gone; the note stays, so the next call deletes the entry
+    note.unlink(missing_ok=True)
+    return True
 
 
 def remove_all(run_dir: Path, *, keep: Collection[str] = ()) -> list[str]:
@@ -267,8 +312,9 @@ def remove_all(run_dir: Path, *, keep: Collection[str] = ()) -> list[str]:
     root = tree_dir(run_dir, "-").parent
     if not root.is_dir():
         return []
-    return [entry.name for entry in sorted(root.iterdir())
-            if entry.is_dir() and entry.name not in keep and remove(run_dir, entry.name)]
+    ids = {entry.name for entry in root.iterdir() if entry.is_dir()}
+    ids |= {entry.name.removesuffix(".gitdir") for entry in root.glob("*.gitdir") if entry.is_file()}
+    return [name for name in sorted(ids) if name not in keep and remove(run_dir, name)]
 
 
 def diff_between(repo: Repo, base: str, ref: str) -> str:
@@ -419,10 +465,14 @@ def _glob(pattern: str) -> re.Pattern[str]:
 
 
 def touches_only(diff: str, open: Sequence[str], *, prefix: str) -> list[str]:
-    """The changed files outside `open` (globs relative to `prefix`), toplevel-relative."""
+    """The changed files outside `open` (globs relative to `prefix`), toplevel-relative.
+
+    A path with a `..` part is always outside, whatever it would match.
+    """
     patterns = [_glob(p) for p in open]
     return [name for name in changed_files(diff)
-            if not (name.startswith(prefix) and any(p.fullmatch(name[len(prefix):]) for p in patterns))]
+            if ".." in name.replace("\\", "/").split("/")
+            or not (name.startswith(prefix) and any(p.fullmatch(name[len(prefix):]) for p in patterns))]
 
 
 def diff_stat(diff: str) -> dict[str, Any]:
@@ -456,6 +506,10 @@ def normalise_diff(diff: str) -> str:
     group: list[str] = []
     anchor: int | None = None
     old, minus, path = 0, "", ""
+    # A `diff --git` header's path, held until a `---`/`+++` pair names the file
+    # instead; a binary patch or a pure rename has none, and is then named by it.
+    pending: str | None = None
+    held: list[str] = []
 
     def flush() -> None:
         nonlocal group, anchor
@@ -464,9 +518,17 @@ def normalise_diff(diff: str) -> str:
             out.extend(group)
         group, anchor = [], None
 
+    def release(named: bool) -> None:
+        nonlocal pending, held
+        if named and pending is not None:
+            out.append(pending)
+        out.extend(held)
+        pending, held = None, []
+
     for kind, text in _lines(diff):
         if kind == "@":
             flush()
+            release(True)
             old = int(_HUNK.match(text).group(1))
         elif kind in ("+", "-"):
             squeezed = _squeeze(text)
@@ -480,15 +542,25 @@ def normalise_diff(diff: str) -> str:
         else:
             flush()
             line = text.rstrip()
+            if line.startswith("diff --git "):
+                release(True)
+                paths = _header_paths(line[len("diff --git "):])
+                pending = f"F {paths[-1]}" if paths else None
+                path = paths[-1] if paths else path
+                continue
             if not line or line.startswith(_DROP):
                 continue
             if line.startswith("--- "):
+                release(False)
                 minus = _side(line[4:])
             elif line.startswith("+++ "):
                 plus = _side(line[4:])
                 path = minus if plus == "/dev/null" else plus
                 out.append(f"F {path}")
+            elif pending is not None:
+                held.append(line)
             else:
                 out.append(line)  # binary patches, new/deleted/rename lines: as they are
     flush()
+    release(True)
     return "\n".join(out) + ("\n" if out else "")

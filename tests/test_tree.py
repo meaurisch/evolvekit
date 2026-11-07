@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
-from tree_helpers import SOLVER, change, git, git_raw, head, make_repo
+from tree_helpers import SOLVER, change, diff_text, git, git_raw, head, make_repo
 
 from evolvekit import tree
 
@@ -67,8 +68,9 @@ def test_materialise_again_replaces_a_crashed_attempt(repo, tmp_path):
     (first.path / "left over.txt").write_text("from a crash\n", encoding="utf-8")
     again = tree.materialise(run_dir, repo=r, base=head(repo), diff=diff, candidate_id="g001-c0001")
     assert again == first and not (again.path / "left over.txt").exists()
-    shutil.rmtree(again.worktree)  # gone without a prune: git still lists it
+    shutil.rmtree(again.worktree)  # deleted by hand: git still lists it
     assert tree.materialise(run_dir, repo=r, base=head(repo), diff=diff, candidate_id="g001-c0001") == first
+    assert git(repo, "worktree", "list").count("g001-c0001") == 1, "the stale entry went with it"
 
 
 def test_materialise_skips_the_repositorys_hooks(repo, tmp_path):
@@ -97,6 +99,8 @@ def test_remove_retries_on_windows_lock(repo, tmp_path, monkeypatch):
     calls, real = [], shutil.rmtree
 
     def flaky(path, *args, **kwargs):
+        if "worktrees" in str(path):  # the tree's entry in the repository, deleted once the tree is gone
+            return real(path, *args, **kwargs)
         calls.append(path)
         if len(calls) < 3:
             raise PermissionError("The process cannot access the file because it is being used by another process")
@@ -122,10 +126,100 @@ def test_remove_all_keeps_what_it_is_told(repo, tmp_path):
     for name in ("g000-c0001", "g001-c0001", "g001-c0002"):
         tree.materialise(run_dir, repo=r, base=head(repo), diff="", candidate_id=name)
     assert tree.remove_all(run_dir, keep={"g001-c0001"}) == ["g000-c0001", "g001-c0002"]
-    assert [p.name for p in (run_dir / "work" / "trees").iterdir()] == ["g001-c0001"]
+    assert sorted(p.name for p in (run_dir / "work" / "trees").iterdir()) == ["g001-c0001", "g001-c0001.gitdir"]
     listed = git(repo, "worktree", "list")
     assert "g001-c0001" in listed and "g000-c0001" not in listed and "g001-c0002" not in listed
     assert tree.remove_all(tmp_path / "never ran") == []
+
+
+def _entries(repo):
+    return sorted(p.name for p in (repo / ".git" / "worktrees").iterdir())
+
+
+def test_remove_deletes_only_its_own_entry(repo, tmp_path):
+    git(repo, "worktree", "add", "-q", "--detach", str(tmp_path / "unplugged"), "HEAD")
+    shutil.rmtree(tmp_path / "unplugged")  # the engineer's tree on a drive that is not there now
+    assert _entries(repo) == ["unplugged"]
+    run_dir, r = tmp_path / "run dir", tree.Repo(repo / "app dir")
+    for name in ("g001-c0001", "g001-c0002", "g001-c0003"):
+        tree.materialise(run_dir, repo=r, base=head(repo), diff="", candidate_id=name)
+    assert _entries(repo) == ["g001-c0001", "g001-c0002", "g001-c0003", "unplugged"]
+    assert tree.remove(run_dir, "g001-c0001") is True
+    assert tree.remove_all(run_dir) == ["g001-c0002", "g001-c0003"]
+    assert _entries(repo) == ["unplugged"], "the engineer's entry is kept, though its folder is missing"
+    assert not (run_dir / "work" / "trees" / "g001-c0001.gitdir").exists()
+
+
+def test_remove_finishes_a_partial_removal(repo, tmp_path):
+    run_dir, r = tmp_path / "run dir", tree.Repo(repo / "app dir")
+    kept_git = tree.materialise(run_dir, repo=r, base=head(repo), diff="", candidate_id="a")
+    for child in kept_git.worktree.iterdir():  # everything but `.git` went
+        if child.name != ".git":
+            shutil.rmtree(child) if child.is_dir() else child.unlink()
+    lost_git = tree.materialise(run_dir, repo=r, base=head(repo), diff="", candidate_id="b")
+    (lost_git.worktree / ".git").unlink()  # `.git` went, a held file stayed: the note still names the entry
+    assert _entries(repo) == ["a", "b"]
+    assert tree.remove(run_dir, "a") is True and tree.remove(run_dir, "b") is True
+    assert not kept_git.worktree.exists() and not lost_git.worktree.exists()
+    assert not (repo / ".git" / "worktrees").exists() or _entries(repo) == []
+    assert list((run_dir / "work" / "trees").iterdir()) == []
+
+
+def test_diff_of_a_file_that_is_not_utf8_round_trips(repo, tmp_path):
+    legacy = repo / "app dir" / "legacy.py"
+    legacy.write_bytes(b"name = 'caf\xe9'\n")  # CP1252, as an old Windows editor saves it
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "legacy")
+    base = head(repo)
+    git(repo, "switch", "-q", "-c", "legacy")
+    legacy.write_bytes(b"name = 'na\xefve caf\xe9'\n")
+    git(repo, "commit", "-q", "-am", "legacy")
+    git(repo, "switch", "-q", "main")
+    r = tree.Repo(repo / "app dir")
+    made = tree.materialise(tmp_path / "r", repo=r, base=base, diff=tree.diff_between(r, base, "legacy"),
+                            candidate_id="b")
+    assert (made.path / "legacy.py").read_bytes() == b"name = 'na\xefve caf\xe9'\n"
+
+
+def _staged_binary(repo, rel, data):
+    (repo / rel).write_bytes(data)
+    git(repo, "add", "-A")
+    try:
+        return git_raw(repo, "diff", "--cached", "--binary")
+    finally:
+        git(repo, "reset", "-q", "--hard", "HEAD")
+        git(repo, "clean", "-fdq")
+
+
+def test_normalise_diff_names_binary_files(repo):
+    one = _staged_binary(repo, "app dir/logo.bin", bytes(range(256)))
+    other = _staged_binary(repo, "app dir/icon.bin", bytes(range(256)))
+    assert "GIT binary patch" in one and "\n--- " not in one
+    assert tree.normalise_diff(one) != tree.normalise_diff(other), "the same blob under two names"
+    assert "F app dir/logo.bin" in tree.normalise_diff(one)
+    text = change(repo, {"app dir/solver.py": SOLVER.replace("VALUE = 5", "VALUE = 3")})
+    assert tree.normalise_diff(text).count("F app dir/solver.py") == 1
+
+
+def test_touches_only_refuses_parent_folder_parts():
+    sneaky = diff_text("app dir/lib/../bench.py", "print('bench')\n", "print('fast')\n")
+    assert tree.touches_only(sneaky, ["**/*.py"], prefix="app dir/") == ["app dir/lib/../bench.py"]
+
+
+def test_git_runs_quiet_unlocalised_and_bounded(repo, monkeypatch):
+    seen = {}
+
+    def slow(argv, **kwargs):
+        seen.update(argv=argv, **kwargs)
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(tree.subprocess, "run", slow)
+    with pytest.raises(tree.TreeError, match=r"git worktree add did not finish in 300 s"):
+        tree._git(repo, "worktree", "add", "x", identity=True)
+    env = seen["env"]
+    assert env["LC_ALL"] == "C" and env["LANGUAGE"] == "C" and env["GCM_INTERACTIVE"] == "never"
+    assert env["GIT_TERMINAL_PROMPT"] == "0" and seen["timeout"] == tree.GIT_TIMEOUT_S == 300
+    assert {"gc.auto=0", "maintenance.auto=false"} <= set(seen["argv"])
 
 
 def test_working_base_commits_a_snapshot_without_touching_the_tree(repo):
@@ -217,8 +311,10 @@ def test_diff_between_refs(repo, tmp_path):
     (repo / "app dir" / "solver.py").write_text(SOLVER.replace("VALUE = 5", "VALUE = 2"), encoding="utf-8", newline="\n")
     git(repo, "commit", "-q", "-am", "faster")
     git(repo, "switch", "-q", "main")
+    git(repo, "config", "diff.context", "0")
     r = tree.Repo(repo / "app dir")
     diff = tree.diff_between(r, base, "faster")
+    assert "\n import json, os, sys, time\n" in diff, "three lines of context, whatever diff.context says"
     assert diff.startswith("diff --git a/app dir/solver.py b/app dir/solver.py") and "+VALUE = 2" in diff
     assert tree.diff_between(r, base, base) == ""
     assert tree.resolve_commit(r, "faster") == git(repo, "rev-parse", "faster")
