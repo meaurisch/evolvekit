@@ -611,14 +611,24 @@ class Home:
         repo = str(located.path)
         study.code = CodeVary(repo=repo, from_ref=from_ref, open=list(existing.open),
                               brief=" ".join(str(brief).split()) if brief is not None else existing.brief)
-        if pinned.application.kind == "program" and pinned.code.app and not study.application_path:
+        if pinned.application.kind == "program" and pinned.code.app:
             from evolvekit.evaluate.stages import render_app
 
-            program = Path(render_app(pinned.code.app, Path(repo)))
-            if program.is_file():
-                probe = probe_application(pinned, str(program))
-                study.application_path = str(program)
-                study.application_version = (probe.version or "") if probe.ok else ""
+            def same(a: str, b: str) -> bool:
+                return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+            # The program this method filled in for the old source follows the
+            # source; a program the engineer named by hand stays theirs.
+            filled = bool(existing.repo and study.application_path
+                          and same(study.application_path, render_app(pinned.code.app, Path(existing.repo))))
+            if not study.application_path or filled:
+                program = Path(render_app(pinned.code.app, Path(repo)))
+                if program.is_file():
+                    probe = probe_application(pinned, str(program))
+                    study.application_path = str(program)
+                    study.application_version = (probe.version or "") if probe.ok else ""
+                else:  # never the old source's program beside the new source's trees
+                    study.application_path, study.application_version = "", ""
         save_study(study, root)
         return {"ok": True, "repo": repo, "from": from_ref, "message": f"source: {repo} (from {from_ref})"}
 

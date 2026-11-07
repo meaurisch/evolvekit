@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -395,6 +395,12 @@ def write_run(
     study is edited afterwards. A code study's base is pinned here, once, to a
     commit (a ref as it is now; `working` as a snapshot of the working tree),
     so the run means the same tree whenever its config is loaded again."""
+    if study.code is not None:  # the bake-off writes runs without study_problems' search check
+        repo = study.code.repo
+        if not repo:
+            raise HarnessError("vary.code.repo: give the full path to the source; the study names none")
+        if not (PurePosixPath(repo).is_absolute() or PureWindowsPath(repo).is_absolute()):
+            raise HarnessError(f"vary.code.repo: give the full path to the source; {repo!r} is relative")
     config, study_run = compile_study(study, harness, plan, root=root, models=models, bakeoff=bakeoff)
     spec = config["problem"].get("tree")
     if spec is not None:

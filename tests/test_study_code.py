@@ -26,10 +26,13 @@ from evolvekit.harness.study import (
     SettingChoice,
     Study,
     load_study,
+    save_study,
     study_from_template,
     study_problems,
 )
 from evolvekit.tree import git
+from tree_helpers import git as tree_git
+from tree_helpers import git_init_commit, head, make_repo
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO = ROOT / "harnesses" / "demo-tour"
@@ -185,3 +188,58 @@ def test_set_code_from_the_app_keeps_the_study_whole(tmp_path):
         home.set_code(slug, "cli-solver")
     copy = home.duplicate_study(slug)
     assert home.document(copy)["code_proposal"] == str(SOURCE), "a copy keeps where its harness came from"
+
+
+def _source_copy(where: Path) -> Path:
+    """examples/cli-solver as a git repository of its own at `where` (a space in the path)."""
+    shutil.copytree(SOURCE, where, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    git_init_commit(where)
+    return where
+
+
+def test_a_moved_source_re_points_the_program_it_filled_in(tmp_path):
+    home = Home(tmp_path / "home")
+    slug = home.create_study("demo-tour", "faster", "F")
+    first, second = _source_copy(tmp_path / "source a"), _source_copy(tmp_path / "source b")
+    assert home.set_code(slug, str(first))["ok"]
+    assert load_study(home.study_root(slug)).application_path == str(first / "solver.py")
+    assert home.set_code(slug, str(second))["ok"]
+    assert load_study(home.study_root(slug)).application_path == str(second / "solver.py"), \
+        "the program D10 filled in follows the source"
+    (second / "solver.py").rename(second / "moved.py")
+    assert home.set_code(slug, str(first))["ok"] and home.set_code(slug, str(second))["ok"]
+    assert load_study(home.study_root(slug)).application_path == "", "no program in the new source: none, not the old one"
+    study = load_study(home.study_root(slug))
+    study.application_path = str(SOURCE / "solver.py")  # said by hand: the engineer's own choice
+    save_study(study, home.study_root(slug))
+    assert home.set_code(slug, str(first))["ok"]
+    assert load_study(home.study_root(slug)).application_path == str(SOURCE / "solver.py")
+
+
+def test_working_is_snapshotted_once_when_the_run_is_written(tmp_path):
+    top = make_repo(tmp_path)
+    (top / "app dir" / "solver.py").write_text("VALUE = 6\n", encoding="utf-8", newline="\n")
+    status = tree_git(top, "status", "--porcelain")
+    harness = load_harness(DEMO)
+    study = study_from_template(harness, "faster", "F")
+    study.code.repo, study.code.from_ref, study.training = str(top / "app dir"), "working", ["cases/a.json"]
+    run_dir = write_run(study, harness, Plan.fixed(), tmp_path / "study", "r1", bakeoff=True)
+    config = yaml.safe_load((run_dir / "evolvekit.yaml").read_text(encoding="utf-8"))
+    pinned = config["problem"]["tree"]["base"]
+    refs = tree_git(top, "for-each-ref", "--format=%(refname)", "refs/evolvekit/").splitlines()
+    assert re.fullmatch(r"[0-9a-f]{40}", pinned) and pinned != head(top) and len(refs) == 1
+    assert tree_git(top, "rev-parse", refs[0]) == pinned, "the snapshot is kept by its ref"
+    for _ in range(2):  # loaded again (a resume, the final check): the same commit, no new snapshot
+        assert build_config(config, base_dir=run_dir).problem.tree.base == pinned
+    assert tree_git(top, "for-each-ref", "--format=%(refname)", "refs/evolvekit/").splitlines() == refs
+    assert tree_git(top, "status", "--porcelain") == status, "the engineer's working tree is untouched"
+
+
+@pytest.mark.parametrize("repo", ["", "cli-solver"])
+def test_write_run_refuses_a_source_without_a_full_path(tmp_path, repo):
+    harness = load_harness(DEMO)
+    study = study_from_template(harness, "faster", "F")
+    study.code.repo, study.training = repo, ["cases/a.json"]
+    with pytest.raises(HarnessError, match=re.escape("vary.code.repo: give the full path to the source")):
+        write_run(study, harness, Plan.fixed(), tmp_path, "r1", bakeoff=True)
+    assert not (tmp_path / "runs" / "r1").exists(), "nothing is written"
