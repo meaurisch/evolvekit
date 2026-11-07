@@ -191,9 +191,10 @@ marked, *worst* and *best*, and the dashed 1 % limit.
   or a worst case beyond 1 %), then *Keep today's settings … for now: the
   gain is not proven.*; *Check with more runs* keeps the runs it did and
   adds others.
-- **One case**: *On the one held-back case: 4.8 % lower tour length.*, then
-  *Keep today's settings …: one held-back case is too few to tell; a study
-  that holds back three or more can.*; *Hold back more cases*.
+- **One case**: *Not proven, one held-back case: 4.8 % lower tour length.*,
+  then *Keep today's settings …: one held-back case is too few cases to tell
+  (the 11 runs were all on it); a study that holds back three or more can.*;
+  *Hold back more cases*.
 - **Worse**, **nothing beat
   the starting point**, a **stopped** check (*Continue the check*), a study
   **stopped by you** (*Run the final check*, *Carry on*) or **by an error**
