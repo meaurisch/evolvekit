@@ -1544,7 +1544,8 @@ evolvekit expands it): `--add "harnesses/demo-tour/samples/*.json"`.
 
 **Check it.** `study check` names what is still missing, one line each, and
 exits 2 while anything is; it says `ready: no problems` and exits 0 when the
-study can run. Here, with the application and the cases in:
+study can run, then the plan it will run (from study.yaml as written). Here,
+with the application and the cases in:
 
 ```
 python -m evolvekit study check depot-a
@@ -1552,7 +1553,11 @@ python -m evolvekit study check depot-a
 
 ```
 ready: no problems
+plan: automatic (budget 0.1 h)
 ```
+
+With a manual plan it says the rounds and combinations instead, e.g.
+`plan: 2 rounds × 2 combinations, budget 0.05 h`.
 
 On a fresh study, before either, it says:
 
