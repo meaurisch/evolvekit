@@ -57,3 +57,46 @@ def test_doctor_text_has_marks(tmp_path, capsys):
     _, out = _doctor(capsys, tmp_path)
     lines = [ln for ln in out.splitlines() if ln and not ln.startswith(" ")]
     assert lines and all(ln.startswith(("✓ ", "✗ ")) for ln in lines)
+
+
+def _second_harness(home):
+    import shutil
+
+    target = home / "harnesses" / "pyvrp"
+    shutil.copytree(ROOT / "harnesses" / "pyvrp", target, ignore=shutil.ignore_patterns("__pycache__", "samples"))
+
+
+def test_doctor_a_harness_that_refuses_is_not_a_fault_when_another_accepts(tmp_path, capsys):
+    _second_harness(tmp_path)
+    code, out = _doctor(capsys, tmp_path, "--app", str(SOLVER), "--json")
+    probes = {c["name"]: c for c in json.loads(out) if c["name"].startswith("probe:")}
+    assert probes["probe:demo-tour"]["ok"]
+    assert probes["probe:pyvrp"]["ok"] and probes["probe:pyvrp"]["message"].startswith("not for this application: ")
+    assert all(c["ok"] for c in probes.values())
+    assert code == (0 if all(c["ok"] for c in json.loads(out)) else 1)
+
+
+def test_doctor_no_harness_accepts_the_application(tmp_path, capsys):
+    _second_harness(tmp_path)
+    stranger = tmp_path / "stranger.txt"
+    stranger.write_text("x", encoding="utf-8")
+    code, out = _doctor(capsys, tmp_path, "--app", str(stranger), "--json")
+    probes = [c for c in json.loads(out) if c["name"].startswith("probe:")]
+    assert len(probes) >= 2 and code == 1 and not any(c["ok"] for c in probes)
+    assert "PyVRP" in next(c for c in probes if c["name"] == "probe:pyvrp")["fix"]
+    assert "solver.py" in next(c for c in probes if c["name"] == "probe:demo-tour")["fix"]
+
+
+def test_doctor_never_crashes(tmp_path, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise ValueError("No closing quotation")
+
+    monkeypatch.setattr("evolvekit.harness.probe.probe_application", boom)
+    monkeypatch.setattr("evolvekit.harness.library.find_harnesses",
+                        lambda home=None: (_ for _ in ()).throw(OSError("disk gone")))
+    code, out = _doctor(capsys, tmp_path, "--app", str(SOLVER))
+    assert code == 1 and "✗ harnesses: could not check: disk gone" in out and "Traceback" not in out
+    monkeypatch.undo()
+    monkeypatch.setattr("evolvekit.harness.probe.probe_application", boom)
+    code, out = _doctor(capsys, tmp_path, "--app", str(SOLVER))
+    assert code == 1 and "✗ probe:demo-tour: could not check: No closing quotation" in out

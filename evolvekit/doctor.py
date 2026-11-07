@@ -104,14 +104,30 @@ def _harnesses(root: Path) -> tuple[dict, list]:
 def _probes(entries: list, app: str) -> list[dict]:
     from evolvekit.harness.probe import probe_application
 
-    out = []
+    rows = []  # (check, refused): a refusal is the probe's answer, not a fault
     for entry in entries:
-        probe = probe_application(entry.harness, app)
-        out.append(_check(
-            probe.ok, f"probe:{entry.harness.id}", probe.message,
-            f"Point --app at the application {entry.harness.id} needs.",
-        ))
-    return out
+        name = f"probe:{entry.harness.id}"
+        spec = entry.harness.application
+        wants = f"{spec.label}. {spec.help.strip()}".strip()
+        try:
+            probe = probe_application(entry.harness, app)
+        except Exception as exc:
+            rows.append((_check(False, name, f"could not check: {exc}", f"The harness needs: {wants}"), False))
+            continue
+        rows.append((_check(probe.ok, name, probe.message, f"The harness needs: {wants}"), not probe.ok))
+    if any(check["ok"] and not refused for check, refused in rows):
+        return [
+            _check(True, c["name"], f"not for this application: {c['message']}") if refused else c
+            for c, refused in rows
+        ]
+    return [c for c, _ in rows]
+
+
+def _guarded(name: str, fix: str, make):
+    try:
+        return make()
+    except Exception as exc:
+        return _check(False, name, f"could not check: {exc}", fix)
 
 
 def checks(home: Path, *, app: str | None = None) -> list[dict]:
@@ -122,14 +138,25 @@ def checks(home: Path, *, app: str | None = None) -> list[dict]:
         store = Home(root)  # makes a missing home, as every other command does
     except OSError:
         store = None
-    result = [_python(), _version(), _home_check(root), _app(root)]
+    result = [
+        _guarded("python", "Reinstall Python.", _python),
+        _guarded("evolvekit", "Reinstall evolvekit.", _version),
+        _guarded("home", f"Check the folder {root}.", lambda: _home_check(root)),
+        _guarded("app", f"Delete {root / 'app.json'} and try again.", lambda: _app(root)),
+    ]
     if store is None:
         result.append(_check(False, "provider", "unknown, the home cannot be opened",
                              f"Fix the home folder {root} first."))
     else:
-        result.append(_provider(store))
-    harness_check, loaded = _harnesses(root)
-    result.append(harness_check)
+        result.append(_guarded("provider", f"Check {root / 'settings.yaml'}.", lambda: _provider(store)))
+    loaded: list = []
+
+    def harnesses():
+        nonlocal loaded
+        check, loaded = _harnesses(root)
+        return check
+
+    result.append(_guarded("harnesses", f"Check the folder {root / 'harnesses'}.", harnesses))
     if app:
         result += _probes(loaded, app)
     return result
