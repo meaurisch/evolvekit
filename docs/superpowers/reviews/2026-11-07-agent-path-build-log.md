@@ -197,3 +197,5 @@ Design §4.4 and §8 for project 2, in
   adapting the demo instead of writing a harness.
 
 ### PR
+
+[meaurisch/evolvekit#73](https://github.com/meaurisch/evolvekit/pull/73) — `agent/2-skills` against `master`, stacked on #72, opened 2026-11-07. **PASS** (every task built and reviewed; gate 1864 passed, 4 skipped; gate script 6/6 and 2/2 on the shipped tree; persona A 8/10, B 8/10 at round 3, no blocker).
