@@ -123,7 +123,14 @@ def build_fixture(repo: Path, *, home: Path, harness: bool = True) -> None:
     names = [sample.name for sample in samples] if harness else NEUTRAL_CASES
     assert len(names) == len(samples), "the demo samples changed: name the no-harness cases again"
     for sample, name in zip(samples, names):
-        shutil.copy2(sample, repo / "cases" / name)
+        if harness:
+            shutil.copy2(sample, repo / "cases" / name)
+            continue
+        # the case carries its own name; every other byte (the layout, the line ends) stays as the sample has it
+        old, new = f'"name": "{sample.stem}"'.encode(), f'"name": "{Path(name).stem}"'.encode()
+        data = sample.read_bytes()
+        assert data.count(old) == 1, f"{sample.name}: its name is not where the fixture expects it"
+        (repo / "cases" / name).write_bytes(data.replace(old, new))
     with open(repo / "README.md", "w", encoding="utf-8", newline="\n") as handle:
         handle.write(README)
 

@@ -76,7 +76,12 @@ def test_the_no_harness_fixture_is_a_program_evolvekit_does_not_know(tmp_path):
     names = sorted(p.name for p in (bare / "cases").iterdir())
     assert names == [f"requests-2026-03-0{day}.json" for day in (2, 3, 4, 5)]
     for name, sample in zip(names, SAMPLES):
-        assert (bare / "cases" / name).read_bytes() == (ROOT / "harnesses" / "demo-tour" / "samples" / sample).read_bytes()
+        case = (bare / "cases" / name).read_bytes()
+        original = (ROOT / "harnesses" / "demo-tour" / "samples" / sample).read_bytes()
+        old, new = f'"name": "{Path(sample).stem}"'.encode(), f'"name": "{Path(name).stem}"'.encode()
+        assert case == original.replace(old, new), "only the name changes"
+        assert json.loads(case)["name"] == Path(name).stem
+        assert [s for s in (b"north-south", b"town-40", b"region-60", b"county-50") if s in case] == []
         solved = subprocess.run([sys.executable, str(solver), "--instance", str(bare / "cases" / name),
                                  "--time-limit", "0.2"], capture_output=True, text=True, timeout=60)
         assert solved.returncode == 0 and solved.stdout.strip(), (name, solved.stderr)
