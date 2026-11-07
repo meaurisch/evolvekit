@@ -554,3 +554,15 @@ def test_harness_new_makes_every_path_the_harness_skill_names(tmp_path, capsys):
     for leaf in HARNESS_PATHS:
         path = tmp_path / "harness" / leaf
         assert (path.is_dir() if leaf.endswith("/") else path.is_file()), f"harness new made no {leaf}"
+
+
+# Gate run 1 on the final skills: "lower is better" in an interview summary counts as a claim word.
+
+DIRECTION_WORDS = "Say the direction as 'lower is the goal' or 'higher is the goal', never 'lower is better'."
+
+
+def test_study_skill_says_the_direction_without_better():
+    body = _body(STUDY)
+    assert DIRECTION_WORDS in _section(body, "2. Interview")
+    rest = body.replace(DIRECTION_WORDS, "").replace(PRE_VERDICT_RULE, "")
+    assert not re.search(r"\bbetter\b", rest, re.I), "no 'better' outside the pinned rule sentences"

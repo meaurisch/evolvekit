@@ -36,6 +36,7 @@ One unanswered question stops you with that question, in one message.
 Several unanswered: ask them all in that one message.
 In a one-shot run, where no answer can come, say what is missing and end.
 Decide nothing about the goal or the total time alone.
+When you sum up the interview or the study, name the measure and its direction in the app's words. Say the direction as 'lower is the goal' or 'higher is the goal', never 'lower is better'.
 Do not go on to step 3 until every question has an answer: with one missing, nothing is made — no `study new`, no file — and your whole message is that question.
 
 ## 3. Make the study
