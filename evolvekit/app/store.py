@@ -12,13 +12,15 @@ opened again at any time, and two tabs see the same thing.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import threading
-from datetime import datetime, timezone
+import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -63,8 +65,17 @@ RECENT = 10
 MAX_UPLOAD = 200 * 1024 * 1024
 INSPECT_TIMEOUT_S = 60
 INSPECTED = ".inspected.json"
+TRASH = ".trash"
+"""`studies/.trash/<slug>~<YYYYMMDD-HHMMSS>` holds a deleted study; `<study>/.trash/cases/` a removed case."""
+TRASH_DAYS = 7
+ARCHIVED = ".archived"
+"""The marker file of an archived study: a fact about the library, not a field of the study."""
+STUDY_PARTS = ("study.yaml", "harness", "cases", "inputs")
+"""What a study is made of, as against what it produced: `runs/`, `preview/`, `assistant.jsonl`."""
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
+_TRASH_ENTRY = re.compile(r"^(?P<slug>[a-z0-9][a-z0-9-]{0,79})~(?P<stamp>\d{8}-\d{6})(?:-\d+)?$")
+_STAMP = "%Y%m%d-%H%M%S"
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
@@ -290,15 +301,20 @@ class Home:
 
         return jobs.active_run(self)
 
+    def _free_slug(self, name: str) -> str:
+        """The slug a new study of this name gets: its name's, or `-2`, `-3`… when taken."""
+        base = slugify(name)
+        slug, number = base, 2
+        while (self.studies_dir / slug).exists():
+            slug, number = f"{base}-{number}", number + 1
+        return slug
+
     def create_study(self, harness_id: str, template: str | None, name: str) -> str:
         name = str(name or "").strip()
         if not name:
             raise AppError("name: give the study a name")
         entry = self.harness_entry(harness_id)
-        base = slugify(name)
-        slug, number = base, 2
-        while (self.studies_dir / slug).exists():
-            slug, number = f"{base}-{number}", number + 1
+        slug = self._free_slug(name)
         try:
             create_study(self.studies_dir / slug, entry.path, name, template or None)
         except HarnessError as exc:
@@ -336,6 +352,184 @@ class Home:
             raise AppError(str(exc)) from None
         save_study(updated, root)
 
+    # -- managing studies: the trash, the archive, copies, the zip ---------------------
+
+    def trash_dir(self) -> Path:
+        return self.studies_dir / TRASH
+
+    def delete_study(self, slug: str) -> str:
+        """Move the study to the trash; the entry's name, `<slug>~<stamp>`.
+        Nothing is deleted at once: `restore_study` brings it back until
+        `clean_trash` empties it after `TRASH_DAYS`."""
+        root = self.study_root(slug)
+        self.trash_dir().mkdir(exist_ok=True)
+        base = f"{slug}~{datetime.now().strftime(_STAMP)}"
+        entry, number = base, 2
+        while (self.trash_dir() / entry).exists():  # a second delete within the second
+            entry, number = f"{base}-{number}", number + 1
+        shutil.move(str(root), str(self.trash_dir() / entry))
+        return entry
+
+    def _trash_entry(self, entry: str) -> tuple[Path, str, datetime]:
+        """`(folder, slug, deleted_at)` of a trash entry, judged by name first."""
+        match = _TRASH_ENTRY.match(entry) if isinstance(entry, str) else None
+        if match is None:
+            raise AppError(f"{entry!r} is not an entry of the trash", 404)
+        folder = self.trash_dir() / entry
+        if not (folder / "study.yaml").is_file():
+            raise AppError(f"there is no {entry!r} in the trash", 404)
+        return folder, match.group("slug"), datetime.strptime(match.group("stamp"), _STAMP)
+
+    def trash(self) -> list[dict[str, Any]]:
+        """What waits in the trash, newest first: `{entry, name, deleted_at}`."""
+        if not self.trash_dir().is_dir():
+            return []
+        listed = []
+        for folder in self.trash_dir().iterdir():
+            try:
+                _, slug, deleted_at = self._trash_entry(folder.name)
+            except AppError:
+                continue
+            name = slug
+            try:
+                loaded = yaml.safe_load((folder / "study.yaml").read_text(encoding="utf-8"))
+                if isinstance(loaded, dict) and str(loaded.get("name") or "").strip():
+                    name = str(loaded["name"]).strip()
+            except (OSError, yaml.YAMLError):
+                pass
+            listed.append({"entry": folder.name, "name": name, "deleted_at": deleted_at.isoformat(timespec="seconds")})
+        return sorted(listed, key=lambda e: e["deleted_at"], reverse=True)
+
+    def restore_study(self, entry: str) -> str:
+        """The study back under its slug -- or `-2` when the slug was taken meanwhile."""
+        folder, slug, _ = self._trash_entry(entry)
+        target = self._free_slug(slug)
+        shutil.move(str(folder), str(self.studies_dir / target))
+        return target
+
+    def clean_trash(self, days: int = TRASH_DAYS) -> list[str]:
+        """Delete for good what has waited in the trash longer than `days`;
+        the entries removed. The app calls this once when it starts."""
+        if not self.trash_dir().is_dir():
+            return []
+        limit = datetime.now() - timedelta(days=days)
+        removed = []
+        for folder in sorted(self.trash_dir().iterdir()):
+            match = _TRASH_ENTRY.match(folder.name)
+            if match is None or not folder.is_dir():
+                continue
+            if datetime.strptime(match.group("stamp"), _STAMP) < limit:
+                shutil.rmtree(folder, ignore_errors=True)
+                if not folder.exists():
+                    removed.append(folder.name)
+        return removed
+
+    def is_archived(self, slug: str) -> bool:
+        return (self.study_root(slug) / ARCHIVED).is_file()
+
+    def set_archived(self, slug: str, archived: bool) -> None:
+        marker = self.study_root(slug) / ARCHIVED
+        if archived:
+            marker.write_text("archived\n", encoding="utf-8")
+        else:
+            marker.unlink(missing_ok=True)
+
+    def duplicate_study(self, slug: str, name: str = "") -> str:
+        """A copy of the study's setup -- `study.yaml`, its harness, cases
+        (with their inspections) and inputs -- under a new slug and name; not
+        its runs, previews, assistant history or downloads."""
+        root, study, _ = self.load(slug)
+        name = str(name or "").strip() or f"{study.name} (copy)"
+        new_slug = self._free_slug(name)
+        new_root = self.studies_dir / new_slug
+        try:
+            new_root.mkdir()
+            for part in STUDY_PARTS[1:]:
+                if (root / part).is_dir():
+                    shutil.copytree(root / part, new_root / part, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+                else:
+                    (new_root / part).mkdir()
+            study.name = name
+            save_study(study, new_root)
+        except OSError as exc:
+            shutil.rmtree(new_root, ignore_errors=True)
+            raise AppError(f"the study could not be copied: {exc}", 500) from None
+        return new_slug
+
+    def export_study(self, slug: str) -> bytes:
+        """The study as one zip: `study.yaml`, `harness/`, `cases/`, `inputs/`
+        -- what `import_study` reads; not what the study produced."""
+        root = self.study_root(slug)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(root / "study.yaml", "study.yaml")
+            for part in STUDY_PARTS[1:]:
+                folder = root / part
+                if not folder.is_dir():
+                    continue
+                for path in sorted(folder.rglob("*")):
+                    relative = path.relative_to(root)
+                    if path.is_dir() or path.suffix == ".pyc" or any(p.startswith(".") or p == "__pycache__" for p in relative.parts):
+                        continue
+                    archive.write(path, relative.as_posix())
+        return buffer.getvalue()
+
+    def import_study(self, data: bytes, filename: str = "study.zip") -> str:
+        """A study from a zip `export_study` wrote (or a folder zipped by
+        hand, with or without a top folder): its slug, new, from the name in
+        its `study.yaml`. A member that would land outside the study's folder
+        is refused, as is a zip without `study.yaml`; nothing is written
+        until every name has been judged."""
+        if len(data) > MAX_UPLOAD:
+            raise AppError("the file is larger than 200 MB", 413)
+        safe_name(filename or "study.zip", (".zip",))
+        try:
+            bundle = zipfile.ZipFile(io.BytesIO(data))
+            names = [n for n in bundle.namelist() if not n.endswith("/")]
+        except zipfile.BadZipFile:
+            raise AppError(f"{filename}: not a zip file") from None
+        tops = {n.split("/", 1)[0] for n in names}
+        strip = len(tops) == 1 and all("/" in n for n in names)
+        members: list[tuple[str, str]] = []
+        for name in names:
+            inner = name.split("/", 1)[1] if strip else name
+            parts = PureWindowsPath(inner)
+            if (not inner or "\x00" in inner or parts.drive or parts.root or inner.startswith(("/", "\\"))
+                    or any(p in ("..", ".") for p in parts.parts)):
+                raise AppError(f"{filename}: {name!r} would land outside the study's folder")
+            # Only what a study is made of comes in: the file study.yaml, and files under the three folders.
+            if (parts.parts[0] == "study.yaml") == (len(parts.parts) == 1) and parts.parts[0] in STUDY_PARTS:
+                members.append((name, "/".join(parts.parts)))
+        if "study.yaml" not in {inner for _, inner in members}:
+            raise AppError(f"{filename}: there is no study.yaml in it, so it is not a study")
+        try:
+            study = Study.parse(yaml.safe_load(bundle.read(next(n for n, i in members if i == "study.yaml"))))
+        except (yaml.YAMLError, HarnessError) as exc:
+            raise AppError(f"{filename}: its study.yaml cannot be read: {exc}") from None
+        slug = self._free_slug(study.name)
+        staging = self.studies_dir / f".incoming-{slug}"
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            for name, inner in members:
+                target = staging.joinpath(*inner.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(bundle.read(name))
+            for part in STUDY_PARTS[2:]:
+                (staging / part).mkdir(exist_ok=True)
+            try:
+                load_harness(staging / "harness")
+            except HarnessError as exc:
+                raise AppError(f"{filename}: its harness cannot be read: {exc}") from None
+            save_study(study, staging)  # written back as parsed: a normal study file
+            staging.rename(self.studies_dir / slug)
+        except AppError:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        except OSError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise AppError(f"{filename}: the study could not be unpacked: {exc}", 500) from None
+        return slug
+
     # -- cases and inputs -------------------------------------------------------
 
     def case_names(self, slug: str) -> list[str]:
@@ -357,20 +551,38 @@ class Home:
         return {"name": name, "inspected": self.inspect_case(slug, name, force=True)}
 
     def delete_case(self, slug: str, filename: str) -> None:
+        """Take the case out of the study: the file waits in `<study>/.trash/cases/`
+        for `restore_case`, and its inspection is kept, so no re-reading then."""
         root, study, _ = self.load(slug)
         name = safe_name(filename)
         target = root / "cases" / name
         if not target.is_file():
             raise AppError(f"there is no case {name!r} in this study", 404)
-        target.unlink()
+        trash = root / TRASH / "cases"
+        trash.mkdir(parents=True, exist_ok=True)
+        (trash / name).unlink(missing_ok=True)
+        shutil.move(str(target), str(trash / name))
         relative = f"cases/{name}"
         study.training = [c for c in study.training if c != relative]
         study.test = [c for c in study.test if c != relative]
         save_study(study, root)
-        with _lock(str(root)):
-            cache = self._inspected(root)
-            cache.pop(name, None)
-            self._write_inspected(root, cache)
+
+    def restore_case(self, slug: str, filename: str) -> None:
+        """A removed case back into the study, in training."""
+        root, study, _ = self.load(slug)
+        name = safe_name(filename)
+        waiting = root / TRASH / "cases" / name
+        if not waiting.is_file():
+            raise AppError(f"there is no removed case {name!r} to restore", 404)
+        target = root / "cases" / name
+        if target.exists():
+            raise AppError(f"there is a case {name!r} in the study again already", 409)
+        target.parent.mkdir(exist_ok=True)
+        shutil.move(str(waiting), str(target))
+        relative = f"cases/{name}"
+        if relative not in study.training and relative not in study.test:
+            study.training.append(relative)
+        save_study(study, root)
 
     def use_samples(self, slug: str) -> list[str]:
         root, study, harness = self.load(slug)

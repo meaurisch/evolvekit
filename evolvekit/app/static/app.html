@@ -189,7 +189,17 @@ h3 { font-size: 15px; margin: 18px 0 6px; } .card > h3:first-child { margin-top:
 /* ------------------------------------------------------------------ home */
 .study-card { display: flex; flex-direction: column; gap: 8px; text-decoration: none; color: var(--ink); min-height: 132px; }
 .study-card:hover { border-color: var(--accent); }
-.study-card .name { font-weight: 650; font-size: 17px; }
+.study-card .name { font-weight: 650; font-size: 17px; padding-right: 28px; }
+.study-wrap { position: relative; display: flex; } .study-wrap > .study-card { flex: 1; }
+.study-wrap > .menu { position: absolute; top: 10px; right: 10px; }
+.menu > summary { list-style: none; cursor: pointer; width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; color: var(--ink-2); }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu > summary:hover, .menu[open] > summary { background: var(--sunken); color: var(--ink); }
+.menu > .menu-list { position: absolute; right: 0; top: 32px; z-index: 20; min-width: 150px; display: flex; flex-direction: column; padding: 6px;
+  background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; box-shadow: var(--shadow); }
+.menu > .menu-list > button { text-align: left; border: 0; background: transparent; color: var(--ink); font: inherit; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+.menu > .menu-list > button:hover { background: var(--sunken); } .menu > .menu-list > button.danger { color: var(--critical-ink); }
+.archived-card { opacity: .75; }
 .empty { text-align: center; padding: 40px 20px; }
 .drop {
   border: 2px dashed var(--hair-strong); border-radius: 14px; padding: 26px 18px; text-align: center;
@@ -263,6 +273,10 @@ svg.chart { width: 100%; height: 170px; display: block; }
   background: var(--ink); color: var(--page); padding: 10px 16px; border-radius: 12px; box-shadow: var(--shadow); font-size: 14px; }
 .toast.bad { background: var(--critical-ink); color: #fff; }
 .toast[hidden] { display: none; }
+.toast.undo { bottom: 68px; display: flex; gap: 14px; align-items: center; }
+.toast.undo[hidden] { display: none; }
+.toast.undo > button { border: 1px solid color-mix(in srgb, var(--page) 50%, transparent); background: transparent; color: inherit; font: inherit; font-weight: 650; padding: 4px 12px; border-radius: 8px; cursor: pointer; }
+.toast.undo > button:hover { background: color-mix(in srgb, var(--page) 15%, transparent); }
 dialog { border: 1px solid var(--hair); border-radius: 14px; background: var(--surface); color: var(--ink); max-width: min(520px, calc(100vw - 32px)); padding: 20px; box-shadow: var(--shadow); }
 dialog::backdrop { background: rgba(0,0,0,.35); }
 
@@ -304,6 +318,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 </header>
 <main id="view" tabindex="-1"></main>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="toast undo" id="undo" role="status" aria-live="polite" hidden></div>
 <script>
 "use strict";
 /* =========================================================================
@@ -401,6 +416,15 @@ function toast(message, bad = false) {
   el.textContent = message; el.className = "toast" + (bad ? " bad" : ""); el.hidden = false;
   clearTimeout(toast.timer); toast.timer = setTimeout(() => { el.hidden = true; }, bad ? 7000 : 3500);
 }
+const UNDO_S = 10;
+// A bar with an Undo button, up for UNDO_S seconds after something was removed; one at a time, and gone with the screen.
+function undo(message, action) {
+  const el = $("#undo");
+  const button = h("button", { type: "button", onclick: () => { hideUndo(); guarded(action); } }, "Undo");
+  el.replaceChildren(h("span", {}, message), button); el.hidden = false;
+  clearTimeout(undo.timer); undo.timer = setTimeout(hideUndo, UNDO_S * 1000);
+}
+function hideUndo() { const el = $("#undo"); el.hidden = true; el.replaceChildren(); clearTimeout(undo.timer); }
 
 async function api(method, path, body, options = {}) {
   const init = { method, headers: {} };
@@ -439,17 +463,21 @@ function crumbs(...parts) {
 }
 
 async function route() {
-  clearTimers();
-  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  clearTimers(); hideUndo();
+  // `#/study/<slug>/results?run=<id>`: the path before the "?", the query after it (a bare path means the latest run).
+  const [path, queryText] = location.hash.replace(/^#\/?/, "").split("?", 2);
+  const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
+  const query = new URLSearchParams(queryText || "");
   view.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), "Loading…"));
   try {
     if (!parts.length) await renderHome();
     else if (parts[0] === "settings") await renderSettings();
     else if (parts[0] === "new") await renderNew();
+    else if (parts[0] === "compare") await renderCompare(query.get("a"), query.get("b"));
     else if (parts[0] === "study" && parts[1]) {
       const slug = parts[1];
-      if (parts[2] === "running") await renderRunning(slug);
-      else if (parts[2] === "results") await renderResults(slug, parts[3]);
+      if (parts[2] === "running") await renderRunning(slug, query.get("run"));
+      else if (parts[2] === "results") await renderResults(slug, query.get("run") || parts[3]);
       else await renderStep(slug, Math.min(7, Math.max(1, parseInt(parts[2] || "1", 10) || 1)));
     } else await renderHome();
   } catch (err) {
@@ -472,18 +500,24 @@ async function renderHome() {
   crumbs({ text: "Your studies" });
   const home = await api("GET", "/api/home");
   const hasKey = Object.values(home.keys || {}).some(Boolean);
-  const studies = home.studies.length ? h("div", { class: "grid" }, home.studies.map((s) => {
-    const [kind, sym] = s.tone === "warn" ? ["warn", "warn"] : s.tone === "bad" ? ["bad", "bad"] : STATE_ICON[s.kind] || ["none", "info"];
-    const stateEl = sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
-      : h("span", { class: `status ${kind}` }, icon(sym), h("span", {}, s.line));
-    return h("a", { class: "card study-card", href: studyLink(s) },
-      h("span", { class: "name" }, s.name), h("span", { class: "faint" }, s.harness), h("span", { class: "spacer" }), stateEl);
-  })) : h("div", { class: "card empty" },
-    h("h2", { style: "margin-top:0" }, "No studies yet"),
-    h("p", { class: "lede", style: "margin: 0 auto 16px" }, "A study finds the best settings for an application — or the best data to give it — on cases you choose, and then checks the result on cases it never saw."),
-    h("a", { class: "btn primary", href: "#/new" }, "New study"));
+  const active = home.studies.filter((s) => !s.archived), archived = home.studies.filter((s) => s.archived);
+  const studies = active.length ? h("div", { class: "grid" }, active.map(studyCard))
+    : archived.length ? h("p", { class: "muted" }, "Every study is archived; they are listed below.")
+    : h("div", { class: "card empty" },
+      h("h2", { style: "margin-top:0" }, "No studies yet"),
+      h("p", { class: "lede", style: "margin: 0 auto 16px" }, "A study finds the best settings for an application — or the best data to give it — on cases you choose, and then checks the result on cases it never saw."),
+      h("a", { class: "btn primary", href: "#/new" }, "New study"));
+  const shelf = archived.length ? h("div", {}, h("h2", {}, "Archived"), h("p", { class: "lede" }, "Kept, but out of the way. Unarchive one to bring it back up."),
+    h("div", { class: "grid" }, archived.map(studyCard))) : "";
+  // Two studies that have run, side by side.
+  const ran = home.studies.filter((s) => HAS_RUN.includes(s.kind)).map((s) => ({ value: s.slug, text: `${s.name} · ${s.line}` }));
+  const compareRow = ran.length >= 2 ? h("div", { style: "margin-top:14px" }, compareControl("Compare", ran, ran)) : "";
+  const trash = home.trash.length ? h("p", { class: "small muted", style: "margin-top:14px" }, "Deleted: ",
+    home.trash.map((t, i) => [i ? " · " : "", h("span", {}, `${t.name} (${t.deleted_at.replace("T", " ")}) `),
+      h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await api("POST", `/api/trash/${encodeURIComponent(t.entry)}/restore`); toast(`${t.name} is back.`); renderHome(); }, e.currentTarget) }, "Restore")]),
+    ". The trash is emptied after 7 days.") : "";
 
-  const upload = h("input", { type: "file", accept: ".zip", class: "sr", id: "harness-zip", onchange: (e) => installHarness(e.target.files[0]) });
+  const upload = h("input", { type: "file", accept: ".zip", class: "sr", id: "harness-zip", onchange: (e) => addZip(e.target.files[0]) });
   const zipPath = h("input", { type: "text", id: "harness-path", placeholder: "C:\\...\\pyvrp-1.0.0.zip" });
   const zipAdd = h("button", { class: "btn small", type: "button", onclick: () => guarded(async () => {
     const harness = await api("POST", "/api/harnesses", { path: zipPath.value.trim() });
@@ -494,15 +528,15 @@ async function renderHome() {
     h("p", { class: "muted small" }, x.problem || x.summary || ""),
     x.problem ? null : h("p", { class: "small", style: "margin:0" }, status("good", "Ready to use: start a new study with it.")))));
   const drop = h("div", { class: "drop", tabindex: "0" },
-    h("p", { style: "margin:0 0 8px" }, "Add a harness: drop its .zip file here, or"),
+    h("p", { style: "margin:0 0 8px" }, "Add a harness, or a study saved as a zip: drop the .zip file here, or"),
     h("label", { class: "btn small", for: "harness-zip" }, "Choose a .zip file"), upload,
     h("div", { class: "row", style: "margin-top:10px; flex-wrap:nowrap; max-width:560px; margin-inline:auto" },
-      h("label", { for: "harness-path", class: "small", style: "white-space:nowrap" }, "or its path:"), zipPath, zipAdd));
-  dropZone(drop, (files) => files[0] && installHarness(files[0]));
+      h("label", { for: "harness-path", class: "small", style: "white-space:nowrap" }, "or a harness's path:"), zipPath, zipAdd));
+  dropZone(drop, (files) => files[0] && addZip(files[0]));
 
   view.replaceChildren(
     h("div", { class: "row between" }, h("div", {}, h("h1", {}, "Your studies"), h("p", { class: "lede" }, "Each study tunes one application on your cases.")), home.studies.length ? h("a", { class: "btn primary", href: "#/new" }, "New study") : null),
-    studies,
+    studies, compareRow, shelf, trash,
     h("h2", {}, "Applications you can tune"),
     h("p", { class: "lede" }, "A harness connects evolvekit to one application. Your colleagues who build them send them as .zip files."),
     installed ? note("good", h("p", { style: "margin:0" }, installed)) : "",
@@ -512,6 +546,93 @@ async function renderHome() {
       note("info", h("p", { style: "margin:0" }, "Optional: with an API key the assistant helps you describe measures and data changes in your own words. Everything else works without one. ", h("a", { href: "#/settings" }, "Add a key in Settings"))),
     h("p", { class: "faint", style: "margin-top:24px" }, `Your library is in ${home.home}.`),
   );
+}
+
+// One study's card, with its menu: rename, duplicate, archive, delete (with Undo for a while, Restore after).
+// A state line with its mark: `{kind, line, tone}` as the API says it for a study's card or one of its runs.
+function stateMark(s) {
+  const [kind, sym] = s.tone === "warn" ? ["warn", "warn"] : s.tone === "bad" ? ["bad", "bad"] : STATE_ICON[s.kind] || ["none", "info"];
+  return sym === "pulse" ? h("span", { class: "status good" }, h("span", { class: "pulse", "aria-hidden": "true" }), h("span", {}, s.line))
+    : h("span", { class: `status ${kind}` }, icon(sym), h("span", {}, s.line));
+}
+const HAS_RUN = ["running", "finished", "stopped", "failed"];  // the kinds with a run to look at (a queued run has none yet)
+function whenText(iso) {
+  // "2026-01-01T00:00:00+00:00" as the reader's clock says it; nothing for no time.
+  if (!iso) return "";
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? String(iso) : at.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+// Two studies, or a study and a run, side by side: the pick becomes `#/compare?a=…&b=…`.
+function compareControl(label, choicesA, choicesB) {
+  const select = (choices, name) => h("select", { class: "inline", "aria-label": name }, choices.map((c) => h("option", { value: c.value }, c.text)));
+  const a = select(choicesA, "First"), b = select(choicesB, "Second");
+  if (choicesB.length > 1 && b.options[0].value === a.value) b.selectedIndex = 1;
+  const go = h("button", { class: "btn small", type: "button", onclick: () => {
+    if (a.value === b.value) { toast("Pick two different studies or runs.", true); return; }
+    location.hash = `#/compare?a=${a.value}&b=${b.value}`;
+  } }, "Compare");
+  return h("div", { class: "row", style: "align-items:center; flex-wrap:wrap" }, h("span", { class: "small" }, label), a, h("span", { class: "small" }, "with"), b, go);
+}
+
+function studyCard(s) {
+  const stateEl = stateMark(s);
+  const card = h("a", { class: "card study-card" + (s.archived ? " archived-card" : ""), href: studyLink(s) },
+    h("span", { class: "name" }, s.name), h("span", { class: "faint" }, s.harness), h("span", { class: "spacer" }), stateEl);
+  const path = `/api/studies/${encodeURIComponent(s.slug)}`;
+  const menu = h("details", { class: "menu" });
+  const item = (label, action, danger) => h("button", { type: "button", class: danger ? "danger" : null, onclick: () => { menu.open = false; guarded(action); } }, label);
+  menu.append(h("summary", { "aria-label": `More for ${s.name}`, title: "Rename, duplicate, archive, delete" }, "⋯"),
+    h("div", { class: "menu-list" },
+      item("Rename", async () => {
+        const name = prompt("The study's new name:", s.name);
+        if (name === null || !name.trim() || name.trim() === s.name) return;
+        await api("PATCH", path, { name: name.trim() }); toast("Renamed."); renderHome();
+      }),
+      item("Duplicate", async () => {
+        const name = prompt("The name of the copy (it takes the setup and the cases, not the runs):", `${s.name} (copy)`);
+        if (name === null) return;
+        const doc = await api("POST", `${path}/duplicate`, { name: name.trim() });
+        toast(`Copied as ${doc.study.name}.`); location.hash = `#/study/${doc.slug}/${doc.study.step || 1}`;
+      }),
+      item(s.archived ? "Unarchive" : "Archive", async () => { await api("PATCH", path, { archived: !s.archived }); renderHome(); }),
+      item("Delete", async () => {
+        if (!confirm(`Delete “${s.name}”? It waits in the trash for 7 days; you can restore it from the home page until then.`)) return;
+        const gone = await api("DELETE", path);
+        await renderHome();
+        undo(`Deleted ${s.name}.`, async () => { await api("POST", `/api/trash/${encodeURIComponent(gone.trashed)}/restore`); toast(`${s.name} is back.`); renderHome(); });
+      }, true)));
+  return h("div", { class: "study-wrap" }, card, menu);
+}
+document.addEventListener("click", (e) => { for (const m of document.querySelectorAll("details.menu[open]")) if (!m.contains(e.target)) m.open = false; });
+
+// The file names a zip holds, from its central directory: enough to tell a study (study.yaml inside) from a harness.
+function zipNames(buffer) {
+  const bytes = new Uint8Array(buffer), view = new DataView(buffer), names = [];
+  let end = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) if (view.getUint32(i, true) === 0x06054b50) { end = i; break; }
+  if (end < 0) return null;
+  const count = view.getUint16(end + 10, true);
+  let at = view.getUint32(end + 16, true);
+  const text = new TextDecoder();
+  for (let n = 0; n < count && at + 46 <= bytes.length && view.getUint32(at, true) === 0x02014b50; n++) {
+    const nameLength = view.getUint16(at + 28, true), extra = view.getUint16(at + 30, true), comment = view.getUint16(at + 32, true);
+    names.push(text.decode(bytes.subarray(at + 46, at + 46 + nameLength)));
+    at += 46 + nameLength + extra + comment;
+  }
+  return names;
+}
+
+// A dropped .zip: a study if study.yaml is in it (at the top, or under one folder), else a harness.
+async function addZip(file) {
+  if (!file) return;
+  await guarded(async () => {
+    const data = await file.arrayBuffer();
+    const names = zipNames(data) || [];
+    const isStudy = names.some((n) => n === "study.yaml" || /^[^/]+\/study\.yaml$/.test(n));
+    if (!isStudy) { await installHarness(file); return; }
+    const doc = await api("POST", `/api/studies?name=${encodeURIComponent(file.name)}`, data);
+    toast(`Imported the study ${doc.study.name}.`); location.hash = `#/study/${doc.slug}/${doc.study.step || 1}`;
+  });
 }
 
 function dropZone(el, onFiles) {
@@ -1037,7 +1158,11 @@ async function step3(box) {
           h("td", {}, h("span", { class: "badge" + (c.set === "test" ? " accent" : "") }, c.set === "test" ? "final check" : "search")),
           h("td", { class: "n" }, h("div", { class: "row", style: "justify-content:flex-end; flex-wrap:nowrap" },
             h("button", { class: "btn small quiet", type: "button", title: `Use it for the ${other === "test" ? "final check" : "search"}`, onclick: (e) => guarded(() => move(c.name, other), e.currentTarget) }, other === "test" ? "Hold back" : "Search with it"),
-            h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${c.name}`, onclick: (e) => guarded(async () => { current.doc = await api("DELETE", studyPath(`/cases/${encodeURIComponent(c.name)}`)); draw(); }, e.currentTarget) }, "Remove"))));
+            h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${c.name}`, onclick: (e) => guarded(async () => {
+              const path = studyPath(`/cases/${encodeURIComponent(c.name)}`);
+              current.doc = await api("DELETE", path); draw();
+              undo(`Removed ${c.name}.`, async () => { current.doc = await api("POST", `${path}/restore`); draw(); });
+            }, e.currentTarget) }, "Remove"))));
       })))));
     const notes = [];
     if (test === 0) notes.push(note("warn", h("p", { style: "margin:0" }, "No cases are held back: there will be no final check, and the result will look better than it is.")));
@@ -1186,7 +1311,10 @@ async function step4(box) {
       return h("div", { class: "item" }, h("div", { class: "body" },
         h("div", { class: "what" }, change.says || `${lever.label}: ${column}`),
         h("div", { class: "muted small" }, `${capital(column)} of ${change.where ? "the rows where " : "all rows of "}`, h("code", {}, change.where || lever.table), `, ${how}, starting at ${fmt(change.start)}.`)),
-        h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${name}`, onclick: (e) => guarded(() => { const next = { ...data }; delete next[name]; return saveVary(null, next); }, e.currentTarget) }, "Remove"));
+        h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${name}`, onclick: (e) => guarded(async () => {
+          const next = { ...data }; delete next[name]; await saveVary(null, next);
+          undo(`Removed the data change ${change.says || name}.`, () => saveVary(null, { ...(current.doc.study.vary.data || {}), [name]: change }));
+        }, e.currentTarget) }, "Remove"));
     });
     dataBox.replaceChildren(rows.length ? h("div", { class: "card", style: "padding:4px 18px" }, rows) : h("p", { class: "muted" }, "No data changes: the study leaves the data as it is."), dataForm());
   }
@@ -1268,7 +1396,13 @@ async function step4(box) {
     fill(rulesBox, 
       rules.length ? h("div", { class: "card", style: "padding:4px 18px" }, rules.map((rule, i) => h("div", { class: "item" },
         h("div", { class: "body" }, h("div", { class: "what" }, sentence(rule.says)), h("div", { class: "faint" }, h("code", {}, rule.expr || rule.sql))),
-        h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => { await patch({ constraints: rules.filter((_, j) => j !== i) }); drawAll(); }, e.currentTarget) }, "Remove"))))
+        h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove the rule ${rule.says}`, onclick: (e) => guarded(async () => {
+          await patch({ constraints: rules.filter((_, j) => j !== i) }); drawAll();
+          undo(`Removed the rule ${sentence(rule.says)}`, async () => {
+            const back = [...(current.doc.study.constraints || [])]; back.splice(Math.min(i, back.length), 0, rule);
+            await patch({ constraints: back }); drawAll();
+          });
+        }, e.currentTarget) }, "Remove"))))
         : h("p", { class: "muted" }, "No rules: every combination in the ranges above may be tried."),
       builder,
       names.length ? h("details", { class: "card", style: "margin-top:12px" }, h("summary", {}, builder ? "Write a rule yourself" : "Add a rule"),
@@ -1339,8 +1473,11 @@ async function step5(box) {
         kpiHelp(name) ? h("div", { class: "small" }, kpiHelp(name)) : null,
         h("div", { class: "muted small" }, `${kpiDirection(name) === "lower" ? "Lower" : "Higher"} is better. Today, on the smallest case: `, valueEl),
         kpi.sql ? h("details", {}, h("summary", {}, "How it is counted"), h("pre", { class: "mono small", style: "white-space:pre-wrap" }, kpi.sql)) : null, rowsBtn),
-        used ? h("span", { class: "badge" }, "in use") : h("button", { class: "btn small quiet", type: "button", onclick: (e) => guarded(async () => {
-          const next = { ...kpis }; delete next[name]; await patch({ kpis: next }); drawAll(); }, e.currentTarget) }, "Remove"));
+        used ? h("span", { class: "badge" }, "in use") : h("button", { class: "btn small quiet", type: "button", "aria-label": `Remove ${kpiLabel(name)}`, onclick: (e) => guarded(async () => {
+          const label = kpiLabel(name);
+          const next = { ...kpis }; delete next[name]; await patch({ kpis: next }); drawAll();
+          undo(`Removed the measure ${label}.`, async () => { await patch({ kpis: { ...current.doc.study.kpis, [name]: kpi } }); drawAll(); });
+        }, e.currentTarget) }, "Remove"));
     });
     kpisBox.replaceChildren(rows.length ? h("div", { class: "card", style: "padding:4px 18px" }, rows) : h("p", { class: "muted" }, "No measures yet."));
   }
@@ -1688,6 +1825,8 @@ async function step7(box) {
       h("ul", { style: "margin:0; padding-left:18px" }, problems.map((p) => h("li", {}, h("a", { href: `#/study/${current.slug}/${p.step}` }, `Step ${p.step}, ${STEPS[p.step - 1]}`), `: ${sentence(p.text)}`)))) : null,
     plan && plan.blocked ? note("bad", h("p", { style: "margin:0" }, sentence(plan.blocked))) : null,
     h("h2", {}, "Test run"), testResult, h("div", { class: "row", style: "margin-top:8px" }, testBtn),
+    h("p", { class: "faint", style: "margin-top:18px" }, "The study's setup — its cases, choices and harness — travels as one file: ",
+      h("a", { href: studyPath("/download/study"), download: "" }, "Save as zip"), ". Dropped on the home page of another library, it becomes a study there."),
     h("div", { class: "step-foot" }, h("a", { class: "btn", href: `#/study/${current.slug}/6` }, "Back"),
       h("div", { class: "row" }, h("span", { class: "faint" }, "The study runs on even if you close the app."), start)));
   drawTest(doc.test_run);
@@ -1919,16 +2058,17 @@ function chart(series) {
   const wrap = h("div"); wrap.innerHTML = svg; return wrap;
 }
 
-async function renderRunning(slug) {
+async function renderRunning(slug, run) {
   await loadStudy(slug, true);
   crumbs({ href: "#/", text: "Your studies", small: true }, { href: `#/study/${slug}/7`, text: current.doc.study.name, small: true }, { text: "Running" });
+  const runQuery = run ? `?run=${encodeURIComponent(run)}` : "";  // a named run; bare, the latest
   const box = h("div");
   const where = { screen: "running", run: null, open: false };  // the run is known once the first status is in
   view.replaceChildren(h("div", { class: "narrow" }, box, assistantPanel(where)));
   let stopping = false;
   async function draw() {
     let s;
-    try { s = await api("GET", studyPath("/status")); }
+    try { s = await api("GET", studyPath("/status" + runQuery)); }
     catch (err) { fill(box, note("bad", h("p", {}, err.message))); return; }
     where.run = s.run;
     const running = ["starting", "search", "check"].includes(s.phase);
@@ -1943,11 +2083,11 @@ async function renderRunning(slug) {
         ? h("dialog", {}, h("h3", { style: "margin-top:0" }, "Take the study out of the queue?"),
           h("p", {}, "It has not started, so nothing is lost. You can start it again from the review step."),
           h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Keep waiting"),
-            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop")); toast("Taken out of the queue"); clearTimers(); location.hash = `#/study/${slug}/7`; }) }, "Take it out")))
+            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop" + runQuery)); toast("Taken out of the queue"); clearTimers(); location.hash = `#/study/${slug}/7`; }) }, "Take it out")))
         : h("dialog", {}, h("h3", { style: "margin-top:0" }, "Stop the study?"),
           h("p", {}, "Runs in progress are stopped within seconds. The best so far is kept, and you see the results."),
           h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Keep running"),
-            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop")); toast("Stopping…"); draw(); }) }, "Stop")));
+            h("button", { class: "btn danger", type: "button", onclick: () => guarded(async () => { dialog.close(); stopping = true; await api("POST", studyPath("/stop" + runQuery)); toast("Stopping…"); draw(); }) }, "Stop")));
       document.body.append(dialog); dialog.showModal(); dialog.addEventListener("close", () => dialog.remove());
     } }, stopping && running ? "Stopping…" : "Stop");
     fill(box, 
@@ -1973,11 +2113,12 @@ async function renderRunning(slug) {
         s.failures.map((f) => h("div", { class: "item" }, h("span", { class: "badge" }, `${f.count}×`), h("div", { class: "body" }, h("div", { class: "what small" }, sentence(f.message)), h("div", { class: "muted small" }, f.todo))))) : null,
       h("div", { class: "step-foot" }, h("a", { class: "btn", href: s.dashboard, target: "_blank", rel: "noopener", title: "Every number the engine keeps, in its own words: for experts" }, "Detailed dashboard (for experts)"),
         running || queued ? stop : h("div", { class: "row" },
-          s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check")); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
-          s.phase === "failed" ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start")); toast("Started again."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Start it again") : null,
+          s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check" + runQuery)); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
+          // A fresh run: the page follows it, not the run it was opened on.
+          s.phase === "failed" ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start")); toast("Started again."); stopping = false; clearTimers(); if (run) { location.hash = `#/study/${slug}/running`; return; } every(2500, draw); draw(); }, e.currentTarget) }, "Start it again") : null,
           // A run that stopped or died with rounds of its plan left goes on from where it was: the same run, nothing done twice.
           s.can_resume ? h("button", { class: "btn primary", type: "button", title: "The rounds already done are kept; the search finishes the rest, then the final check runs", onclick: (e) => guarded(async () => { await api("POST", studyPath("/start"), { resume: s.run }); toast("Continuing where it stopped."); stopping = false; clearTimers(); every(2500, draw); draw(); }, e.currentTarget) }, "Continue where it stopped") : null,
-          s.phase === "failed" && !s.rounds.done ? null : h("a", { class: s.can_resume ? "btn" : "btn primary", href: `#/study/${slug}/results` }, "See the results"))));
+          s.phase === "failed" && !s.rounds.done ? null : h("a", { class: s.can_resume ? "btn" : "btn primary", href: `#/study/${slug}/results${runQuery}` }, "See the results"))));
     if (!running && !queued) clearTimers();  // a queued run keeps polling: the server starts it by itself
   }
   await draw();
@@ -2035,9 +2176,24 @@ async function renderResults(slug, run) {
   }
   const running = ["starting", "search", "check"].includes(r.phase);
   const runQuery = `?run=${encodeURIComponent(r.run)}`;
-  const finalKind = { confirmed: "good", worse: "bad", unclear: "warn", single: "warn", skipped: "info", stopped: "warn", missing: "info" }[r.final.state] || "info";
-  const finalWord = { good: "Probably better", bad: "Worse", warn: r.final.state === "stopped" ? "Not finished" : "Not clear", info: "Note" }[finalKind];
+  const finalKind = finalKindOf(r.final.state), finalWord = finalWordOf(r.final.state);
   const unitOf = (k) => k.unit ? ` · in ${k.unit}` : "";
+  // This study's runs, newest first, each with its verdict; and a pick to compare this run with another run or study.
+  const allRuns = [...(current.doc.runs || [])].reverse();
+  const runsList = h("div", {}, allRuns.map((entry) => {
+    const here = entry.id === r.run, active = ["running", "queued"].includes(entry.kind);
+    const label = whenText(entry.started_at) || entry.id;
+    const href = `#/study/${slug}/${active ? "running" : "results"}?run=${encodeURIComponent(entry.id)}`;
+    return h("div", { class: "item", "aria-current": here ? "true" : null },
+      h("div", { class: "body" }, h("div", { class: "what" }, here ? h("strong", {}, label) : h("a", { href }, label), here ? h("span", { class: "faint" }, " · this one") : null),
+        h("div", { class: "small" }, stateMark(entry))));
+  }));
+  const home = await api("GET", "/api/home");
+  const otherRuns = allRuns.filter((e) => e.id !== r.run && e.kind !== "queued").map((e) => ({ value: `${slug}/${e.id}`, text: `${whenText(e.started_at) || e.id} · ${e.line}` }));
+  const otherStudies = home.studies.filter((s) => s.slug !== slug && HAS_RUN.includes(s.kind)).map((s) => ({ value: s.slug, text: `${s.name} · ${s.line}` }));
+  const compareRow = otherRuns.length || otherStudies.length
+    ? compareControl("Compare this run", [{ value: `${slug}/${r.run}`, text: `${whenText((allRuns.find((e) => e.id === r.run) || {}).started_at) || r.run} · this run` }], [...otherRuns, ...otherStudies])
+    : h("p", { class: "faint", style: "margin:0" }, "Once another run or study has finished, you can compare this one with it here.");
   const kpiTable = h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {},
       h("tr", {}, h("th", { rowspan: "2" }, "Measure"), h("th", { class: "n group", colspan: "2" }, "Cases the search learned from"), h("th", { class: "n group", colspan: "2" }, "Held-back cases")),
@@ -2078,10 +2234,16 @@ async function renderResults(slug, run) {
     const doc = await api("POST", studyPath(`/next${runQuery}`), { name: `${current.doc.study.name} (next)` });
     location.hash = `#/study/${doc.slug}/4`;
   }, e.currentTarget) }, "Start a new study from this result");
+  // The same run, given the study's hours once more: the search goes on from its best, then the final check runs again.
+  const moreHours = (current.doc.study.budget || {}).hours;
+  const more = r.can_continue && moreHours ? h("button", { class: "btn", type: "button", title: "The rounds done are kept; the search goes on from here for that much more time, then the final check runs again", onclick: (e) => guarded(async () => {
+    await api("POST", studyPath("/continue"), { run: r.run, hours: moreHours });
+    toast("Searching on."); location.hash = `#/study/${slug}/running${runQuery}`;
+  }, e.currentTarget) }, `Continue for another ${duration(moreHours * 3600)}`) : null;
   const ctx = r.context;
   view.replaceChildren(h("div", { class: "narrow" },
     h("h1", {}, r.study),
-    running ? note("info", h("p", { style: "margin:0" }, "The study is still running; these are the results so far. ", h("a", { href: `#/study/${slug}/running` }, "See it run"))) : null,
+    running ? note("info", h("p", { style: "margin:0" }, "The study is still running; these are the results so far. ", h("a", { href: `#/study/${slug}/running${run ? runQuery : ""}` }, "See it run"))) : null,
     r.final.advice ? h("div", { class: "card answer", "data-kind": finalKind },
       h("div", { class: "faint" }, "The answer"),
       h("p", { class: "big", style: "margin:4px 0 0" }, r.final.advice),
@@ -2108,9 +2270,93 @@ async function renderResults(slug, run) {
     h("h2", {}, "Hand it over"), h("div", { class: "card" },
       h("p", { class: "muted", style: "margin-top:0" }, "The summary says how the study was set up, what it found, how sure that is and what changed — ready to paste into a message. The report says the same on one page, with every number."),
       h("div", { class: "row" }, summary, report, settingsButton), shown,
-      h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads),
-    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again),
+      h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads,
+      h("p", { class: "faint", style: "margin:14px 0 0" }, "The study itself — its cases, choices and harness, not the runs — as one file to pass on: ",
+        h("a", { href: studyPath("/download/study"), download: "" }, "Save as zip"), ".")),
+    h("h2", {}, "Next steps"), h("div", { class: "card" },
+      more ? h("p", { class: "muted", style: "margin-top:0" }, "Give this run more time: the search goes on from its best, and the final check runs again.") : null,
+      more ? h("div", { class: "row", style: "margin-bottom:14px" }, more) : null,
+      h("p", { class: "muted", style: more ? "" : "margin-top:0" }, "Search again from here: the same cases and choices, starting from this result."), again),
+    h("h2", {}, allRuns.length === 1 ? "This study's run" : "This study's runs"),
+    h("div", { class: "card" }, runsList, h("div", { style: "margin-top:12px" }, compareRow)),
     assistantPanel({ screen: "results", run: r.run, open: false })));
+}
+
+// The final check's verdict as a mark: its kind (the colour) and the word on it.
+function finalKindOf(state) { return { confirmed: "good", worse: "bad", unclear: "warn", single: "warn", skipped: "info", stopped: "warn", missing: "info" }[state] || "info"; }
+function finalWordOf(state) { return { good: "Probably better", bad: "Worse", warn: state === "stopped" ? "Not finished" : "Not clear", info: "Note" }[finalKindOf(state)]; }
+
+// ================================================================ compare
+// Two studies, or two runs, side by side: `#/compare?a=<slug>[/<run>]&b=<slug>[/<run>]`.
+// Every row is one label with a cell per side; cases and changes are joined by name.
+async function renderCompare(a, b) {
+  crumbs({ href: "#/", text: "Your studies", small: true }, { text: "Compare" });
+  if (!a || !b) {
+    view.replaceChildren(h("div", { class: "narrow" }, note("info", h("p", { style: "margin:0" }, "Pick two studies, or two runs of one study, to compare: from the home page, or from a study's results.")),
+      h("p", {}, h("a", { href: "#/" }, "Back to your studies"))));
+    return;
+  }
+  let c;
+  try { c = await api("GET", `/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`); }
+  catch (err) {
+    if (err.status === 404) { view.replaceChildren(h("div", { class: "narrow" }, note("info", h("p", { style: "margin:0" }, sentence(err.message))), h("p", {}, h("a", { href: "#/" }, "Back to your studies")))); return; }
+    throw err;
+  }
+  const sides = [c.a, c.b];
+  const head = (side) => h("th", { class: "group" }, h("a", { href: `#/study/${side.slug}/results?run=${encodeURIComponent(side.run)}` }, side.name),
+    h("div", { class: "faint", style: "font-weight:400" }, `${side.harness} · run ${side.run}`));
+  const row = (label, cell) => h("tr", {}, h("th", { scope: "row" }, label), sides.map((s) => h("td", {}, cell(s))));
+  const dash = h("span", { class: "faint" }, "–");
+  const pctText = (v) => typeof v === "number" ? `${fmt(v, 1)} %` : null;
+  const verdict = h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, ""), sides.map(head))),
+    h("tbody", {},
+      row("Goal", (s) => `${capital(s.goal.says)} (${s.goal.direction} is better)`),
+      row("Verdict", (s) => status(finalKindOf(s.final.state), finalWordOf(s.final.state))),
+      row("The answer", (s) => s.final.advice || dash.cloneNode(true)),
+      row("The search", (s) => s.headline),
+      row("The final check", (s) => s.final.line || dash.cloneNode(true)),
+      row("Chance of a gain", (s) => typeof s.final.chance === "number" ? `${Math.round(s.final.chance * 100)} %` : dash.cloneNode(true)),
+      row("Likely range", (s) => Array.isArray(s.final.ci95) ? `${pctText(s.final.ci95[0])} to ${pctText(s.final.ci95[1])}` : dash.cloneNode(true)))));
+  // Held-back cases, joined by name: start, best and change per side.
+  const caseNames = [...new Set(sides.flatMap((s) => s.held.map((r) => r.case)))];
+  const heldOf = (s, name) => s.held.find((r) => r.case === name);
+  const held = caseNames.length ? h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {},
+      h("tr", {}, h("th", { rowspan: "2" }, "Case"), sides.map((s) => h("th", { class: "n group", colspan: "3" }, s.name))),
+      h("tr", {}, sides.flatMap(() => [h("th", { class: "n" }, "Start"), h("th", { class: "n" }, "Best"), h("th", { class: "n" }, "Change")]))),
+    h("tbody", {}, caseNames.map((name) => h("tr", {}, h("td", {}, name), sides.flatMap((s) => {
+      const r = heldOf(s, name);
+      return r ? [h("td", { class: "n" }, fmt(r.start, 2)), h("td", { class: "n" }, fmt(r.best, 2)), h("td", { class: "n" }, change(r.change_pct, s.goal.direction))]
+        : [h("td", { class: "n faint" }, "–"), h("td", { class: "n faint" }, "–"), h("td", { class: "n faint" }, "not held back")];
+    })))))) : h("p", { class: "muted", style: "margin:0" }, "Neither run has a final check on held-back cases.");
+  // What changed, joined by the setting or data change's name.
+  const changeNames = [...new Set(sides.flatMap((s) => s.changes.map((x) => x.name)))];
+  const changeOf = (s, name) => s.changes.find((x) => x.name === name);
+  const changes = changeNames.length ? h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "What"), sides.map((s) => h("th", {}, s.name)))),
+    h("tbody", {}, changeNames.map((name) => {
+      const label = (sides.map((s) => changeOf(s, name)).find(Boolean) || {}).label || name;
+      return h("tr", {}, h("td", {}, label, h("div", { class: "faint" }, name)), sides.map((s) => {
+        const x = changeOf(s, name);
+        return h("td", { class: "num" }, !x ? h("span", { class: "faint" }, "not varied") : x.changed ? [x.old_text, " → ", h("strong", {}, x.new_text)] : [x.old_text, h("span", { class: "faint" }, " (kept)")]);
+      }));
+    })))) : h("p", { class: "muted", style: "margin:0" }, "Nothing was varied.");
+  const setup = h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, ""), sides.map((s) => h("th", {}, s.name)))),
+    h("tbody", {},
+      row("Time per case", (s) => duration(s.setup.time_per_case_s)),
+      row("Time for the study", (s) => duration(s.setup.hours * 3600)),
+      row("Combinations tried", (s) => String(s.setup.combinations)))));
+  view.replaceChildren(h("div", { class: "narrow" },
+    h("h1", {}, "Side by side"),
+    h("p", { class: "lede" }, sides.map((s, i) => [i ? " and " : "", h("strong", {}, s.name)]), "."),
+    c.same_goal ? null : note("warn", h("p", { style: "margin:0" }, "The two chase different goals, so their numbers are not comparable; read each verdict on its own.")),
+    h("h2", {}, "The verdict"), h("div", { class: "card" }, verdict),
+    h("h2", {}, "Held-back cases"), h("div", { class: "card" }, held),
+    h("h2", {}, "What changed"), h("div", { class: "card" }, changes),
+    h("h2", {}, "The set-up"), h("div", { class: "card" }, setup),
+    h("p", { style: "margin-top:20px" }, h("a", { href: "#/" }, "Back to your studies"))));
 }
 
 route();

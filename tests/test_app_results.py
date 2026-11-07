@@ -225,3 +225,106 @@ def test_a_data_change_is_shown_in_the_values_it_makes_and_a_rule_compares_them(
     holds = min(north) > south[1]
     checked = assistant.check_card(rule("north", "south"), study, harness, root, {})
     assert checked["ok"] is holds, checked
+
+
+# -- a study's runs, each with its verdict
+
+
+def finished_run(run_dir: Path, *, check: bool = True, decision: str = "use", mean: float = 4.2,
+                 started: str = "2026-01-01T00:00:00+00:00", held: str = "cases/town-40.json") -> None:
+    """A finished run written by hand: a seed and a best in `runs.jsonl`, and
+    -- with `check` -- a final check that found the best `mean` % better on
+    one held-back case (`decision` says what the run made of it)."""
+    import json
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    final = {"candidate": "c1", "confirmed": decision == "use", "decision": decision, "seeds": 3,
+             "comparison": "confirm/final/comparison.json"} if check else None
+    job = {"phase": "done", "pid": 2 ** 22 + 7, "started_at": started, "finished_at": started.replace("T00:00", "T00:12"),
+           "plan": {"hours": 0.2, "rounds": 2, "generations": 2}, "search": {"generations": 2, "aborted": False}}
+    if final:
+        job["final"] = final
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    seed = {"neighbours": 8, "restart_after": 2000, "accept_worse": 0.0, "init": "random"}
+    best = {**seed, "restart_after": 13000, "accept_worse": 0.017}
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"id": "seed", "operator": "human-seed", "score": -100.0, "params": seed, "kpis": {"tour_length": 100.0, "longest_leg": 4.0}},
+        {"id": "c1", "operator": "mutate", "score": -95.8, "params": best, "kpis": {"tour_length": 95.8, "longest_leg": 4.1}},
+    ]) + "\n", encoding="utf-8")
+    if not check:
+        return
+    folder = run_dir / "confirm" / "final"
+    folder.mkdir(parents=True)
+    worst = mean - 1.2
+    (folder / "comparison.json").write_text(json.dumps({
+        "seeds": [1001, 1002, 1003], "instances": [held],
+        "per_candidate": {"c1": {"summary": {"n": 1, "mean": mean, "ci95": [worst, mean + 1.2], "chance": 0.97, "worst": worst}}},
+    }), encoding="utf-8")
+    rows = []
+    for seed_no in (1001, 1002, 1003):
+        rows.append({"configuration": "baseline", "instance": held, "seed": seed_no, "ok": True, "kpis": {"tour_length": 50.0, "longest_leg": 3.0}})
+        rows.append({"configuration": "c1", "instance": held, "seed": seed_no, "ok": True,
+                     "kpis": {"tour_length": 50.0 * (1 - mean / 100), "longest_leg": 3.1}})
+    (folder / "results.json").write_text(json.dumps(rows), encoding="utf-8")
+
+
+def document_of(_run_dir: Path) -> dict:
+    """The status document of a hand-written run: the best is `c1`, 4.2 % better on the cases learned from."""
+    return {"progress": {"best": {"id": "c1"}, "improvement": {"pct": 4.2, "verdict": "better"}}}
+
+
+def study_with_runs(tmp_path: Path, name: str = "Tours") -> tuple[Path, object]:
+    """A demo study with the sample cases, one held back; no runs yet."""
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    slug = home.create_study("demo-tour", "tune", name)
+    home.use_samples(slug)
+    home.split(slug, 1)
+    return home.study_root(slug), home
+
+
+def test_every_run_of_a_study_has_its_line_and_kind(tmp_path):
+    from evolvekit.harness.study import load_study
+
+    root, _ = study_with_runs(tmp_path)
+    study = load_study(root)
+    assert jobs.runs(root) == [] and jobs.state_line(root, study)["kind"] == "draft"
+    finished_run(root / "runs" / "20260101-000000", decision="use")
+    finished_run(root / "runs" / "20260102-000000", started="2026-01-02T00:00:00+00:00", check=False)
+    finished_run(root / "runs" / "20260103-000000", started="2026-01-03T00:00:00+00:00", decision="keep", mean=0.4)
+    listed = jobs.runs(root)
+    assert [r["id"] for r in listed] == ["20260101-000000", "20260102-000000", "20260103-000000"], "oldest first"
+    assert [r["kind"] for r in listed] == ["finished"] * 3
+    assert listed[0]["line"] == "finished · probably better: 4.2 % lower tour length"
+    assert listed[1]["line"] == "finished · not proven on the held-back cases", "no final check: nothing proven"
+    assert listed[2]["line"] == "finished · not proven on the held-back cases" and listed[2]["tone"] == "warn"
+    assert all(r["phase"] == "done" and r["started_at"] and r["finished_at"] for r in listed)
+    # One run's words on their own, and the card's: the latest run's.
+    first = jobs.run_line(root, study, root / "runs" / "20260101-000000")
+    assert first == {"kind": "finished", "run": "20260101-000000", "line": "finished · probably better: 4.2 % lower tour length"}
+    assert jobs.state_line(root, study) == jobs.run_line(root, study, root / "runs" / "20260103-000000")
+    assert jobs.state_line(root, study)["run"] == "20260103-000000"
+
+
+def test_a_running_run_says_how_far_it_got_only_when_asked(tmp_path, monkeypatch):
+    import json
+    import os
+
+    from evolvekit.harness.study import load_study
+
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    now = jobs._now()  # noqa: SLF001
+    (run_dir / "job.json").write_text(json.dumps({"phase": "search", "pid": os.getpid(), "started_at": now.isoformat(),
+                                                   "plan": {"hours": 1.0}}), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
+    study = load_study(root)
+    plain = jobs.run_line(root, study, run_dir)
+    assert plain["kind"] == "running" and plain["line"].startswith("running · ") and "better so far" not in plain["line"]
+    told = jobs.run_line(root, study, run_dir, document_of)
+    assert told["line"].endswith(" · 4.2 % better so far")
+    assert jobs.runs(root)[0]["line"] == plain["line"], "the list does not read the status document"

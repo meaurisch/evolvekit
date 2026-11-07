@@ -263,6 +263,7 @@ class AppServer:
 
     def __init__(self, home: str | Path, *, port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
         self.home = Home(home)
+        self.home.clean_trash()  # what has waited in the trash past its week goes, once, at the start
         self.work: dict[str, Any] = {}
         """Background work of this process (previews, test runs), by key."""
         self.assistant_provider: Any = None
