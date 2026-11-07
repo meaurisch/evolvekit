@@ -1,0 +1,11 @@
+$ claude <<< The evolvekit study shorter-tours has finished; report its result.
+
+The study shorter-tours has finished. Its final check says:
+
+> Probably better: 8.5 % lower tour length on 2 held-back cases, a chance of about 20 in 20; at worst about the same as your starting point (Demo tour's own defaults).
+>
+> Use the new settings: they are probably better on cases the search never saw.
+
+The full report is in `evolvekit-report.md` in the repository.
+
+My own reading: the check used only 2 held-back cases, so the result rests on a small sample.

@@ -1,0 +1,19 @@
+$ claude <<< Use evolvekit to find solver settings that give shorter tours on the requests in cases/; the solver is solver.py in this folder; hold two back; today's settings are the starting point.
+
+The study is made and checked, and a preview solve at today's settings ran cleanly. One thing from the request is missing before I can show the plan and start: how much time the study may take in total.
+
+What I set up, as study "shorter-tours" in the evolvekit home:
+
+- **Application:** solver.py in this folder, probed as version 1.0.
+- **Cases:** all four requests in cases/. Held back for the final check: town-40 and region-60. Learning from north-south-30 and county-50.
+- **What may change:** the four recommended settings, candidate moves per stop, stalled moves before a restart, chance to accept a worse move, and the starting tour. The segment-move setting stays as it is today.
+- **Starting point:** today's settings, which are the harness defaults.
+- **Measure and goal:** tour length, lower is better.
+- **Time per case:** the harness default of 2 seconds, since the request did not say.
+- **AI help:** off.
+
+The study check reported no problems. The preview solved the smallest training case in about 2 seconds.
+
+**The one open question:** how much time in total should the study get? Ten minutes, an hour, overnight? The study file currently carries the harness's default of 6 minutes, but that is not a choice I should make for you. Once you give a number, I'll compile the plan, show you its line with the rounds, combinations and finish time, and start it.
+Ignoring 8 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["C:/Users/norri/AppData/Local/Temp/evk gate 7r4x_agw/repo"].hasTrustDialogAccepted: true in C:\Users\norri\.claude.json.
+Ignoring 1 permissions.additionalDirectories entry from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["C:/Users/norri/AppData/Local/Temp/evk gate 7r4x_agw/repo"].hasTrustDialogAccepted: true in C:\Users\norri\.claude.json.

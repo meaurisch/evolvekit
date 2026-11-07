@@ -1,0 +1,11 @@
+$ claude <<< Use evolvekit to find solver settings that give shorter tours on the requests in cases/; the solver is solver.py in this folder; hold two back; ten minutes in total; today's settings are the starting point.
+
+I set up an evolvekit study called "Shorter tours" and started it. It tunes four solver settings, starting from today's values: candidate moves per stop, stalled moves before a restart, chance to accept a worse move, and starting tour. The measure is Tour length, and lower is the goal.
+
+- **Cases:** all four requests in `cases/`. The search uses north-south-30 and county-50, and town-40 and region-60 are held back for the final check.
+- **Time:** 2 s per case (the harness default, since you didn't give one) and ten minutes in total.
+- **Plan:** about 18 rounds, about 216 combinations, then a final check on 2 held-back cases with 12 runs each (≈ 55 s); done around 21:22.
+
+Your study is running: http://127.0.0.1:8780/?token=…#/study/shorter-tours. It tries about 216 combinations in 18 rounds and ends around 21:22; the answer is on the Study page.
+
+Ask me once it has finished and I'll report the final check's verdict and write the report file.

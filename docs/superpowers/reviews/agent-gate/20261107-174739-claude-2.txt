@@ -1,0 +1,11 @@
+$ claude <<< The evolvekit study shorter-tours has finished; report its result.
+
+The shorter-tours study has finished. The final check's verdict, word for word:
+
+> Probably better: 8.5 % lower tour length on 2 held-back cases, a chance of about 20 in 20; at worst about the same as your starting point (Demo tour's own defaults).
+>
+> Use the new settings: they are probably better on cases the search never saw.
+
+The full report is written to `evolvekit-report.md` in the repository root. The gain on the cases it learned from is available in that report if you want it named.
+Ignoring 8 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["C:/Users/norri/AppData/Local/Temp/evk gate syxcrog7/repo"].hasTrustDialogAccepted: true in C:\Users\norri\.claude.json.
+Ignoring 1 permissions.additionalDirectories entry from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["C:/Users/norri/AppData/Local/Temp/evk gate syxcrog7/repo"].hasTrustDialogAccepted: true in C:\Users\norri\.claude.json.

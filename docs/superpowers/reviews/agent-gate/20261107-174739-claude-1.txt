@@ -1,0 +1,17 @@
+$ claude <<< Use evolvekit to find solver settings that give shorter tours on the requests in cases/; the solver is solver.py in this folder; hold two back; ten minutes in total; today's settings are the starting point.
+
+Your study is running: http://127.0.0.1:8780/?token=…#/study/shorter-tours. It tries about 216 combinations in 18 rounds and ends around 17:58; the answer is on the Study page.
+
+What was set up:
+
+- **Study** "Shorter tours" on solver.py in this folder, from the harness's "Tune solver settings" template.
+- **What may change:** the four recommended settings (candidate moves per stop, stalled moves before a restart, chance to accept a worse move, starting tour). Today's settings are the starting point.
+- **Cases:** all four requests in cases/. Two are held back for the final check (town-40 and region-60). The search learns from north-south-30 and county-50.
+- **Goal:** tour length, lower. Two seconds per case, the harness default, since the request did not say.
+- **Total time:** ten minutes.
+
+The preview solved the smallest case cleanly at the starting values. The doctor's only ✗ was the missing AI provider key, which does not matter here since AI help is off.
+
+When the run has ended, ask me to report on the study and I will relay the final check's verdict word for word.
+Ignoring 8 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["C:/Users/norri/AppData/Local/Temp/evk gate syxcrog7/repo"].hasTrustDialogAccepted: true in C:\Users\norri\.claude.json.
+Ignoring 1 permissions.additionalDirectories entry from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["C:/Users/norri/AppData/Local/Temp/evk gate syxcrog7/repo"].hasTrustDialogAccepted: true in C:\Users\norri\.claude.json.
