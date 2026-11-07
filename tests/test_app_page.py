@@ -179,3 +179,59 @@ def test_every_route_the_old_page_used_is_still_reachable():
             continue
         last = words[-1]
         assert re.search(rf"[\"'/]{re.escape(last)}[\"'/?]", SOURCE), f"{method} {literal}: nothing in the page calls it"
+
+
+# ---------------------------------------------------------------------------
+# the verdict: rendered from the results document, never composed on the page
+# ---------------------------------------------------------------------------
+
+STUDY_PAGE = (STATIC / "js" / "pages" / "study.js").read_text(encoding="utf-8")
+
+
+def _strip_branches(source: str) -> str:
+    """The body of the status strip's `strip()`: where the headline is chosen."""
+    start = source.index("function strip()")
+    return source[start:source.index("function foundWords()", start)]
+
+
+def test_the_study_page_headline_is_the_verdict_line_and_advice():
+    """Design 3.4: the page's headline and the sentence under it are the
+    results document's `final.line` and `final.advice`, verbatim."""
+    body = _strip_branches(STUDY_PAGE)
+    finished = body[body.index('d === "use"'):]
+    assert "head: verdictHead" in finished and "sub: verdictSub" in finished
+    assert "function verdictHead" in STUDY_PAGE and "f.line" in STUDY_PAGE[STUDY_PAGE.index("function verdictHead"):]
+    assert "f.advice" in STUDY_PAGE[STUDY_PAGE.index("function verdictSub"):]
+    for old in ("EK.better(f.mean)", "on one case", "One case gives no range, so no answer.", "but not sure enough"):
+        assert old not in finished, f"the page composes its own verdict again: {old!r}"
+
+
+def test_no_figure_on_the_study_page_says_better():
+    """The same number, one way: one decimal, "lower"/"higher" by the measure's
+    direction, in the chip and the held-back table; "better" only inside the line."""
+    parts = (STATIC / "js" / "parts.js").read_text(encoding="utf-8")
+    chip = parts[parts.index("EK.chosenChip = function"):parts.index("EK.hoverCard = function")]
+    assert "EK.better" not in chip and "on the cases it learned from, not checked" in chip
+    assert "EK.change(x.change_pct" in STUDY_PAGE, "the held-back table: one decimal, the measure's direction"
+    assert "mean of the paired runs" in STUDY_PAGE, "the table's column says what its figure is"
+    assert "improvement_pct" in STUDY_PAGE, "the chip of the best: the document's learned_from figure"
+
+
+def test_the_change_words_round_like_the_report():
+    """`EK.change` in core.js, run under node: the report's `_change` words."""
+    import json
+    import shutil
+    import subprocess
+
+    from evolvekit.app.report import _change
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+    core = (STATIC / "js" / "core.js").read_text(encoding="utf-8")
+    cases = [(4.78, "lower"), (-7.43, "lower"), (7.46, "higher"), (0.01, "lower"), (None, "lower")]
+    script = ("var window = {}, document = {addEventListener: function () {}}, navigator = {}, location = {href: 'http://127.0.0.1/', hash: '', search: ''};\n"
+              + core + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(function (c) { return window.EK.change(c[0], c[1]); })));")
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == [_change(v, d) for v, d in cases]

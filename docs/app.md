@@ -173,19 +173,26 @@ must keep), **Data changes** and AI help.
 The **status strip** at the top says the study's one answer right now —
 *Searching · round 7 of 12 · Best so far: 1.95 % better · Not checked yet* —
 and becomes the verdict when the final check has decided. Nothing says *use
-it* before then. The app decides by one fixed rule, stated under the answer:
+it* before then. The verdict's two sentences are the verdict document's
+`line` and `advice`, word for word, as `evolvekit study verdict` prints
+them: the page never composes its own. The app decides by one fixed rule, stated under the answer:
 *use it at 9 in 10 or better, worst within 1 %* — the chance of a gain at
 least 9 in 10 and the worst plausible case within 1 % of today. Every
 estimate shows its likely range as a band through *today*, with both ends
 marked, *worst* and *best*, and the dashed 1 % limit.
 
-- **Use it** (the strip turns orange): the improvement on the goal's measure
-  — *1.40 % better on cost as PyVRP counts it (lower)* — with the chance and
-  the worst case; *Save settings file* and *Copy* a summary.
-- **Keep today's settings**: better on average, but not sure enough (*chance
-  under 9 in 10*, or a worst case beyond 1 %); *Check with more runs* keeps
-  the runs it did and adds others.
-- **Worse**, a number on **one case** (no range, so no answer), **nothing beat
+- **Use it** (the strip turns orange): *Probably better: 1.4 % lower cost
+  on 3 held-back cases, a chance of about 19 in 20; …*, then *Use the new
+  settings: they are probably better on cases the search never saw.*;
+  *Save settings file* and *Copy* a summary.
+- **Keep**: *Not proven on 3 held-back cases: …* (*chance under 9 in 10*,
+  or a worst case beyond 1 %), then *Keep today's settings … for now: the
+  gain is not proven.*; *Check with more runs* keeps the runs it did and
+  adds others.
+- **One case**: *On the one held-back case: 4.8 % lower tour length.*, then
+  *Keep today's settings …: one held-back case is too few to tell; a study
+  that holds back three or more can.*; *Hold back more cases*.
+- **Worse**, **nothing beat
   the starting point**, a **stopped** check (*Continue the check*), a study
   **stopped by you** (*Run the final check*, *Carry on*) or **by an error**
   (*Continue where it stopped*), and **queued** (*Remove from queue*).
@@ -208,6 +215,12 @@ combination and its family — the combinations it came from, back to today's
 settings — are marked on the Tries plot. *Details* shows one combination in
 full: every setting it changed, its result case by case, and for a run that
 failed, what it printed and how it was started.
+
+Every figure for a combination is written as the report writes it: one
+decimal and the measure's own direction, never *better* — the chosen
+combination's chip reads *Combination 2 · 7.5 % lower on the cases it
+learned from, not checked*. The held-back table under *Details* gives each
+case's change as the verdict computes it, the mean of the paired runs.
 
 | Dark | Phone |
 |---|---|
@@ -310,7 +323,7 @@ everything it does.
 | *… is thin* under the plan | take one of the fixes it offers, or accept that the search may miss the best |
 | *fewer than 3 rounds* | take one of the three ways out the plan offers |
 | *Not proven on the held-back cases* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
-| *Keep your current settings* and you have time | *Continue for another …*: the search goes on from its best, and the check runs again |
+| *Keep today's settings* and you have time | *Continue for another …*: the search goes on from its best, and the check runs again |
 | *the starting point breaks a guardrail* | the guardrail is stricter than today's plans: loosen it, or give the application more time per case |
 | *It failed* after a restart of the computer | *Continue where it stopped*: the run goes on from its last round |
 | *It failed* | the message says why; fix that, then *Start it again* |

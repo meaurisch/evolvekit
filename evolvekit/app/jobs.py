@@ -1129,6 +1129,9 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     verdict = verdict_doc._document(root, run_dir, study, harness, job, final, comparison, by_case["held"], changed,
                                     facts, pct)
     final["line"], final["advice"] = verdict["line"], verdict["advice"]
+    # The held-back table's change is the document's: the paired mean over the final check's runs.
+    paired = {row["name"]: row["change_pct"] for row in verdict["by_case"]}
+    by_case["held"] = [{**row, "change_pct": paired.get(row["case"], row["change_pct"])} for row in by_case["held"]]
     if "decision" in final:
         final["decision"] = verdict["decision"]
     for key, name in (("mean", "mean_pct"), ("ci95", "ci95_pct"), ("worst_pct", "worst_pct"), ("chance", "chance"),
@@ -1431,6 +1434,10 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
             current = max(1, last + 1)
             current = min(current, planned) if planned else current
             where = f" · round {current}" + (f" of {planned}" if planned else "")
+        elif not _continued(job) and not job.get("resumed_at") and (
+                document_of is not None or not (run_dir / "events.jsonl").exists()):
+            # Live, and no round has reported yet (known: the status was read, or there are no events).
+            where = " · starting" + (f" round 1 of {planned}" if planned else "")
         line = ("running" + (" · continued" if _continued(job) else "") + where
                 + (f" · {_duration(left)} left" if left is not None else ""))
         if document_of is not None and (run_dir / "events.jsonl").exists():

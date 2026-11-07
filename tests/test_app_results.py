@@ -353,6 +353,28 @@ def test_a_running_run_says_its_round_and_a_manual_plan_no_stale_time(tmp_path, 
     assert jobs.run_line(root, load_study(root), run_dir, status)["line"] == "running · round 2 of 2"
 
 
+def test_a_run_with_no_round_yet_says_it_is_starting_round_1(tmp_path, monkeypatch):
+    import json
+    import os
+
+    from evolvekit.harness.study import load_study
+
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    job = {"phase": "search", "pid": os.getpid(), "started_at": jobs._now().isoformat(),  # noqa: SLF001
+           "plan": {"hours": 1.0, "rounds": 2, "adjusted": ["generations"]}}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
+    study = load_study(root)
+    assert jobs.run_line(root, study, run_dir, lambda _d: {})["line"] == "running · starting round 1 of 2"
+    assert jobs.state_line(root, study, lambda _d: {})["line"] == "running · starting round 1 of 2"
+    job["plan"] = {"hours": 1.0, "adjusted": ["generations"]}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    assert jobs.run_line(root, study, run_dir, lambda _d: {})["line"].startswith("running · starting")
+    assert "round" not in jobs.run_line(root, study, run_dir, lambda _d: {})["line"], "no plan: no round number"
+
+
 def test_a_running_run_says_how_far_it_got_only_when_asked(tmp_path, monkeypatch):
     import json
     import os

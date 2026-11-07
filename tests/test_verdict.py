@@ -93,6 +93,24 @@ def test_advice_says_keep_todays_settings_unless_use(decision, run_of):
     assert ": " in v["advice"], "the reason after the colon"
 
 
+def test_page_held_back_rows_equal_the_verdict_rows(use_run):
+    """One figure: the page's held-back table takes its change from the verdict
+    document (the paired mean over the final check's runs), not from the two means."""
+    root, run = use_run
+    path = root / "runs" / run / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    held = comparison["instances"][0]
+    comparison["per_candidate"]["c1"]["per_instance"] = [
+        {"instance": held, "pairs": 3, "baseline": 50.0, "candidate": 47.9, "improvement_pct": 4.78}]
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+    v = build_verdict(root, run)
+    rows = jobs.results(root, run, document_of)["by_case"]["held"]
+    assert [r["case"] for r in rows] == [r["name"] for r in v["by_case"]]
+    for page, doc in zip(rows, v["by_case"]):
+        assert {k: page[k] for k in ("start", "best", "change_pct")} == {k: doc[k] for k in ("start", "best", "change_pct")}
+    assert rows[0]["change_pct"] == pytest.approx(4.78)
+
+
 def test_advice_for_use_says_use(use_run):
     assert build_verdict(*use_run)["advice"].startswith("Use the new settings")
 

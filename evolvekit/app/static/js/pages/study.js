@@ -138,39 +138,42 @@
         caption: EK.capital(roundWord()) + (s.time && s.time.used ? " · stopped at " + s.time.used : ""), stoppedAt: true,
         acts: [s.can_check ? { text: "Run the final check", act: "check" } : null, s.can_resume ? { text: "Carry on", kind: s.can_check ? "secondary" : "primary", act: "resume" } : null].filter(Boolean) });
     } else if (d === "use") {
-      Object.assign(x, { tone: "accent", mark: "use", kickerTone: "", kicker: "Use it · final check on " + EK.plural(f.n || heldCount(), "case"), head: EK.better(f.mean) + EK.goalWords(goalOf()),
-        sub: EK.rangeCaption({ decision: "use", chance: f.chance, ci95: f.ci95 }).split(" · at best")[0], right: "range",
+      Object.assign(x, { tone: "accent", mark: "use", kickerTone: "", kicker: "Use it · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
+        sub: verdictSub(f), right: "range",
         range: [f.mean, f.ci95 && f.ci95[0], f.ci95 && f.ci95[1]], caption: "Likely range, on the final check", rule: true,
         acts: [hasExport("settings_json") ? { text: "Save settings file", act: "save-settings" } : null, { text: "Copy", kind: "secondary", act: "copy-summary", label: "Copy a summary" }].filter(Boolean) });
     } else if (d === "keep") {
-      Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Keep · final check on " + EK.plural(f.n || heldCount(), "held-back case"), head: keep,
-        sub: f.mean != null ? EK.capital(EK.better(f.mean)) + EK.goalWords(goalOf()) + " on held-back cases, but not sure enough." : "Not proven on new cases.", right: "range",
+      Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Keep · final check on " + EK.plural(f.n || heldCount(), "held-back case"), head: verdictHead(f),
+        sub: verdictSub(f), right: "range",
         range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
         acts: [f.recheck ? { text: "Check with more runs", kind: "secondary", act: "recheck" } : null].filter(Boolean) });
     } else if (d === "worse") {
-      Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Worse · final check on " + EK.plural(f.n || heldCount(), "case"), head: EK.better(f.mean) + EK.goalWords(goalOf()),
-        sub: "On held-back cases. " + keep + ".", right: "range", range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95 }), rule: true,
+      Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Worse · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
+        sub: verdictSub(f), right: "range", range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95 }), rule: true,
         acts: [{ text: "Start a new study", kind: "secondary", act: "next" }] });
     } else if (d === "single") {
-      Object.assign(x, { mark: "none", kickerTone: "", kicker: "Final check done · 1 held-back case", head: EK.capital(EK.better(f.mean)) + " on one case",
-        sub: "One case gives no range, so no answer.", right: "range", range: [f.mean, null, null], caption: "One case: a number, no range",
+      Object.assign(x, { mark: "none", kickerTone: "", kicker: "Final check done · 1 held-back case", head: verdictHead(f),
+        sub: verdictSub(f), right: "range", range: [f.mean, null, null], caption: "One case: a number, no range",
         acts: [{ text: "Hold back more cases", kind: "secondary", act: "next" }] });
     } else if (d === "skipped") {
-      var nothing = /starting point stayed/.test(f.line || "") || /nothing better/.test(f.advice || "");
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Search done" + (s.time && s.time.used ? " · " + s.time.used : ""),
-        head: nothing ? "Nothing beat " + keep.replace(/^Keep /, "") : "No final check", sub: nothing ? "No final check needed. " + keep + "." : "Nothing was held back to check it on.",
+        head: verdictHead(f), sub: verdictSub(f),
         caption: EK.capital(roundWord()) + " · no final check", stoppedAt: true,
         acts: [s.can_continue ? { text: "Search for longer", kind: "secondary", act: "continue" } : null].filter(Boolean) });
     } else if (d === "stopped") {
-      Object.assign(x, { kickerTone: "", kicker: "Final check stopped" + (ch && ch.planned ? " · " + ch.pairs + " of " + ch.planned + " runs" : ""), head: "No answer yet",
-        sub: "The runs so far are kept. Continue for an answer.", right: ch && ch.mean != null ? "both" : "timeline",
+      Object.assign(x, { kickerTone: "", kicker: "Final check stopped" + (ch && ch.planned ? " · " + ch.pairs + " of " + ch.planned + " runs" : ""), head: verdictHead(f),
+        sub: verdictSub(f), right: ch && ch.mean != null ? "both" : "timeline",
         range: ch && ch.mean != null ? [ch.mean, ch.ci95 && ch.ci95[0], ch.ci95 && ch.ci95[1]] : null, caption: "So far, on the final check",
         acts: [{ text: "Continue the check", act: "check" }] });
     } else {
-      Object.assign(x, { mark: "none", kickerTone: "", kicker: "Finished", head: "No final check", sub: f.line || "There is no final check for this run.", acts: [] });
+      Object.assign(x, { mark: "none", kickerTone: "", kicker: "Finished", head: verdictHead(f), sub: verdictSub(f), acts: [] });
     }
     return x;
   }
+  /** The verdict in the results document's own words (design 3.4): its `line` is the headline and
+      its `advice` the sentence under it, verbatim, so the page and the terminal say the same. */
+  function verdictHead(f) { return f.line || "No answer yet"; }
+  function verdictSub(f) { return f.advice || ""; }
   /** "Found 14 min ago, on the 10 study cases." for the best so far, from the tries. */
   function foundWords() {
     var t = st.tries, best = t && (t.best || []).slice(-1)[0];
@@ -211,9 +214,9 @@
     var announce = null;
     var seenKey = "evolvekit.hatched." + st.slug + "/" + st.run, seen = true;
     try { seen = !!localStorage.getItem(seenKey); if (finished && !seen) localStorage.setItem(seenKey, "1"); } catch (e) { seen = true; }
-    if (((st.phase && st.phase !== phase) || !seen) && finished) announce = phase === "butterfly" ? "I’m out! " + x.head + ", checked on " + EK.plural(((st.results || {}).final || {}).n || heldCount(), "case") + "." : "I’m out. " + x.head + ".";
+    if (((st.phase && st.phase !== phase) || !seen) && finished) announce = phase === "butterfly" ? "I’m out! " + x.head.replace(/\.$/, "") + ", checked on " + EK.plural(((st.results || {}).final || {}).n || heldCount(), "case") + "." : "I’m out. " + x.head.replace(/\.$/, "") + ".";
     if (st.phase && st.phase !== phase && !finished && phase === "cocoon") announce = "Halfway. I’m in my cocoon now.";
-    EK.companion.show({ phase: phase, slug: st.slug, say: x.head + ". " + (x.sub || ""), announce: announce, finished: finished });
+    EK.companion.show({ phase: phase, slug: st.slug, say: x.head.replace(/\.$/, "") + ". " + (x.sub || ""), announce: announce, finished: finished });
     if (st.phase && st.phase !== phase && finished) notify(x.head);
     st.phase = phase;
     var name = st.doc.study.name;
@@ -327,7 +330,12 @@
   }
   function chipHtml() {
     var c = chosenCombo();
-    return html`${EK.chosenChip(c)}${c ? EK.button("Details", { kind: "quiet", size: "s", act: "details", arg: c.id, label: "Details of combination " + c.n }) : ""}`;
+    return html`${EK.chosenChip(c, chipFigure(c))}${c ? EK.button("Details", { kind: "quiet", size: "s", act: "details", arg: c.id, label: "Details of combination " + c.n }) : ""}`;
+  }
+  /** The chip's figure: the verdict document's `learned_from` for the best combination, else its own. */
+  function chipFigure(c) {
+    var r = st.results, best = c && r && r.best_id === c.id && r.improvement_pct != null;
+    return { pct: best ? r.improvement_pct : null, direction: (goalOf() || {}).direction };
   }
   function chosenCombo() { var c = st.chosen && combo(st.chosen); return c && !c.base ? c : null; }
 
@@ -447,12 +455,14 @@
         <div class="fact"><span class="type-label">Starting point</span><span>${c.compared_with || ""}</span></div></div>`);
       if (r.final && r.final.line) parts.push(html`<p class="type-body">${r.final.line}</p>${r.final.next ? html`<p class="type-small ink-2">${r.final.next}</p>` : ""}`);
       if (r.final && r.final.recheck) parts.push(html`<div class="actions">${EK.button(r.final.recheck.label, { kind: r.final.recheck.over ? "quiet" : "secondary", act: "recheck" })}</div><p class="type-small ink-2">${r.final.recheck.why}</p>`);
-      var table = function (title, rows) {
+      var dir = (goalOf() || {}).direction, measure = (goalOf() || {}).label || "the measure";
+      var table = function (title, rows, change) {
         if (!rows || !rows.length) return "";
-        return html`<div class="sub-section"><h3>${title}</h3><div class="cases-wrap"><table class="changed-table"><thead><tr><th>Case</th><th>Runs</th><th>Start</th><th>Best</th><th>Change</th></tr></thead><tbody>
-          ${rows.map(function (x) { return html`<tr><td class="mono">${x.case}</td><td>${x.runs}${x.failed ? " · " + x.failed + " failed" : ""}</td><td>${EK.num(x.start)}</td><td>${EK.num(x.best)}</td><td>${EK.better(x.change_pct)}</td></tr>`; })}</tbody></table></div></div>`;
+        return html`<div class="sub-section"><h3>${title}</h3><div class="cases-wrap"><table class="changed-table"><thead><tr><th>Case</th><th>Runs</th><th>Start</th><th>Best</th><th>${change}</th></tr></thead><tbody>
+          ${rows.map(function (x) { return html`<tr><td class="mono">${x.case}</td><td>${x.runs}${x.failed ? " · " + x.failed + " failed" : ""}</td><td>${EK.num(x.start)}</td><td>${EK.num(x.best)}</td><td>${EK.change(x.change_pct, dir)}</td></tr>`; })}</tbody></table></div></div>`;
       };
-      parts.push(table("Held-back cases", (r.by_case || {}).held), table("Cases it learned from", (r.by_case || {}).learned));
+      parts.push(table("Held-back cases", (r.by_case || {}).held, "Change in " + measure + " (mean of the paired runs)"),
+        table("Cases it learned from", (r.by_case || {}).learned, "Change in " + measure + " (of the means)"));
       if ((r.kpis || []).length) {
         parts.push(html`<div class="sub-section"><h3>Every measure</h3><div class="cases-wrap"><table class="changed-table"><thead><tr><th>Measure</th><th>Study cases</th><th>Held-back cases</th></tr></thead><tbody>
           ${r.kpis.map(function (k) { return html`<tr><td>${k.says}${k.unit ? " (" + k.unit + ")" : ""}</td><td>${EK.num(k.training.start)} → ${EK.num(k.training.best)}</td><td>${k.test ? EK.num(k.test.start) + " → " + EK.num(k.test.best) : "–"}</td></tr>`; })}</tbody></table></div>
@@ -618,7 +628,7 @@
       var per = c.cases[st.tries.full_stage] || c.cases[Object.keys(c.cases).slice(-1)[0]] || {};
       var failed = (d.evaluations || []).filter(function (e) { return String(e.ok) === "false" || e.ok === false; });
       var parent = d.parent_id && combo(d.parent_id);
-      var body = html`<p class="type-body strong">${c.failed || c.pct == null ? "Did not finish" : EK.better(c.pct) + " on the study cases"}</p>
+      var body = html`<p class="type-body strong">${c.failed || c.pct == null ? "Did not finish" : EK.capital(EK.change(chipFigure(c).pct != null ? chipFigure(c).pct : c.pct, chipFigure(c).direction)) + " on the cases it learned from, not checked"}</p>
         <p class="type-small ink-2">${lookWords(c)}${parent ? " · comes from combination " + (parent.base ? "0, today’s settings" : parent.n) : ""}</p>
         <div class="sub-section"><h3 class="type-heading">What it changed</h3>
           ${params.length ? html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Today</th><th>This one</th></tr></thead><tbody>

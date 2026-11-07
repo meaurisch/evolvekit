@@ -966,6 +966,7 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
             return 2
         _advance_step(home.study_root(slug), len(STEPS))  # ready: the Set up's last step, Review and start
         print("ready: no problems")
+        print(_plan_line(home.load(slug)[1]))
         _say_next(args, f"study start {slug}")
         return 0
     if command == "application":
@@ -1082,14 +1083,29 @@ def _home_flag(home: str | None) -> str:
     return f' --home "{home}"' if home else ""
 
 
-def _say_next(args: argparse.Namespace, *commands: str, tail: str = "") -> None:
+def _say_next(args: argparse.Namespace, *commands: str) -> None:
     """The next step for people, on stderr (`next: evolvekit study start depot-a`), with the
     `--home` the user passed: never on stdout and never with `--json`, so scripts read what they did."""
     if getattr(args, "json", False):
         return
+    sys.stdout.flush()  # the command's own result first: a piped stdout is buffered, stderr is not
     flag = _home_flag(getattr(args, "home", None))
-    said = ", or ".join(command + flag for command in commands)
-    print(f"next: evolvekit {said}{tail}", file=sys.stderr)
+    said = ", or ".join("evolvekit " + command + flag for command in commands)
+    print(f"next: {said}", file=sys.stderr)
+
+
+def _plan_line(study) -> str:
+    """The plan `study check` says the study will run, as study.yaml writes it
+    (no solving): "plan: 2 rounds × 2 combinations, budget 0.05 h", or
+    "plan: automatic (budget 0.1 h)"."""
+    plan, budget = dict(study.plan or {}), f"budget {float(study.budget.hours):g} h"
+    if plan.get("auto", True):
+        return f"plan: automatic ({budget})"
+    rounds, children = plan.get("rounds", plan.get("generations")), plan.get("children")
+    shape = " × ".join(part for part in (
+        f"{rounds} round{'' if rounds == 1 else 's'}" if rounds else "",
+        f"{children} combination{'' if children == 1 else 's'}" if children else "") if part)
+    return f"plan: {shape}, {budget}" if shape else f"plan: set by hand ({budget})"
 
 
 def _say_verdict(document: dict) -> None:
@@ -1263,7 +1279,7 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         print(json.dumps(document) if args.json else line, flush=True)
         if args.wait:
             return _wait(home, slug, args.timeout, args.json, args)
-        _say_next(args, f"study wait {slug}", tail=" (or study watch)")
+        _say_next(args, f"study wait {slug}", f"study watch {slug}")
         return 0
     if command == "stop":
         run = _run_of(root)
@@ -1325,7 +1341,7 @@ def cmd_study(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps({"slug": slug, "root": str(home.study_root(slug))}))
             return 0
-        print(slug)
+        print(slug, flush=True)  # the result before the application's line and the hint on stderr
         if answer is not None:
             print(f"application: {answer['path']}" + (f" (version {answer['version']})" if answer.get("version") else ""),
                   file=sys.stderr)

@@ -196,7 +196,24 @@ def test_study_check_ready_exits_0(tmp_path, capsys):
     code = main(["study", "check", "depot-a", "--home", str(tmp_path)])
     out, err = capsys.readouterr()
     assert code == 0, err
-    assert out.strip() == "ready: no problems"
+    assert out.splitlines()[0] == "ready: no problems"
+    assert out.splitlines()[1].startswith("plan: automatic (budget "), "the plan it will run, from the template"
+
+
+def test_study_check_echoes_a_manual_plan(tmp_path, capsys):
+    import yaml
+
+    _new(tmp_path, "Depot A", "--template", "tune", "--app", str(SOLVER))
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    path = tmp_path / "studies" / "depot-a" / "study.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["plan"] = {"auto": False, "children": 2, "generations": 2}
+    data["budget"]["hours"] = 0.05
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["study", "check", "depot-a", "--home", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert out == "ready: no problems\nplan: 2 rounds × 2 combinations, budget 0.05 h\n"
 
 
 def test_study_steps_advance_from_the_command_line(tmp_path, capsys):
@@ -761,8 +778,56 @@ def test_a_ready_check_says_start_next(tmp_path, capsys):
     assert f'next: evolvekit study check depot-a --home "{tmp_path}"' in capsys.readouterr().err
     assert main(["study", "check", "depot-a", "--home", str(tmp_path)]) == 0
     out, err = capsys.readouterr()
-    assert out == "ready: no problems\n", "stdout keeps its contract"
+    assert out.startswith("ready: no problems\nplan: "), "stdout keeps its contract: the answer, then the plan"
+    assert "next:" not in out
     assert f'next: evolvekit study start depot-a --home "{tmp_path}"' in err
+
+
+class _Screen:
+    """A terminal both streams write to: stdout buffered until flushed (as when piped), stderr at once."""
+
+    def __init__(self):
+        self.seen: list[str] = []
+
+    def stream(self, buffered: bool):
+        screen = self
+
+        class _Stream:
+            encoding = "utf-8"
+
+            def __init__(self):
+                self.held: list[str] = []
+
+            def write(self, text):
+                (self.held if buffered else screen.seen).append(text)
+                return len(text)
+
+            def flush(self):
+                screen.seen.extend(self.held)
+                self.held.clear()
+
+            def isatty(self):
+                return False
+
+        return _Stream()
+
+
+def test_the_result_comes_before_the_next_step(tmp_path, monkeypatch):
+    import sys
+
+    screen = _Screen()
+    out, err = screen.stream(buffered=True), screen.stream(buffered=False)
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    assert main(["study", "new", "Depot A", "--harness", "demo-tour", "--template", "tune", "--app", str(SOLVER),
+                 "--home", str(tmp_path)]) == 0
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    assert main(["study", "check", "depot-a", "--home", str(tmp_path)]) == 0
+    out.flush()
+    text = "".join(screen.seen)
+    assert text.index("depot-a\n") < text.index("next: evolvekit study cases")
+    assert text.index("4 cases added") < text.index("next: evolvekit study check")
+    assert text.index("ready: no problems") < text.index("plan: ") < text.index("next: evolvekit study start")
 
 
 def test_study_new_says_the_application_then_the_next_step(tmp_path, capsys):
@@ -791,7 +856,7 @@ def test_start_and_a_finished_wait_say_what_comes_next(tmp_path, monkeypatch, ca
     assert main(["study", "start", "depot-a", "--home", str(tmp_path)]) == 0
     out, err = capsys.readouterr()
     assert out == "started run 20260101-000000\n"
-    assert "next: evolvekit study wait depot-a" in err and "(or study watch)" in err
+    assert "next: evolvekit study wait depot-a" in err and ", or evolvekit study watch depot-a" in err
     run_dir = tmp_path / "studies" / "depot-a" / "runs" / "20260101-000000"
     run_dir.mkdir(parents=True)
     (run_dir / "job.json").write_text(json.dumps({
@@ -800,7 +865,8 @@ def test_start_and_a_finished_wait_say_what_comes_next(tmp_path, monkeypatch, ca
         "final": {"skipped": "no cases were held back"}}), encoding="utf-8")
     assert main(["study", "wait", "depot-a", "--home", str(tmp_path)]) == 0
     err = capsys.readouterr().err
-    assert f'next: evolvekit study report depot-a --markdown --home "{tmp_path}", or study open depot-a' in err
+    assert f'next: evolvekit study report depot-a --markdown --home "{tmp_path}", or evolvekit study open depot-a' in err
+    assert "or evolvekit study open" in err, "each alternative with its evolvekit"
     assert main(["study", "wait", "depot-a", "--json", "--home", str(tmp_path)]) == 0
     assert "next:" not in capsys.readouterr().err
 

@@ -165,6 +165,14 @@
     if (Math.abs(v) < Math.pow(10, -d) / 2) return "about the same";
     return EK.pct(v, d) + (v >= 0 ? " better" : " worse");
   };
+  /** A change in percent of the starting point (positive = a gain) as the verdict and the report
+      write it: one decimal and the measure's own direction, "4.8 % lower", "0.3 % higher", "the same". */
+  EK.change = function (v, direction) {
+    if (v == null || !isFinite(v)) return "-";
+    if (Math.abs(v) < 0.05) return "the same";
+    var toward = direction === "higher" ? "higher" : "lower", away = toward === "higher" ? "lower" : "higher";
+    return Math.abs(v).toFixed(1) + " % " + (v > 0 ? toward : away);
+  };
   /** The chance of a gain in words; under the rule's 9 in 10 it never rounds up to read like a pass. */
   EK.chanceWords = function (p) {
     if (p == null || !isFinite(p)) return "";

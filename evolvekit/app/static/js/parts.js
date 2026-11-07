@@ -391,10 +391,15 @@
   };
 
   /** ChosenChip: the one chosen combination, carried across the views. */
-  EK.chosenChip = function (c) {
+  /* The figure as the report says it: one decimal, the measure's direction (o.direction), and
+     o.pct in place of the combination's own when the page has the verdict document's figure. */
+  EK.chosenChip = function (c, o) {
     if (!c) return html`<span class="type-small ink-3 chip-hint">Click a dot to follow it</span>`;
+    o = o || {};
+    var pct = o.pct != null ? o.pct : c.pct;
+    var said = c.failed || pct == null ? "did not finish" : EK.change(pct, o.direction);
     return html`<div class="chip"><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.5"/></svg>
-      <span class="chip-text"><span class="wide-only">Combination </span><span class="phone-only">No. </span>${c.n} · ${EK.better(c.pct)}<span class="wide-only"> on study cases</span></span>
+      <span class="chip-text"><span class="wide-only">Combination </span><span class="phone-only">No. </span>${c.n} · ${said}<span class="wide-only"> on the cases it learned from, not checked</span></span>
       <button type="button" class="chip-close" aria-label="Stop following combination ${c.n}" data-act="unchoose">${EK.gl("close", 14)}</button></div>`;
   };
 
