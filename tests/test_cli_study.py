@@ -187,7 +187,71 @@ def test_study_check_ready_exits_0(tmp_path, capsys):
     assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
     capsys.readouterr()
     code = main(["study", "check", "depot-a", "--home", str(tmp_path)])
-    assert code == 0, capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert out.strip() == "ready: no problems"
+
+
+def test_study_steps_advance_from_the_command_line(tmp_path, capsys):
+    """Application, cases and a clean check each complete a step of the app's
+    Set up: the study reads as a ready draft, not "step 1 of 7"."""
+    from evolvekit.app import jobs
+    from evolvekit.app.store import STEPS, Home
+
+    _new(tmp_path, "Depot A", "--template", "tune")
+    assert _app(tmp_path) == 0
+    assert _study_yaml(tmp_path)["step"] == 3
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    assert _study_yaml(tmp_path)["step"] == 4
+    assert main(["study", "check", "depot-a", "--home", str(tmp_path)]) == 0
+    assert _study_yaml(tmp_path)["step"] == len(STEPS)
+    capsys.readouterr()
+    assert main(["study", "list", "--home", str(tmp_path)]) == 0
+    listed = capsys.readouterr().out
+    assert "draft" in listed and "step 1" not in listed
+    root, study, _ = Home(tmp_path).load("depot-a")
+    assert main(["study", "status", "depot-a", "--home", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.strip() == jobs.state_line(root, study)["line"] == f"draft · step {len(STEPS)} of {len(STEPS)}"
+    # a later command never moves the step back
+    assert _app(tmp_path) == 0
+    assert _study_yaml(tmp_path)["step"] == len(STEPS)
+
+
+def test_study_new_dir_with_app_records_the_application(tmp_path):
+    target = tmp_path / "elsewhere" / "s"
+    assert main(["study", "new", "S", "--harness", "demo-tour", "--dir", str(target), "--app", str(SOLVER),
+                 "--home", str(tmp_path)]) == 0
+    import yaml
+
+    application = yaml.safe_load((target / "study.yaml").read_text(encoding="utf-8"))["application"]
+    assert application["path"] == str(SOLVER) and application["version"]
+
+
+def test_compiled_study_is_not_a_failed_run(tmp_path, capsys):
+    from evolvekit.app import jobs
+
+    _new(tmp_path, "Depot A", "--template", "tune", "--app", str(SOLVER))
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    assert main(["study", "compile", "depot-a", "--home", str(tmp_path)]) == 0
+    root = tmp_path / "studies" / "depot-a"
+    assert any((root / "runs").iterdir())
+    capsys.readouterr()
+    assert main(["study", "status", "depot-a", "--home", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.startswith("draft")
+    assert main(["study", "list", "--json", "--home", str(tmp_path)]) == 0
+    assert "failed" not in json.loads(capsys.readouterr().out)[0]["state"]
+    assert jobs.latest_run(root) is None
+
+
+def test_study_cases_expands_a_pattern(tmp_path, capsys):
+    _new(tmp_path)
+    capsys.readouterr()
+    pattern = str(SAMPLES[0].parent / "*.json")
+    assert main(["study", "cases", "depot-a", "--add", pattern, "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    assert "4 cases added, 1 held back" in capsys.readouterr().out
+    nothing = str(tmp_path / "*.csv")
+    assert main(["study", "cases", "depot-a", "--add", nothing, "--home", str(tmp_path)]) == 1
+    assert f"no file matches {nothing}" in capsys.readouterr().err
 
 
 def test_study_cases_adds_and_splits(tmp_path, capsys):

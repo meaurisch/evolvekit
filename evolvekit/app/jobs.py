@@ -40,7 +40,7 @@ from evolvekit.evaluate.process import scrubbed_environment
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import CONFIG, STUDY_RUN
-from evolvekit.harness.execute import ExportFailed, export_path, read_job, run_study_of, write_exports
+from evolvekit.harness.execute import JOB, ExportFailed, export_path, read_job, run_study_of, write_exports
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
@@ -138,7 +138,10 @@ def _run_dirs(root: Path) -> list[Path]:
     folder = root / "runs"
     if not folder.is_dir():
         return []
-    found = [p for p in folder.iterdir() if p.is_dir() and _RUN.match(p.name)]
+    # A folder that was never submitted -- no job, no launch, no place in the
+    # queue, such as the files `study compile` writes -- is not a run.
+    found = [p for p in folder.iterdir() if p.is_dir() and _RUN.match(p.name)
+             and any((p / name).is_file() for name in (JOB, LAUNCH, QUEUED))]
 
     def started(path: Path) -> str:
         launch, job = _read(path / LAUNCH) or {}, read_job(path) or {}

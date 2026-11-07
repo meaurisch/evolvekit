@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -934,6 +935,7 @@ def _study_root(value: str, args: argparse.Namespace) -> Path:
 def _study_library_command(command: str, args: argparse.Namespace) -> int:
     from evolvekit.app import jobs
     from evolvekit.app.detect import detect
+    from evolvekit.app.store import STEPS
 
     home = _home(args)
     if command == "list":
@@ -953,7 +955,11 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
         for problem in problems:
             print(f"{problem['key']}: {problem['text']}" if problem["key"] != problem["text"] else problem["text"],
                   file=sys.stderr)
-        return 2 if problems else 0
+        if problems:
+            return 2
+        _advance_step(home.study_root(slug), len(STEPS))  # ready: the Set up's last step, Review and start
+        print("ready: no problems")
+        return 0
     if command == "application":
         if args.detect:
             _, _, harness = home.load(slug)
@@ -973,8 +979,20 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
         if not answer["ok"]:
             print(answer["message"], file=sys.stderr)
             return 1
+        _advance_step(home.study_root(slug), _STEP_AFTER_APPLICATION)
         return 0
-    result = home.add_cases(slug, [Path(f) for f in args.add], hold_back=args.hold_back)
+    files: list[Path] = []
+    for value in args.add:
+        if any(mark in value for mark in "*?[") and not Path(value).is_file():
+            # PowerShell and cmd hand a pattern over as it is: expand it here.
+            matches = sorted(glob.glob(value))
+            if not matches:
+                print(f"no file matches {value}", file=sys.stderr)
+                return 1
+            files.extend(Path(m) for m in matches)
+        else:
+            files.append(Path(value))
+    result = home.add_cases(slug, files, hold_back=args.hold_back)
     if args.json:
         print(json.dumps(result))
     else:
@@ -982,7 +1000,28 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
         print(f"{n} case{'' if n == 1 else 's'} added, {len(result['test'])} held back")
     for refused in result["refused"]:
         print(refused["reason"], file=sys.stderr)
-    return 1 if result["refused"] else 0
+    if result["refused"]:
+        return 1
+    if result["added"]:
+        _advance_step(home.study_root(slug), _STEP_AFTER_CASES)
+    return 0
+
+
+_STEP_AFTER_APPLICATION = 3
+"""The Set up's step after Application (3, Cases): where `study application` leaves a study."""
+_STEP_AFTER_CASES = 4
+"""The step after Cases (4, What may change): where `study cases` leaves a study."""
+
+
+def _advance_step(root: Path, step: int) -> None:
+    """Move the study's Set up step (the app's "draft · step N of 7") on to
+    `step`, never back: a command finished the step before it."""
+    from evolvekit.harness.study import load_study, save_study
+
+    study = load_study(root)
+    if study.step < step:
+        study.step = step
+        save_study(study, root)
 
 
 WAIT_EVERY_S = 2.0
@@ -1203,6 +1242,15 @@ def cmd_study(args: argparse.Namespace) -> int:
         if args.dir:
             folder = Path(args.dir)
             study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name, args.template)
+            if args.app:
+                from evolvekit.app.store import set_application
+
+                answer = set_application(folder, args.app)
+                if not answer["ok"]:
+                    print(f"{answer['message']} (the study {folder} is made; say where the application is in "
+                          "its study.yaml)", file=sys.stderr)
+                    return 1
+                _advance_step(folder, _STEP_AFTER_APPLICATION)
             if args.json:
                 print(json.dumps({"slug": folder.name, "root": str(folder.resolve())}))
                 return 0
@@ -1219,6 +1267,7 @@ def cmd_study(args: argparse.Namespace) -> int:
                 print(f"{answer['message']} (the study {slug} is made; say where the application is with "
                       f"study application {slug} PATH)", file=sys.stderr)
                 return 1
+            _advance_step(home.study_root(slug), _STEP_AFTER_APPLICATION)
         if args.json:
             print(json.dumps({"slug": slug, "root": str(home.study_root(slug))}))
         else:
@@ -1347,14 +1396,20 @@ def _tolerant_output() -> None:
     `UnicodeEncodeError` while being printed, a `ValueError` that `main` turns
     into exit 1: `preflight` reported "warnings" for a broken harness, and a
     wrapper that stops only on 2 went ahead. Unencodable characters are
-    written as escapes instead."""
+    written as escapes instead.
+
+    A pipe is written as UTF-8: a tool (a coding agent) that reads the CLI
+    then gets ✓ and · rather than escapes. A console keeps its own encoding
+    (Python already writes UTF-8 to the Windows console)."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
             reconfigure(errors="backslashreplace")
-        except (ValueError, OSError):  # a stream that cannot be reconfigured is left alone
+            if not stream.isatty():
+                reconfigure(encoding="utf-8")
+        except (ValueError, OSError, AttributeError):  # a stream that cannot be reconfigured is left alone
             pass
 
 

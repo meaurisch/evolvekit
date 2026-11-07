@@ -100,3 +100,16 @@ def test_doctor_never_crashes(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("evolvekit.harness.probe.probe_application", boom)
     code, out = _doctor(capsys, tmp_path, "--app", str(SOLVER))
     assert code == 1 and "✗ probe:demo-tour: could not check: No closing quotation" in out
+
+
+def test_doctor_writes_utf8_into_a_pipe(tmp_path):
+    """A coding agent reads the CLI through a pipe: the marks arrive as UTF-8,
+    not as cp1252 escapes."""
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONUTF8", "PYTHONIOENCODING")}
+    done = subprocess.run([sys.executable, "-m", "evolvekit", "doctor", "--home", str(tmp_path)],
+                          capture_output=True, env=env, cwd=ROOT, timeout=120)
+    assert b"\xe2\x9c\x93" in done.stdout, done.stdout
+    assert b"\\u2713" not in done.stdout

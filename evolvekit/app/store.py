@@ -36,7 +36,7 @@ from evolvekit.harness.probe import probe_application
 from evolvekit.harness.study import Study, load_study, save_study, study_problems
 from evolvekit.ledger import _atomic_write
 
-__all__ = ["STEPS", "Home", "safe_name", "split_words"]
+__all__ = ["STEPS", "Home", "safe_name", "set_application", "split_words"]
 
 STEPS = ("Question", "Application", "Cases", "What may change", "Goal", "Limits and budget", "Review and start")
 _STEP_OF = {
@@ -568,19 +568,10 @@ class Home:
         """Ask the program at `path` whether it is the application and, when it
         is, record its path and version in the study and among the paths used
         before. The answer is `{path, ok, message, version, python}`."""
-        root, study, pinned = self.load(slug)
-        path = str(path or "").strip().strip('"')
-        if not path:
-            raise AppError("path: where the application is")
-        if not Path(path).is_absolute():
-            raise AppError(f"give the full path to the application; {path!r} is not one")
-        probe = probe_application(pinned, path)
-        answer = {"path": path, "ok": probe.ok, "message": probe.message, "version": probe.version, "python": probe.python}
-        if probe.ok:
-            study.application_path = str(Path(path))
-            study.application_version = probe.version or ""
-            save_study(study, root)
-            self.remember_application(str(Path(path)))
+        root, _, _ = self.load(slug)
+        answer = set_application(root, path)
+        if answer["ok"]:
+            self.remember_application(str(Path(answer["path"])))
         return answer
 
     def add_cases(self, slug: str, files: list[Path], *, hold_back: int | None = None) -> dict[str, Any]:
@@ -861,6 +852,28 @@ class Home:
             "split_words": split_words(len(study.test), len(cases)),
             "inputs": dict(study.inputs),
         }
+
+
+def set_application(root: Path, path: str) -> dict[str, Any]:
+    """Ask the program at `path` whether it is the application of the study
+    in the folder `root` and, when it is, record its path and version in the
+    study. The answer is `{path, ok, message, version, python}`."""
+    try:
+        study, pinned = load_study(root), load_harness(Path(root) / "harness")
+    except HarnessError as exc:
+        raise AppError(f"the study in {root} cannot be read: {exc}", 500) from None
+    path = str(path or "").strip().strip('"')
+    if not path:
+        raise AppError("path: where the application is")
+    if not Path(path).is_absolute():
+        raise AppError(f"give the full path to the application; {path!r} is not one")
+    probe = probe_application(pinned, path)
+    answer = {"path": path, "ok": probe.ok, "message": probe.message, "version": probe.version, "python": probe.python}
+    if probe.ok:
+        study.application_path = str(Path(path))
+        study.application_version = probe.version or ""
+        save_study(study, root)
+    return answer
 
 
 def split_words(held: int, total: int) -> str:
