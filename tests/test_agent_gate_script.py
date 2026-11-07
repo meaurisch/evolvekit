@@ -140,6 +140,17 @@ def test_no_claim_detector_ignores_the_verdict_line():
     assert _ok(report_checks(document, "Probably better: 1.3 % lower."))["report_equals_verdict_line"] is False
 
 
+def test_a_figure_the_verdict_gives_is_not_another_claim():
+    document = {"line": LINE, "advice": ADVICE}
+    said = f"{LINE}\n{ADVICE}\n"
+    for own in ("The 'at least 0.3 %' bound is the safest figure to rely on.", "Rely on 0.3% at worst.",
+                "The middle figure is 1.3 %."):
+        assert _ok(report_checks(document, said + own))["report_equals_verdict_line"] is True, own
+    added = report_checks(document, said + "Expect about 7.5 % on new requests.")
+    assert added[0]["ok"] is False and "7.5 %" in added[0]["detail"]
+    assert _ok(report_checks(document, said + "It was 13 % lower."))["report_equals_verdict_line"] is False
+
+
 def test_tool_command_is_one_shot(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_gate.shutil, "which", lambda name: f"/bin/{name}")
     home = tmp_path / "a home"

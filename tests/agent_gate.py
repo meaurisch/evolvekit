@@ -291,6 +291,10 @@ def question_checks(home: Path, output: str) -> list[dict]:
             _check("asks_the_missing_question", bool(asking), asking[0] if asking else "no question about the time")]
 
 
+def _figure(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
 def report_checks(document: dict, output: str) -> list[dict]:
     """The second answer: the verdict's line verbatim, and no other percentage (the words are the persona's
     to judge, the percentages here -- spec §4.4)."""
@@ -298,7 +302,11 @@ def report_checks(document: dict, output: str) -> list[dict]:
     problems = []
     if not line or line not in output:
         problems.append(f"the verdict's line is missing: {line!r}")
-    extra = [c for c in claims(output, allowed=(line, document.get("advice") or "")) if PERCENT.fullmatch(c)]
+    advice = document.get("advice") or ""
+    # A figure the verdict itself gives (`0.3 %` or `0.3%`) is not another claim: the agent may repeat it in
+    # the one sentence of its own (spec §3.5); any other figure is.
+    given = {_figure(m.group(0)) for m in PERCENT.finditer(f"{line}\n{advice}")}
+    extra = [c for c in claims(output, allowed=(line, advice)) if PERCENT.fullmatch(c) and _figure(c) not in given]
     if extra:
         problems.append("other percentages: " + ", ".join(extra))
     return [_check("report_equals_verdict_line", not problems, "; ".join(problems))]
