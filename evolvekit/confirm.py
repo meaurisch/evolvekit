@@ -175,13 +175,16 @@ class Comparison:
     runs: list[dict[str, Any]] = field(default_factory=list)
     """One entry per evaluator run: configuration, instance, seed, ok, kpis."""
     per_candidate: dict[str, dict[str, Any]] = field(default_factory=dict)
+    levels: list[dict[str, Any]] = field(default_factory=list)
+    """`evaluate.score.levels`, described: the comparison is then made level
+    by level as well (`_analyse_levels`). Empty for a single objective."""
 
     def to_json(self) -> dict[str, Any]:
         return {
             "label": self.label, "objective": self.objective, "direction": self.direction,
             "stage": self.stage, "seeds": self.seeds, "instances": self.instances,
             "baseline_id": self.baseline_id, "candidates": self.candidates,
-            "per_candidate": self.per_candidate,
+            "levels": self.levels, "per_candidate": self.per_candidate,
         }
 
 
@@ -310,6 +313,7 @@ def confirm(
         label=label, objective=config.evaluate.score.objective, direction=config.evaluate.score.direction,
         stage=stage.id, seeds=list(seeds), instances=list(stage.instance_names()),
         baseline_id=str(seed_row["id"]), candidates=[str(r["id"]) for r in chosen],
+        levels=[level.describe() for level in config.evaluate.score.levels],
     )
 
     def observer_for(name: str) -> Callable[..., None]:
@@ -354,7 +358,7 @@ def confirm(
                         runs_per_candidate=len(stage.instances) * len(seeds), workers=stage.workers)
             run_instance_stage(
                 jobs, stage, out_dir=work / "stage_out", cwd=config.base_dir,
-                required_kpis=(comparison.objective,), cache=EvalCache(work / "cache"),
+                required_kpis=config.evaluate.required_kpis, cache=EvalCache(work / "cache"),
                 seeds=list(seeds), keep_going=True,
             )
             events.emit("stage_finished", stage=stage.id, private=False, candidates=len(jobs),
@@ -494,6 +498,108 @@ def _analyse(comparison: Comparison) -> None:
             "failed_runs": failed,
             **totals,
         }
+        if comparison.levels:
+            comparison.per_candidate[cid]["levels"] = _analyse_levels(comparison, cid)
+
+
+def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
+    """`evaluate.score.levels`, compared level by level, and a lexicographic verdict.
+
+    Per level, the paired difference per (instance, seed), signed so that
+    positive is better, averaged over the seeds of an instance; over
+    instances a mean with a 95 % interval. The difference is in percent of the
+    baseline's value on the same instance and seed, as for the objective --
+    instances of different size then count alike -- unless some baseline
+    value is 0: a level is often a count (late tasks, missed tasks) and a
+    percentage of 0 is no number, so such a level is compared in the KPI's own
+    units, and says so (`unit`). A pair only one side finished counts against
+    the side that failed, as large as the largest difference measured on that
+    level. A relative tolerance is a fraction of the baseline's value; an
+    absolute one is in the KPI's units (in percent of the baseline's mean when
+    the level is compared in percent).
+
+    A level is *equal* when its mean difference is within its tolerance; the
+    first level that is not equal decides, and the result is `confirmed` only
+    when that level is better and its interval lies above zero. The last
+    level has no tolerance: whatever the levels above leave equal, it decides.
+    """
+    rows: list[dict[str, Any]] = []
+    parts: list[str] = []
+    deciding: int | None = None
+    confirmed = False
+    judging = True  # until a level decides, or cannot be compared at all
+    for index, level in enumerate(comparison.levels):
+        kpi, last = str(level["kpi"]), index == len(comparison.levels) - 1
+        sign = 1.0 if level.get("direction") == "maximize" else -1.0
+        table: dict[str, dict[tuple[str, int], float]] = {}
+        for run in comparison.runs:
+            if run["ok"] and kpi in run["kpis"]:
+                table.setdefault(run["configuration"], {})[(str(run["instance"]), int(run["seed"]))] = float(run["kpis"][kpi])
+        base, mine = table.get(BASELINE, {}), table.get(cid, {})
+        shared = base.keys() & mine.keys()
+        baseline_mean = fmean(base.values()) if base else None
+        unit = "percent" if shared and baseline_mean and all(base[k] != 0 for k in shared) else "absolute"
+
+        def difference(key: tuple[str, int]) -> float:
+            gain = sign * (mine[key] - base[key])
+            return 100.0 * gain / abs(base[key]) if unit == "percent" else gain
+
+        largest = max((abs(difference(k)) for k in shared), default=None)
+        per_instance = []
+        for instance in comparison.instances:
+            differences = []
+            for key in [(instance, seed) for seed in comparison.seeds]:
+                if key in shared:
+                    differences.append(difference(key))
+                elif key in base and largest is not None:
+                    differences.append(-largest)
+                elif key in mine and largest is not None:
+                    differences.append(largest)
+            if differences:
+                per_instance.append(fmean(differences))
+        summary = paired_summary(per_instance)
+        tolerance = level.get("tolerance")
+        tolerance_abs = within = None
+        if not last and tolerance is not None:
+            relative = bool(level.get("relative"))
+            tolerance_abs = float(tolerance) * abs(baseline_mean) if relative and baseline_mean else float(tolerance)
+            if unit == "percent":
+                within = 100.0 * float(tolerance) if relative else 100.0 * float(tolerance) / abs(baseline_mean)
+            else:
+                within = tolerance_abs
+        mean, interval = summary["mean"], summary.get("ci95")
+        if mean is None:
+            state = "unknown"
+        elif within is not None and abs(mean) <= within:
+            state = "equal"
+        else:
+            state = "better" if mean > 0 else "worse" if mean < 0 else "equal"
+        clear = bool(interval) and ((state == "better" and interval[0] > 0) or (state == "worse" and interval[1] < 0))
+        rows.append({
+            "level": index + 1, "kpi": kpi, "direction": level.get("direction"), "unit": unit,
+            "tolerance": tolerance, "relative": bool(level.get("relative")), "tolerance_abs": tolerance_abs,
+            "tolerance_in_unit": within, "baseline_mean": baseline_mean, "mean_difference": mean,
+            "ci95": interval, "n": summary["n"], "wins": summary["wins"], "losses": summary["losses"],
+            "state": state, "clear": clear,
+        })
+        if not judging:
+            continue  # below the deciding level: reported, not judged
+        if state == "equal" and not last:
+            within = f"{100 * float(tolerance):g} %" if level.get("relative") else f"{float(tolerance):g}"
+            parts.append(f"equal on level {index + 1} ({kpi} within {within})")
+        elif state in ("better", "worse"):
+            deciding, judging = index + 1, False
+            confirmed = state == "better" and clear
+            parts.append(
+                f"{state} on level {index + 1} ({kpi}): "
+                + ("clear" if clear else "not distinguishable from the baseline")
+            )
+        elif state == "equal":
+            parts.append(f"equal on level {index + 1} ({kpi})")
+        else:
+            judging = False
+            parts.append(f"level {index + 1} ({kpi}): no pair of runs to compare")
+    return {"levels": rows, "deciding": deciding, "verdict": ", ".join(parts), "confirmed": confirmed}
 
 
 def _counted_as(totals: dict[str, int], largest: float | None) -> str:
@@ -527,6 +633,8 @@ def render_markdown(comparison: Comparison) -> str:
     for cid, result in comparison.per_candidate.items():
         s = result["summary"]
         lines += [f"## `{cid}` against the baseline", ""]
+        if result.get("levels"):
+            lines += _levels_markdown(result["levels"])
         counted = (
             f"{result['pairs']} of {result['pairs_planned']} (instance, seed) pairs are in the comparison, "
             f"{result.get('finished_pairs', 0)} of them finished by both. A pair only one side finished counts "
@@ -570,6 +678,43 @@ def render_markdown(comparison: Comparison) -> str:
                 )
         lines.append("")
     return "\n".join(lines)
+
+
+def _levels_markdown(levels: dict[str, Any]) -> list[str]:
+    """The lexicographic verdict and one row per level (`_analyse_levels`)."""
+
+    def number(value: Any, unit: str, signed: bool = False) -> str:
+        if value is None:
+            return "–"
+        text = f"{value:+.4g}" if signed else f"{value:.4g}"
+        return text + " %" if unit == "percent" else text
+
+    verdict = levels["verdict"]
+    lines = [
+        "### Level by level",
+        "",
+        f"**{verdict[:1].upper() + verdict[1:]}.** The first level that is not equal within its "
+        "tolerance decides; it is confirmed only when that level is better and its 95 % interval "
+        "lies above zero.",
+        "",
+        "Differences are per instance, averaged over the seeds, positive is better: in percent of "
+        "the baseline's value, or in the KPI's own units where some baseline value is 0.",
+        "",
+        "| level | goal | baseline mean | equal within | mean difference | 95 % CI | verdict |",
+        "|--:|---|--:|--:|--:|---|---|",
+    ]
+    for row in levels["levels"]:
+        unit = row.get("unit", "absolute")
+        interval = (
+            f"[{number(row['ci95'][0], unit, True)}, {number(row['ci95'][1], unit, True)}]" if row.get("ci95") else "n/a"
+        )
+        lines.append(
+            f"| {row['level']} | {row['kpi']} ({row['direction']}) | {number(row.get('baseline_mean'), 'absolute')} | "
+            f"{number(row.get('tolerance_in_unit'), unit)} | {number(row.get('mean_difference'), unit, True)} | "
+            f"{interval} | {row['state']}{', clear' if row.get('clear') else ''} |"
+        )
+    lines.append("")
+    return lines
 
 
 def _dropped(row: dict[str, Any]) -> str:

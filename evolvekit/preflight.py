@@ -267,6 +267,8 @@ def _run_stages(
         if not outcome.ok:
             report.failures.append(f"stage {stage.id}: {outcome.failure}")
             return
+        if _seed_breaks_a_gate(config, report, f"stage {stage.id}", outcome):
+            return
 
         if stage.private_inputs or stage.private_instances:
             private = _run_command(config, stage, candidate_path, configuration, work_dir, private=True)
@@ -276,6 +278,21 @@ def _run_stages(
                     f"stage {stage.id} hold-out: {private.failure}"
                 )
                 return
+            if _seed_breaks_a_gate(config, report, f"stage {stage.id} hold-out", private):
+                return
+
+
+def _seed_breaks_a_gate(config: Config, report: PreflightReport, where: str, outcome: StageOutcome) -> bool:
+    """A seed outside `evaluate.gates` aborts every run before it searches."""
+    for gate in config.evaluate.gates:
+        broken = gate.broken_by(outcome.kpis)
+        if broken is not None:
+            report.failures.append(
+                f"{where}: the seed breaks a gate: {broken} (evaluate.gates). A run would abort "
+                "on it: change the starting point or the gate"
+            )
+            return True
+    return False
 
 
 def _run_command(
@@ -292,7 +309,7 @@ def _run_command(
         job = Job("seed", candidate_path, configuration=configuration)
         return run_instance_stage(
             [job], stage, out_dir=work_dir, cwd=config.base_dir, private=private,
-            required_kpis=(config.evaluate.score.objective,),
+            required_kpis=config.evaluate.required_kpis,
         )["seed"]
     return run_command_stage(
         candidate_path,
@@ -301,7 +318,7 @@ def _run_command(
         out_path=work_dir / (f"{stage.id}.private.json" if private else f"{stage.id}.json"),
         cwd=config.base_dir,
         private=private,
-        required_kpis=(config.evaluate.score.objective,),
+        required_kpis=config.evaluate.required_kpis,
         configuration=configuration,
     )
 

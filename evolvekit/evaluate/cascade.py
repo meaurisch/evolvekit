@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from pathlib import Path
 from statistics import fmean, quantiles
@@ -23,6 +24,7 @@ from evolvekit.candidate import SEED_OPERATOR, Candidate
 from evolvekit.config import Config, PromoteRule, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
+from evolvekit.evaluate.levels import Anchor, level_score, make_anchor
 from evolvekit.evaluate.scoring import compute_score, ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
 from evolvekit.evaluate.stages import (
@@ -51,13 +53,16 @@ def finished_final_stage(
     last_failure: str | None,
     stages_reached: Sequence[str],
     private_score: float | None,
+    gated: str | None = None,
 ) -> bool:
     """Whether a candidate's score may be compared with anybody else's.
 
     A score means something only next to scores from the same stage on the
     same inputs, so a candidate competes -- is ranked, archived, bred from --
-    only when it got all the way through. That rules out four cases which used
-    to be ranked as if they had:
+    only when it got all the way through, and broke no gate (`evaluate.gates`):
+    a gated candidate's score is real, but it is the score of a plan nobody
+    would use. That rules out four cases which used to be ranked as if they
+    had:
 
     * a **failed** evaluation. It carries `evaluate.failure_score`, and the
       default `-1000` outranks every healthy candidate whose minimised cost is
@@ -71,7 +76,7 @@ def finished_final_stage(
     Takes plain values rather than an `EvalResult` so that a `runs.jsonl` row
     written before the `competes` field existed can be judged by the same rule.
     """
-    if rejected or last_failure:
+    if rejected or last_failure or gated:
         return False
     final = config.final_stage
     if final.id not in stages_reached:
@@ -152,8 +157,13 @@ class Cascade:
         budget: BudgetGuard | None = None,
         signatures: BehaviourIndex | None = None,
         on_event: Callable[..., Any] | None = None,
+        stop: threading.Event | None = None,
     ) -> None:
         self.config = config
+        self.stop = stop
+        """The run's own stop (`evolvekit/stopping.py`): once set, evaluations
+        in flight are stopped, none is started, and what did not finish is
+        abandoned rather than failed."""
         self.on_event = on_event
         """`on_event(type, **fields)`, called for every evaluator run as it starts
         and ends. The driver points it at the run's event log."""
@@ -178,6 +188,13 @@ class Cascade:
         """Per stage, what the baseline reached on each instance: the yardstick
         of `normalize: baseline`. Kept on disk, because a resumed run does not
         evaluate its seed again."""
+        self.anchors: dict[str, Anchor] = {
+            key: Anchor.from_json(value)
+            for key, value in self._load_json(self.work_dir / "levels.json").items()
+            if isinstance(value, dict)
+        }
+        """Per stage, what `evaluate.score.levels` are measured from: the
+        seed's values (`evaluate/levels.py`). On disk for the same reason."""
 
     # -- public ----------------------------------------------------------
 
@@ -200,6 +217,12 @@ class Cascade:
         for index, stage in enumerate(stages):
             if not alive:
                 break
+            if self._stopping():
+                # The run's time limit, or a stop request: what has not
+                # finished is abandoned, not failed, and nothing more starts.
+                for cid in alive:
+                    results[cid].abandoned = "the run was stopped before this candidate finished"
+                break
             survivors: list[str] = []
             began = self._stage_started(stage, alive, private=False)
             outcomes = (
@@ -207,7 +230,7 @@ class Cascade:
                 if stage.fans_out
                 else None
             )
-            failed = raced_out = 0
+            failed = raced_out = abandoned = 0
             for cid in alive:
                 outcome = (
                     outcomes[cid]
@@ -215,9 +238,12 @@ class Cascade:
                     else self._run_stage(stage, by_id[cid], paths[cid])
                 )
                 # Raced out is not failed: nothing went wrong, the candidate
-                # was stopped because it was behind.
+                # was stopped because it was behind. Neither is abandoned: the
+                # run was stopped.
                 if outcome.raced_out:
                     raced_out += 1
+                elif outcome.abandoned:
+                    abandoned += 1
                 elif not outcome.ok:
                     failed += 1
                 self._absorb(results[cid], outcome, stage)
@@ -230,9 +256,14 @@ class Cascade:
                 # deeper stage, no hold-out run, no archive entry.
                 if self._note_behaviour(results[cid], outcome, stage, cid):
                     continue
+                # So does one that broke a gate: not a failure, not a contender.
+                if self._gate(results[cid], outcome, stage):
+                    continue
                 survivors.append(cid)
 
-            self._stage_finished(stage, began, len(alive), failed, private=False, raced_out=raced_out)
+            self._stage_finished(
+                stage, began, len(alive), failed, private=False, raced_out=raced_out, abandoned=abandoned
+            )
             is_final = index == len(stages) - 1
             if is_final:
                 self._run_private(stage, by_id, paths, results, survivors)
@@ -242,14 +273,58 @@ class Cascade:
             alive = select_promoted(scored, stage.promote, prior)
 
         for result in results.values():
-            result.competes = finished_final_stage(
+            result.competes = not result.abandoned and finished_final_stage(
                 self.config,
                 rejected=result.rejected,
                 last_failure=result.last_failure,
                 stages_reached=result.stages_reached,
                 private_score=result.private_score,
+                gated=result.gated,
             )
         return results
+
+    def _stopping(self) -> bool:
+        return self.stop is not None and self.stop.is_set()
+
+    # -- levels ----------------------------------------------------------
+
+    def _level_score(self, key: str, values: dict[str, float]) -> float:
+        """`evaluate.score.levels` as one score, measured from the anchor of
+        stage `key`. The first candidate through a stage anchors it -- in a
+        run that is the seed, which therefore scores exactly 0 -- and the
+        anchor is kept on disk so that a resumed run measures from it too."""
+        levels = self.config.evaluate.score.levels
+        anchor = self.anchors.get(key)
+        if anchor is None:
+            anchor = self.anchors[key] = make_anchor(levels, values)
+            # Atomically: half a file reads back as "no anchor", and a resumed
+            # run would quietly anchor at its first child instead of the seed.
+            _atomic_write(
+                self.work_dir / "levels.json",
+                json.dumps({k: a.to_json() for k, a in self.anchors.items()}, indent=2, sort_keys=True) + "\n",
+            )
+        return level_score(levels, anchor, values)
+
+    # -- gates -----------------------------------------------------------
+
+    def _broken_gate(self, kpis: dict[str, float]) -> str | None:
+        """The first gate `kpis` break, as `"missed = 2 > 0"`, or `None`."""
+        for gate in self.config.evaluate.gates:
+            broken = gate.broken_by(kpis)
+            if broken is not None:
+                return broken
+        return None
+
+    def _gate(self, result: EvalResult, outcome: StageOutcome, stage: StageConfig, *, private: bool = False) -> bool:
+        """Judge a command stage's aggregated KPIs against `evaluate.gates`.
+        True when the candidate broke one: it stops here, with the reason."""
+        if stage.kind != "command":
+            return False
+        broken = self._broken_gate(outcome.kpis)
+        if broken is None:
+            return False
+        result.gated = f"{broken} on the hold-out" if private else broken
+        return True
 
     # -- internals -------------------------------------------------------
 
@@ -288,12 +363,13 @@ class Cascade:
             inputs=stage.inputs,
             out_path=self.work_dir / "stage_out" / f"{candidate.id}.{stage.id}.json",
             cwd=self.config.base_dir,
-            required_kpis=(self.config.evaluate.score.objective,),
+            required_kpis=self.config.evaluate.required_kpis,
             observer=self._observer(candidate.id, stage, private=False),
             configuration=self._configurations.get(candidate.id),
             cache=self.cache,
+            cancel=self.stop,
         )
-        if self._is_final(stage) and self.budget is not None:
+        if self._is_final(stage) and self.budget is not None and not outcome.abandoned:
             self.budget.record_full_eval()
         return outcome
 
@@ -314,7 +390,7 @@ class Cascade:
 
     def _stage_finished(
         self, stage: StageConfig, began: float, candidates: int, failed: int, *, private: bool,
-        raced_out: int = 0,
+        raced_out: int = 0, abandoned: int = 0,
     ) -> None:
         if self.on_event is not None and stage.kind == "command":
             self.on_event(
@@ -324,6 +400,7 @@ class Cascade:
                 candidates=candidates,
                 failed=failed,
                 raced_out=raced_out,
+                abandoned=abandoned,
                 duration_s=round(time.perf_counter() - began, 3),
             )
 
@@ -366,9 +443,10 @@ class Cascade:
                 out_dir=self.work_dir / "stage_out",
                 cwd=self.config.base_dir,
                 private=private,
-                required_kpis=(self.config.evaluate.score.objective,),
+                required_kpis=self.config.evaluate.required_kpis,
                 cache=self.cache,
                 race=self._race_for(stage, admitted, private=private),
+                stop=self.stop,
             )
             if admitted
             else {}
@@ -403,8 +481,10 @@ class Cascade:
         )
 
     def _note_incumbent(self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome) -> None:
-        """Remember the best candidate to have finished this stage, instance by instance."""
-        if stage.race is None or not outcome.ok:
+        """Remember the best candidate to have finished this stage, instance by
+        instance. Never one that broke a gate: it is not a contender, so it is
+        not the one to race against either."""
+        if stage.race is None or not outcome.ok or self._broken_gate(outcome.kpis) is not None:
             return
         objective = self.config.evaluate.score.objective
         values = dict(zip(outcome.instance_names, outcome.vector_kpis.get(per_instance_key(objective), [])))
@@ -569,6 +649,11 @@ class Cascade:
         self, result: EvalResult, outcome: StageOutcome, stage: StageConfig
     ) -> None:
         result.outcomes.append(outcome)
+        if outcome.abandoned:
+            # Not a failure either: the run was stopped. The driver records
+            # nothing of this generation, and the resumed run finishes it.
+            result.abandoned = outcome.failure or "the run was stopped before this candidate finished"
+            return
         if outcome.raced_out:
             # Not a failure: the candidate keeps the score of the stage before,
             # does not reach this one, and so does not compete.
@@ -593,9 +678,12 @@ class Cascade:
         if stage.kind == "builtin-static":
             # No objective KPI here; a static pass carries no score of its own.
             return
-        score, penalty_total, terms = compute_score(
-            result.kpis, self.config.evaluate.score, self.config.evaluate.penalties
-        )
+        if self.config.evaluate.score.levels:
+            score, penalty_total, terms = self._level_score(stage.id, result.kpis), 0.0, {}
+        else:
+            score, penalty_total, terms = compute_score(
+                result.kpis, self.config.evaluate.score, self.config.evaluate.penalties
+            )
         result.score = score
         result.penalty_total = penalty_total
         result.penalty_terms = terms
@@ -618,6 +706,10 @@ class Cascade:
             return
         if not survivors:
             return
+        if self._stopping():
+            for cid in survivors:
+                results[cid].abandoned = "the run was stopped before its hold-out run"
+            return
         began, failed = self._stage_started(stage, survivors, private=True), 0
         held_out = (
             self._run_instances(stage, [by_id[cid] for cid in survivors], paths, private=True)
@@ -635,14 +727,18 @@ class Cascade:
                     out_path=self.work_dir / "stage_out" / f"{cid}.{stage.id}.private.json",
                     cwd=self.config.base_dir,
                     private=True,
-                    required_kpis=(self.config.evaluate.score.objective,),
+                    required_kpis=self.config.evaluate.required_kpis,
                     observer=self._observer(cid, stage, private=True),
                     configuration=self._configurations.get(cid),
                     cache=self.cache,
+                    cancel=self.stop,
                 )
             )
             result = results[cid]
             result.outcomes.append(outcome)
+            if outcome.abandoned:
+                result.abandoned = outcome.failure or "the run was stopped during its hold-out run"
+                continue
             if not outcome.ok:
                 failed += 1
                 result.last_failure = _artefact(outcome)
@@ -658,9 +754,12 @@ class Cascade:
                 )
             merged = dict(result.kpis)
             merged.update(outcome.kpis)
-            private_score, _, _ = compute_score(
-                merged, self.config.evaluate.score, self.config.evaluate.penalties
-            )
+            if self.config.evaluate.score.levels:
+                private_score = self._level_score(f"{stage.id}/private", merged)
+            else:
+                private_score, _, _ = compute_score(
+                    merged, self.config.evaluate.score, self.config.evaluate.penalties
+                )
             result.private_score = private_score
             if result.public_score is not None:
                 result.generalization_gap = result.public_score - private_score
@@ -670,6 +769,7 @@ class Cascade:
                 private_score,
                 self.config.evaluate.holdout_penalty,
             )
+            self._gate(result, outcome, stage, private=True)
         self._stage_finished(stage, began, len(survivors), failed, private=True)
 
 

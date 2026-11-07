@@ -49,6 +49,7 @@ from evolvekit.evaluate.stages import (
     _run_once,
 )
 from evolvekit.evaluate.types import StageOutcome
+from evolvekit.stopping import AnyEvent
 
 __all__ = ["Job", "Race", "run_instance_stage", "per_instance_key"]
 
@@ -107,13 +108,16 @@ def run_instance_stage(
     seeds: Sequence[int] | None = None,
     keep_going: bool = False,
     race: Race | None = None,
+    stop: threading.Event | None = None,
 ) -> dict[str, StageOutcome]:
     """Run `stage` for every job, instance and seed; one outcome per candidate.
 
     `seeds` replaces the stage's own `0 .. seeds-1` -- a comparison on seeds
     the search never saw names them. `keep_going` runs a candidate's remaining
     instances after one has failed: a search has no use for them, a comparison
-    does, because every pair that did finish still counts.
+    does, because every pair that did finish still counts. `stop` is the run's
+    own stop (`evolvekit/stopping.py`): once set, runs in flight are stopped,
+    no other is started, and what did not finish is *abandoned*, not failed.
 
     A `pin_cpus` this machine cannot honour is a `ConfigError` here, before
     the first run: the config may have been written for another machine, and
@@ -127,6 +131,7 @@ def run_instance_stage(
     files = _file_names(names)
     seed_values = list(seeds) if seeds is not None else list(range(stage.seeds))
     cancel = threading.Event()
+    halt = AnyEvent(cancel, stop)
     board = _Board(jobs, len(instances), seed_values, race=race, names=names)
     cpus: queue.SimpleQueue[int] | None = None
     if stage.pin_cpus:
@@ -135,7 +140,7 @@ def run_instance_stage(
             cpus.put(cpu)
 
     def run(job: Job, index: int, seed: int) -> None:
-        if cancel.is_set() or (board.failed(job.candidate_id) and not keep_going):
+        if halt.is_set() or (board.failed(job.candidate_id) and not keep_going):
             return  # a candidate that has already failed buys nothing further
         cpu = cpus.get() if cpus is not None else None
         try:
@@ -156,12 +161,12 @@ def run_instance_stage(
                         name=names[index],
                         attempt=attempt,
                         cpus=(cpu,) if cpu is not None else (),
-                        cancel=cancel,
+                        cancel=halt,
                     ),
                     cache=cache,
                 )
                 board.ran(job.candidate_id, outcome)
-                if outcome.ok or cancel.is_set() or (board.failed(job.candidate_id) and not keep_going):
+                if outcome.ok or halt.is_set() or (board.failed(job.candidate_id) and not keep_going):
                     break
             verdict = board.settle(job.candidate_id, index, seed, names[index], outcome)
             if verdict is not None and job.observer is not None:
@@ -309,10 +314,11 @@ class _Board:
             failure = self._failure.get(candidate_id)
             done = dict(self._done[candidate_id])
         if failure is None and len(done) < self._instances * self._seeds:
-            # Only an interrupted stage leaves runs unstarted without a failure.
+            # Only a stopped stage leaves runs unstarted without a failure: the
+            # run's time limit or a stop request (Ctrl+C never gets here).
             failure = StageOutcome(
-                stage_id=stage.id, ok=False, private=private,
-                failure=f"called off after {len(done)} of {self._instances * self._seeds} runs",
+                stage_id=stage.id, ok=False, private=private, abandoned=True,
+                failure=f"called off after {len(done)} of {self._instances * self._seeds} runs: the run was stopped",
             )
         if failure is not None:
             failure.duration_s, failure.runs = spent, runs

@@ -32,7 +32,7 @@ import random
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from evolvekit.space import Parameter, ParameterSpace
+from evolvekit.space import CONSTRAINT_ATTEMPTS, Parameter, ParameterSpace
 
 __all__ = ["Observation", "propose_tpe", "GOOD_FRACTION", "MIN_OBSERVATIONS"]
 
@@ -80,9 +80,13 @@ def propose_tpe(
     densities = {p.name: (_Density(p, good), _Density(p, bad)) for p in space}
     seen = [dict(v) for v in taken] + [dict(o.values) for o in usable]
     best: tuple[float, dict[str, Any]] | None = None
-    for _ in range(CANDIDATES):
+    # A draw that breaks a constraint (`problem.parameter_constraints`) is not
+    # a candidate at all: it is skipped, and up to CONSTRAINT_ATTEMPTS more
+    # draws are allowed to find CANDIDATES that are.
+    rated = 0
+    for _ in range(CANDIDATES + (CONSTRAINT_ATTEMPTS if space.constraints else 0)):
         values = {p.name: densities[p.name][0].sample(rng) for p in space}
-        if values in seen:
+        if values in seen or not space.satisfies(values):
             continue
         ratio = sum(
             math.log(densities[p.name][0].pdf(values[p.name]))
@@ -91,6 +95,9 @@ def propose_tpe(
         )
         if best is None or ratio > best[0]:
             best = (ratio, values)
+        rated += 1
+        if rated >= CANDIDATES:
+            break
     return best[1] if best else None
 
 

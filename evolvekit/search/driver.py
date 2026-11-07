@@ -65,6 +65,7 @@ from evolvekit.search.operators import (
 from evolvekit.search.params import has_params
 from evolvekit.search.scratchpad import Scratchpad
 from evolvekit.search.tuning import Observation
+from evolvekit.stopping import RunStop, active_seconds
 
 __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
 
@@ -171,12 +172,18 @@ class Driver:
         self.behaviour = BehaviourIndex()
         self.events = EventLog(self.ledger.run_dir)
         self.heartbeat = Heartbeat(self.ledger.run_dir, session=self.events.session)
+        self.run_stop = RunStop(self.ledger.run_dir, max_hours=config.budget.max_hours)
+        """`budget.max_hours` and `stop-request` (`evolvekit/stopping.py`)."""
+        self._durations: dict[int, float] = {}
+        """How long each generation took, by generation, all sessions included:
+        what the time limit projects the next one from."""
         self.cascade = Cascade(
             config,
             work_dir=self.ledger.run_dir / "work",
             budget=self.budget,
             signatures=self.behaviour,
             on_event=self._on_evaluation,
+            stop=self.run_stop.event,
         )
         self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
         self.breadth = AdaptiveBreadth.from_config(config.search)
@@ -245,6 +252,10 @@ class Driver:
             ] if space is not None else None,
             "objective": config.evaluate.score.objective,
             "direction": config.evaluate.score.direction,
+            # Which candidates compete, and how they rank. `None` when there are
+            # none: what a run directory from before either existed recorded.
+            "gates": [gate.describe() for gate in config.evaluate.gates] or None,
+            "levels": [level.describe() for level in config.evaluate.score.levels] or None,
             "stages": [
                 {
                     "id": stage.id, "command": stage.command, "seeds": stage.seeds,
@@ -276,7 +287,7 @@ class Driver:
         if recorded is None:
             return  # a run directory from before this was recorded
         now = _comparable(self._problem_identity())
-        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "stages")
+        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "levels", "gates", "stages")
                    if recorded.get(key) != now[key]]
         if not changed:
             return
@@ -294,7 +305,9 @@ class Driver:
             {"skeleton_sha": "the skeleton (or the generated one) changed",
              "parameters": "the declared parameters changed (names, types or choices)",
              "objective": f"the objective is now {now['objective']!r}, was {recorded.get('objective')!r}",
-             "direction": f"the direction is now {now['direction']!r}"}[key]
+             "direction": f"the direction is now {now['direction']!r}",
+             "gates": "the gates changed (evaluate.gates), so earlier candidates were judged by other rules",
+             "levels": "the levels changed (evaluate.score.levels), so earlier scores rank by other rules"}[key]
             for key in changed if key != "stages"
         ]
         raise ValueError(
@@ -321,6 +334,12 @@ class Driver:
             "parameters": (
                 config.problem.parameters.describe() if config.problem.parameters else None
             ),
+            "parameter_constraints": (
+                [c.text for c in config.problem.parameters.constraints]
+                if config.problem.parameters else None
+            ),
+            "gates": [gate.describe() for gate in config.evaluate.gates],
+            "levels": [level.describe() for level in config.evaluate.score.levels],
             "failure_score": config.evaluate.failure_score,
             "stages": [
                 {
@@ -352,6 +371,7 @@ class Driver:
                 "max_usd": config.budget.max_usd,
                 "max_tokens": config.budget.max_tokens,
                 "max_full_evals_per_day": config.budget.max_full_evals_per_day,
+                "max_hours": config.budget.max_hours,
             },
             "stop": {
                 "patience": config.stop.patience,
@@ -477,6 +497,7 @@ class Driver:
                 last_failure=row.get("last_failure"),
                 stages_reached=row.get("stages_reached") or [],
                 private_score=row.get("private_score"),
+                gated=row.get("gated"),
             ),
         }
 
@@ -488,6 +509,10 @@ class Driver:
             # Before the first event of this session: a refusal must not leave a
             # "crashed" session behind in a directory it declined to touch.
             self._check_same_problem()
+            recorded = read_events(self.ledger.run_dir)
+            self._durations = _generation_durations(recorded)
+            # The time limit is the run's: earlier sessions' hours count.
+            self.run_stop.start(used_s=active_seconds(recorded))
             self.heartbeat.start(phase="starting")
             try:
                 if lock.reclaimed_from:
@@ -505,6 +530,8 @@ class Driver:
                 self.events.emit("run_crashed", error=f"{type(exc).__name__}: {exc}")
                 self.heartbeat.stop(phase="crashed")
                 raise
+            finally:
+                self.run_stop.close()
             best = summary.best
             self.events.emit(
                 "run_finished",
@@ -567,8 +594,19 @@ class Driver:
         else:
             seed = self._seed_candidate()
         if seed is not None:
+            halt = self.run_stop.poll()
+            if halt is not None:
+                summary.stop_reason = halt
+                self.log(f"gen 0  not started: {halt}")
+                return self._finalise(summary)
             began = self._generation_started(0, children=0)
-            self._evaluate_and_record([seed], generation=0)
+            if self._evaluate_and_record([seed], generation=0):
+                summary.stop_reason = self.run_stop.reason or "stopped"
+                self.log(
+                    f"gen 0  cut short: {summary.stop_reason}. The seed is evaluated again when the "
+                    "run is resumed"
+                )
+                return self._finalise(summary)
             self._generation_finished(0, began, [seed])
             summary.seed_score = seed.score
             summary.candidates += 1
@@ -584,6 +622,13 @@ class Driver:
                     "seed failed evaluation — fix the harness before spending: "
                     f"{first_line}"
                 )
+                if seed.gated and not (seed.rejected or seed.last_failure):
+                    # Every candidate is judged against the seed, and a seed
+                    # outside the gates is not a starting point anybody wants.
+                    summary.stop_reason = (
+                        f"the seed breaks a gate: {seed.gated} (evaluate.gates). Nothing was "
+                        "searched: change the starting point or the gate, then run again"
+                    )
                 summary.aborted = True
                 self.log(f"ABORT: {summary.stop_reason}")
                 return self._finalise(summary)
@@ -609,6 +654,10 @@ class Driver:
                     "the final stage per calendar day"
                 )
                 break
+            halt = self.run_stop.before_generation(self._projected_s())
+            if halt is not None:
+                summary.stop_reason = halt
+                break
 
             self._maybe_refresh_scratchpad(generation)
 
@@ -619,9 +668,18 @@ class Driver:
             if children is None:
                 children = self._breed(generation, plateau=decision.plateau)
                 self._write_pending(generation, children)
-            summary.candidates += len(children)
             viable = [c for c in children if not c.rejected]
-            self._evaluate_and_record(viable, generation=generation)
+            if self._evaluate_and_record(viable, generation=generation):
+                # Stopped in the middle: nothing of this generation is
+                # recorded, and `pending.json` keeps its children for the
+                # resumed run, which finishes it first.
+                summary.stop_reason = self.run_stop.reason or "stopped"
+                self.log(
+                    f"gen {generation:<2} cut short: {summary.stop_reason}. Its children stay in "
+                    "pending.json: the resumed run finishes this generation first"
+                )
+                break
+            summary.candidates += len(children)
             for child in children:
                 if child.rejected and child.id not in self.results:
                     self._record(child)
@@ -672,6 +730,7 @@ class Driver:
         return bool(
             seed.rejected
             or seed.last_failure
+            or seed.gated
             or seed.score == self.config.evaluate.failure_score
         )
 
@@ -825,10 +884,12 @@ class Driver:
         self, generation: int, began: float, children: Sequence[Candidate]
     ) -> None:
         best = self.best
+        duration = round(time.perf_counter() - began, 3)
+        self._durations[generation] = duration
         self.events.emit(
             "generation_finished",
             generation=generation,
-            duration_s=round(time.perf_counter() - began, 3),
+            duration_s=duration,
             children=len(children),
             rejected=sum(1 for c in children if c.rejected),
             best_id=best.id if best else None,
@@ -868,6 +929,17 @@ class Driver:
         if self.breadth is None:
             return self.config.search.children_per_generation
         return self.breadth.current
+
+    def _projected_s(self) -> float | None:
+        """How long the next generation may take, for `budget.max_hours`: the
+        longest of the last two. With only the seed done, the seed's duration
+        times the breadth -- an upper bound when a cheaper stage screens
+        first, since then most children never run the expensive one."""
+        done = sorted(generation for generation in self._durations if generation >= 1)
+        if done:
+            return max(self._durations[generation] for generation in done[-2:])
+        seed = self._durations.get(0)
+        return None if seed is None else seed * self.children_per_generation
 
     def _plan_operators(self, generation: int, plateau: bool) -> list[str]:
         """One operator name per child. The big step, when due, takes slot 0."""
@@ -948,7 +1020,9 @@ class Driver:
         for c in self.archive:
             if not c.params or c.rejected:
                 continue
-            if c.last_failure:
+            # A configuration that broke a gate is as bad as one that crashed:
+            # a region the estimator should not propose in again.
+            if c.last_failure or c.gated:
                 failed.append(c)
             elif c.raced_out:
                 behind.append(c)
@@ -1055,7 +1129,7 @@ class Driver:
         best = self.best
         children: list[Candidate] = []
         for slot, operator in enumerate(plan):
-            if not self.budget.check().allowed or self._provider_is_dead():
+            if not self.budget.check().allowed or self._provider_is_dead() or self.run_stop.triggered:
                 break
             # A big step is an escape from the *front* of the search, so it
             # starts from the best candidate rather than from a sampled cell.
@@ -1332,10 +1406,16 @@ class Driver:
 
     def _evaluate_and_record(
         self, candidates: Sequence[Candidate], *, generation: int
-    ) -> None:
+    ) -> bool:
+        """Evaluate a generation and record it. True when the run was stopped
+        in the middle of it (`evolvekit/stopping.py`): then nothing is
+        recorded -- a generation is recorded whole or not at all, and the
+        resumed run evaluates it again, its finished runs from the cache."""
         if not candidates:
-            return
+            return False
         results = self.cascade.evaluate_generation(candidates, self._archive_scores())
+        if any(result.abandoned for result in results.values()):
+            return True
         for candidate in candidates:
             result = results[candidate.id]
             self.results[candidate.id] = result
@@ -1343,6 +1423,7 @@ class Driver:
             candidate.params = result.params
             candidate.competes = result.competes
             candidate.raced_out = result.raced_out
+            candidate.gated = result.gated
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis
@@ -1366,6 +1447,7 @@ class Driver:
             if not candidate.rejected:
                 self.novelty.add(candidate.id, candidate.block)
             self._record(candidate)
+        return False
 
     def _note_behavioural_twin(self, candidate: Candidate) -> None:
         """Log the twin and leave an artefact for the parent's next prompt.
@@ -1403,6 +1485,18 @@ class Driver:
 
 def _fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6g}"
+
+
+def _generation_durations(events: Sequence[dict]) -> dict[int, float]:
+    """`generation -> duration_s` from every `generation_finished` event; the
+    last one counts when a generation was finished twice."""
+    durations: dict[int, float] = {}
+    for event in events:
+        value = event.get("duration_s")
+        if event.get("type") == "generation_finished" and isinstance(event.get("generation"), int) \
+                and isinstance(value, (int, float)) and not isinstance(value, bool):
+            durations[event["generation"]] = float(value)
+    return durations
 
 
 def _comparable(problem: dict) -> dict:
