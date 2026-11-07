@@ -11,11 +11,12 @@ runs a real study, and the full gate has timing-sensitive tests):
 
     .venv/Scripts/python.exe tests/agent_gate.py [--tool claude|copilot] [--sentence "..."] [--expect-question]
         [--timeout S] [--wait-timeout S] [--log-dir DIR] [--keep]
-    .venv/Scripts/python.exe tests/agent_gate.py --fixture DIR [--no-harness]
+    .venv/Scripts/python.exe tests/agent_gate.py --fixture DIR [--no-harness] [--shell bash|powershell] [--force]
 
-Exit 0 when every check passes, 1 when one fails, 2 when the tool is not installed (the gate did not run).
-`--fixture DIR` only builds `DIR/repo` and `DIR/home` (the persona rounds' materials) and prints the three
-lines to set before working there.
+Exit 0 when every check passes, 1 when one fails (a failure is always a FAIL line, never a traceback), 2 when
+the tool is not installed (the gate did not run). `--fixture DIR` only builds `DIR/repo` and `DIR/home` (the
+persona rounds' materials) and prints, in the chosen shell's syntax, the three lines to set before working
+there and the one-shot, isolated command to run there.
 """
 
 from __future__ import annotations
@@ -50,15 +51,19 @@ DEFAULT_SENTENCE = ("Use evolvekit to find solver settings that give shorter tou
 MISSING_TIME_SENTENCE = DEFAULT_SENTENCE.replace("ten minutes in total; ", "")
 REPORT_PROMPT = "The evolvekit study {slug} has finished; report its result."
 
-ALLOWED_TOOLS = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep"]
+ALLOWED_TOOLS = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep", "Skill"]
+ISOLATION = ["--setting-sources", "project", "--strict-mcp-config", "--permission-prompts", "none"]
+"""A fresh agent, not the operator's: only the fixture's own settings (no user settings, so no user plugins),
+no MCP servers, and anything that would prompt is denied instead of waiting (claude 2.1.304's `--help`)."""
 TOOLS: dict[str, list[str]] = {
-    "claude": ["-p", "--allowedTools", ",".join(ALLOWED_TOOLS), "--add-dir", "{home}",
+    "claude": ["-p", "--allowedTools", ",".join(ALLOWED_TOOLS), "--add-dir", "{home}", *ISOLATION,
                "--no-session-persistence", "--output-format", "text"],
     "copilot": ["-p", "{sentence}", "--allow-all-tools", "--add-dir", "{home}"],
 }
 """Each tool's one-shot flags. claude reads the sentence on stdin (a .cmd on Windows mangles quotes in
 arguments); `--add-dir` lets it edit study.yaml in the library home, outside the repository. copilot's flags are
 the plan's and unverified: it was not installed when the gate was written."""
+SHELLS = ("bash", "powershell")
 
 LIVE = ("queued", "starting", "search", "check")
 CLAIM_WORDS = re.compile(r"\b(better|improved|faster|cheaper)\b", re.IGNORECASE)
@@ -113,16 +118,41 @@ def _text(data: str | bytes | None) -> str:
     return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
 
 
+def _kill_tree(process: subprocess.Popen) -> None:
+    """End the process and everything it started: on Windows the tool is a `.cmd`, so the agent is a grandchild
+    holding the pipes, and killing `cmd.exe` alone would leave `communicate()` waiting for it."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, timeout=60)
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except Exception:  # noqa: BLE001 - the plain kill below is the fallback
+        pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
 def run_tool(tool: str, cwd: Path, sentence: str, *, timeout_s: int, env: Mapping[str, str],
              transcript: Path) -> str:
-    """Run the tool once (never resuming a session); write the redacted transcript; return the raw output."""
+    """Run the tool once (never resuming a session); write the redacted transcript; return the raw output.
+    On timeout the whole process tree is killed and what it wrote so far is kept."""
     argv, stdin = tool_command(tool, sentence, Path(env["EVOLVEKIT_HOME"]))
+    process = subprocess.Popen(argv, cwd=cwd, env=dict(env), text=True, encoding="utf-8", errors="replace",
+                               stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=(os.name != "nt"))
     try:
-        done = subprocess.run(argv, cwd=cwd, env=dict(env), input=stdin, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout_s)
-        output = _text(done.stdout) + _text(done.stderr)
-    except subprocess.TimeoutExpired as exc:
-        output = _text(exc.stdout) + _text(exc.stderr) + f"\n[the gate stopped the tool after {timeout_s} s]"
+        out, err = process.communicate(stdin, timeout=timeout_s)
+        output = _text(out) + _text(err)
+    except subprocess.TimeoutExpired:
+        _kill_tree(process)
+        try:
+            out, err = process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        output = _text(out) + _text(err) + f"\n[the gate stopped the tool after {timeout_s} s]"
     transcript = Path(transcript)
     transcript.parent.mkdir(parents=True, exist_ok=True)
     with open(transcript, "w", encoding="utf-8", newline="\n") as handle:
@@ -235,6 +265,100 @@ def _clean_up(work: Path, home: Path, env: Mapping[str, str]) -> None:
     shutil.rmtree(work, ignore_errors=True)
 
 
+def _posix(path: Path) -> str:
+    """A path as Git Bash writes it: `C:\\x\\y` -> `/c/x/y`; unchanged elsewhere."""
+    text = Path(path).as_posix()
+    if re.match(r"^[A-Za-z]:/", text):
+        return f"/{text[0].lower()}{text[2:]}"
+    return text
+
+
+def fixture_lines(repo: Path, home: Path, shell: str = "bash") -> list[str]:
+    """What to set before working in the fixture, in one shell's syntax, and the command to run there: the
+    same one-shot, isolated claude the gate runs, with the message as its argument."""
+    scripts = Path(sys.executable).parent
+    flags = TOOLS["claude"][1:]
+    if shell == "powershell":
+        rest = " ".join(f'"{home}"' if a == "{home}" else a for a in flags)
+        return [f'$env:EVOLVEKIT_HOME = "{home}"', f'$env:PATH = "{scripts}{os.pathsep}" + $env:PATH',
+                f'Set-Location "{repo}"', f'claude -p "<message>" {rest}']
+    rest = " ".join(f'"{Path(home).as_posix()}"' if a == "{home}" else a for a in flags)
+    return [f'export EVOLVEKIT_HOME="{Path(home).as_posix()}"', f'export PATH="{_posix(scripts)}:$PATH"',
+            f'cd "{Path(repo).as_posix()}"', f'claude -p "<message>" {rest}']
+
+
+def _fixture(where: Path, *, harness: bool, shell: str, force: bool) -> int:
+    where = where.resolve()
+    repo, home = where / "repo", where / "home"
+    taken = [p for p in (repo, home) if p.exists()]
+    if taken and not force:
+        print(f"FAIL fixture: {', '.join(str(p) for p in taken)} already exists; "
+              "choose another folder, or pass --force to build it again")
+        return 1
+    for path in taken:
+        shutil.rmtree(path)
+    try:
+        build_fixture(repo, home=home, harness=harness)
+    except Exception as exc:  # noqa: BLE001 - a FAIL line, never a traceback
+        print(f"FAIL fixture: {exc}")
+        return 1
+    for line in fixture_lines(repo, home, shell):
+        print(line)
+    return 0
+
+
+def _gate(args: argparse.Namespace, work: Path, results: list[dict], transcripts: list[Path]) -> None:
+    """The gate's run, every failure a check: nothing here raises."""
+    repo, home = work / "repo", work / "home"
+    try:
+        build_fixture(repo, home=home)
+    except Exception as exc:  # noqa: BLE001
+        results.append(_check("fixture", False, str(exc)))
+        return
+    env = gate_env(home)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    transcripts.append(args.log_dir / f"{stamp}-{args.tool}-1.txt")
+    try:
+        out1 = run_tool(args.tool, repo, args.sentence, timeout_s=args.timeout, env=env, transcript=transcripts[0])
+    except Exception as exc:  # noqa: BLE001
+        results.append(_check("tool_run", False, f"{type(exc).__name__}: {exc}"))
+        return
+    try:
+        if args.expect_question:
+            results.extend(question_checks(home, out1))
+            return
+        results.extend(checks(home, out1))
+        live = {r["name"]: r["ok"] for r in results}.get("study_started_or_queued")
+        found = the_study(home)
+    except Exception as exc:  # noqa: BLE001
+        results.append(_check("checks", False, f"{type(exc).__name__}: {exc}"))
+        return
+    if not live or found is None:
+        return
+    slug, root = found
+    try:
+        code = _evolvekit("study", "wait", slug, "--home", str(home), "--timeout", str(args.wait_timeout), env=env)
+    except Exception as exc:  # noqa: BLE001
+        results.append(_check("study_finished", False, f"study wait: {type(exc).__name__}: {exc}"))
+        return
+    if code != 0:
+        results.append(_check("study_finished", False, f"study wait exited {code}"))
+        return
+    try:
+        document = build_verdict(root)
+    except Exception as exc:  # noqa: BLE001
+        results.append(_check("report_equals_verdict_line", False, f"no verdict: {type(exc).__name__}: {exc}"))
+        return
+    transcripts.append(args.log_dir / f"{stamp}-{args.tool}-2.txt")
+    try:
+        out2 = run_tool(args.tool, repo, REPORT_PROMPT.format(slug=slug), timeout_s=args.timeout, env=env,
+                        transcript=transcripts[1])
+    except Exception as exc:  # noqa: BLE001
+        results.append(_check("report_equals_verdict_line", False, f"second run: {type(exc).__name__}: {exc}"))
+        return
+    results.extend(report_checks(document, out2))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="The agent gate: one sentence to a running study, then the verdict.")
     parser.add_argument("--tool", choices=sorted(TOOLS), default="claude")
@@ -248,15 +372,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixture", type=Path, metavar="DIR",
                         help="only build DIR/repo and DIR/home and print the lines to set there")
     parser.add_argument("--no-harness", action="store_true", help="with --fixture: no harness/ in the repository")
+    parser.add_argument("--shell", choices=SHELLS, default="bash", help="with --fixture: the printed lines' syntax")
+    parser.add_argument("--force", action="store_true", help="with --fixture: build DIR/repo and DIR/home again")
     args = parser.parse_args(argv)
 
     if args.fixture is not None:
-        where = args.fixture.resolve()
-        build_fixture(where / "repo", home=where / "home", harness=not args.no_harness)
-        print(f'EVOLVEKIT_HOME="{where / "home"}"')
-        print(f'PATH="{Path(sys.executable).parent}{os.pathsep}…"')
-        print(f'cd "{where / "repo"}"')
-        return 0
+        return _fixture(args.fixture, harness=not args.no_harness, shell=args.shell, force=args.force)
 
     try:
         tool_command(args.tool, args.sentence, Path("."))
@@ -264,43 +385,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL tool: {exc}")
         return 2
 
+    results: list[dict] = []
+    transcripts: list[Path] = []
     work = Path(tempfile.mkdtemp(prefix="evk gate "))
-    repo, home = work / "repo", work / "home"
-    build_fixture(repo, home=home)
-    env = gate_env(home)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    transcripts = [args.log_dir / f"{stamp}-{args.tool}-1.txt"]
-    try:
-        out1 = run_tool(args.tool, repo, args.sentence, timeout_s=args.timeout, env=env, transcript=transcripts[0])
-        if args.expect_question:
-            results = question_checks(home, out1)
-        else:
-            results = checks(home, out1)
-            live = {r["name"]: r["ok"] for r in results}.get("study_started_or_queued")
-            found = the_study(home)
-            if live and found is not None:
-                slug, root = found
-                code = _evolvekit("study", "wait", slug, "--home", str(home), "--timeout", str(args.wait_timeout),
-                                  env=env)
-                if code != 0:
-                    results.append(_check("study_finished", False, f"study wait exited {code}"))
-                else:
-                    document = build_verdict(root)
-                    transcripts.append(args.log_dir / f"{stamp}-{args.tool}-2.txt")
-                    out2 = run_tool(args.tool, repo, REPORT_PROMPT.format(slug=slug), timeout_s=args.timeout,
-                                    env=env, transcript=transcripts[1])
-                    results += report_checks(document, out2)
-        for result in results:
-            print(f"PASS {result['name']}" if result["ok"] else f"FAIL {result['name']}: {result['detail']}")
-        for path in transcripts:
-            print(f"transcript: {path}")
-        if args.keep:
-            print(f"kept: {work}")
-    finally:
-        if not args.keep:
-            _clean_up(work, home, env)
-    return 0 if all(r["ok"] for r in results) else 1
+    _gate(args, work, results, transcripts)
+    for result in results:
+        print(f"PASS {result['name']}" if result["ok"] else f"FAIL {result['name']}: {result['detail']}")
+    for path in transcripts:
+        print(f"transcript: {path}")
+    if args.keep:
+        print(f"kept: {work}")
+    else:
+        try:
+            _clean_up(work, work / "home", gate_env(work / "home"))
+        except Exception as exc:  # noqa: BLE001
+            failed = _check("clean_up", False, f"{type(exc).__name__}: {exc}")
+            results.append(failed)
+            print(f"FAIL clean_up: {failed['detail']}")
+    return 0 if results and all(r["ok"] for r in results) else 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

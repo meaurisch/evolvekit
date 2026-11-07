@@ -1,6 +1,8 @@
 import json
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,15 @@ URL = "http://127.0.0.1:8780/?token=abc123#/study/gate"
 LINE = ("Probably better: 1.3 % lower tour length on 2 held-back cases, a chance of about 19 in 20; "
         "at worst 0.3 % worse than your starting point.")
 ADVICE = "Use the new settings: they are probably better on cases the search never saw."
-TOOLS = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep"]
+TOOLS = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep", "Skill"]
+FAKE_TOOL = """\
+import subprocess, sys, time
+from pathlib import Path
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+print("partial output", flush=True)
+time.sleep(120)
+"""
 
 
 def _ok(results):
@@ -125,13 +135,121 @@ def test_a_missing_tool_exits_2(monkeypatch, capsys):
     assert "FAIL tool: copilot is not installed" in capsys.readouterr().out
 
 
+def test_claude_is_isolated_from_the_operators_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_gate.shutil, "which", lambda name: f"/bin/{name}")
+    argv, _ = tool_command("claude", "Use evolvekit.", tmp_path)
+    assert argv[argv.index("--setting-sources") + 1] == "project"
+    assert "--strict-mcp-config" in argv
+    assert argv[argv.index("--permission-prompts") + 1] == "none"
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
-def test_fixture_prints_the_three_lines(tmp_path, capsys):
+def test_fixture_prints_bash_lines(tmp_path, capsys):
     where = tmp_path / "persona round"
     assert agent_gate.main(["--fixture", str(where), "--no-harness"]) == 0
     lines = capsys.readouterr().out.strip().splitlines()
+    home, repo = (where / "home").resolve(), (where / "repo").resolve()
+    assert lines[0] == f'export EVOLVEKIT_HOME="{home.as_posix()}"'
+    assert lines[1].startswith('export PATH="') and lines[1].endswith(':$PATH"') and "\\" not in lines[1]
+    assert lines[1][len('export PATH="'):-len(':$PATH"')] == agent_gate._posix(Path(sys.executable).parent)
+    assert lines[2] == f'cd "{repo.as_posix()}"'
+    assert lines[3].startswith('claude -p "<message>" ')
+    for flag in ("--setting-sources project", "--strict-mcp-config", "--permission-prompts none",
+                 f'--add-dir "{home.as_posix()}"', "--allowedTools " + ",".join(TOOLS)):
+        assert flag in lines[3], flag
+    assert len(lines) == 4
+    assert (repo / "solver.py").is_file() and not (repo / "harness").exists()
+    assert (repo / ".claude" / "settings.json").is_file()
+
+
+def test_posix_path():
+    assert agent_gate._posix(Path("C:/Users/a b/x")) in ("/c/Users/a b/x", "C:/Users/a b/x")
+    if agent_gate.os.name == "nt":
+        assert agent_gate._posix(Path("C:/Users/a b/x")) == "/c/Users/a b/x"
+    assert agent_gate._posix(Path("/usr/bin")) == "/usr/bin"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_fixture_prints_powershell_lines_and_refuses_a_taken_folder(tmp_path, capsys):
+    where = tmp_path / "persona round"
+    assert agent_gate.main(["--fixture", str(where), "--shell", "powershell"]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    home, repo = (where / "home").resolve(), (where / "repo").resolve()
     scripts = Path(sys.executable).parent
-    assert lines == [f'EVOLVEKIT_HOME="{where / "home"}"', f'PATH="{scripts}{agent_gate.os.pathsep}…"',
-                     f'cd "{where / "repo"}"']
-    assert (where / "repo" / "solver.py").is_file() and not (where / "repo" / "harness").exists()
-    assert (where / "repo" / ".claude" / "settings.json").is_file()
+    assert lines[:3] == [f'$env:EVOLVEKIT_HOME = "{home}"', f'$env:PATH = "{scripts}{agent_gate.os.pathsep}" + $env:PATH',
+                         f'Set-Location "{repo}"']
+    assert lines[3].startswith('claude -p "<message>" ') and f'--add-dir "{home}"' in lines[3]
+    assert agent_gate.main(["--fixture", str(where)]) == 1
+    assert "already exists" in capsys.readouterr().out
+    (repo / "stale.txt").write_text("x", encoding="utf-8")
+    assert agent_gate.main(["--fixture", str(where), "--force"]) == 0
+    assert not (repo / "stale.txt").exists() and (repo / "harness").is_dir()
+
+
+def _alive(pid):
+    if agent_gate.os.name == "nt":
+        found = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in found
+    try:
+        agent_gate.os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_timeout_kills_the_whole_tree(tmp_path, monkeypatch):
+    script = tmp_path / "fake tool.py"
+    script.write_text(FAKE_TOOL, encoding="utf-8")
+    monkeypatch.setitem(agent_gate.TOOLS, "fake", [str(script), "{sentence}"])
+    monkeypatch.setattr(agent_gate.shutil, "which", lambda name: sys.executable)
+    pid_file = tmp_path / "child.pid"
+    transcript = tmp_path / "logs" / "t.txt"
+    env = {**agent_gate.os.environ, "EVOLVEKIT_HOME": str(tmp_path / "home")}
+    began = time.monotonic()
+    output = agent_gate.run_tool("fake", tmp_path, str(pid_file), timeout_s=2, env=env, transcript=transcript)
+    assert time.monotonic() - began < 15
+    assert "partial output" in output and "stopped the tool after 2 s" in output
+    assert transcript.is_file()
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _alive(pid)
+
+
+def _gate_args(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_gate.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(agent_gate.tempfile, "mkdtemp", lambda prefix="": str(tmp_path / "work"))
+    monkeypatch.setattr(agent_gate, "build_fixture",
+                        lambda repo, *, home, harness=True: (repo.mkdir(parents=True), home.mkdir(parents=True)))
+    return ["--log-dir", str(tmp_path / "logs")]
+
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("boom")
+
+
+def test_a_failing_tool_run_is_a_fail_line(tmp_path, monkeypatch, capsys):
+    argv = _gate_args(tmp_path, monkeypatch)
+    monkeypatch.setattr(agent_gate, "run_tool", _boom)
+    assert agent_gate.main(argv) == 1
+    out = capsys.readouterr().out
+    assert "FAIL tool_run: RuntimeError: boom" in out and "Traceback" not in out
+    assert not (tmp_path / "work").exists()
+
+
+def test_a_failing_verdict_and_clean_up_are_fail_lines(tmp_path, monkeypatch, capsys):
+    argv = _gate_args(tmp_path, monkeypatch)
+    root = tmp_path / "study"
+    monkeypatch.setattr(agent_gate, "run_tool", lambda *a, **k: "said")
+    monkeypatch.setattr(agent_gate, "checks", lambda home, output: [{"name": n, "ok": True, "detail": ""} for n in (
+        "study_exists", "application_set", "study_started_or_queued", "output_names_the_url",
+        "no_claim_of_improvement")])
+    monkeypatch.setattr(agent_gate, "the_study", lambda home: ("gate", root))
+    monkeypatch.setattr(agent_gate, "_evolvekit", lambda *a, **k: 0)
+    monkeypatch.setattr(agent_gate, "build_verdict", _boom)
+    monkeypatch.setattr(agent_gate, "_clean_up", _boom)
+    assert agent_gate.main(argv) == 1
+    out = capsys.readouterr().out
+    assert "FAIL report_equals_verdict_line: no verdict: RuntimeError: boom" in out
+    assert "FAIL clean_up: RuntimeError: boom" in out and "PASS study_exists" in out
