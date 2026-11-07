@@ -114,17 +114,21 @@ def parse_help(text: str) -> list[dict]:
     section = ""
     current: dict | None = None
 
+    in_usage = False  # the usage block, wrapped or not, is read by _usage only
     for line in lines:
         stripped = line.strip()
         if not stripped:
-            current = None
+            current, in_usage = None, False
+            continue
+        if stripped.lower().startswith("usage:"):
+            current, in_usage = None, True
             continue
         if not line[:1].isspace():
-            current = None
+            current, in_usage = None, False
             if stripped.endswith(":"):
                 section = stripped[:-1].lower()
             continue
-        if stripped.lower().startswith("usage:"):
+        if in_usage:
             continue
         parts = re.split(r"\s{2,}", stripped, maxsplit=1)
         head, help_text = parts[0], (parts[1] if len(parts) > 1 else "")

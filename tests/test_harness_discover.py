@@ -51,6 +51,28 @@ def test_parse_help_gnu_shape():
     assert settings[1]["type"] == "float" and settings[1]["default"] == 0.5
 
 
+WRAPPED_HELP = """usage: router.py [-h] [--version] [--seed SEED] [--time-limit TIME_LIMIT]
+                 [--neighbours NEIGHBOURS]
+                 --instance INSTANCE [--print-tour]
+                 --fleet FLEET
+
+options:
+  -h, --help            show this help message and exit
+  --seed SEED           where the search starts (default: 0)
+  --instance INSTANCE   the file
+  --fleet FLEET         how many vans
+  --print-tour          also report the tour
+"""
+
+
+def test_parse_help_skips_a_wrapped_usage_block():
+    settings = {s["name"]: s for s in parse_help(WRAPPED_HELP)}
+    assert set(settings) == {"seed", "instance", "fleet", "print-tour"}
+    assert settings["instance"]["help"] == "the file" and settings["instance"]["required"] is True
+    assert settings["fleet"]["help"] == "how many vans" and settings["fleet"]["required"] is True
+    assert settings["seed"]["required"] is False and settings["seed"]["default"] == 0
+
+
 def test_discover_help_unparseable(tmp_path):
     program = _script(tmp_path, 'print("Usage: thing\\nSee the manual.")\n')
     found = discover_program(str(program))
