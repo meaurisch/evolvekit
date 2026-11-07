@@ -12,6 +12,7 @@ from pathlib import Path
 
 from evolvekit import __version__
 from evolvekit.app import AppError
+from evolvekit.harness import HarnessError
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
 from evolvekit.env import LoadedEnv, load_env_files
@@ -827,14 +828,15 @@ def _home(args: argparse.Namespace):
     return Home(args.home or default_home())
 
 
-def _study_root(value: str, home) -> Path:
-    """A study given as a folder on disk, else as a name in the library home."""
+def _study_root(value: str, args: argparse.Namespace) -> Path:
+    """A study given as a folder on disk, else as a name in the library home
+    (the home is only opened when the value is not a folder)."""
     folder = Path(value)
     if folder.is_dir():
-        if (home.studies_dir / value).is_dir():
+        if not folder.is_absolute() and folder.name == value and (_home(args).studies_dir / value / "study.yaml").is_file():
             print(f"using the folder {folder.resolve()}", file=sys.stderr)
         return folder
-    return home.study_root(value)
+    return _home(args).study_root(value)
 
 
 def cmd_study(args: argparse.Namespace) -> int:
@@ -863,8 +865,7 @@ def cmd_study(args: argparse.Namespace) -> int:
         else:
             print(slug)
         return 0
-    home = _home(args)
-    folder = _study_root(args.directory, home)
+    folder = _study_root(args.directory, args)
     if command == "preview":
         result = execute.preview(folder)
         if not result["ok"]:
@@ -973,6 +974,9 @@ def main(argv: list[str] | None = None) -> int:
     except RunLockError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
+    except HarnessError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
