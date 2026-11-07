@@ -148,6 +148,7 @@ def test_fixture_prints_bash_lines(tmp_path, capsys):
     where = tmp_path / "persona round"
     assert agent_gate.main(["--fixture", str(where), "--no-harness"]) == 0
     lines = capsys.readouterr().out.strip().splitlines()
+    assert lines.pop(0) == "unset CLAUDECODE"
     home, repo = (where / "home").resolve(), (where / "repo").resolve()
     assert lines[0] == f'export EVOLVEKIT_HOME="{home.as_posix()}"'
     assert lines[1].startswith('export PATH="') and lines[1].endswith(':$PATH"') and "\\" not in lines[1]
@@ -162,6 +163,19 @@ def test_fixture_prints_bash_lines(tmp_path, capsys):
     assert (repo / ".claude" / "settings.json").is_file()
 
 
+def test_gate_env_drops_the_launching_sessions_variables(tmp_path, monkeypatch):
+    dropped = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_PID", "CLAUDE_EFFORT",
+               "CLAUDE_PREVIEW_PORT", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_SMALL_FAST_MODEL"]
+    for name in dropped:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("CLAUDE_CLI_PATH", "/bin/claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    env = agent_gate.gate_env(tmp_path / "home")
+    assert not set(dropped) & {k.upper() for k in env}
+    assert env["CLAUDE_CLI_PATH"] == "/bin/claude" and env["ANTHROPIC_API_KEY"] == "test-key"
+    assert env["EVOLVEKIT_HOME"] == str(tmp_path / "home")
+
+
 def test_posix_path():
     assert agent_gate._posix(Path("C:/Users/a b/x")) in ("/c/Users/a b/x", "C:/Users/a b/x")
     if agent_gate.os.name == "nt":
@@ -174,6 +188,7 @@ def test_fixture_prints_powershell_lines_and_refuses_a_taken_folder(tmp_path, ca
     where = tmp_path / "persona round"
     assert agent_gate.main(["--fixture", str(where), "--shell", "powershell"]) == 0
     lines = capsys.readouterr().out.strip().splitlines()
+    assert lines.pop(0) == "Remove-Item Env:CLAUDECODE -ErrorAction SilentlyContinue"
     home, repo = (where / "home").resolve(), (where / "repo").resolve()
     scripts = Path(sys.executable).parent
     assert lines[:3] == [f'$env:EVOLVEKIT_HOME = "{home}"', f'$env:PATH = "{scripts}{agent_gate.os.pathsep}" + $env:PATH',

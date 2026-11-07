@@ -96,9 +96,23 @@ def build_fixture(repo: Path, *, home: Path, harness: bool = True) -> None:
         handle.write(README)
 
 
+SESSION_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_PREVIEW_")
+SESSION_NAMES = ("CLAUDECODE", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_SMALL_FAST_MODEL")
+"""Variables a launching coding-agent session leaves in the environment. With them the one-shot tool runs as
+that session's child (or refuses to start), on its model and endpoint: a fresh agent sees none of them.
+`CLAUDE_CLI_PATH` (evolvekit's own) and `ANTHROPIC_API_KEY` (the sign-in) are kept."""
+
+
+def _from_session(name: str) -> bool:
+    upper = name.upper()
+    return upper in SESSION_NAMES or upper.startswith(SESSION_PREFIXES)
+
+
 def gate_env(home: Path) -> dict[str, str]:
-    """The tool's environment: this home, and the venv's `Scripts` first so `evolvekit` resolves."""
-    return {**os.environ, "EVOLVEKIT_HOME": str(home), "PYTHONIOENCODING": "utf-8",
+    """The tool's environment: this home, the venv's `Scripts` first so `evolvekit` resolves, and nothing of
+    the session that launched the gate."""
+    inherited = {k: v for k, v in os.environ.items() if not _from_session(k)}
+    return {**inherited, "EVOLVEKIT_HOME": str(home), "PYTHONIOENCODING": "utf-8",
             "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
 
 
@@ -280,10 +294,10 @@ def fixture_lines(repo: Path, home: Path, shell: str = "bash") -> list[str]:
     flags = TOOLS["claude"][1:]
     if shell == "powershell":
         rest = " ".join(f'"{home}"' if a == "{home}" else a for a in flags)
-        return [f'$env:EVOLVEKIT_HOME = "{home}"', f'$env:PATH = "{scripts}{os.pathsep}" + $env:PATH',
+        return ["Remove-Item Env:CLAUDECODE -ErrorAction SilentlyContinue", f'$env:EVOLVEKIT_HOME = "{home}"', f'$env:PATH = "{scripts}{os.pathsep}" + $env:PATH',
                 f'Set-Location "{repo}"', f'claude -p "<message>" {rest}']
     rest = " ".join(f'"{Path(home).as_posix()}"' if a == "{home}" else a for a in flags)
-    return [f'export EVOLVEKIT_HOME="{Path(home).as_posix()}"', f'export PATH="{_posix(scripts)}:$PATH"',
+    return ["unset CLAUDECODE", f'export EVOLVEKIT_HOME="{Path(home).as_posix()}"', f'export PATH="{_posix(scripts)}:$PATH"',
             f'cd "{Path(repo).as_posix()}"', f'claude -p "<message>" {rest}']
 
 
