@@ -12,12 +12,17 @@ from typing import Any
 
 
 def _number(value: Any) -> str:
+    """A measure value as people write it: 1,248,920 and 12.35, never 1.2e+06."""
     if value is None:
         return "-"
     try:
-        return f"{float(value):,.4g}"
+        number = float(value)
     except (TypeError, ValueError):
         return str(value)
+    if abs(number) >= 1000 or number == int(number):
+        return f"{number:,.0f}"
+    text = f"{number:.4g}"
+    return f"{number:.6f}".rstrip("0") if "e" in text else text
 
 
 def _lower(direction: str) -> tuple[str, str]:
@@ -94,8 +99,9 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
                      f"{_change(verdict.get('mean_pct'), direction)}, {_between(low, high, direction)} (95 % interval).")
     if verdict.get("chance_words"):
         facts.append(f"Chance of a gain: {verdict['chance_words']}.")
-    if verdict.get("reason"):
-        facts.append(verdict["reason"][0].upper() + verdict["reason"][1:] + ".")
+    reason = verdict.get("reason") or ""
+    if reason and reason.lower() not in verdict.get("line", "").lower():
+        facts.append(reason[0].upper() + reason[1:] + ".")
     if facts:
         out += [""] + [f"- {fact}" for fact in facts]
     if verdict.get("rule"):
