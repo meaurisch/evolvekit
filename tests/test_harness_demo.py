@@ -38,7 +38,7 @@ def _last_json(completed: subprocess.CompletedProcess) -> dict:
 def test_the_demo_harness_loads_with_its_templates():
     harness = load_harness(DEMO)
     assert harness.id == "demo-tour" and harness.application.kind == "program"
-    assert set(harness.templates) == {"tune", "stop-weights"}
+    assert set(harness.templates) == {"tune", "stop-weights", "faster"}
     assert harness.recommended == ["neighbours", "restart_after", "accept_worse", "init"]
 
 

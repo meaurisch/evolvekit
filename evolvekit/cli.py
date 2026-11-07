@@ -432,6 +432,14 @@ def build_parser() -> argparse.ArgumentParser:
     s_app.add_argument("--detect", action="store_true", help="list the applications found on this computer")
     s_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_app.add_argument("--json", action="store_true", help="print JSON and nothing else")
+    s_code = study.add_parser("code", help="say where a code study's source is, from which base, and what to improve")
+    s_code.add_argument("slug", help="the study's name in the library home")
+    s_code.add_argument("--repo", help="the source folder (default: the harness's own, while its folder is there)")
+    s_code.add_argument("--from", dest="from_ref", metavar="REF",
+                        help="the base: a branch, tag or commit, or `working` for the files as they are (default: HEAD)")
+    s_code.add_argument("--brief", help="what the search should improve, in a sentence")
+    s_code.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_code.add_argument("--json", action="store_true", help='print {"ok", "repo", "from", "message"} and nothing else')
     s_list = study.add_parser("list", help="the studies in the library home")
     s_list.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_list.add_argument("--json", action="store_true", help='print a list of {"slug", "name", "harness", "state"}')
@@ -990,6 +998,19 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
             return 1
         _advance_step(home.study_root(slug), _STEP_AFTER_APPLICATION)
         return 0
+    if command == "code":
+        answer = home.set_code(slug, _full_path(args.repo) if args.repo else None, args.from_ref, args.brief)
+        if args.json:
+            print(json.dumps(answer))
+        if not answer["ok"]:
+            print(answer["message"], file=sys.stderr)
+            return 1
+        if not args.json:
+            _, study, harness = home.load(slug)
+            files = study.code.open or list(harness.code.open)
+            print(f"source: {answer['repo']} (from {answer['from']}); files: {', '.join(files)}")
+        _say_next(args, f"study check {slug}")
+        return 0
     files: list[Path] = []
     for value in args.add:
         if any(mark in value for mark in "*?[") and not Path(value).is_file():
@@ -1359,7 +1380,7 @@ def cmd_study(args: argparse.Namespace) -> int:
                   file=sys.stderr)
         _say_next(args, f"study cases {slug} --add <files> --hold-back N")
         return 0
-    if command in ("application", "list", "check", "cases"):
+    if command in ("application", "code", "list", "check", "cases"):
         return _study_library_command(command, args)
     if command in ("start", "stop", "status", "watch", "wait"):
         return _study_run_command(command, args)

@@ -1,0 +1,12 @@
+title: Shorter tours by changing the solver
+summary: Let the search change the solver's code and check on held-back cases whether its tours get shorter.
+vary:
+  code:
+    from: HEAD
+    brief: Shorter tours in the same time; change the local search in solver.py so that it finds them.
+kpis:
+  tour_length: {from: harness}
+  longest_leg: {from: harness}
+goal:
+  levels:
+    - {kpi: tour_length, direction: lower}

@@ -47,6 +47,7 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study new NAME --harness ID [--template T] [--app PATH] [--json]` | a new study folder in the library home from a harness (`--harness` takes ID, or a harness folder) and a template; `--dir PATH` writes a standalone study folder outside the home instead | |
 | `evolvekit study application SLUG PATH` | say where the study's application is | |
 | `evolvekit study application SLUG --detect` | list the applications found on this computer | |
+| `evolvekit study code SLUG [--repo PATH] [--from REF] [--brief TEXT] [--json]` | a code study: where the source is (default: the harness's own folder), the base it starts from (`HEAD`, a branch, or `working`), and what to improve | 0 set, 1 not a git folder or no such ref |
 | `evolvekit study list [--json]` | the studies in the library home | |
 | `evolvekit study cases SLUG --add FILE... [--hold-back N] [--json]` | add cases and hold some back for the final check | |
 | `evolvekit study check SLUG` | name what is still missing before the study can run | 0 ready, 2 problems |

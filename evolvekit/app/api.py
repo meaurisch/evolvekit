@@ -87,6 +87,10 @@ def describe_harness(harness: Harness) -> dict[str, Any]:
         "templates": {tid: {"title": str(t.get("title") or tid), "summary": str(t.get("summary") or "").strip()}
                       for tid, t in harness.templates.items()},
         "exports": {name: {"label": e.label, "for": e.applies_to} for name, e in harness.exports.items()},
+        # What a code study may change; `repo` as written (Set up proposes it resolved: `code_proposal`).
+        "code": None if harness.code is None else {
+            "label": harness.code.label, "repo": harness.code.repo, "open": list(harness.code.open),
+            "build": harness.code.build, "app": harness.code.app},
         "defaults": {"time_per_case_s": harness.defaults.time_per_case_s, "retries": harness.defaults.retries,
                      "budget_hours": harness.defaults.budget_hours, "test_share": harness.defaults.test_share,
                      "runs_per_case": harness.defaults.runs_per_case},
@@ -132,7 +136,7 @@ def _templates(harness: Harness) -> list[dict[str, Any]]:
     listed = []
     for tid, template in harness.templates.items():
         vary = template.get("vary") or {}
-        kind = "data" if vary.get("data") else "settings"
+        kind = "code" if vary.get("code") else "data" if vary.get("data") else "settings"
         listed.append({"id": tid, "title": str(template.get("title") or tid),
                        "summary": " ".join(str(template.get("summary") or "").split()), "kind": kind})
     return sorted(listed, key=lambda t: (t["kind"] != "settings", t["title"]))
@@ -264,6 +268,20 @@ def application(req: Request) -> dict[str, Any]:
     slug = req.params["slug"]
     answer = req.home.set_application(slug, str(req.json().get("path") or ""))
     return {"probe": answer, "study": _document(req, slug)}
+
+
+def code(req: Request) -> dict[str, Any]:
+    """Where a code study's source is: JSON `{repo, from, brief}`, each optional
+    (`repo` empty: the harness's own). The answer is `Home.set_code`'s, with the study."""
+    slug = req.params["slug"]
+    if jobs.running(req.home.study_root(slug)):
+        raise AppError("the study is running; stop it before changing it", 409)
+    body = req.json()
+    brief = body.get("brief")
+    if brief is not None and not isinstance(brief, str):
+        raise AppError("brief: a sentence")
+    answer = req.home.set_code(slug, str(body.get("repo") or ""), str(body.get("from") or "") or None, brief)
+    return {"code": answer, "study": _document(req, slug)}
 
 
 def pick_file(req: Request) -> dict[str, Any]:
@@ -645,6 +663,7 @@ ROUTES = [
     route("POST", "/api/studies/{slug}/duplicate")(duplicate_study),
     route("GET", "/api/studies/{slug}/harness")(study_harness),
     route("POST", "/api/studies/{slug}/application")(application),
+    route("POST", "/api/studies/{slug}/code")(code),
     route("PUT", "/api/studies/{slug}/cases/{name}")(put_case),
     route("DELETE", "/api/studies/{slug}/cases/{name}")(delete_case),
     route("POST", "/api/studies/{slug}/cases/{name}/restore")(restore_case),

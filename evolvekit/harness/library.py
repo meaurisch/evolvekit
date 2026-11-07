@@ -31,6 +31,7 @@ from evolvekit.harness.study import Study, save_study, study_from_template
 
 __all__ = [
     "BUILT_IN",
+    "ORIGIN",
     "HarnessEntry",
     "copy_harness",
     "create_study",
@@ -50,6 +51,12 @@ samples. Judged from the archive's directory, before anything is written."""
 
 BUILT_IN = Path(__file__).resolve().parents[2] / "harnesses"
 """`harnesses/` of the checkout evolvekit runs from (absent in an installed package)."""
+
+ORIGIN = "harness-origin.txt"
+"""In a study folder: the absolute path of the harness folder the study was made
+from (decision D11), so Set up and `study code` can propose the harness's own
+`code.repo` while that folder still holds the harness. The pinned copy in
+`<study>/harness/` never resolves `code.repo` itself."""
 
 _IGNORED = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".DS_Store", "*.egg-info")
 
@@ -114,6 +121,7 @@ def create_study(folder: str | Path, harness_dir: str | Path, name: str, templat
     study = study_from_template(harness, template, name)
     folder.mkdir(parents=True, exist_ok=True)
     copy_harness(harness_dir, folder / "harness")
+    (folder / ORIGIN).write_text(str(harness_dir.resolve()), encoding="utf-8")
     for sub in ("cases", "inputs"):
         (folder / sub).mkdir(exist_ok=True)
     save_study(study, folder)

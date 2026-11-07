@@ -24,6 +24,9 @@ to studies.
     budget.hours                            budget.max_hours (what the plan leaves the search)
     budget.ai                               models, `rewrite` among the operators, budget.max_usd
     the plan                                stages, workers, pin_cpus, children, generations
+    vary.code (and the harness's code:)     problem.tree (no parameters), the brief in the
+                                            description, a builtin-build stage with a build;
+                                            write_run pins the base to a commit
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from evolvekit.harness.study import Study, parse_within, resolve_kpi
 
 __all__ = [
     "compile_study", "write_run", "runner_input", "runner_kpi", "base_settings",
-    "OPERATORS", "OPERATORS_WITH_AI", "STUDY_RUN", "CONFIG", "UP",
+    "OPERATORS", "OPERATORS_WITH_AI", "OPERATORS_CODE", "OPERATORS_NO_SEARCH", "STUDY_RUN", "CONFIG", "UP",
 ]
 
 STUDY_RUN = "study-run.json"
@@ -53,6 +56,14 @@ OPERATORS = {"param_local": 0.5, "param_tpe": 0.25, "param_lhs": 0.15, "param_cr
 """Without a model: the mix that worked on the PyVRP benchmark."""
 
 OPERATORS_WITH_AI = {"param_local": 0.35, "rewrite": 0.3, "param_tpe": 0.2, "param_lhs": 0.15}
+
+OPERATORS_CODE = {"diff": 1.0}
+"""A code study's search: a diff against the base (decision 37: no rewrite,
+crossover or big step on a tree)."""
+
+OPERATORS_NO_SEARCH = {"param_lhs": 1.0}
+"""A bake-off, or a code study without a model: nothing is generated, and the
+config still loads without models (decision D13). The operator is never invoked."""
 
 UP = "../.."
 """From a run's directory to its study's."""
@@ -178,26 +189,37 @@ def compile_study(
     *,
     root: Path | None = None,
     models: dict[str, Any] | None = None,
+    bakeoff: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """`(evolvekit.yaml as a dict, study-run.json as a dict)` for a run of
     `study` in `<root>/runs/<id>/`. `models` is the engine's `models` section
-    when the study lets a model take part (`budget.ai`)."""
+    when the study lets a model take part (`budget.ai`). A code study
+    (`vary.code`) compiles to `problem.tree`, its base as the study says it
+    (`write_run` pins it); `bakeoff` compiles one that generates nothing."""
     if plan.blocked:
         raise HarnessError(f"plan: {plan.blocked}")
+    code = study.code
+    if code is not None and harness.code is None:
+        raise HarnessError("vary.code: the harness has no code section, so this study cannot change code")
     base = base_settings(study, harness, root)
     parameters = _parameters(study, harness, base)
+    if code is not None and parameters:
+        raise HarnessError("vary: a study changes code or tunes settings, not both yet; fix the settings, "
+                           "or vary code alone")
     single = len(study.goal) == 1
     time_limit = float(study.limits.time_per_case_s)
 
     def command(limit: float) -> str:
         runner = f"{UP}/harness/runner.py"
+        values = "" if code is not None else " --values {params_json}"  # a tree has no tuned values
         tail = (
-            f"solve --case {{instance}} --seed {{seed}} --values {{params_json}} --study {STUDY_RUN}"
+            f"solve --case {{instance}} --seed {{seed}}{values} --study {STUDY_RUN}"
             + (f" --time-limit {limit:g}" if harness.time_limit.accepts else "")
         )
         if harness.application.kind == "python":
             return f"{_quoted(study.application_path)} {runner} {tail}"
-        return f"{{python}} {runner} --app {_quoted(study.application_path)} {tail}"
+        app = "{app}" if code is not None else _quoted(study.application_path)  # the program inside each tree
+        return f"{{python}} {runner} --app {app} {tail}"
 
     def timeout(limit: float) -> float:
         return round(limit * 1.5 + 30, 1) if harness.time_limit.accepts else limit
@@ -217,7 +239,10 @@ def compile_study(
     if plan.pin_cpus:
         shared["pin_cpus"] = list(plan.pin_cpus)
     stages: list[dict[str, Any]] = [{"id": "static", "kind": "builtin-static"}]
-    if plan.screening:
+    built = code is not None and harness.code is not None and bool(harness.code.build)
+    if built:
+        stages.append({"id": "build", "kind": "builtin-build"})  # second, after the static stage (D8)
+    if plan.screening and not built:  # with a build, one candidate at a time: no screen (D9)
         screened = _screen_cases(study.training, plan.screen_cases, root)
         stages.append({
             "id": "screen", **shared,
@@ -244,24 +269,34 @@ def compile_study(
     if study.guardrails:
         evaluate["gates"] = [{"kpi": "guardrail_violation", "max": 0}]
 
-    ai = study.budget.ai_enabled
+    ai = study.budget.ai_enabled and not (code is not None and bakeoff)
     if ai and not models:
         raise HarnessError("budget.ai: AI search help is on, and no model is set up (Settings)")
-    problem: dict[str, Any] = {"description": _description(study, harness), "parameters": parameters}
+    problem: dict[str, Any]
+    if code is not None:
+        problem = {"description": _description(study, harness) + "\nWhat to improve: " + code.brief,
+                   "tree": _tree(study, harness)}
+        operators = OPERATORS_CODE if ai else OPERATORS_NO_SEARCH
+    else:
+        problem = {"description": _description(study, harness), "parameters": parameters}
+        operators = OPERATORS_WITH_AI if ai else OPERATORS
     expressions = [{"expr": c.expr, "says": c.says} for c in study.constraints if c.expr]
     if expressions:
         problem["parameter_constraints"] = expressions
+    novelty: dict[str, Any] = {"behavioural": "off" if harness.time_limit.accepts else "auto"}
+    if code is not None:
+        novelty["near"] = {"method": "off"}  # it compares code structure, and a candidate is a diff
     config: dict[str, Any] = {
         "problem": problem,
         "evaluate": evaluate,
         "search": {
-            "operators": dict(OPERATORS_WITH_AI if ai else OPERATORS),
+            "operators": dict(operators),
             "children_per_generation": plan.children,
             "generations": plan.generations,
             "seed": 1,
             "big_step_every": 0,
             "scratchpad_every": 0,
-            "novelty": {"behavioural": "off" if harness.time_limit.accepts else "auto"},
+            "novelty": novelty,
         },
         "budget": {
             "max_hours": round(plan.max_hours, 4),
@@ -275,6 +310,23 @@ def compile_study(
     if ai:
         config["models"] = models
     return config, runner_input(study, harness, base)
+
+
+def _tree(study: Study, harness: Harness) -> dict[str, Any]:
+    """`problem.tree` of a code study: the study's source and base, the files it
+    may change (its own subset, else the harness's), and the harness's build
+    and program. A python harness builds into the study's application Python,
+    which `{python}` stands for (`problem.tree.python`)."""
+    code, spec = study.code, harness.code
+    assert code is not None and spec is not None
+    tree: dict[str, Any] = {"repo": code.repo, "base": code.from_ref, "open": list(code.open or spec.open)}
+    if spec.build:
+        tree.update({"build": spec.build, "build_timeout_s": spec.build_timeout_s})
+        if harness.application.kind == "python" and study.application_path:
+            tree["python"] = study.application_path
+    if spec.app:
+        tree["app"] = spec.app
+    return tree
 
 
 def runner_input(
@@ -335,12 +387,27 @@ def write_run(
     run_id: str,
     *,
     models: dict[str, Any] | None = None,
+    bakeoff: bool = False,
 ) -> Path:
     """Compile `study` into `<root>/runs/<run_id>/` and return that directory.
     The run keeps a copy of `study.yaml` as it was when it started, so what
     the run says about itself (its cases, goal, choices) stays true when the
-    study is edited afterwards."""
-    config, study_run = compile_study(study, harness, plan, root=root, models=models)
+    study is edited afterwards. A code study's base is pinned here, once, to a
+    commit (a ref as it is now; `working` as a snapshot of the working tree),
+    so the run means the same tree whenever its config is loaded again."""
+    config, study_run = compile_study(study, harness, plan, root=root, models=models, bakeoff=bakeoff)
+    spec = config["problem"].get("tree")
+    if spec is not None:
+        from evolvekit import tree  # only a code study needs git
+
+        try:
+            located = tree.Repo(spec["repo"])
+        except tree.TreeError as exc:
+            raise HarnessError(f"vary.code.repo: {exc}") from None
+        try:
+            spec["base"] = tree.resolve_base(located, spec["base"])
+        except tree.TreeError as exc:
+            raise HarnessError(f"vary.code.from: {exc}") from None
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     if (root / "study.yaml").is_file():
