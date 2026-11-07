@@ -398,24 +398,33 @@ def test_harness_skill_pins_the_interview_smoke_test_and_exits():
 
 
 # Round B1: interview first, write only what was asked, check with --app, the smoke test says its values.
+# Round B2: the two questions only the engineer can answer come first; the check shown to people has no --json.
 
-ASK_FIRST = ("Ask the five questions in one message before you write or copy anything, unless the request already "
-             "answers them; an application that evolvekit already has a harness for (`evolvekit harness list`, or "
-             "the probe accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to "
-             "reuse it, and if yes hand over to `evolvekit-study`.")
+ENGINEER_ONLY = ("Questions 1–3 may be answered from the application's `--help` and a case file: say what you read. "
+                 "Questions 4 and 5 only the engineer can answer, in the request or a reply; never from `--help`, a "
+                 "case file or a harness you copy. Ask those in one message and write nothing until they are "
+                 "answered: in a one-shot run your whole answer is those questions.")
+REUSE_FINDING = ("An application that evolvekit already has a harness for (`evolvekit harness list`, or the probe "
+                 "accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to reuse it, "
+                 "and if yes hand over to `evolvekit-study`.")
 ONLY_WHAT_WAS_ASKED = ("Write only what the interview named: no lever, template, data change, request format or retry "
                        "the engineer did not ask for; a smaller harness that passes beats a fuller one.")
 CHECK_WITH_APP = ("Run `evolvekit harness check harness/ --app PATH --json` — without `--app` it exits 2 before "
-                  "checking anything — and quote the exact command and its exit code in your answer.")
+                  "checking anything — and quote the command and its exit code in your answer.")
+CHECK_FOR_PEOPLE = ("Show the engineer the command without `--json`, `evolvekit harness check harness/ --app PATH`: "
+                    "the `--json` form is for you.")
 SMOKE_VALUES = ("Say which values the smoke test used (the harness's default time per case, the template's budget, "
                 "the cases held back), that they are for the smoke test only, and quote the `study preview` line.")
 
 
-def test_harness_skill_round_b1_sentences():
+def test_harness_skill_round_b_sentences():
     body = _body(HARNESS)
-    assert ASK_FIRST in _section(body, "2. Interview")
+    interview = _section(body, "2. Interview")
+    assert ENGINEER_ONLY in interview and REUSE_FINDING in interview
+    assert "go on without asking" not in interview, "no request is complete without questions 4 and 5"
     assert ONLY_WHAT_WAS_ASKED in _section(body, "4. Write it, in this order")
     assert CHECK_WITH_APP in _section(body, "5. Check until it exits 0")
+    assert CHECK_FOR_PEOPLE in _section(body, "5. Check until it exits 0")
     assert SMOKE_VALUES in _section(body, "6. Smoke test")
 
 

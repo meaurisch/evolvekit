@@ -51,9 +51,7 @@ def test_build_fixture_layout(tmp_path):
     assert sorted(p.name for p in (repo / "cases").iterdir()) == SAMPLES
     assert len((repo / "README.md").read_text(encoding="utf-8").splitlines()) == 2
     assert home.is_dir() and list(home.iterdir()) == []
-    settings = json.loads((repo / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    assert settings["permissions"]["allow"] == TOOLS
-    assert settings["permissions"]["additionalDirectories"] == [str(home)]
+    assert not (repo / ".claude" / "settings.json").exists(), "an untrusted workspace ignores it: the flags carry the run"
     bare = tmp_path / "bare"
     build_fixture(bare, home=tmp_path / "home2", harness=False)
     assert not (bare / "harness").exists() and (bare / "solver.py").is_file()
@@ -71,7 +69,14 @@ def test_the_no_harness_fixture_is_a_program_evolvekit_does_not_know(tmp_path):
     assert check.returncode == 2
     probe = next(c for c in json.loads(check.stdout)["checks"] if c["id"] == "probe")
     assert probe["ok"] is False and "tour-solver 0.9" in probe["message"]
-    for name in SAMPLES:
+    text = solver.read_text(encoding="utf-8")
+    assert [word for word in ("demo-tour", "harnesses/", "evolvekit") if word in text.lower()] == []
+    code = SOLVER.read_text(encoding="utf-8").split('"""', 2)[2]  # the example's code after its docstring
+    assert text.split('"""', 2)[2] == code.replace('version="cli-solver 1.0"', 'version="tour-solver 0.9"')
+    names = sorted(p.name for p in (bare / "cases").iterdir())
+    assert names == [f"requests-2026-03-0{day}.json" for day in (2, 3, 4, 5)]
+    for name, sample in zip(names, SAMPLES):
+        assert (bare / "cases" / name).read_bytes() == (ROOT / "harnesses" / "demo-tour" / "samples" / sample).read_bytes()
         solved = subprocess.run([sys.executable, str(solver), "--instance", str(bare / "cases" / name),
                                  "--time-limit", "0.2"], capture_output=True, text=True, timeout=60)
         assert solved.returncode == 0 and solved.stdout.strip(), (name, solved.stderr)
@@ -178,7 +183,7 @@ def test_fixture_prints_bash_lines(tmp_path, capsys):
         assert flag in lines[3], flag
     assert len(lines) == 4
     assert (repo / "solver.py").is_file() and not (repo / "harness").exists()
-    assert (repo / ".claude" / "settings.json").is_file()
+    assert not (repo / ".claude" / "settings.json").exists()
 
 
 def test_gate_env_drops_the_launching_sessions_variables(tmp_path, monkeypatch):

@@ -22,7 +22,6 @@ there and the one-shot, isolated command to run there.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -53,7 +52,8 @@ REPORT_PROMPT = "The evolvekit study {slug} has finished; report its result."
 
 ALLOWED_TOOLS = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep", "Skill"]
 ISOLATION = ["--setting-sources", "project", "--strict-mcp-config", "--permission-prompts", "none"]
-"""A fresh agent, not the operator's: only the fixture's own settings (no user settings, so no user plugins),
+"""A fresh agent, not the operator's: only project settings (no user settings, so no user plugins; the fixture
+writes none, since an untrusted workspace ignores them and these flags carry the run),
 no MCP servers, and anything that would prompt is denied instead of waiting (claude 2.1.304's `--help`)."""
 TOOLS: dict[str, list[str]] = {
     "claude": ["-p", "--allowedTools", ",".join(ALLOWED_TOOLS), "--add-dir", "{home}", *ISOLATION,
@@ -77,6 +77,29 @@ class ToolMissing(Exception):
 
 KNOWN_VERSION = 'version="cli-solver 1.0"'
 UNKNOWN_VERSION = 'version="tour-solver 0.9"'
+UNKNOWN_DOCSTRING = '''"""tour-solver: plans a tour through the stops of a request.
+
+    solver.py --instance FILE --seed N --time-limit SECONDS [--flag value ...]
+
+It logs progress lines, then prints one line of JSON with the result. A
+request lists its stops, `"stops": [[x, y, weight], ...]` (or names a seed and
+a number of cities, placed at random). A leg between two stops costs its
+length times the mean of their weights; `cost` is what the solver minimised,
+`length` the tour's plain length. The tour starts random or nearest-neighbour
+and is improved by 2-opt moves, with a few knobs.
+"""
+'''
+NEUTRAL_CASES = [f"requests-2026-03-0{day}.json" for day in (2, 3, 4, 5)]
+"""The no-harness fixture's cases: the demo samples, in their sorted order, under an engineer's own names."""
+
+
+def _unknown_solver(text: str) -> str:
+    """The example solver as an engineer's own program: its own docstring (the example's names evolvekit and
+    its demo harness) and its own `--version` (demo-tour's probe expects "cli-solver N.N"); the code is the same."""
+    head, _, rest = text.partition('"""')
+    _, _, code = rest.partition('"""\n')
+    assert head == "" and code.count(KNOWN_VERSION) == 1, "examples/cli-solver/solver.py changed its shape"
+    return UNKNOWN_DOCSTRING + code.replace(KNOWN_VERSION, UNKNOWN_VERSION)
 
 
 def build_fixture(repo: Path, *, home: Path, harness: bool = True) -> None:
@@ -86,23 +109,21 @@ def build_fixture(repo: Path, *, home: Path, harness: bool = True) -> None:
     home.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     skills.install(repo)
-    settings = {"permissions": {"allow": list(ALLOWED_TOOLS), "additionalDirectories": [str(home)]}}
-    (repo / ".claude").mkdir(exist_ok=True)
-    (repo / ".claude" / "settings.json").write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     if harness:
         shutil.copytree(ROOT / "harnesses" / "demo-tour", repo / "harness",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     solver = ROOT / "examples" / "cli-solver" / "solver.py"
     if harness:
         shutil.copy2(solver, repo / "solver.py")
-    else:  # a program evolvekit does not know: demo-tour's probe expects "cli-solver N.N" from --version
-        text = solver.read_text(encoding="utf-8")
-        assert text.count(KNOWN_VERSION) == 1, "examples/cli-solver/solver.py changed its --version text"
+    else:  # a program evolvekit does not know
         with open(repo / "solver.py", "w", encoding="utf-8", newline="") as handle:
-            handle.write(text.replace(KNOWN_VERSION, UNKNOWN_VERSION))
+            handle.write(_unknown_solver(solver.read_text(encoding="utf-8")))
     (repo / "cases").mkdir()
-    for sample in sorted((ROOT / "harnesses" / "demo-tour" / "samples").glob("*.json")):
-        shutil.copy2(sample, repo / "cases" / sample.name)
+    samples = sorted((ROOT / "harnesses" / "demo-tour" / "samples").glob("*.json"))
+    names = [sample.name for sample in samples] if harness else NEUTRAL_CASES
+    assert len(names) == len(samples), "the demo samples changed: name the no-harness cases again"
+    for sample, name in zip(samples, names):
+        shutil.copy2(sample, repo / "cases" / name)
     with open(repo / "README.md", "w", encoding="utf-8", newline="\n") as handle:
         handle.write(README)
 

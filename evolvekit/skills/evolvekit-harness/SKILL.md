@@ -27,10 +27,8 @@ Answer from the application and its files first; ask the engineer only what neit
 - [ ] What do people call things? → the words the labels, tables and columns use.
 - [ ] What must never reach a model? → those columns get `private: true`.
 
-Ask the five questions in one message before you write or copy anything, unless the request already answers them; an application that evolvekit already has a harness for (`evolvekit harness list`, or the probe accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to reuse it, and if yes hand over to `evolvekit-study`.
-A request that answers every question is complete: go on without asking.
-One unanswered question stops you with that question, in one message.
-In a one-shot run, where no answer can come, say what is missing and end.
+Questions 1–3 may be answered from the application's `--help` and a case file: say what you read. Questions 4 and 5 only the engineer can answer, in the request or a reply; never from `--help`, a case file or a harness you copy. Ask those in one message and write nothing until they are answered: in a one-shot run your whole answer is those questions.
+An application that evolvekit already has a harness for (`evolvekit harness list`, or the probe accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to reuse it, and if yes hand over to `evolvekit-study`.
 
 ## 3. Start from something that passes
 
@@ -53,7 +51,8 @@ Write only what the interview named: no lever, template, data change, request fo
 
 ## 5. Check until it exits 0
 
-Run `evolvekit harness check harness/ --app PATH --json` — without `--app` it exits 2 before checking anything — and quote the exact command and its exit code in your answer.
+Run `evolvekit harness check harness/ --app PATH --json` — without `--app` it exits 2 before checking anything — and quote the command and its exit code in your answer.
+Show the engineer the command without `--json`, `evolvekit harness check harness/ --app PATH`: the `--json` form is for you.
 
 ```
 evolvekit harness check harness/ --app PATH --json
