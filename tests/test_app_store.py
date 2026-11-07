@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from evolvekit.app import AppError
-from evolvekit.app.store import Home, safe_name
+from evolvekit.app.store import Home, safe_name, split_words
 from evolvekit.harness.study import load_study
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +114,36 @@ def test_the_samples_and_a_split_that_spans_the_sizes(home):
     assert home.split(slug, 0) == []
     with pytest.raises(AppError, match="at most 3"):
         home.split(slug, 4)
+
+
+def test_more_cases_hold_more_back(home):
+    sample = (DEMO / "samples" / "town-40.json").read_bytes()
+
+    def counts_for(n: int) -> int:
+        slug = _demo_study(home, f"{n} cases")
+        for i in range(n):
+            home.put_case(slug, f"town-{i:02d}.json", sample)
+        return home.suggested_test_count(slug)
+
+    # the demo harness holds back a 0.3 share; more cases allow a firmer check
+    assert counts_for(8) == 3 and counts_for(10) == 4 and counts_for(20) == 8 and counts_for(3) == 1
+    assert counts_for(1) == 0 and counts_for(2) == 1, "never every case: the search keeps one"
+
+
+def test_the_split_says_how_firm_the_answer_can_be():
+    assert split_words(0, 5) == "Nothing held back: there will be no final check, so no answer about cases the search never saw."
+    assert split_words(1, 5) == "1 held back: the final check can give a number, but no range and no verdict."
+    assert split_words(2, 6) == "2 held back: a rough answer; the range will be wide."
+    assert split_words(3, 8) == "3 held back: a fair answer for a clear, consistent gain."
+    assert split_words(5, 12) == "5 held back: a firm answer."
+
+
+def test_the_document_carries_the_split_words(home):
+    slug = _demo_study(home)
+    home.use_samples(slug)
+    assert home.document(slug)["split_words"] == split_words(0, 4)
+    home.split(slug, 2)
+    assert home.document(slug)["split_words"] == split_words(2, 4)
 
 
 def test_problems_land_on_their_steps_and_go_away_when_the_step_is_done(home):

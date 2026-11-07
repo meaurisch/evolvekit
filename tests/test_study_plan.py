@@ -17,13 +17,15 @@ def _plan(**kwargs):
 
 def test_without_screening_every_combination_runs_on_every_case():
     plan = _plan()
-    # T = 21; C = ceil(2*3*3/3) * 21 = 126; S = 0.95 * 7200 - 126 = 6714;
-    # B = ceil(5/3) * 21 = 42; R(12) = ceil(12*5/3) * 21 = 420 -> 15.9 rounds.
-    assert (plan.run_s, plan.final_check_s, plan.search_s, plan.seed_round_s) == (21, 126, 6714, 42)
-    assert (plan.children, plan.round_s, plan.rounds) == (12, 420, 15)
-    assert plan.generations == 16 + 2 and not plan.screening
-    assert plan.max_hours == pytest.approx(6714 / 3600)
-    assert (plan.workers, plan.pin_cpus, plan.check_seeds) == (3, (2, 4, 6), 3)
+    # T = 21; one check seed costs ceil(2*3/3) * 21 = 42 and 15 % of 2 h (1080 s)
+    # pays for 25: capped at k = 12. C = ceil(2*3*12/3) * 21 = 504; S = 0.95 *
+    # 7200 - 504 = 6336; B = ceil(5/3) * 21 = 42; R(12) = ceil(12*5/3) * 21 = 420
+    # -> 14.99 rounds.
+    assert (plan.run_s, plan.final_check_s, plan.search_s, plan.seed_round_s) == (21, 504, 6336, 42)
+    assert (plan.children, plan.round_s, plan.rounds) == (12, 420, 14)
+    assert plan.generations == 15 + 2 and not plan.screening
+    assert plan.max_hours == pytest.approx(6336 / 3600)
+    assert (plan.workers, plan.pin_cpus, plan.check_seeds) == (3, (2, 4, 6), 12)
 
 
 def test_with_six_cases_or_more_a_screen_comes_first():
@@ -32,7 +34,7 @@ def test_with_six_cases_or_more_a_screen_comes_first():
     # R(12) = ceil(12*3/3) * 6 + ceil(2*9/3) * 21 = 72 + 126 = 198.
     assert plan.screening and (plan.screen_cases, plan.screen_time_limit_s, plan.screen_run_s) == (3, 5.0, 6.0)
     assert (plan.children, plan.round_s) == (12, 198)
-    assert plan.seed_round_s == 63 and plan.rounds == int((6714 - 63) / 198)
+    assert plan.seed_round_s == 63 and plan.rounds == int((6336 - 63) / 198)
 
 
 @pytest.mark.parametrize("kwargs", [dict(training=5), dict(training=9, time_limit_s=8), dict(training=9, accepts_time_limit=False)])
@@ -42,9 +44,10 @@ def test_no_screen_without_six_cases_and_a_ten_second_limit_the_application_keep
 
 def test_fewer_combinations_when_twelve_would_leave_fewer_than_six_rounds():
     plan = _plan(hours=0.5)
-    # S = 1710 - 126 = 1584, B = 42: c = 12 gives (1584-42)/420 = 3.7 rounds,
-    # c = 7 (ceil(35/3)*21 = 252) gives 6.1 -- the largest with at least 6.
-    assert (plan.children, plan.rounds) == (7, 6)
+    # 15 % of half an hour (270 s) pays for 6 check seeds at 42 s: C = ceil(36/3)
+    # * 21 = 252, S = 1710 - 252 = 1458, B = 42: c = 12 gives (1458-42)/420 = 3.4
+    # rounds, c = 6 (ceil(30/3)*21 = 210) gives 6.7 -- the largest with at least 6.
+    assert (plan.check_seeds, plan.children, plan.rounds) == (6, 6, 6)
 
 
 def test_three_rounds_are_accepted_when_six_are_out_of_reach():
@@ -105,8 +108,8 @@ def test_the_plan_in_words():
     plan = _plan()
     text = plan.summary(datetime(2026, 9, 26, 15, 40))
     assert text == (
-        "about 15 rounds, about 180 combinations tried, a final check on 3 held-back cases (≈ 2 min); "
-        "done around 17:40."
+        "about 14 rounds, about 168 combinations tried, a final check on 3 held-back cases with 12 runs each "
+        "(≈ 8 min); done around 17:40."
     )
     assert "no final check" in _plan(test=0).summary(datetime(2026, 9, 26, 15, 40))
 
@@ -126,3 +129,23 @@ def test_an_application_that_does_not_stop_itself_is_planned_on_what_it_took():
     plan = _plan(accepts_time_limit=False, measured_s=12, time_limit_s=60)
     assert plan.run_s == 12
     assert _plan(accepts_time_limit=False, measured_s=90, time_limit_s=60).run_s == 60
+
+
+def test_a_long_study_gives_its_check_more_runs_per_case():
+    plan = make_plan(training=5, test=3, runs_per_case=1, time_limit_s=20, hours=2.0, workers=4)
+    # One check seed costs ceil(2*3/4) * 20 = 40 s; 15 % of two hours is 1080 s:
+    # 27 would fit, the twelve seeds there are cap it. C = ceil(72/4) * 20 = 360,
+    # S = 6840 - 360 = 6480, B = 40, R(12) = 300 -> 21.5 rounds.
+    assert plan.check_seeds == 12 and plan.rounds >= 6
+    assert "with 12 runs each" in plan.summary()
+
+
+def test_a_short_study_gives_its_check_fewer_runs_per_case_never_below_three():
+    half_hour = make_plan(training=5, test=3, runs_per_case=1, time_limit_s=20, hours=0.5, workers=4)
+    # 15 % of half an hour is 270 s: floor(270 / 40) = 6 seeds. C = ceil(36/4) * 20
+    # = 180, S = 1710 - 180 = 1530, B = 40; c = 9 (ceil(45/4) * 20 = 240) gives
+    # 6.2 rounds, the first with at least 6, so six seeds stand.
+    assert half_hour.check_seeds == 6 and half_hour.rounds >= 6 and not half_hour.blocked
+    quarter_hour = make_plan(training=5, test=3, runs_per_case=1, time_limit_s=20, hours=0.25, workers=4)
+    # 135 s buys 3 seeds (3.4): the floor of three; C = 100, S = 755, c = 4 -> 7.1 rounds.
+    assert quarter_hour.check_seeds == 3 and quarter_hour.rounds >= 6

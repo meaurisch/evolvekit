@@ -5,7 +5,7 @@ Inputs: n training cases, m test cases, r runs per case, T the wall time of
 one run (the preview's, scaled to the chosen time limit), H the hours, and w
 workers (physical cores but one, at most n * r; `evolvekit/cpus.py`).
 
-    final check      C = ceil(2 * m * k / w) * T          k = 3 check seeds (2 if 3 do not fit)
+    final check      C = ceil(2 * m * k / w) * T          k check seeds, see below
     search           S = 0.95 * H - C
     starting point   B = ceil(n * r / w) * T
     one round        R = ceil(c * q * r / w) * T_q + ceil(2 * n * r / w) * T    with screening
@@ -13,10 +13,13 @@ workers (physical cores but one, at most n * r; `evolvekit/cpus.py`).
 
 Screening -- every combination first on q = min(4, ceil(n / 3)) cases at a
 quarter of the time limit, the best two on everything -- needs n >= 6 and a
-time limit of at least 10 s that the application keeps. c, the combinations
-per round, is the largest value in 4..12 that leaves at least 6 rounds, else
-at least 3; with fewer than 3 the plan is blocked, with three concrete ways
-out. The engine gets `generations = ceil((S - B) / R) + 2`, `budget.max_hours
+time limit of at least 10 s that the application keeps. The final check gets
+up to CHECK_SHARE = 15 % of the hours: one check seed costs ceil(2 * m / w)
+* T, and k starts at kmax = max(3, min(12, floor(0.15 * H / that))) and
+falls to 3 while the search cannot get 6 rounds, then 3 at 3 rounds, then 2
+at 6 and at 3. c, the combinations per round, is the largest value in 4..12
+that leaves at least 6 rounds, else at least 3; with fewer than 3 the plan
+is blocked, with three concrete ways out. The engine gets `generations = ceil((S - B) / R) + 2`, `budget.max_hours
 = S / 3600` -- which is what stops the search -- and `stop.patience` equal to
 the generations, so the run uses the time it is given.
 """
@@ -30,13 +33,16 @@ from typing import Any, Mapping
 
 from evolvekit.cpus import plan_workers
 
-__all__ = ["Plan", "make_plan", "CHECK_SEEDS", "DEFAULT_CHECK_SEEDS"]
+__all__ = ["Plan", "make_plan", "CHECK_SEEDS", "CHECK_SHARE", "DEFAULT_CHECK_SEEDS"]
 
 CHECK_SEEDS = tuple(range(1001, 1013))
 """The seeds of the final check: never among the search's own (0 .. r-1).
-A plan uses the first k (DEFAULT_CHECK_SEEDS, or 2 if those do not fit); a
-final check run again with more takes the next ones."""
+A plan uses the first k -- as many as CHECK_SHARE of the hours pays for, at
+least DEFAULT_CHECK_SEEDS, or 2 if those do not fit; a final check run again
+with more takes the next ones."""
 DEFAULT_CHECK_SEEDS = 3
+CHECK_SHARE = 0.15
+"""The share of the hours the final check may take."""
 
 MIN_ROUNDS, GOOD_ROUNDS = 3, 6
 CHILDREN = range(4, 13)
@@ -93,7 +99,7 @@ class Plan:
         moment = (now or datetime.now()) + timedelta(hours=self.hours)
         check = (
             f"a final check on {self.test_cases} held-back case{'s' if self.test_cases != 1 else ''} "
-            f"(≈ {_minutes(self.final_check_s)})"
+            f"with {self.check_seeds} run{'s' if self.check_seeds != 1 else ''} each (≈ {_minutes(self.final_check_s)})"
             if self.test_cases else "no final check (no case is held back)"
         )
         return (
@@ -159,6 +165,22 @@ def _layout(shape: _Shape, children: int, check_seeds: int, screening: bool) -> 
             "rounds": (search - seed) / round_s if round_s > 0 else 0.0}
 
 
+def _check_attempts(shape: _Shape) -> list[tuple[int, int]]:
+    """(check seeds, rounds wanted) in the order the plan tries them: as many
+    seeds as CHECK_SHARE of the hours pays for, down to 3, each at 6 rounds;
+    then 3 at 3 rounds; then 2 at 6 and at 3. With no held-back case the
+    check costs nothing and 3 seeds stand."""
+    kmax = DEFAULT_CHECK_SEEDS
+    if shape.m:
+        seed_cost = math.ceil(2 * shape.m / shape.workers) * shape.run_s()
+        if seed_cost > 0:
+            kmax = max(DEFAULT_CHECK_SEEDS, min(len(CHECK_SEEDS), math.floor(CHECK_SHARE * shape.hours * 3600.0 / seed_cost)))
+    attempts = [(k, GOOD_ROUNDS) for k in range(kmax, DEFAULT_CHECK_SEEDS - 1, -1)]
+    attempts.append((DEFAULT_CHECK_SEEDS, MIN_ROUNDS))
+    attempts.extend([(2, GOOD_ROUNDS), (2, MIN_ROUNDS)])
+    return attempts
+
+
 def make_plan(
     *,
     training: int,
@@ -194,14 +216,11 @@ def make_plan(
     if "screening" in overrides:
         screening = bool(overrides["screening"]) and n >= 2 and accepts_time_limit
     chosen = None
-    for check_seeds in (DEFAULT_CHECK_SEEDS, 2):
-        for enough in (GOOD_ROUNDS, MIN_ROUNDS):
-            for children in reversed(CHILDREN):
-                layout = _layout(shape, children, check_seeds, screening)
-                if layout["rounds"] >= enough:
-                    chosen = (children, check_seeds, layout)
-                    break
-            if chosen:
+    for check_seeds, enough in _check_attempts(shape):
+        for children in reversed(CHILDREN):
+            layout = _layout(shape, children, check_seeds, screening)
+            if layout["rounds"] >= enough:
+                chosen = (children, check_seeds, layout)
                 break
         if chosen:
             break

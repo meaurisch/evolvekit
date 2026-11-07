@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import http.client
 import json
+import re
 import time
 from pathlib import Path
 
@@ -100,8 +101,18 @@ def test_a_run_from_start_to_results_and_downloads(app, tmp_path):
     status, body = call(app, "PATCH", f"/api/studies/{slug}", {"step": 3})
     assert status == 409, "a running study does not change"
 
-    final = _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] in ("done", "failed", "stopped"))
+    checking: list[str] = []
+
+    def ended(body: dict) -> bool:
+        if body["phase"] == "check":
+            checking.append(body["now"])
+        return body["phase"] in ("done", "failed", "stopped")
+
+    final = _until(app, f"/api/studies/{slug}/status", ended)
     assert final["phase"] == "done", final
+    # While the check runs, the page says how many runs per case it is on and that it may add more.
+    assert all(re.fullmatch(r"The final check: \d+ runs? per case so far on the held-back cases; "
+                            r"it adds runs while time remains and the answer is open\.", now) for now in checking), checking
     assert final["sentence"] == "Finished." and final["goal"]["kpi"] == "tour_length"
     assert final["dashboard"] == f"/studies/{slug}/runs/{run}/dashboard/"
     status, page = call(app, "GET", final["dashboard"])
@@ -113,6 +124,8 @@ def test_a_run_from_start_to_results_and_downloads(app, tmp_path):
     assert status == 200, results
     assert results["headline"].startswith(("The best settings found give", "No settings found beat"))
     assert results["final"]["state"] in ("single", "confirmed", "unclear", "worse", "skipped")
+    if results["final"]["state"] != "skipped":
+        assert results["final"]["decision"] in ("use", "keep", "worse", "single")
     assert {k["name"] for k in results["kpis"]} == {"tour_length", "longest_leg"}
     assert [c["name"] for c in results["changed"]] == ["neighbours", "restart_after", "accept_worse", "init"]
     assert [d["name"] for d in results["downloads"]] == ["settings_json", "settings_flags", "report"]
@@ -142,6 +155,20 @@ def test_a_run_from_start_to_results_and_downloads(app, tmp_path):
     assert document["study"]["cases"] == {"training": ["cases/north-south-30.json", "cases/town-40.json", "cases/region-60.json"],
                                           "test": ["cases/county-50.json"]}
     assert document["problems"] == [], document["problems"]
+
+    # The run reads the study it was started with: a split changed afterwards
+    # does not change what the results say was held back.
+    status, body = call(app, "PATCH", f"/api/studies/{slug}", {
+        "cases": {"training": ["cases/north-south-30.json", "cases/town-40.json", "cases/county-50.json"],
+                  "test": ["cases/region-60.json"]}})
+    assert status == 200, body
+    status, after = call(app, "GET", f"/api/studies/{slug}/results")
+    assert status == 200 and after["cases"] == results["cases"] == {
+        "training": ["cases/north-south-30.json", "cases/town-40.json", "cases/region-60.json"],
+        "test": ["cases/county-50.json"]}
+    assert after["by_case"]["held"] == results["by_case"]["held"]
+    if results["final"]["state"] != "skipped":
+        assert [c["case"] for c in after["by_case"]["held"]] == ["county-50"]
 
 
 @pytest.mark.slow

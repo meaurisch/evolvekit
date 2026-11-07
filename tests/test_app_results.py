@@ -4,40 +4,91 @@ failures, and a summary to paste -- on made-up runs, without running any."""
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
 
 from evolvekit.app import jobs
+from evolvekit.confirm import _t95, paired_summary
 
 GOAL = {"kpi": "cost", "says": "real cost", "label": "Real cost", "direction": "lower"}
 PLAN = {"workers": 3, "run_s": 20.4}
 
 
-def comparison(ci, mean=2.0, cases=3, seeds=3):
+def comparison(ci, mean=2.0, cases=3, seeds=3, summary=None):
+    """A comparison as a run written it before it said the chance of a gain:
+    mean, interval and spread only (the spread is what the interval implies)."""
+    if summary is None:
+        summary = {"n": cases, "mean": mean, "ci95": ci}
+        if ci is not None:
+            summary["sd"] = (ci[1] - ci[0]) / 2 / _t95(cases - 1) * math.sqrt(cases)
     return {"seeds": list(range(1001, 1001 + seeds)), "instances": ["a", "b", "c"][:cases],
-            "per_candidate": {"c1": {"summary": {"n": cases, "mean": mean, "ci95": ci}}}}
+            "per_candidate": {"c1": {"summary": summary}}}
 
 
 def words(ci, mean=2.0, what="settings", baseline="", **job):
     return jobs._final_words({"final": {"candidate": "c1", **job}}, comparison(ci, mean), GOAL, what, baseline)
 
 
+def words_for(differences, what="settings", baseline="", **job):
+    """The words for the real statistics of per-case differences, in %."""
+    summary = paired_summary(differences)
+    return jobs._final_words({"final": {"candidate": "c1", **job}}, comparison(None, cases=summary["n"], summary=summary),
+                             GOAL, what, baseline)
+
+
+def test_a_worst_case_that_rounds_to_nothing_is_said_as_about_the_same():
+    tiny = jobs._final_words({"final": {"candidate": "c1", "decision": "use"}},
+                             comparison([-0.02, 10.6], 5.3, cases=2), GOAL, "settings")
+    assert tiny["line"].endswith("; at worst about the same as your starting point."), tiny["line"]
+    assert "0.0 %" not in tiny["line"]
+
+
+def test_the_final_check_decides_with_the_chance_and_the_worst_case():
+    use = words_for([1.3, 0.6, 1.9], what="settings", baseline="PyVRP's own defaults")
+    assert use["state"] == "confirmed" and use["decision"] == "use"
+    assert use["chance_words"] == "about 19 in 20"
+    assert use["line"] == ("Probably better: 1.3 % lower real cost on 3 held-back cases, a chance of about 19 in 20; "
+                           "at worst 0.3 % worse than your starting point (PyVRP's own defaults).")
+    assert use["advice"] == "Use the new settings: they are probably better on cases the search never saw."
+    assert use["rule"].startswith("The app says use it when")
+    assert use["chance"] == pytest.approx(0.961, abs=0.001) and use["worst_pct"] == pytest.approx(-0.35, abs=0.01)
+    sure = words_for([5.0, 5.2, 4.8])
+    assert sure["line"] == ("Probably better: 5.0 % lower real cost on 3 held-back cases, almost certain; "
+                            "at least 4.5 % better than your starting point.")
+    keep = words_for([-9.0, 11.5, -0.4])
+    assert keep["state"] == "unclear" and keep["decision"] == "keep"
+    assert keep["line"].startswith("Not proven on 3 held-back cases: a chance of about 11 in 20 of a gain; at worst 24.9 % worse")
+    assert keep["advice"] == "Keep your current settings for now: the gain is not proven."
+    worse = words_for([-1.5, -1.0, -1.2, -0.8])
+    assert worse["state"] == "worse" and worse["decision"] == "worse"
+    assert worse["line"].startswith("Worse on 4 held-back cases: 1.1 % higher real cost, a chance of 1 in 20 or less of a gain")
+    assert words_for([0.4])["state"] == "single" and words_for([0.4])["decision"] == "single"
+    assert words_for([3.0, 3.1, 2.9, -1.4])["decision"] == "keep", "the chance is high, the worst case beyond 1 %"
+    assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "1 in 20 or less"
+    assert jobs._chance_words(0.5) == "about 10 in 20" and jobs._chance_words(None) == ""
+    decided = words_for([-9.0, 11.5, -0.4], decision="use")
+    assert decided["decision"] == "use" and decided["state"] == "confirmed", "the run's own decision, when it has one"
+
+
 def test_the_final_check_says_what_to_do():
     unclear = words([-10.1, 11.5], 0.7)
-    assert unclear["state"] == "unclear"
-    assert unclear["line"] == ("Not distinguishable from your starting point on 3 held-back cases "
+    assert unclear["state"] == "unclear" and unclear["decision"] == "keep"
+    assert unclear["line"] == ("Not proven on 3 held-back cases: a chance of about 12 in 20 of a gain; at worst 10.1 % worse "
                                "(somewhere between 10.1 % worse and 11.5 % better).")
     assert unclear["advice"] == "Keep your current settings for now: the gain is not proven."
     confirmed = words([1.2, 5.0], 3.1)
-    assert confirmed["line"] == "Confirmed: 3.1 % lower real cost on 3 held-back cases (likely between 1.2 % and 5.0 % better)."
-    assert confirmed["advice"] == "Use the new settings: they are better on cases the search never saw."
+    assert confirmed["line"] == ("Probably better: 3.1 % lower real cost on 3 held-back cases, a chance of about 20 in 20; "
+                                 "at least 1.2 % better than your starting point.")
+    assert confirmed["advice"] == "Use the new settings: they are probably better on cases the search never saw."
     worse = words([-8.0, -1.0], -4.0)
-    assert worse["line"] == "Worse on 3 held-back cases: 4.0 % higher real cost (likely between 1.0 % and 8.0 % worse)."
+    assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of 1 in 20 or less of a gain "
+                             "(likely between 1.0 % and 8.0 % worse).")
     assert worse["advice"] == "Keep your current settings: the new settings did worse on cases the search never saw."
     assert words(None, 2.0)["advice"].startswith("Not sure: one held-back case is too few")
-    assert words([-1.0, 2.0], what="data changes")["advice"].startswith("Keep your data as it is")
-    assert words([-1.0, 2.0], baseline="PyVRP's own defaults")["advice"] == \
+    assert words([-1.0, 2.0], 0.5, what="data changes")["advice"].startswith("Keep your data as it is")
+    assert words([-1.0, 2.0], 0.5, baseline="PyVRP's own defaults")["advice"] == \
         "Keep your current settings (PyVRP's own defaults) for now: the gain is not proven.", "named, when it is known"
     kept = jobs._final_words({"final": {"skipped": "the starting point stayed the best: there is nothing to check"}},
                              None, GOAL, "settings")
@@ -54,6 +105,10 @@ def test_an_open_answer_can_be_checked_again_with_twice_the_runs():
     assert within["why"].startswith("The study then takes about 27 min of its 30 min.") and not within["over"]
     over = jobs._recheck({"state": "unclear"}, budget, comparison([-1.0, 2.0]), used_s=29 * 60)
     assert over["why"].startswith("The study then takes about 31 min: more than its 30 min.") and over["over"]
+    # A check that added runs on its own is offered more from where it got to, and nothing past the 12 seeds there are.
+    grown = jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=7))
+    assert grown["seeds"] == 12 and grown["label"].startswith("Check again with 12 runs per case instead of 7")
+    assert jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=12)) is None
     assert jobs._recheck({"state": "confirmed"}, PLAN, comparison([1.0, 2.0])) is None, "a settled answer"
     assert jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=12)) is None, "no seeds left"
 
@@ -107,6 +162,7 @@ def test_a_summary_to_paste():
     assert jobs._summary_text(data).splitlines() == [
         "PyVRP: tune solver settings (PyVRP), run 20260927-005503",
         "Answer: Keep your current settings for now: the gain is not proven.",
+        "The app says use it when the chance of a gain is at least 9 in 10 and the worst plausible case is within 1 % of today.",
         "Set-up: 20 s per case, 30 min in total; the search learned from 2 cases and was checked on 1 held-back case."
         " Compared with PyVRP's own defaults.",
         "Search: " + data["headline"],

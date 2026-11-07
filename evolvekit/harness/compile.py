@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -335,10 +336,15 @@ def write_run(
     *,
     models: dict[str, Any] | None = None,
 ) -> Path:
-    """Compile `study` into `<root>/runs/<run_id>/` and return that directory."""
+    """Compile `study` into `<root>/runs/<run_id>/` and return that directory.
+    The run keeps a copy of `study.yaml` as it was when it started, so what
+    the run says about itself (its cases, goal, choices) stays true when the
+    study is edited afterwards."""
     config, study_run = compile_study(study, harness, plan, root=root, models=models)
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    if (root / "study.yaml").is_file():
+        shutil.copyfile(root / "study.yaml", run_dir / "study.yaml")
     (run_dir / CONFIG).write_text(
         "# Compiled from ../../study.yaml by evolvekit. Runnable as it is:\n"
         f"#   python -m evolvekit run --config {CONFIG} --run-dir .\n"

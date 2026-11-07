@@ -42,6 +42,7 @@ __all__ = [
     "StudyKpi",
     "check_templates",
     "load_study",
+    "load_study_file",
     "parse_within",
     "save_study",
     "study_from_template",
@@ -468,13 +469,20 @@ def _retrying(action: Any) -> Any:
 
 
 def load_study(folder: str | Path) -> Study:
+    """The study in `folder`: its `study.yaml`, parsed."""
     path = Path(folder) / "study.yaml"
     if not path.is_file():
         raise HarnessError(f"{folder}: there is no study.yaml in this folder")
+    return load_study_file(path)
+
+
+def load_study_file(path: Path) -> Study:
+    """A study file, parsed: the study folder's own `study.yaml`, or the copy
+    a run keeps of the study it was started with."""
     try:
-        raw = yaml.safe_load(_retrying(lambda: path.read_text(encoding="utf-8")))
+        raw = yaml.safe_load(_retrying(lambda: Path(path).read_text(encoding="utf-8")))
     except yaml.YAMLError as exc:
-        raise HarnessError(f"study.yaml: not valid YAML: {exc}") from None
+        raise HarnessError(f"{Path(path).name}: not valid YAML: {exc}") from None
     return Study.parse(raw)
 
 

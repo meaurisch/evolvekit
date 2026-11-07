@@ -1517,8 +1517,11 @@ python -m evolvekit study run studies/depot-a        # search, then the final ch
   out: fewer cases, a shorter time limit, or more hours.
   `plan: {auto: false, children: 4, generations: 6}` overrides it.
 - **The run** is an ordinary run directory, `runs/<id>/`, with
-  `study-run.json` (what the harness's runner reads) and `job.json`, which
-  says where the job is: `search`, `check`, `done`, `stopped` or `failed`.
+  `study-run.json` (what the harness's runner reads), a copy of `study.yaml`
+  as it was when the run started (its results and any later final check
+  read that copy, so editing the study afterwards changes nothing about the
+  run) and `job.json`, which says where the job is: `search`, `check`,
+  `done`, `stopped` or `failed`.
   `python -m evolvekit stop --run-dir studies/depot-a/runs/<id>` ends it
   cleanly.
 - **The final check** runs the best configuration against the starting point

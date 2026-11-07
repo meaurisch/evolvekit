@@ -33,7 +33,7 @@ from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, save_study, study_problems
 from evolvekit.ledger import _atomic_write
 
-__all__ = ["STEPS", "Home", "safe_name"]
+__all__ = ["STEPS", "Home", "safe_name", "split_words"]
 
 STEPS = ("Question", "Application", "Cases", "What may change", "Goal", "Limits and budget", "Review and start")
 _STEP_OF = {
@@ -476,12 +476,17 @@ class Home:
         return listed
 
     def suggested_test_count(self, slug: str) -> int:
+        """How many cases to hold back for the final check: the harness's
+        share of them, at least 3 once there are 6, and 40 % once there are
+        10 (more held back makes a firmer answer); never every case."""
         _, _, harness = self.load(slug)
         n = len(self.case_names(slug))
         if n < 2:
             return 0
         share = round(harness.defaults.test_share * n)
-        if n >= 6:
+        if n >= 10:
+            share = max(3, round(0.4 * n))
+        elif n >= 6:
             share = max(share, 3)  # fewer make a weak final check
         return max(0, min(share, n - 1))
 
@@ -519,6 +524,7 @@ class Home:
     def document(self, slug: str) -> dict[str, Any]:
         root, study, harness = self.load(slug)
         problems = [_problem(p) for p in study_problems(study, harness, root=root)]
+        cases = self.cases(slug)
         return {
             "slug": slug,
             "study": study.to_yaml(),
@@ -527,10 +533,25 @@ class Home:
                 {"number": i + 1, "title": title, "problems": sum(1 for p in problems if p["step"] == i + 1)}
                 for i, title in enumerate(STEPS)
             ],
-            "cases": self.cases(slug),
+            "cases": cases,
             "suggested_test": self.suggested_test_count(slug),
+            "split_words": split_words(len(study.test), len(cases)),
             "inputs": dict(study.inputs),
         }
+
+
+def split_words(held: int, total: int) -> str:
+    """One sentence on how firm the final check's answer can be with `held`
+    of `total` cases held back (the page shows it under the count)."""
+    if held <= 0:
+        return "Nothing held back: there will be no final check, so no answer about cases the search never saw."
+    if held == 1:
+        return "1 held back: the final check can give a number, but no range and no verdict."
+    if held == 2:
+        return "2 held back: a rough answer; the range will be wide."
+    if held < 5:
+        return f"{held} held back: a fair answer for a clear, consistent gain."
+    return f"{held} held back: a firm answer."
 
 
 def safe_relative(root: Path, relative: str) -> Path:

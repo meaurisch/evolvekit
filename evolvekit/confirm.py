@@ -57,9 +57,27 @@ from evolvekit.leaderboard import rank
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import run_lock
 
-__all__ = ["confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown"]
+__all__ = [
+    "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
+    "t_cdf", "decide", "USE_CHANCE", "USE_MARGIN_PCT", "WORSE_CHANCE", "RULE_WORDS",
+]
 
 BASELINE = "baseline"
+
+USE_CHANCE = 0.9
+"""`decide` says "use" from this chance of a gain on."""
+
+USE_MARGIN_PCT = 1.0
+"""... and only when the worst plausible case is within this many % of today."""
+
+WORSE_CHANCE = 0.1
+"""`decide` says "worse" up to this chance of a gain."""
+
+RULE_WORDS = (
+    "The app says use it when the chance of a gain is at least 9 in 10 "
+    "and the worst plausible case is within 1 % of today."
+)
+"""The rule in one sentence, as the page states it."""
 
 
 # --------------------------------------------------------------------------
@@ -98,6 +116,63 @@ def _t95(df: int) -> float:
     )
 
 
+def _betacf(a: float, b: float, x: float) -> float:
+    """The continued fraction of the incomplete beta function at `x`, by the
+    modified Lentz method (Numerical Recipes `betacf`): 200 iterations at
+    most, stopped when a step changes the value by less than 1e-12."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) >= tiny else tiny)
+    h = d
+    for m in range(1, 201):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) >= tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) >= tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) >= tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) >= tiny else tiny
+        step = d * c
+        h *= step
+        if abs(step - 1.0) < 1e-12:
+            break
+    return h
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    """The regularised incomplete beta function I_x(a, b), in [0, 1]. The
+    continued fraction converges fast for x below (a + 1) / (a + b + 2); past
+    it, the symmetry I_x(a, b) = 1 - I_{1-x}(b, a) brings it back."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    front = math.exp(
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
+    )
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def t_cdf(x: float, df: int) -> float:
+    """The probability that Student's t with `df` degrees of freedom is below
+    `x`: through I_z(df/2, 1/2) with z = df / (df + x²), no table and no
+    SciPy. It is what turns a mean and its spread into the chance that the
+    true mean gain is above zero."""
+    if df < 1:
+        raise ValueError(f"degrees of freedom must be >= 1, got {df}")
+    z = df / (df + x * x)
+    tail = 0.5 * _betainc(df / 2.0, 0.5, z)
+    return 1.0 - tail if x >= 0 else tail
+
+
 def wilcoxon_signed_rank(differences: Sequence[float]) -> dict[str, Any]:
     """The exact two-sided Wilcoxon signed-rank test of "the median difference
     is zero". Zeros are dropped, ties share their mean rank; the null
@@ -133,27 +208,55 @@ def wilcoxon_signed_rank(differences: Sequence[float]) -> dict[str, Any]:
 
 
 def paired_summary(differences: Sequence[float]) -> dict[str, Any]:
-    """Mean, 95 % confidence interval and Wilcoxon test of per-instance differences."""
+    """Mean, 95 % confidence interval and Wilcoxon test of per-instance
+    differences -- and, from two instances on, `chance`, the probability that
+    the true mean difference is above zero (one-sided, Student's t), and
+    `worst`, the lower end of the interval: the worst plausible case."""
     n = len(differences)
     if n == 0:
-        return {"n": 0, "mean": None, "ci95": None, "sd": None, "wilcoxon": wilcoxon_signed_rank([]),
-                "wins": 0, "losses": 0, "verdict": "nothing to compare"}
+        return {"n": 0, "mean": None, "ci95": None, "sd": None, "chance": None, "worst": None,
+                "wilcoxon": wilcoxon_signed_rank([]), "wins": 0, "losses": 0, "verdict": "nothing to compare"}
     mean = fmean(differences)
     wins, losses = sum(1 for d in differences if d > 0), sum(1 for d in differences if d < 0)
     if n < 2:
-        return {"n": n, "mean": mean, "ci95": None, "sd": None, "wilcoxon": wilcoxon_signed_rank(differences),
-                "wins": wins, "losses": losses, "verdict": "one instance: no interval can be given"}
+        return {"n": n, "mean": mean, "ci95": None, "sd": None, "chance": None, "worst": None,
+                "wilcoxon": wilcoxon_signed_rank(differences), "wins": wins, "losses": losses,
+                "verdict": "one instance: no interval can be given"}
     sd = stdev(differences)
     half = _t95(n - 1) * sd / math.sqrt(n)
     low, high = mean - half, mean + half
+    if sd > 0:
+        chance = t_cdf(mean / (sd / math.sqrt(n)), n - 1)
+    else:  # every instance moved by the same amount: there is nothing to be unsure about
+        chance = 1.0 if mean > 0 else 0.0 if mean < 0 else 0.5
     if low > 0:
         verdict = "better than the baseline: the 95 % interval lies above zero"
     elif high < 0:
         verdict = "WORSE than the baseline: the 95 % interval lies below zero"
     else:
         verdict = "not distinguishable from the baseline: the 95 % interval includes zero"
-    return {"n": n, "mean": mean, "sd": sd, "ci95": [low, high], "wilcoxon": wilcoxon_signed_rank(differences),
-            "wins": wins, "losses": losses, "verdict": verdict}
+    return {"n": n, "mean": mean, "sd": sd, "ci95": [low, high], "chance": chance, "worst": low,
+            "wilcoxon": wilcoxon_signed_rank(differences), "wins": wins, "losses": losses, "verdict": verdict}
+
+
+def decide(summary: dict[str, Any]) -> str:
+    """One fixed rule on a `paired_summary`, for a planner who has to choose:
+    "use" when the chance of a gain is at least `USE_CHANCE` and the worst
+    plausible case is within `USE_MARGIN_PCT` of today; "worse" when the
+    chance is `WORSE_CHANCE` or less; "keep" (today's settings) in between.
+    "single" with one instance, where no range can be given, and "none" with
+    nothing to compare. `RULE_WORDS` says the same in a sentence."""
+    n = int(summary.get("n") or 0)
+    if n == 0:
+        return "none"
+    if n == 1:
+        return "single"
+    chance, worst = float(summary["chance"]), float(summary["worst"])
+    if chance <= WORSE_CHANCE:
+        return "worse"
+    if chance >= USE_CHANCE and worst >= -USE_MARGIN_PCT:
+        return "use"
+    return "keep"
 
 
 # --------------------------------------------------------------------------

@@ -138,15 +138,20 @@ width:
 
 1. **The headline**: "The best settings found give 4.2 % lower real cost
    than your starting point on the cases the search learned from" — and under
-   it, what to do: *Use the new settings: they are better on cases the search
-   never saw*, or *Keep your current settings for now: the gain is not
-   proven*.
-2. **The final check** on the held-back cases: *Confirmed* with the likely
-   range in words ("likely between 1.2 % and 5.0 % better"), or honestly *Not
-   distinguishable from your starting point* ("somewhere between 3.1 % worse
-   and 6.0 % better"). An open answer comes with *Check again with 6 runs per
-   case instead of 3 (about 4 min)*: the check keeps the runs it did and adds
-   the others. With one held-back case there is no range; hold back three or
+   it, what to do: *Use the new settings: they are probably better on cases
+   the search never saw*, or *Keep your current settings for now: the gain is
+   not proven*. The app decides by one fixed rule, stated in one line under
+   the answer: *The app says use it when the chance of a gain is at least 9 in
+   10 and the worst plausible case is within 1 % of today.*
+2. **The final check** on the held-back cases, with the chance of a gain and
+   the worst plausible case: *Probably better: 1.3 % lower real cost on 3
+   held-back cases, a chance of about 19 in 20; at worst 0.3 % worse than
+   your starting point*, or honestly *Not proven on 3 held-back cases: a
+   chance of about 12 in 20 of a gain; at worst 10.1 % worse (somewhere
+   between 10.1 % worse and 11.5 % better)*, or *Worse on 3 held-back cases*.
+   An open answer comes with *Check again with 6 runs per case instead of 3
+   (about 4 min)*: the check keeps the runs it did and adds the others. With
+   one held-back case there is no range and no verdict; hold back three or
    more for an answer to rely on.
 3. **The goal, case by case**: every held-back case and every case the search
    learned from, starting point against best, with the change in words.
@@ -201,7 +206,7 @@ and templates, the forms and the SQL box still do everything it does.
 | a case *cannot be read* | open it: it is not a request the harness knows, or it is damaged; remove it |
 | *… is thin* under the plan | take one of the fixes it offers, or accept that the search may miss the best |
 | *fewer than 3 rounds* | take one of the three ways out the plan offers |
-| *Not distinguishable from your starting point* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
+| *Not proven on the held-back cases* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
 | *the starting point breaks a guardrail* | the guardrail is stricter than today's plans: loosen it, or give the application more time per case |
 | *It failed* | the message says why; after a restart of the computer, *Start it again* |
 

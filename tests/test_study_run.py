@@ -8,12 +8,16 @@ import shutil
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from evolvekit.harness.execute import preview, read_job, read_preview, run_study, run_test
+from evolvekit.confirm import paired_summary
+from evolvekit.harness.execute import Job, _extend_check, final_check, preview, read_job, read_preview, run_study, run_test
 from evolvekit.harness.library import create_study
+from evolvekit.harness.plan import CHECK_SEEDS, Plan
 from evolvekit.harness.study import Guardrail, load_study, save_study
 from evolvekit.stopping import STOP_REQUEST
 
@@ -35,6 +39,16 @@ def _study(tmp_path: Path, template: str = "tune", hours: float = 0.01) -> Path:
     study.budget.hours = hours
     save_study(study, folder)
     return folder
+
+
+def _fix_plan(folder: Path, generations: int = 3) -> None:
+    # The automatic plan is drawn from this machine's measured speed: on a slow
+    # runner 14 s buys fewer than 3 rounds and the plan refuses to start. The
+    # tests that use this are about the search and the check, not the plan,
+    # so the plan is fixed.
+    study = load_study(folder)
+    study.plan = {"auto": False, "children": 4, "generations": generations}
+    save_study(study, folder)
 
 
 def test_a_new_study_pins_its_harness_without_the_samples(tmp_path):
@@ -90,12 +104,7 @@ def test_the_test_run_says_when_the_starting_point_breaks_a_guardrail(tmp_path):
 @pytest.mark.slow
 def test_a_study_runs_its_search_and_then_the_final_check(tmp_path):
     folder = _study(tmp_path)
-    # The automatic plan is drawn from this machine's measured speed: on a slow
-    # runner 14 s buys fewer than 3 rounds and the plan refuses to start. This
-    # test is about the search and the check, not the plan, so the plan is fixed.
-    study = load_study(folder)
-    study.plan = {"auto": False, "children": 4, "generations": 3}
-    save_study(study, folder)
+    _fix_plan(folder)
     job = run_study(folder, "r1", log=lambda _m: None)
     run_dir = folder / "runs" / "r1"
     assert job["phase"] == "done", job
@@ -109,6 +118,26 @@ def test_a_study_runs_its_search_and_then_the_final_check(tmp_path):
         comparison = json.loads((run_dir / final["comparison"]).read_text(encoding="utf-8"))
         assert comparison["instances"] == ["region-60"] and comparison["seeds"][0] == 1001
         assert final["candidate"] in comparison["per_candidate"]
+        assert final["decision"] in ("use", "keep", "worse", "single")
+        assert isinstance(final.get("seeds"), int) and len(comparison["seeds"]) == final["seeds"]
+
+
+@pytest.mark.slow
+def test_a_rerun_final_check_uses_the_cases_the_run_held_back(tmp_path):
+    folder = _study(tmp_path)
+    _fix_plan(folder)
+    job = run_study(folder, "r1", log=lambda _m: None)
+    assert (folder / "runs" / "r1" / "study.yaml").is_file()
+    if "skipped" in job["final"]:
+        # A slow machine may find nothing better than the starting point in
+        # 14 s; then there is no check to run again, here or on CI.
+        pytest.skip("the search found nothing better, so there is no final check to run again")
+    study = load_study(folder)
+    study.training, study.test = study.training[1:] + study.test, [study.training[0]]   # swap after the run
+    save_study(study, folder)
+    job = final_check(folder, "r1", seeds=2, log=lambda _m: None)
+    comparison = json.loads((folder / "runs" / "r1" / job["final"]["comparison"]).read_text(encoding="utf-8"))
+    assert comparison["instances"] == ["region-60"], "the run's own held-back case, not today's"
 
 
 @pytest.mark.slow
@@ -134,3 +163,65 @@ def test_a_stop_request_during_the_search_ends_the_job_as_stopped(tmp_path):
     assert job["phase"] == "stopped", job
     assert job["search"]["stop_reason"] == "stopped on request"
     assert time.monotonic() - began < 40, "the study was given three minutes; the stop ended it"
+
+
+# -- the check adds runs on its own ----------------------------------------
+
+
+def _three_held_back(tmp_path: Path):
+    study = create_study(tmp_path / "s", DEMO, "Three held back", "tune")
+    study.test = ["cases/a.json", "cases/b.json", "cases/c.json"]
+    return study
+
+
+def _plan_with(**changes):
+    return replace(Plan.fixed(), **{"check_seeds": 3, "workers": 1, "run_s": 20.0, "test_cases": 3, **changes})
+
+
+def _confirm_recording(calls: list[int], settled_at: int = 6):
+    """A `confirm` that costs nothing: open (`keep`) below `settled_at` runs per
+    case, settled (`use`) from there on."""
+    def fake_confirm(config, run_dir, *, seeds, instances, label, log, stop):
+        assert list(seeds) == list(CHECK_SEEDS[:len(seeds)]), "every call names the whole seed list, so runs are kept"
+        assert len(instances) == 3 and label == "final"
+        calls.append(len(seeds))
+        summary = paired_summary([-9.0, 11.5, -0.4] if len(seeds) < settled_at else [1.3, 0.6, 1.9])
+        return SimpleNamespace(per_candidate={"c1": {"summary": summary}})
+    return fake_confirm
+
+
+def test_the_check_adds_runs_while_the_answer_is_open_and_time_remains(tmp_path):
+    calls: list[int] = []
+    clock = iter([400.0, 300.0, 200.0, 100.0, 10.0, 10.0])
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    comparison, seeds = _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lambda _m: None,
+                                      stop=threading.Event(), time_left_s=lambda: next(clock),
+                                      confirm=_confirm_recording(calls))
+    assert calls == [3, 4, 5, 6], "open at 3, 4 and 5 runs per case; settled at 6"
+    assert seeds == 6 and job.state["check"] == {"seeds": 6}
+    assert read_job(tmp_path)["check"] == {"seeds": 6}
+    assert comparison.per_candidate["c1"]["summary"]["n"] == 3
+
+
+def test_the_check_stops_adding_runs_when_time_the_seeds_or_a_stop_say_so(tmp_path):
+    study, log = _three_held_back(tmp_path), (lambda _m: None)
+
+    def run(plan, *, time_left, stop: threading.Event | None = None):
+        calls: list[int] = []
+        job = Job(tmp_path, run_id="r", study="s", plan={})
+        _, seeds = _extend_check(study, plan, None, tmp_path, job, log, stop=stop or threading.Event(),
+                                 time_left_s=time_left, confirm=_confirm_recording(calls, settled_at=99))
+        return calls, seeds, job.state["check"]["seeds"]
+
+    # One more run per case costs ceil(2 * 3 / 1) * 20 s = 120 s: 30 s left does not pay for it.
+    assert run(_plan_with(), time_left=lambda: 30.0) == ([3], 3, 3)
+    # Never past the 12 seeds there are, however much time there is.
+    assert run(_plan_with(check_seeds=12), time_left=lambda: 1e9) == ([12], 12, 12)
+    assert run(_plan_with(check_seeds=11), time_left=lambda: 1e9) == ([11, 12], 12, 12)
+    # A stop request keeps the comparison it has.
+    stopped = threading.Event()
+    stopped.set()
+    assert run(_plan_with(), time_left=lambda: 1e9, stop=stopped) == ([3], 3, 3)
+    # Four workers make a round cheaper: ceil(6 / 4) * 20 = 40 s, so 100 s pays for one more, 30 s for none.
+    clock = iter([100.0, 30.0])
+    assert run(_plan_with(workers=4), time_left=lambda: next(clock))[0] == [3, 4]
