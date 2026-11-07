@@ -137,6 +137,13 @@ def test_study_new_app_sets_the_application(tmp_path):
     assert _study_yaml(tmp_path)["application"]["path"] == str(SOLVER)
 
 
+def test_study_application_takes_a_relative_path(tmp_path, monkeypatch, capsys):
+    _new(tmp_path)
+    monkeypatch.chdir(ROOT)
+    assert main(["study", "application", "depot-a", "examples/cli-solver/solver.py", "--home", str(tmp_path)]) == 0
+    assert _study_yaml(tmp_path)["application"]["path"] == str(SOLVER)
+
+
 def test_study_application_bad_path_is_exit_1(tmp_path, capsys):
     _new(tmp_path)
     capsys.readouterr()
@@ -271,6 +278,25 @@ def test_study_cases_refuses_wrong_format(tmp_path, capsys):
     assert main(["study", "cases", "depot-a", "--add", str(bad), *map(str, SAMPLES[:2]), "--home", str(tmp_path)]) == 1
     assert "this harness reads .json files" in capsys.readouterr().err
     assert len(list((tmp_path / "studies" / "depot-a" / "cases").iterdir())) == 2
+
+
+def test_study_cases_on_an_empty_study_with_nothing_readable(tmp_path, capsys):
+    _new(tmp_path)
+    capsys.readouterr()
+    missing = tmp_path / "missing.json"
+    assert main(["study", "cases", "depot-a", "--add", str(missing), "--hold-back", "1", "--home", str(tmp_path)]) == 1
+    out, err = capsys.readouterr()
+    assert out.strip() == "nothing added"
+    assert "missing.json: cannot be read" in err and "Traceback" not in err
+
+
+def test_study_cases_hold_back_more_than_there_are_is_a_sentence(tmp_path, capsys):
+    _new(tmp_path)
+    capsys.readouterr()
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES[:2]), "--hold-back", "5",
+                 "--home", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "at most 1" in err and "Traceback" not in err
 
 
 def test_study_cases_default_hold_back_is_the_suggestion(tmp_path):
@@ -535,7 +561,7 @@ def test_wait_ticks_the_queue(tmp_path, monkeypatch, capsys):
     run_dir = _queued(tmp_path, "depot-a")
     launched = []
 
-    def launch(home, root, run_dir, extra, *, with_keys):  # a run that stopped at once
+    def launch(home, root, run_dir, extra, *, with_keys, **kwargs):  # a run that stopped at once
         launched.append(run_dir.name)
         (run_dir / "launch.json").write_text(json.dumps({"pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:02+00:00"}),
                                              encoding="utf-8")
@@ -548,6 +574,85 @@ def test_wait_ticks_the_queue(tmp_path, monkeypatch, capsys):
     assert main(["study", "wait", "depot-a", "--timeout", "5", "--home", str(tmp_path)]) == 1
     assert launched == [run_dir.name]
     assert not (run_dir / "queued.json").exists()
+
+
+def test_a_fault_in_the_queue_does_not_end_wait(tmp_path, monkeypatch, capsys):
+    from evolvekit import cli
+    from evolvekit.app import jobs
+    from evolvekit.app.store import Home
+
+    def broken(home):  # another study's launcher timed out
+        raise RuntimeError("the launcher timed out")
+
+    monkeypatch.setattr(jobs, "launch_queued", broken)
+    cli._tick_queue(Home(tmp_path))  # noqa: SLF001
+    assert capsys.readouterr().err.strip() == "could not start a queued run: the launcher timed out"
+
+
+def test_wait_ends_when_the_run_is_gone(tmp_path, monkeypatch, capsys):
+    import shutil
+
+    from evolvekit import cli
+    from evolvekit.app import jobs
+
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+    ticks = []
+
+    def dequeued_elsewhere(home):  # `study stop` in another terminal, or the app's card
+        ticks.append(1)
+        if len(ticks) == 2:
+            shutil.rmtree(run_dir)
+        if len(ticks) > 50:
+            raise KeyboardInterrupt  # it never ended by itself
+
+    monkeypatch.setattr(jobs, "launch_queued", dequeued_elsewhere)
+    monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
+    capsys.readouterr()
+    assert main(["study", "wait", "depot-a", "--home", str(tmp_path)]) == 1
+    assert f"run {run_dir.name} is gone" in capsys.readouterr().err
+
+
+def test_watch_ends_when_the_run_left_the_queue(tmp_path, monkeypatch, capsys):
+    from evolvekit.app import jobs
+
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+    ticks = []
+
+    def dequeued_but_the_folder_stayed(home):
+        ticks.append(1)
+        (run_dir / "queued.json").unlink(missing_ok=True)
+        (run_dir / "keep.txt").write_text("x", encoding="utf-8")
+        if len(ticks) > 50:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(jobs, "launch_queued", dequeued_but_the_folder_stayed)
+    capsys.readouterr()
+    assert main(["study", "watch", "depot-a", "--every", "0.01", "--home", str(tmp_path)]) == 1
+    assert f"run {run_dir.name} is gone" in capsys.readouterr().err
+
+
+def test_a_claimed_launch_writes_the_marker_once(tmp_path, monkeypatch):
+    from evolvekit.app import jobs
+    from evolvekit.app.store import Home
+
+    _new(tmp_path)
+    run_dir = _queued(tmp_path, "depot-a")
+    marks, seen = [], []
+    mark = jobs._mark_pending  # noqa: SLF001
+    monkeypatch.setattr(jobs, "_mark_pending", lambda *a, **k: marks.append(k) or mark(*a, **k))
+
+    def spawn(env, argv, root, run_dir):
+        seen.append(json.loads((run_dir / "launch.json").read_text(encoding="utf-8")))
+        return 4242
+
+    monkeypatch.setattr(jobs, "_spawn", spawn)
+    assert jobs.launch_queued(Home(tmp_path)) == f"depot-a/{run_dir.name}"
+    assert marks == [{"exclusive": True}], "the claim is the marker: no second truncating write"
+    assert seen[0]["pending"] is True
+    assert json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))["pid"] == 4242
+    assert not list(run_dir.glob("*.tmp"))
 
 
 def test_wait_timeout_exits_4(started_study, capsys):

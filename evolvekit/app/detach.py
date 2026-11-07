@@ -10,6 +10,7 @@ starts this way, and so does the app that `study open` starts.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -41,13 +42,29 @@ class DetachError(OSError):
     launcher's last line on stderr."""
 
 
+def _private_file(path: Path) -> None:
+    """Create `path` readable by its owner only (or leave it, made so), for
+    the launcher to append to."""
+    try:
+        os.close(os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600))
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    except OSError as exc:  # nothing was started: as the launcher would have said
+        raise DetachError(f"cannot write {path}: {exc.strerror or exc}") from None
+
+
 def spawn_detached(argv: list[str], *, cwd: Path | None = None, env: dict | None = None,
                    log: Path | None = None) -> int:
     """Run the launcher to its end; the pid of the detached process it
     started. Its output goes to `log` (appended), else nowhere. Raises
     `DetachError` when nothing was started, and lets
     `subprocess.TimeoutExpired` through: a launcher that timed out may have
-    started the process."""
+    started the process.
+
+    The log is the user's alone (0600 on POSIX): the app's carries its
+    address with the key."""
+    if log:
+        _private_file(Path(log))
     done = subprocess.run([sys.executable, "-c", _LAUNCHER, json.dumps(list(argv)), str(cwd) if cwd else "",
                            str(log) if log else ""],
                           env=env, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S)

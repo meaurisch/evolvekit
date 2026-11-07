@@ -190,6 +190,13 @@ def test_the_dashboard_needs_the_token(app):
     assert call(app, "GET", f"{dashboard}api/status?token={app.token}", token=None)[0] == 200
 
 
+def test_a_folder_is_not_a_harness_id(app):
+    folder = str(Path(__file__).resolve().parents[1] / "harnesses" / "demo-tour")
+    status, body = call(app, "POST", "/api/studies", {"harness": folder, "template": "tune", "name": "Folder"})
+    assert status == 404 and "no harness" in body["error"]
+    assert app.home.slugs() == []
+
+
 def test_keys_are_accepted_and_never_sent_back(app, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     status, body = call(app, "PUT", "/api/settings", {"keys": {"OPENROUTER_API_KEY": "sk-or-v1-secret"}})

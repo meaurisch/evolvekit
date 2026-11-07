@@ -44,7 +44,7 @@ from evolvekit.harness.execute import JOB, ExportFailed, export_path, read_job, 
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
-from evolvekit.ledger import read_jsonl
+from evolvekit.ledger import _atomic_write, read_jsonl
 from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
@@ -303,7 +303,7 @@ def _cap_holds(home: Any, study: Study) -> None:
                    "so the cap cannot hold: add its price under Settings › Models, or turn AI help off", 409)
 
 
-def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys: bool) -> int:
+def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys: bool, claimed: bool = False) -> int:
     """Start the run so that nothing that ends the app ends the run, through
     `detach.spawn_detached`: nobody's child, detached from any console, in a
     process group (or session) of its own, outside the app's job object where
@@ -311,7 +311,11 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys
 
     The run's environment is the app's without its secrets (the app carries
     the API keys for its assistant), plus the keys the app keeps when
-    `with_keys`: only a run with AI search help on has a use for them."""
+    `with_keys`: only a run with AI search help on has a use for them.
+
+    `claimed`: the caller already wrote the pending marker (the claim on a
+    queued run), so it is not written again -- each truncation of
+    `launch.json` is a moment a reader sees nothing."""
     env = {**scrubbed_environment(), "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     if with_keys:
         env.update(home.job_environment())
@@ -322,7 +326,8 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys
         previous = None
     # The pending marker: between here and the real launch below, any process
     # that asks (the app's ticker, `study wait`) sees the run as starting.
-    _mark_pending(run_dir)
+    if not claimed:
+        _mark_pending(run_dir)
     try:
         pid = _spawn(env, argv, root, run_dir)
     except AppError:
@@ -362,8 +367,10 @@ def _spawn(env: dict[str, str], argv: list[str], root: Path, run_dir: Path) -> i
 
 
 def _record_launch(run_dir: Path, pid: int, argv: list[str]) -> None:
-    (run_dir / LAUNCH).write_text(json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
-                                              "host": socket.gethostname(), "argv": argv[1:]}, indent=2), encoding="utf-8")
+    """The real launch over the pending marker, in one step (a temp file
+    replaced): a reader sees the marker or the launch, never nothing."""
+    _atomic_write(run_dir / LAUNCH, json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
+                                               "host": socket.gethostname(), "argv": argv[1:]}, indent=2))
 
 
 def _wants_keys(root: Path, run_dir: Path) -> bool:
@@ -507,7 +514,7 @@ def launch_queued(home: Any) -> str | None:
             waited = None
         (run_dir / QUEUED).unlink(missing_ok=True)
         try:
-            _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir))
+            _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir), claimed=True)
         except AppError:
             # The launcher started nothing: queued again, as it was, and the
             # next tick tries once more. Any other failure may have started
@@ -1324,7 +1331,7 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 
 def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) -> dict[str, Any]:
     """The home card's state in a few words: "draft · step 4 of 7", "running ·
-    1 h 10 min left · 3.2 % better so far", "finished · probably better: 3.1 %
+    1 h 10 min left · 3.2 % lower real cost so far, not checked yet", "finished · probably better: 3.1 %
     lower real cost", "finished · not proven on the held-back cases". A draft
     is `study` as it is today; a run is described by the study it was
     started with (the copy the latest run keeps). Besides the words, the
@@ -1406,7 +1413,8 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         line = "running" + (" · continued" if _continued(job) else "") + (f" · {_duration(left)} left" if left is not None else "")
         if document_of is not None and (run_dir / "events.jsonl").exists():
             if pct is not None and pct > 0:
-                line += f" · {_pct(pct)} better so far"
+                # Not "better": nothing claims that before the final check does.
+                line += f" · {_pct(pct)} {_better_word(goal['direction'])} {goal['says']} so far, not checked yet"
         facts.update({"left_s": left, "hours": hours, "continued": _continued(job) or bool(job.get("resumed_at")),
                       "finish_at": (started + timedelta(hours=hours)).astimezone().strftime("%H:%M") if started and hours else None})
         if state == "check":

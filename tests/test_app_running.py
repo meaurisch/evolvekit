@@ -45,6 +45,18 @@ def test_running_ignores_pid_of_another_program(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Windows has no mode bits to set")
+def test_a_detached_process_log_is_private_to_the_user(tmp_path, monkeypatch):
+    """The app's log carries its address with the key: only the user reads it."""
+    from evolvekit.app import detach
+
+    monkeypatch.setattr(detach.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="4242\n", stderr=""))
+    log = tmp_path / "app.log"
+    assert detach.spawn_detached(["x"], log=log) == 4242
+    assert log.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows has no mode bits to set")
 def test_the_file_is_private_to_the_user(tmp_path):
     path = write_running(tmp_path, pid=os.getpid(), port=8780, url="http://127.0.0.1:8780/?token=x")
     assert path.stat().st_mode & 0o777 == 0o600

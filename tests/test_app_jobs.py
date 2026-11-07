@@ -400,7 +400,7 @@ def test_two_starts_in_one_second_get_two_visible_run_ids(app, monkeypatch):
     fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(jobs, "_now", lambda: fixed)
 
-    def launched_and_done(home, root, run_dir, extra, *, with_keys):  # a run that finished within the second
+    def launched_and_done(home, root, run_dir, extra, *, with_keys, **kwargs):  # a run that finished within the second
         (run_dir / "job.json").write_text(json.dumps({"phase": "done", "pid": 2 ** 22 + 7, "started_at": fixed.isoformat(),
                                                        "finished_at": fixed.isoformat()}), encoding="utf-8")
         return 2 ** 22 + 7

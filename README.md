@@ -1537,16 +1537,22 @@ python -m evolvekit study cases depot-a --hold-back 1 --add harnesses/demo-tour/
 
 says `4 cases added, 1 held back`. A file the harness cannot read is refused
 with the reason, and the others still go in. Without `--hold-back` the app's
-suggestion is used. Name every file: the Windows shells do not expand
-`*.json`.
+suggestion is used. A pattern works too, in any shell (quote it, and
+evolvekit expands it): `--add "harnesses/demo-tour/samples/*.json"`.
 
 **Check it.** `study check` names what is still missing, one line each, and
-exits 2 while anything is; it prints nothing and exits 0 when the study can
-run:
+exits 2 while anything is; it says `ready: no problems` and exits 0 when the
+study can run. Here, with the application and the cases in:
 
 ```
 python -m evolvekit study check depot-a
 ```
+
+```
+ready: no problems
+```
+
+On a fresh study, before either, it says:
 
 ```
 application: say where the application is

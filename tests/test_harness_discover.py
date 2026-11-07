@@ -83,8 +83,8 @@ def test_discover_help_unparseable(tmp_path):
 def test_discover_help_hangs(tmp_path):
     program = _script(tmp_path, 'import sys, time\nif "--help" in sys.argv:\n    time.sleep(60)\nprint("thing 2.1")\n')
     started = time.monotonic()
-    found = discover_program(str(program))
-    assert time.monotonic() - started < 12
+    found = discover_program(str(program), timeout_s=1)
+    assert time.monotonic() - started < 4
     assert any("did not answer --help" in note for note in found["notes"])
     assert found["application"]["version"] == "thing 2.1"
 

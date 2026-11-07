@@ -315,12 +315,14 @@ class Home:
             slug, number = f"{base}-{number}", number + 1
         return slug
 
-    def create_study(self, harness_id: str, template: str | None, name: str) -> str:
+    def create_study(self, harness_id: str, template: str | None, name: str, *, folder: Path | None = None) -> str:
+        """A new study of the harness `harness_id` from the library -- only
+        ever an id: the API passes what a request says. The command line,
+        given a harness folder, passes it as `folder`."""
         name = str(name or "").strip()
         if not name:
             raise AppError("name: give the study a name")
-        folder = Path(harness_id)
-        source = folder if folder.is_dir() else self.harness_entry(harness_id).path
+        source = Path(folder) if folder is not None else self.harness_entry(harness_id).path
         slug = self._free_slug(name)
         try:
             create_study(self.studies_dir / slug, source, name, template or None)
@@ -588,6 +590,8 @@ class Home:
                 refused.append({"file": file.name, "reason": f"{file.name}: cannot be read ({exc.strerror or exc})"})
             except AppError as exc:
                 refused.append({"file": file.name, "reason": str(exc)})
+        if not self.case_names(slug):
+            return {"added": added, "refused": refused, "test": []}  # nothing to hold back
         count = self.suggested_test_count(slug) if hold_back is None else hold_back
         test = [Path(c).name for c in self.split(slug, count)] if added or hold_back is not None else []
         return {"added": added, "refused": refused, "test": test}
@@ -811,6 +815,8 @@ class Home:
         names = self.case_names(slug)
         if not isinstance(test, int) or isinstance(test, bool) or test < 0:
             raise AppError("test: a whole number of cases, 0 or more")
+        if not names and test > 0:
+            raise AppError("test: there are no cases to hold back yet; add some first")
         if names and test > len(names) - 1:
             raise AppError(f"test: at most {len(names) - 1}, so the search keeps at least one case to learn from")
 

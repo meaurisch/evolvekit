@@ -921,6 +921,13 @@ def _home(args: argparse.Namespace):
     return Home(args.home or default_home())
 
 
+def _full_path(path: str) -> str:
+    """A path given on the command line, relative to where the command runs,
+    made whole: the app and its API take full paths only."""
+    path = str(path).strip().strip('"')
+    return str(Path(path).resolve()) if path else path
+
+
 def _study_root(value: str, args: argparse.Namespace) -> Path:
     """A study given as a folder on disk, else as a name in the library home
     (the home is only opened when the value is not a folder)."""
@@ -971,7 +978,7 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
             return 0
         if not args.path:
             raise AppError("path: where the application is (or --detect to look for it)")
-        answer = home.set_application(slug, args.path)
+        answer = home.set_application(slug, _full_path(args.path))
         if args.json:
             print(json.dumps(answer))
         elif answer["ok"]:
@@ -997,7 +1004,7 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
         print(json.dumps(result))
     else:
         n = len(result["added"])
-        print(f"{n} case{'' if n == 1 else 's'} added, {len(result['test'])} held back")
+        print(f"{n} case{'' if n == 1 else 's'} added, {len(result['test'])} held back" if n else "nothing added")
     for refused in result["refused"]:
         print(refused["reason"], file=sys.stderr)
     if result["refused"]:
@@ -1032,13 +1039,29 @@ _ENDED = ("done", "stopped", "failed")
 def _tick_queue(home) -> None:
     """Launch the run that waits longest when nothing is active, as the app's
     ticker does, so a queued study starts with no app open. A launch that
-    fails is the app's to report too: the next tick tries again."""
+    fails -- any study's, for any reason -- is said in one line and the wait
+    goes on, as the app's ticker does: the next tick tries again."""
     from evolvekit.app import jobs
 
     try:
         jobs.launch_queued(home)
-    except AppError:
-        pass
+    except Exception as exc:  # noqa: BLE001 - a fault in another study's launch does not end this wait
+        print(f"could not start a queued run: {exc}", file=sys.stderr)
+
+
+def _gone(run_dir: Path, state: str | None) -> bool:
+    """Whether the run has left: its folder is gone, or it reads as nothing
+    -- not queued, no launch under way, no job -- as a dequeue leaves it."""
+    from evolvekit.app import jobs
+
+    if not run_dir.is_dir():
+        return True
+    return state == "unknown" and not (run_dir / jobs.QUEUED).exists() and not (run_dir / jobs.LAUNCH).exists()
+
+
+def _say_gone(run: str) -> int:
+    print(f"run {run} is gone: it was taken out of the queue, or its folder was removed", file=sys.stderr)
+    return 1
 
 
 def _run_of(root: Path, run: str | None = None) -> str:
@@ -1132,6 +1155,8 @@ def _wait(home, slug: str, timeout: float | None, as_json: bool) -> int:
             state = jobs.phase(run_dir).get("phase")
             if state in _ENDED:
                 break
+            if _gone(run_dir, state):
+                return _say_gone(run)
             if deadline is not None and time.monotonic() >= deadline:
                 print(f"run {run} is still {state} after {timeout:g} s; it goes on "
                       f"(evolvekit study wait {slug} waits again)", file=sys.stderr)
@@ -1171,6 +1196,8 @@ def _watch(home, slug: str, every: float, as_json: bool) -> int:
     try:
         while True:
             _tick_queue(home)
+            if _gone(run_dir, jobs.phase(run_dir).get("phase")):
+                return _say_gone(run)
             if as_json:
                 document = jobs.status(root, run, build_status)
                 state = document.get("phase")
@@ -1245,7 +1272,7 @@ def cmd_study(args: argparse.Namespace) -> int:
             if args.app:
                 from evolvekit.app.store import set_application
 
-                answer = set_application(folder, args.app)
+                answer = set_application(folder, _full_path(args.app))
                 if not answer["ok"]:
                     print(f"{answer['message']} (the study {folder} is made; say where the application is in "
                           "its study.yaml)", file=sys.stderr)
@@ -1260,9 +1287,10 @@ def cmd_study(args: argparse.Namespace) -> int:
                   f"{folder}")
             return 0
         home = _home(args)
-        slug = home.create_study(args.harness, args.template, args.name)
+        given = Path(args.harness)  # a harness folder on disk, else an id the home knows
+        slug = home.create_study(args.harness, args.template, args.name, folder=given if given.is_dir() else None)
         if args.app:
-            answer = home.set_application(slug, args.app)
+            answer = home.set_application(slug, _full_path(args.app))
             if not answer["ok"]:
                 print(f"{answer['message']} (the study {slug} is made; say where the application is with "
                       f"study application {slug} PATH)", file=sys.stderr)
@@ -1315,7 +1343,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from evolvekit.doctor import checks
     from evolvekit.harness.library import default_home
 
-    results = checks(Path(args.home or default_home()), app=args.app)
+    results = checks(Path(args.home or default_home()), app=_full_path(args.app) if args.app else None)
     if args.json:
         print(json.dumps(results, indent=2))
     else:

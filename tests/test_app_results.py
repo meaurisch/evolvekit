@@ -333,7 +333,9 @@ def test_a_running_run_says_how_far_it_got_only_when_asked(tmp_path, monkeypatch
     monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
     study = load_study(root)
     plain = jobs.run_line(root, study, run_dir)
-    assert plain["kind"] == "running" and plain["line"].startswith("running · ") and "better so far" not in plain["line"]
+    assert plain["kind"] == "running" and plain["line"].startswith("running · ") and "so far" not in plain["line"]
     told = jobs.run_line(root, study, run_dir, document_of)
-    assert told["line"].endswith(" · 4.2 % better so far")
+    # Nothing says "better" before the final check: the measure's direction, and that it is not checked.
+    assert told["line"].endswith(" · 4.2 % lower tour length so far, not checked yet")
+    assert "better" not in told["line"]
     assert jobs.runs(root)[0]["line"] == plain["line"], "the list does not read the status document"
