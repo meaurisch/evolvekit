@@ -1,5 +1,5 @@
 """`python -m evolvekit init | preflight | run | status | dashboard | leaderboard | confirm | export | stop
-| harness new/check/pack/install/list | study new/preview/compile/run`."""
+| harness new/check/pack/install/list/discover | study new/preview/compile/run`."""
 
 from __future__ import annotations
 
@@ -387,6 +387,14 @@ def build_parser() -> argparse.ArgumentParser:
     h_install.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     h_list = harness.add_parser("list", help="the harnesses evolvekit can offer")
     h_list.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    h_discover = harness.add_parser(
+        "discover", help="what an application exposes, before a harness exists: a first list of candidate settings")
+    h_target = h_discover.add_mutually_exclusive_group(required=True)
+    h_target.add_argument("--program", metavar="PATH", help="a program: runs PATH --version and PATH --help")
+    h_target.add_argument("--python", metavar="PATH", help="a Python interpreter that imports --module")
+    h_discover.add_argument("--module", metavar="NAME", help="with --python: the module to import and read")
+    h_discover.add_argument("--json", action="store_true",
+                            help='print {"application", "settings", "notes"} for a script or an AI coding tool')
 
     p_app = sub.add_parser("app", help="the app: set up, run and read studies in the browser")
     p_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
@@ -874,6 +882,17 @@ def cmd_harness(args: argparse.Namespace) -> int:
     if command == "install":
         harness = library.install_harness(args.archive, Path(args.home) if args.home else None)
         print(f"installed {harness.title} {harness.version} in {harness.root}")
+        return 0
+    if command == "discover":
+        from evolvekit.harness import discover
+
+        if args.python and not args.module:
+            raise ValueError("--python needs --module NAME: the module to import and read")
+        if args.program and args.module:
+            raise ValueError("--module goes with --python, not with --program")
+        found = (discover.discover_program(args.program) if args.program
+                 else discover.discover_python(args.python, args.module))
+        print(json.dumps(found, indent=2) if args.json else discover.render(found))
         return 0
     entries = library.find_harnesses(Path(args.home) if args.home else None)
     if not entries:
