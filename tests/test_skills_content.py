@@ -23,7 +23,7 @@ HARNESS = SKILLS / "evolvekit-harness" / "SKILL.md"
 SECTIONS = ["Words", "Where things live", "Commands", "The verdict document", "Rules"]
 NEVER_SAID = re.compile(r"\b(kpis?|seeds?|generations?|instances?|configs?|baselines?)\b", re.I)
 PLACEHOLDERS = {"SLUG": "gate-study", "NAME": "Gate", "ID": "demo-tour", "T": "tune", "PATH": "solver.py",
-                "DIR": "harness", "FILE": "cases/a.json", "N": "2", "S": "600"}
+                "DIR": "harness", "FILE": "cases/a.json", "N": "2", "H": "2", "S": "600"}
 GROUPS = ("study", "harness", "skill")
 VERDICT_KEYS = ("schema", "study", "run", "phase", "decision", "reason", "line", "advice", "measure", "held_back",
                 "mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words", "levels", "learned_from", "rule",
@@ -197,6 +197,11 @@ HAND_OVER_QUEUED = ("Your study is queued behind <name>: <url>. It starts when t
 MEASURES_RULE = "Measures come from the harness by name, `{from: harness}`, or from its templates; never write SQL for a measure."
 THIN_PLAN_RULE = ("A plan with fewer than 3 rounds is thin: show its three ways out, start nothing, and wait for "
                   "the engineer's choice; in a one-shot run, say so and end.")
+THIN_COMPILE = ("On a thin plan `study compile` exits 2 with `plan: … fewer than 3 rounds …`; the sentences after "
+                "it are the ways out — relay them, change nothing in `study.yaml` yourself.")
+THIN_WARNING = ("K is the number of entries under `problem.parameters` in the compiled `runs/<id>/evolvekit.yaml` "
+                "(the settings tuned). When N is under 6 × K, add: \"The app will call this plan thin: K settings in N "
+                "combinations; more time or fewer settings would sharpen it.\"")
 STUDY_PATH = re.compile(r"`((?:study\.yaml|cases/|inputs/|runs/)[^`\s]*)`")
 RUN_FILES = ("job.json", "job.log", "downloads/", "confirm/final/", "evolvekit.yaml")
 
@@ -264,6 +269,12 @@ def test_study_skill_takes_measures_from_the_harness():
 
 def test_study_skill_stops_on_a_thin_plan():
     assert THIN_PLAN_RULE in _section(_body(STUDY), "4. Show the plan")
+    assert THIN_COMPILE in _section(_body(STUDY), "4. Show the plan")
+    assert "fewer than 3 rounds" in _section(_body(STUDY), "When it goes wrong")
+
+
+def test_study_skill_says_where_the_thin_warning_comes_from():
+    assert THIN_WARNING in _section(_body(STUDY), "5. Start and hand over")
 
 
 def test_study_skill_says_what_to_do_when_it_goes_wrong():

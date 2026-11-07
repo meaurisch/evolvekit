@@ -5,7 +5,7 @@ description: "Runs an evolvekit study from a problem description: asks only what
 
 Read `references/evolvekit.md` first: its words, commands and rules hold here.
 Its sections are "Words", "Where things live", "Commands", "The verdict document" and "Rules"; this file does not repeat them.
-Placeholders are in UPPERCASE: SLUG is the study's short name, PATH the application, N a count.
+Placeholders, each with one meaning: NAME the study's name, SLUG its short name, PATH the application, T a template, H the held-back cases, N the combinations, R the rounds, K the settings tuned, HH:MM the time the plan is done, <url> the study's address, <name> the study it is queued behind.
 Use the app's words with the engineer (study, case, held-back case, measure, goal, combination, round, final check).
 
 ## 1. Ground
@@ -25,7 +25,7 @@ Use the engineer's words, not the keys. Go through this checklist against the re
 - [ ] Where is the application? → `--app PATH` on `study new`.
 - [ ] What may change: settings, data? → `vary.settings` (`tune`, `{fixed: value}` or `default` per setting), `vary.data`.
 - [ ] What stays fixed? → `{fixed: value}`; what the request does not name stays as the template has it.
-- [ ] Where are the cases, which are representative, how many are held back? → `study cases --add … --hold-back N`; "the requests in cases/" means all of them.
+- [ ] Where are the cases, which are representative, how many are held back? → `study cases --add … --hold-back H`; "the requests in cases/" means all of them.
 - [ ] The measure and its direction? → `kpis` and `goal.levels`: the harness measure whose label or help says what the engineer said ("shorter tours" → the tour length, `lower`). When two fit, ask.
 - [ ] How long per case? → `limits.time_per_case_s`; when the request does not say, keep the harness's default and name it in the plan line.
 - [ ] How much time in total? → `budget.hours`, the minutes ÷ 60 to three decimals (ten minutes → `0.167`). Never chosen by you.
@@ -33,6 +33,7 @@ Use the engineer's words, not the keys. Go through this checklist against the re
 
 A request that answers every question is complete: go on without asking.
 One unanswered question stops you with that question, in one message.
+Several unanswered: ask them all in that one message.
 In a one-shot run, where no answer can come, say what is missing and end.
 Decide nothing about the goal or the total time alone.
 
@@ -43,13 +44,13 @@ With none fitting, leave out `--template`: the study starts blank.
 
 ```
 evolvekit study new NAME --harness harness/ --template T --app PATH --json
-evolvekit study cases SLUG --add "cases/*.json" --hold-back N
+evolvekit study cases SLUG --add "cases/*.json" --hold-back H
 evolvekit study application SLUG PATH
 ```
 
 - `--harness` takes the harness folder (`harness/`, or `harness/<id>/`) or the id from `evolvekit harness list`.
 - The `--json` line gives `slug` and `root`. Use that slug as SLUG from here on.
-- Run the third command only when `study new` said the application was not accepted (the study is made all the same; the message names its slug).
+- Run the third command only when `study new` said the application was not accepted (the study is made all the same; the message names its slug, and no `root` is printed: the folder is `studies/SLUG/` in the library home).
 - Quote a pattern for `--add`: evolvekit expands it in any shell.
 - Open `study.yaml` in `root` and write what the interview gave:
   - `vary`: the settings and data that may change; with a blank study, `vary.settings: recommended`.
@@ -64,7 +65,8 @@ evolvekit study application SLUG PATH
 
 ## 4. Show the plan
 
-- Run `evolvekit study compile SLUG`. Its line says the rounds, the combinations, the final check on the held-back cases and "done around HH:MM".
+- Run `evolvekit study compile SLUG`. Its line says the rounds, the combinations, the final check on the held-back cases and "done around HH:MM", and the run folder it compiled the plan into, `runs/<id>/evolvekit.yaml`.
+- On a thin plan `study compile` exits 2 with `plan: … fewer than 3 rounds …`; the sentences after it are the ways out — relay them, change nothing in `study.yaml` yourself.
 - Show that line to the engineer as it is.
 - A plan that fits, after a complete request, goes on to step 5 without a question. Otherwise wait for a yes.
 - A plan with fewer than 3 rounds is thin: show its three ways out, start nothing, and wait for the engineer's choice; in a one-shot run, say so and end.
@@ -77,7 +79,7 @@ evolvekit study application SLUG PATH
 - Fill in one of these two sentences and say it, word for word apart from the blanks (N, R and HH:MM from step 4's line; `<name>` from `study start`; `<url>` from `study open`):
   - Your study is running: <url>. It tries about N combinations in R rounds and ends around HH:MM; the answer is on the Study page.
   - Your study is queued behind <name>: <url>. It starts when that study finishes; the answer is on the Study page.
-- When the plan has fewer than 6 combinations per setting tuned, add: "The app will call this plan thin: N settings in M combinations; more time or fewer settings would sharpen it." (N and M from the plan.)
+- K is the number of entries under `problem.parameters` in the compiled `runs/<id>/evolvekit.yaml` (the settings tuned). When N is under 6 × K, add: "The app will call this plan thin: K settings in N combinations; more time or fewer settings would sharpen it."
 - Until the verdict exists, write no "better", "improved", "faster" or "cheaper", and no percentage.
 - Then end, unless the engineer asked you to wait.
 - Waiting is `evolvekit study wait SLUG --timeout 600`, run again while it exits 4 (no single command may run for hours), until it exits 0 (done) or 1 (stopped or failed).
@@ -89,13 +91,13 @@ evolvekit study application SLUG PATH
 - Report only the verdict's line and its advice, word for word, and add no sentence that claims more.
 - The gain on the cases it learned from is said only when asked, and named so.
 - An interpretation, if any, is one sentence below the line and the advice, marked as yours, and claims nothing the line does not.
-- A later request to report on the study starts here: `evolvekit study status SLUG` says whether it has ended.
+- A later request to report on the study starts here: `evolvekit study status SLUG` says whether it has ended. When it has not, say where it is and hand over as in step 5.
 
 ## When it goes wrong
 
 - No harness for the application: follow the `evolvekit-harness` skill, then return to step 1.
 - `evolvekit study check SLUG` exits 2: fix the keys of `study.yaml` it names, and check again.
-- A thin plan: show its ways out (step 4) and wait.
+- `study compile` exits 2 with `plan: … fewer than 3 rounds …`: a thin plan, not a fault. Relay its ways out (step 4), change nothing yourself, and wait.
 - A ✗ from `evolvekit doctor`: run its `fix:` line; a provider ✗ matters only with AI help on.
 - `study start` says the study is already running: `evolvekit study status SLUG` says where it is; hand over as in step 5.
 - The run failed (`study wait` exits 1): say the error line from `evolvekit study status SLUG` and point to the log `runs/<id>/job.log` in the study's folder, and stop. Claim nothing about the result.
