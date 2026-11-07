@@ -317,8 +317,8 @@ def _run_tree_stages(config: Config, report: PreflightReport, work_dir: Path) ->
     problem = config.problem.tree
     assert problem is not None
     try:
-        repo = tree.Repo(problem.repo)
         try:
+            repo = tree.Repo(problem.repo)
             made = tree.materialise(work_dir, repo=repo, base=problem.base, diff="", candidate_id="seed")
         except tree.TreeError as exc:
             report.failures.append(f"the starting point could not be checked out: {exc}")
@@ -338,8 +338,15 @@ def _run_tree_stages(config: Config, report: PreflightReport, work_dir: Path) ->
                 report.failures.append(f"stage {stage.id}: the seed {what} -- {outcome.failure}")
                 return
     finally:
-        tree.remove_all(work_dir)
-        restore_build(config.problem, log=report.warnings.append)
+        try:
+            tree.remove_all(work_dir)
+        except Exception as exc:  # noqa: BLE001 - the build back still runs, and the check's own result stands
+            report.warnings.append(f"the starting point's folder under {work_dir} was not removed ({exc})")
+
+        def said(line: str) -> None:
+            (report.warnings if line.startswith("warning:") else report.notes).append(line)
+
+        restore_build(config.problem, log=said)
 
 
 def _seed_breaks_a_gate(config: Config, report: PreflightReport, where: str, outcome: StageOutcome) -> bool:

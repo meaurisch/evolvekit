@@ -1176,6 +1176,8 @@ class EvaluateConfig:
         for i, stage in enumerate(stages):
             if stage.kind == "builtin-build" and i != 1:
                 raise ConfigError(f"evaluate.stages[{i}].kind: builtin-build comes right after the static stage")
+            if stage.kind == "builtin-build" and not any(s.kind == "command" for s in stages[i + 1:]):
+                raise ConfigError(f"evaluate.stages[{i}]: a build stage needs a command stage after it")
         for i, stage in enumerate(stages[:-1]):
             if stage.private_inputs:
                 raise ConfigError(
@@ -1860,6 +1862,10 @@ def _tree_rules(config: Config) -> Config:
     if tree is None:
         return config
     if tree.build:
+        listed = config.evaluate.stages
+        if len(listed) < 2 or listed[1].kind != "builtin-build":
+            # Else the search would never build, and the trees' code would not be what runs.
+            raise ConfigError('`problem.tree.build` needs `{"kind": "builtin-build"}` at `evaluate.stages[1]`')
         stages = tuple(replace(stage, timeout=tree.build_timeout_s) if stage.kind == "builtin-build" else stage
                        for stage in config.evaluate.stages)
         config = replace(config, evaluate=replace(config.evaluate, stages=stages))

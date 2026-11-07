@@ -259,7 +259,7 @@ def test_tree_command_placeholders(project, tmp_path):
     repo, base = project
 
     def with_command(command: str, **tree_keys) -> dict:
-        raw = _raw(repo, base)
+        raw = _raw(repo, base, build=tree_keys.pop("build", ""))  # a build comes with its stage
         raw["problem"]["tree"].update(tree_keys)
         raw["evaluate"]["stages"][-1]["command"] = command
         return raw
@@ -379,8 +379,8 @@ def test_a_problem_names_what_it_varies(tmp_path):
 
 def test_the_tree_identity_holds_build_and_app(project, tmp_path):
     repo, base = project
-    raw = _raw(repo, base)
-    raw["problem"]["tree"].update(build='{python} -c "pass"', app="{tree}/solver.py")
+    raw = _raw(repo, base, build='{python} -c "pass"')
+    raw["problem"]["tree"]["app"] = "{tree}/solver.py"
     identity = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")._problem_identity()
     assert identity["tree"] == {"base": base, "open": ["solver.py"], "build": '{python} -c "pass"',
                                 "app": "{tree}/solver.py"}

@@ -547,12 +547,8 @@ def _compare(
 
 
 def _build_stage(config: Config) -> StageConfig:
-    """The config's `builtin-build` stage, or one made from `problem.tree`."""
-    found = next((s for s in config.evaluate.stages if s.kind == "builtin-build"), None)
-    if found is not None:
-        return found
-    assert config.problem.tree is not None
-    return StageConfig(id="build", kind="builtin-build", timeout=config.problem.tree.build_timeout_s)
+    """The config's `builtin-build` stage: a tree with a build has one (`config._tree_rules`)."""
+    return next(s for s in config.evaluate.stages if s.kind == "builtin-build")
 
 
 def _put_trees_back(config: Config, work: Path, log: Callable[[str], None]) -> None:

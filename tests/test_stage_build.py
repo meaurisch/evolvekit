@@ -177,8 +177,79 @@ def test_builtin_build_needs_a_build_and_its_place(project, tmp_path):
     assert stage.kind == "builtin-build" and stage.timeout == 42, "its timeout is problem.tree.build_timeout_s"
 
 
+def test_a_tree_build_needs_its_stage_and_a_command_after_it(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base, build='{python} -c "pass"')
+    del raw["evaluate"]["stages"][1]
+    with pytest.raises(ConfigError, match=re.escape(
+            '`problem.tree.build` needs `{"kind": "builtin-build"}` at `evaluate.stages[1]`')):
+        build_config(raw, base_dir=tmp_path)
+    raw = _raw(repo, base, build='{python} -c "pass"')
+    del raw["evaluate"]["stages"][2]
+    with pytest.raises(ConfigError, match=re.escape(
+            "evaluate.stages[1]: a build stage needs a command stage after it")):
+        build_config(raw, base_dir=tmp_path)
+
+
+def test_only_a_build_into_the_python_is_restored(project, tmp_path):
+    repo, base = project
+    checkout = repo / "app dir"
+    said: list[str] = []
+    log = tmp_path / "builds.log"
+    _, problem, _ = _setup(project, tmp_path, build=_logging_build(log))
+    restore_build(problem, log=said.append)
+    assert _built(log) == [checkout.resolve()], "a build into {python} is built back from the checkout"
+    assert said == [f"building {checkout} back into the application's Python"], "said before, so it never looks hung"
+    tree.remove_all(tmp_path / "trees")
+    program = f'"{sys.executable}" -c "open(\'made.txt\', \'w\').write(\'x\')"'  # no {python}: a program's own build
+    made, problem, stage = _setup(project, tmp_path, build=program)
+    assert run_build_stage(made, stage, problem).ok and (made.path / "made.txt").is_file()
+    said.clear()
+    restore_build(problem, log=said.append)
+    assert not (checkout / "made.txt").exists() and not said, "the engineer's folder is never built into"
+
+
+def test_build_feedback_falls_back_to_stdout(project, tmp_path):
+    repo, base = project
+    noisy = '{python} -c "print(\'error: solver.py on stdout\'); raise SystemExit(2)"'
+    Driver(build_config(_raw(repo, base, build=noisy), base_dir=tmp_path), run_dir=tmp_path / "run").run(generations=0)
+    seed = list(read_jsonl(tmp_path / "run" / "runs.jsonl"))[0]
+    assert seed["reject_reason"] == "build: exit code 2: error: solver.py on stdout"
+    assert "error: solver.py on stdout" in seed["feedback"]["build"]
+
+
+def test_no_time_left_is_said_as_such(project, tmp_path):
+    made, problem, stage = _setup(project, tmp_path, build=SLEEPING)
+    outcome = run_build_stage(made, stage, problem, time_left_s=0.0)
+    assert outcome.abandoned and "time ran out" in outcome.failure
+
+
+def test_preflight_reports_a_missing_repository_and_always_builds_back(project, tmp_path, monkeypatch):
+    repo, base = project
+    log = tmp_path / "builds.log"
+    config = build_config(_raw(repo, base, build=_logging_build(log)), base_dir=tmp_path)
+
+    def gone(_path):
+        raise tree.TreeError("the folder is gone")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tree, "Repo", gone)
+        report = preflight(config, work_dir=tmp_path / "pf")
+    assert any("the folder is gone" in failure for failure in report.failures), report.failures
+
+    def stuck(*_a, **_k):
+        raise OSError("a tree is held open")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tree, "remove_all", stuck)
+        report = preflight(config, work_dir=tmp_path / "pf")
+    assert _built(log)[-1] == (repo / "app dir").resolve(), "built back although the tree could not be removed"
+    assert any("a tree is held open" in warning for warning in report.warnings), report.warnings
+
+
 def test_a_skeleton_problem_has_no_build(minimal_raw, tmp_path):
-    minimal_raw["evaluate"]["stages"].append({"id": "build", "kind": "builtin-build"})
+    minimal_raw["evaluate"]["stages"] += [{"id": "build", "kind": "builtin-build"},
+                                          {"id": "run", "kind": "command", "command": "{python} {candidate} {out}"}]
     with pytest.raises(ConfigError, match=re.escape(
             "evaluate.stages[1]: a builtin-build stage runs problem.tree.build, and the problem gives none")):
         build_config(minimal_raw, base_dir=tmp_path)

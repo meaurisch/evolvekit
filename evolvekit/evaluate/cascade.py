@@ -724,9 +724,11 @@ class Cascade:
             if stage.kind in ("builtin-static", "builtin-build"):
                 result.rejected = True
                 result.reject_reason = outcome.failure
-            if stage.kind == "builtin-build" and outcome.stderr.strip():
-                # What the next prompt shows: the build's own last words.
-                result.feedback[stage.id] = outcome.stderr[-FEEDBACK_LIMIT:]
+            said = outcome.stderr if outcome.stderr.strip() else outcome.stdout
+            if stage.kind == "builtin-build" and said.strip():
+                # What the next prompt shows: the build's own last words
+                # (a build tool that reports on stdout, when stderr is empty).
+                result.feedback[stage.id] = said[-FEEDBACK_LIMIT:]
             result.score = self.config.evaluate.failure_score
             result.ranking_score = result.score
             return

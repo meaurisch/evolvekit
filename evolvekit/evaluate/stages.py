@@ -280,9 +280,12 @@ def run_build_stage(
     limit, short = stage.timeout, False
     if time_left_s is not None and time_left_s < limit:
         limit, short = max(0.0, time_left_s), True
-    if (cancel is not None and cancel.is_set()) or limit <= 0:
+    if cancel is not None and cancel.is_set():
         return StageOutcome(stage_id=stage.id, ok=False, abandoned=True,
                             failure="called off before it started: the run was stopped")
+    if limit <= 0:
+        return StageOutcome(stage_id=stage.id, ok=False, abandoned=True,
+                            failure="the study's time ran out before this built")
     started = time.perf_counter()
     try:
         argv = build_command(problem.tree.build, tree=tree.path)
@@ -321,14 +324,18 @@ def restore_build(problem: ProblemConfig, *, log: Callable[[str], None]) -> None
     candidate's tree once that tree is removed.
 
     Called in a `finally` wherever candidates were built: the search, the final
-    check, a preflight. A failure is one warning through `log`, never raised:
-    it must not hide what the run itself ended with.
+    check, a preflight. Only a build that names `{python}` installs into the
+    shared interpreter; any other (a program's `make -C {tree}`) builds inside
+    each tree, and is never run in the engineer's own folder. A failure is one
+    warning through `log`, never raised: it must not hide what the run itself
+    ended with.
     """
     tree = problem.tree
-    if tree is None or not tree.build:
+    if tree is None or not tree.build or "{python}" not in tree.build:
         return
     _forget_build()
     checkout = Path(tree.repo)
+    log(f"building {checkout} back into the application's Python")
     try:
         argv = build_command(tree.build, tree=checkout)
         with tempfile.TemporaryDirectory(prefix="evolvekit-build-", ignore_cleanup_errors=True) as scratch:
