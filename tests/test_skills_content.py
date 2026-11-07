@@ -323,3 +323,39 @@ def _check_commands(path: Path, capsys) -> None:
 
 def _headings(path: Path) -> list[str]:
     return re.findall(r"^## (.+?)\s*$", _body(path), re.M)
+
+
+# The harness skill (Task 3).
+
+HARNESS_STEPS = ["1. Look first", "2. Interview", "3. Start from something that passes", "4. Write it, in this order",
+                 "5. Check until it exits 0", "6. Smoke test", "7. Every later change", "Two rules"]
+CHECK_RULE = "Never call the harness done before `evolvekit harness check harness/ --app PATH --json` exits 0."
+
+
+def test_harness_skill_frontmatter():
+    _check_frontmatter(HARNESS, "evolvekit-harness", ("behind evolvekit", "write a harness", "harness check"))
+
+
+def test_harness_skill_length():
+    _check_length(HARNESS)
+
+
+def test_harness_skill_commands_parse(capsys):
+    _check_commands(HARNESS, capsys)
+    named = {tuple(w[:2]) for c in commands_in(_body(HARNESS)) for w in command_variants(c)}
+    assert {("harness", "discover"), ("harness", "new"), ("harness", "check"), ("study", "new"),
+            ("study", "cases"), ("study", "check"), ("study", "preview")} <= named
+
+
+def test_harness_skill_has_the_steps_in_order():
+    assert _headings(HARNESS) == HARNESS_STEPS
+
+
+def test_harness_skill_forbids_editing_the_sdk():
+    body = _body(HARNESS)
+    assert SDK_RULE in body and CHECK_RULE in body
+    assert "evolvekit harness check harness/ --app PATH --json" in body
+    rules = _section(body, "Two rules")
+    assert "#the-comparability-trap" in rules and "#settings-every-value-in-range-must-be-valid" in rules
+    assert "`private: true`" in _section(body, "4. Write it, in this order")
+    assert "`version:`" in _section(body, "7. Every later change")
