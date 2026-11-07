@@ -395,6 +395,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_app.add_argument("--shortcut", action="store_true",
                        help="write evolvekit.cmd to the Windows desktop, which starts the app with a double-click")
 
+    p_doctor = sub.add_parser("doctor", help="is this machine ready? (exit 0 when every check passes, else 1)")
+    p_doctor.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    p_doctor.add_argument("--app", metavar="PATH", help="also ask every harness whether this application is its own")
+    p_doctor.add_argument("--json", action="store_true", help="print the checks as a JSON list")
+
     p_study = sub.add_parser("study", help="make, preview, compile and run studies")
     study = p_study.add_subparsers(dest="study_command", required=True)
     s_new = study.add_parser("new", help="a new study folder from a harness (and a template)")
@@ -1231,7 +1236,23 @@ def cmd_study(args: argparse.Namespace) -> int:
     return 0 if job["phase"] in ("done", "stopped") else 1
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from evolvekit.doctor import checks
+    from evolvekit.harness.library import default_home
+
+    results = checks(Path(args.home or default_home()), app=args.app)
+    if args.json:
+        print(json.dumps(results, indent=2))
+    else:
+        for item in results:
+            print(f"{'✓' if item['ok'] else '✗'} {item['name']}: {item['message']}")
+            if not item["ok"]:
+                print(f"    fix: {item['fix']}")
+    return 0 if all(item["ok"] for item in results) else 1
+
+
 _COMMANDS = {
+    "doctor": cmd_doctor,
     "confirm": cmd_confirm,
     "export": cmd_export,
     "init": cmd_init,
