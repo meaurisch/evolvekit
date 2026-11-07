@@ -225,23 +225,26 @@ def run_tree_static_stage(
 
 # --- builtin-build ---------------------------------------------------------------
 
-_BUILT: tuple[str, str, str] | None = None
-"""What the shared interpreter holds now, as `(build, tree folder, commit)`, or
+_BUILT: tuple[str, str, str, str] | None = None
+"""What the shared interpreter holds now, as `(build, interpreter, tree folder, commit)`, or
 `None` when nobody knows. In memory and for this process only (decision 31):
 nothing on disk claims a build, so a resumed run builds again. One entry, not a
 set: a build that installs into one interpreter replaces the one before."""
 _BUILT_LOCK = threading.Lock()
 
 
-def build_command(template: str, *, tree: Path) -> list[str]:
+def build_command(template: str, *, tree: Path, python: str | None = None) -> list[str]:
     """`problem.tree.build` as argv: split first, then `{tree}` and `{python}`
     substituted (as `build_argv` does, so a Windows path keeps its backslashes
-    and a folder with a space stays one argument). Other braces are the
+    and a folder with a space stays one argument). `{python}` is `python`
+    (`problem.tree.python`: the application's Python for a python harness),
+    evolvekit's own interpreter when it is not given. Other braces are the
     command's own."""
     tokens = shlex.split(template, posix=True)
     if not tokens:
         raise ValueError("the build command is empty")
-    return [token.replace("{tree}", str(tree)).replace("{python}", sys.executable) for token in tokens]
+    interpreter = python or sys.executable
+    return [token.replace("{tree}", str(tree)).replace("{python}", interpreter) for token in tokens]
 
 
 def render_app(template: str, tree: Path) -> str:
@@ -306,7 +309,7 @@ def run_build_stage(
     """
     global _BUILT
     assert problem.tree is not None and problem.tree.build
-    key = (problem.tree.build, os.path.normcase(os.path.abspath(tree.path)), tree.commit)
+    key = (problem.tree.build, problem.tree.python, os.path.normcase(os.path.abspath(tree.path)), tree.commit)
     with _BUILT_LOCK:
         if _BUILT == key:
             return StageOutcome(stage_id=stage.id, ok=True, cached=True)
@@ -322,7 +325,7 @@ def run_build_stage(
                             failure="the study's time ran out before this built")
     started = time.perf_counter()
     try:
-        argv = build_command(problem.tree.build, tree=tree.path)
+        argv = build_command(problem.tree.build, tree=tree.path, python=problem.tree.python)
     except ValueError as exc:
         return StageOutcome(stage_id=stage.id, ok=False, failure=f"build: bad command: {exc}")
     # Beside the command stages' logs (`<work>/stage_out/`), not in `trees/`.
@@ -359,7 +362,7 @@ def restore_build(problem: ProblemConfig, *, log: Callable[[str], None]) -> None
 
     Called in a `finally` wherever candidates were built: the search, the final
     check, a preflight. Only a build that names `{python}` installs into the
-    shared interpreter; any other (a program's `make -C {tree}`) builds inside
+    shared interpreter (`problem.tree.python`); any other (a program's `make -C {tree}`) builds inside
     each tree, and is never run in the engineer's own folder. A failure is one
     warning through `log`, never raised: it must not hide what the run itself
     ended with.
@@ -371,7 +374,7 @@ def restore_build(problem: ProblemConfig, *, log: Callable[[str], None]) -> None
     checkout = Path(tree.repo)
     log(f"building {checkout} back into the application's Python")
     try:
-        argv = build_command(tree.build, tree=checkout)
+        argv = build_command(tree.build, tree=checkout, python=tree.python)
         with tempfile.TemporaryDirectory(prefix="evolvekit-build-", ignore_cleanup_errors=True) as scratch:
             out, err = Path(scratch) / "build.stdout.log", Path(scratch) / "build.stderr.log"
             run = run_bounded(argv, timeout=tree.build_timeout_s, cwd=checkout, stdout_path=out, stderr_path=err)

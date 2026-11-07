@@ -30,8 +30,9 @@ from typing import Any
 
 __all__ = [
     "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError",
-    "changed_files", "diff_between", "diff_stat", "git_version", "materialise", "normalise_diff", "remove",
-    "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "touches_only", "tree_dir",
+    "changed_files", "diff_between", "diff_stat", "git", "git_version", "glob_pattern", "materialise",
+    "normalise_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "touches_only",
+    "tree_dir",
 ]
 
 GIT_FLAGS = ("-c", "core.autocrlf=false", "-c", "core.quotepath=false", "-c", "core.longpaths=true")
@@ -104,6 +105,10 @@ def _git(cwd: Path | None, *args: str, identity: bool = False, env: Mapping[str,
         lines = done.stderr.decode("utf-8", errors="replace").strip().splitlines()
         raise TreeError(_plain(lines[-1].strip()) if lines else f"git {args[0]} stopped with exit code {done.returncode}")
     return done.stdout.decode("utf-8", errors="surrogateescape")
+
+
+git = _git
+"""The one way to call git (`_git`), for evolvekit's other modules: `harness check` lists a source's files."""
 
 
 class Repo:
@@ -462,6 +467,10 @@ def _glob(pattern: str) -> re.Pattern[str]:
             out.append(re.escape(pattern[i]))
             i += 1
     return re.compile("".join(out))
+
+
+glob_pattern = _glob
+"""`code.open`'s glob as a pattern for a path relative to the repo folder, as `touches_only` matches it."""
 
 
 def touches_only(diff: str, open: Sequence[str], *, prefix: str) -> list[str]:

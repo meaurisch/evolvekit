@@ -90,6 +90,7 @@ def _demo_copy(tmp_path: Path, **edit) -> Path:
     target = tmp_path / "demo"
     shutil.copytree(DEMO, target)
     manifest = yaml.safe_load((target / "harness.yaml").read_text(encoding="utf-8"))
+    manifest["code"]["repo"] = str(ROOT / "examples" / "cli-solver")  # relative, it would name a folder near the copy
     for dotted, value in edit.items():
         keys = dotted.split("__")
         node = manifest

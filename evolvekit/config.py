@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
@@ -208,11 +209,14 @@ class TreeConfig:
     build_timeout_s: float = 600.0
     app: str = ""
     """The program inside a candidate's tree, as `{tree}/...`: what `{app}` is."""
+    python: str = sys.executable
+    """The interpreter `{python}` stands for in `build`: the study's application
+    Python for a python harness, evolvekit's own otherwise."""
 
     @staticmethod
     def parse(raw: Any, path: str = "problem.tree") -> "TreeConfig":
         data = _as_mapping(raw, path)
-        _reject_unknown(data, {"repo", "base", "open", "build", "build_timeout_s", "app"}, path)
+        _reject_unknown(data, {"repo", "base", "open", "build", "build_timeout_s", "app", "python"}, path)
         repo = _as_str(_require(data, "repo", path), f"{path}.repo")
         if not (PurePosixPath(repo).is_absolute() or PureWindowsPath(repo).is_absolute()):
             raise ConfigError(f"{path}.repo: give the full path to the source folder; {repo!r} is relative")
@@ -228,6 +232,9 @@ class TreeConfig:
         if not isinstance(app, str):
             raise ConfigError(f"{path}.app: expected a path such as '{{tree}}/solver.py', got {app!r}")
         timeout = _as_positive(data.get("build_timeout_s", 600.0), f"{path}.build_timeout_s")
+        python = data.get("python") or sys.executable
+        if not isinstance(python, str) or not python.strip():
+            raise ConfigError(f"{path}.python: expected the path of a Python interpreter, got {python!r}")
         # Only a tree problem needs git: imported here, never for a skeleton.
         from evolvekit import tree
 
@@ -240,7 +247,7 @@ class TreeConfig:
         except tree.TreeError as exc:
             raise ConfigError(f"{path}.base: {exc}") from None
         return TreeConfig(repo=Path(repo), base=base, open=open_, build=build.strip(),
-                          build_timeout_s=timeout, app=app.strip())
+                          build_timeout_s=timeout, app=app.strip(), python=python.strip())
 
 
 @dataclass(frozen=True)

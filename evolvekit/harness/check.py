@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import random
 import shutil
 import sqlite3
@@ -222,21 +221,18 @@ def _sample_cases(harness: Harness, samples: int) -> list[Path]:
     return sorted(p for p in (harness.root / "samples").glob("*") if p.suffix.lower() in harness.cases.formats)[:samples]
 
 
-def _same_file(a: str, b: str) -> bool:
-    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+def _interpreter(harness: Harness, app: str) -> str:
+    """What `{python}` stands for in `code.build`: the application's Python (`--app`)
+    for a python harness, as a study's `problem.tree.python` is; evolvekit's otherwise."""
+    return app if harness.application.kind == "python" else sys.executable
 
 
 def _build_argv(harness: Harness, app: str, folder: Path) -> list[str]:
-    """`code.build` as argv for one folder (`{tree}`): `{python}` is the application's
-    Python for a python harness (as a study's compile writes it), evolvekit's otherwise."""
+    """`code.build` as argv for one folder (`{tree}`)."""
     from evolvekit.evaluate.stages import build_command
-    from evolvekit.harness.compile import _quoted
 
     assert harness.code is not None
-    template = harness.code.build
-    if harness.application.kind == "python":
-        template = template.replace("{python}", _quoted(app))
-    return build_command(template, tree=folder)
+    return build_command(harness.code.build, tree=folder, python=_interpreter(harness, app))
 
 
 def _last_line(text: str) -> str:
@@ -260,34 +256,22 @@ def _run_build(argv: list[str], *, cwd: Path, timeout: float, logs: Path) -> tup
     return None, run.duration_s
 
 
-def _put_back(harness: Harness, app: str, checkout: Path, base: str, logs: Path) -> list[Check]:
-    """Decision 31: a build that installs into a shared interpreter (one naming
-    `{python}`) is run once more on the engineer's own checkout, so the
-    interpreter never points at the removed clean checkout. A failure is a warning."""
+def _put_back(harness: Harness, app: str, checkout: Path, base: str) -> list[Check]:
+    """Decision 31: a build that installs into the shared interpreter (one naming
+    `{python}`) is run once more on the engineer's own checkout, through the
+    stage's own `restore_build`, so the interpreter never points at the removed
+    clean checkout. A failure is a warning."""
+    from evolvekit.config import ProblemConfig, TreeConfig
+    from evolvekit.evaluate.stages import restore_build
+
     code = harness.code
     assert code is not None
-    if "{python}" not in code.build:
-        return []
     said: list[str] = []
-    if harness.application.kind == "program" or _same_file(app, sys.executable):
-        # `{python}` is evolvekit's own interpreter: the stage's own restore, as a study does it.
-        from evolvekit.config import ProblemConfig, TreeConfig
-        from evolvekit.evaluate.stages import restore_build
-
-        problem = ProblemConfig(skeleton=None, tree=TreeConfig(
-            repo=checkout, base=base, open=code.open, build=code.build, build_timeout_s=code.build_timeout_s))
-        restore_build(problem, log=lambda line: said.append(line.removeprefix("warning: "))
-                      if line.startswith("warning:") else None)
-    else:
-        # Another interpreter: `restore_build` can only name evolvekit's, so the same build, by hand.
-        try:
-            reason, _ = _run_build(_build_argv(harness, app, checkout), cwd=checkout,
-                                   timeout=code.build_timeout_s, logs=logs)
-        except ValueError as exc:
-            reason = str(exc)
-        if reason is not None:
-            said.append(f"{checkout} could not be built back into the application's Python (build: {reason}); it "
-                        "may still run the clean checkout's code")
+    problem = ProblemConfig(skeleton=None, tree=TreeConfig(
+        repo=checkout, base=base, open=code.open, build=code.build, build_timeout_s=code.build_timeout_s,
+        python=_interpreter(harness, app)))
+    restore_build(problem, log=lambda line: said.append(line.removeprefix("warning: "))
+                  if line.startswith("warning:") else None)
     return [_warn("code.restore", line, f"run the build in {checkout} yourself: {code.build}") for line in said]
 
 
@@ -310,13 +294,13 @@ def _code_checks(harness: Harness, app: str, scratch: Path) -> list[Check]:
                       "point code.repo at a folder inside a git repository (git init, then commit it)")]
     checks.append(_pass("code.repo", f"code.repo is {repo.path}, in the git repository {repo.toplevel}"))
     try:
-        listed = [name for name in tree._git(repo.path, "ls-files", "-z", "--cached", "--", ".").split("\0") if name]
+        listed = [name for name in tree.git(repo.path, "ls-files", "-z", "--cached", "--", ".").split("\0") if name]
     except tree.TreeError as exc:
         return checks + [_fail("code.open", f"code.open: the source's files cannot be listed: {exc}",
                                "run git ls-files in code.repo by hand and fix what it says")]
     matched: list[str] = []
     for glob in code.open:
-        pattern = tree._glob(glob)  # matched as the static stage matches a change (`tree.touches_only`)
+        pattern = tree.glob_pattern(glob)  # matched as the static stage matches a change (`tree.touches_only`)
         found = [name for name in listed if pattern.fullmatch(name)]
         if not found:
             return checks + [_fail("code.open", f"code.open: no file of the source matches {glob}",
@@ -339,7 +323,7 @@ def _code_checks(harness: Harness, app: str, scratch: Path) -> list[Check]:
     finally:
         tree.remove_all(scratch)
         if code.build:
-            put_back = _put_back(harness, app, repo.path, commit, scratch / "restore")
+            put_back = _put_back(harness, app, repo.path, commit)
     checks += found + put_back
     if code.build and not any(c.severity == "failure" for c in found):
         checks.append(_pass("code.one_at_a_time", ONE_AT_A_TIME))

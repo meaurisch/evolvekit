@@ -6,10 +6,12 @@ when a run, the final check or a preflight ends (decision 31)."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -64,6 +66,30 @@ def test_build_command_splits_first_and_substitutes_second(tmp_path):
         sys.executable, "-m", "pip", "install", "-q", "-e", str(folder)]
     assert build_command('{python} -c "d = {}; print(d)"', tree=folder)[-1] == "d = {}; print(d)", \
         "other braces are the command's own"
+
+
+def test_build_command_renders_python_with_the_given_interpreter(tmp_path):
+    other = str(tmp_path / "app python" / "python.exe")
+    assert build_command("{python} -m pip install -e {tree}", tree=tmp_path, python=other)[0] == other
+    assert build_command("{python} -c pass", tree=tmp_path, python=None)[0] == sys.executable
+
+
+OTHER_PYTHON = getattr(sys, "_base_executable", sys.executable)
+"""Another interpreter than evolvekit's: the base Python a venv was made from."""
+
+
+@pytest.mark.skipif(os.path.normcase(OTHER_PYTHON) == os.path.normcase(sys.executable)
+                    or not Path(OTHER_PYTHON).is_file(), reason="no second interpreter (not run from a venv)")
+def test_the_build_and_its_restore_run_with_the_tree_s_python(project, tmp_path):
+    log = tmp_path / "pythons.log"
+    build = f'{{python}} -c "import sys; open(r\'{log}\', \'a\').write(sys.executable + chr(10))"'
+    made, problem, stage = _setup(project, tmp_path, build=build)
+    assert problem.tree.python == sys.executable, "evolvekit's own interpreter unless the config names one"
+    problem = replace(problem, tree=replace(problem.tree, python=OTHER_PYTHON))
+    assert run_build_stage(made, stage, problem).ok
+    restore_build(problem, log=lambda _m: None)
+    used = [os.path.normcase(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert used == [os.path.normcase(OTHER_PYTHON)] * 2, "the tree is built, and the checkout built back, with it"
 
 
 def test_build_runs_in_the_tree(project, tmp_path):

@@ -4,6 +4,7 @@ a clean checkout's build, and the samples solved from that checkout."""
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ import yaml
 
 from evolvekit.harness import HarnessError
 from evolvekit.harness.check import _build_argv, _code_checks, check_harness, exit_code
+from evolvekit.harness.library import new_harness, point_code_repo
 from evolvekit.harness.manifest import Code, load_harness, resolve_code_repo
 from harness_toy import MANIFEST, write_toy_harness
 
@@ -200,6 +202,47 @@ def test_check_a_python_harness_solves_with_the_application_python(tmp_path):
     checks = _code_checks(harness, sys.executable, tmp_path / "scratch")
     assert [c.id for c in checks] == ["code.repo", "code.open", "code.build", "code.samples", "code.one_at_a_time"]
     assert all(c.ok for c in checks), checks
+
+
+OTHER_PYTHON = getattr(sys, "_base_executable", sys.executable)
+
+
+@pytest.mark.skipif(os.path.normcase(OTHER_PYTHON) == os.path.normcase(sys.executable)
+                    or not Path(OTHER_PYTHON).is_file(), reason="no second interpreter (not run from a venv)")
+def test_check_builds_into_the_app_python_and_puts_it_back(tmp_path):
+    log = tmp_path / "pythons.log"
+    build = f'{{python}} -c "import os, sys; open(r\'{log}\', \'a\').write(sys.executable + \'|\' + os.getcwd() + chr(10))"'
+    harness = load_harness(_toy(tmp_path, {"label": "s", "repo": str(CLI_SOLVER), "open": ["solver.py"],
+                                           "build": build}))
+    checks = _code_checks(harness, OTHER_PYTHON, tmp_path / "scratch")
+    assert all(c.ok for c in checks), checks
+    (in_tree, tree_cwd), (back, checkout) = [line.split("|") for line in log.read_text().splitlines()]
+    assert os.path.normcase(in_tree) == os.path.normcase(back) == os.path.normcase(OTHER_PYTHON), \
+        "the --app Python builds the tree, and the checkout is built back into it"
+    assert "trees" in Path(tree_cwd).parts and Path(checkout) == CLI_SOLVER.resolve()
+
+
+def test_a_harness_copied_with_new_keeps_its_source(tmp_path):
+    target = new_harness(tmp_path / "mine", source=DEMO)
+    text = (target / "harness.yaml").read_text(encoding="utf-8")
+    assert "# The source a code study may change" in text, "one line changes; the comments stay"
+    copied = load_harness(target)
+    assert copied.code.repo == str(CLI_SOLVER.resolve()) and copied.code.open == ("solver.py",)
+    assert resolve_code_repo(copied.root, copied.code) == CLI_SOLVER.resolve()
+    again = new_harness(tmp_path / "again", source=target)
+    assert load_harness(again).code.repo == str(CLI_SOLVER.resolve()), "an absolute repo is copied as it is"
+    plain = new_harness(tmp_path / "plain", source=write_toy_harness(tmp_path / "toy-src"))
+    assert load_harness(plain).code is None
+
+
+def test_point_code_repo_rewrites_one_line(tmp_path):
+    target = tmp_path / "copy"
+    shutil.copytree(DEMO, target, ignore=shutil.ignore_patterns("__pycache__"))
+    before = (target / "harness.yaml").read_text(encoding="utf-8").splitlines()
+    point_code_repo(target, "..")
+    after = (target / "harness.yaml").read_text(encoding="utf-8").splitlines()
+    assert [(a, b) for a, b in zip(before, after) if a != b] == [("  repo: ../../examples/cli-solver", '  repo: ".."')]
+    assert load_harness(target).code.repo == ".."
 
 
 def test_demo_tour_loads_with_code(tmp_path):
