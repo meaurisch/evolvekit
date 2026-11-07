@@ -1569,7 +1569,11 @@ limits:
   time_per_case_s: 2.0     # the application's time limit on each case
 budget:
   hours: 0.1               # the whole study, final check included
+plan: {auto: true}         # or {auto: false, children: 2, generations: 2}: children = combinations per round, generations = rounds
 ```
+
+A manual plan (`auto: false`) sets the rounds: the search stops when they
+are done, and the hours are only the most it may take.
 
 **Go:**
 

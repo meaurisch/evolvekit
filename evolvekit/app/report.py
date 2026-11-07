@@ -110,13 +110,19 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     out += ["", "## Held-back cases", ""]
     rows = verdict.get("by_case") or []
     if rows:
-        out += _table(["Case", "Start", "Best", f"Change in {measure.get('label') or 'the measure'}", "Outcome"],
+        # Start and best are means over the final check's runs; the change is the paired mean of the
+        # runs' changes -- the verdict's own figure -- so it need not be the change of the two means.
+        runs = (verdict.get("held_back") or {}).get("runs_per_case")
+        of = f" (mean of {runs} run{'s' if runs != 1 else ''})" if runs else " (mean)"
+        out += _table(["Case", f"Start{of}", f"Best{of}",
+                       f"Change in {measure.get('label') or 'the measure'} (mean of the paired runs)", "Outcome"],
                       [[r["name"], _number(r.get("start")), _number(r.get("best")), _change(r.get("change_pct"), direction),
                         _OUTCOME.get(r.get("outcome"), r.get("outcome") or "")] for r in rows])
     else:
         out.append("No cases were checked.")
 
-    out += ["", "## What changed", ""]
+    out += ["", "## What changed (recommended)" if verdict.get("decision") == "use"
+            else "## What changed (found, not recommended)", ""]
     changed = verdict.get("changed") or []
     if changed:
         out += _table(["Setting or data change", "From", "To"], [[c["label"], c["from"], c["to"]] for c in changed])
@@ -126,7 +132,11 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     learned, held = verdict.get("learned_from") or {}, verdict.get("held_back") or {}
     ran = [f"Cases learned from: {learned['cases']}" + (f" ({_change(learned['pct'], direction)} on them)" if learned.get("pct") is not None else "")
            ] if learned.get("cases") is not None else []
-    for label, value in (("Rounds", verdict.get("rounds")), ("Combinations tried", verdict.get("combinations")),
+    tried = verdict.get("combinations")
+    if isinstance(tried, int) and tried >= 1:
+        # `combinations` counts the starting point too: say the plan's number, and the start beside it.
+        tried = f"{tried - 1}, plus today's settings"
+    for label, value in (("Rounds", verdict.get("rounds")), ("Combinations tried", tried),
                          ("Time", _duration(verdict.get("elapsed_s"))), ("Started", _when(verdict.get("started_at"))),
                          ("Held-back cases", held.get("cases")),
                          ("Runs per case in the final check", held.get("runs_per_case"))):

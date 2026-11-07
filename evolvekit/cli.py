@@ -950,7 +950,7 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
         for slug in home.slugs():
             root, study, harness = home.load(slug)
             rows.append({"slug": slug, "name": study.name, "harness": harness.title,
-                         "state": jobs.state_line(root, study)["line"]})
+                         "state": jobs.state_line(root, study, build_status)["line"]})  # the round, as the README shows
         if args.json:
             print(json.dumps(rows))
         for row in [] if args.json else rows:
@@ -966,6 +966,7 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
             return 2
         _advance_step(home.study_root(slug), len(STEPS))  # ready: the Set up's last step, Review and start
         print("ready: no problems")
+        _say_next(args, f"study start {slug}")
         return 0
     if command == "application":
         if args.detect:
@@ -1011,6 +1012,7 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
         return 1
     if result["added"]:
         _advance_step(home.study_root(slug), _STEP_AFTER_CASES)
+        _say_next(args, f"study check {slug}")
     return 0
 
 
@@ -1051,12 +1053,14 @@ def _tick_queue(home) -> None:
 
 def _gone(run_dir: Path, state: str | None) -> bool:
     """Whether the run has left: its folder is gone, or it reads as nothing
-    -- not queued, no launch under way, no job -- as a dequeue leaves it."""
+    -- not queued, no launch under way, no job -- as a dequeue leaves it.
+    A run with a `job.json` is never gone, whatever its phase reads as."""
     from evolvekit.app import jobs
 
     if not run_dir.is_dir():
         return True
-    return state == "unknown" and not (run_dir / jobs.QUEUED).exists() and not (run_dir / jobs.LAUNCH).exists()
+    return (state == "unknown" and not (run_dir / jobs.QUEUED).exists() and not (run_dir / jobs.LAUNCH).exists()
+            and not (run_dir / "job.json").exists())
 
 
 def _say_gone(run: str) -> int:
@@ -1071,6 +1075,21 @@ def _run_of(root: Path, run: str | None = None) -> str:
     if not run:
         raise AppError("the study has not been started yet", 404)
     return run
+
+
+def _home_flag(home: str | None) -> str:
+    """` --home "<home>"` as the user wrote it, quoted for any shell; nothing without one."""
+    return f' --home "{home}"' if home else ""
+
+
+def _say_next(args: argparse.Namespace, *commands: str, tail: str = "") -> None:
+    """The next step for people, on stderr (`next: evolvekit study start depot-a`), with the
+    `--home` the user passed: never on stdout and never with `--json`, so scripts read what they did."""
+    if getattr(args, "json", False):
+        return
+    flag = _home_flag(getattr(args, "home", None))
+    said = ", or ".join(command + flag for command in commands)
+    print(f"next: evolvekit {said}{tail}", file=sys.stderr)
 
 
 def _say_verdict(document: dict) -> None:
@@ -1139,9 +1158,10 @@ def _verdict_command(command: str, args: argparse.Namespace) -> int:
     return 0
 
 
-def _wait(home, slug: str, timeout: float | None, as_json: bool) -> int:
+def _wait(home, slug: str, timeout: float | None, as_json: bool, args: argparse.Namespace | None = None) -> int:
     """`study wait`: until the latest run has ended -- 0 done (the verdict),
-    1 stopped or failed, 4 when `timeout` seconds pass first."""
+    1 stopped or failed, 4 when `timeout` seconds pass first. With `args`, a
+    run that is done says the next step on stderr."""
     from evolvekit.app import jobs
     from evolvekit.app.verdict import build_verdict
 
@@ -1181,6 +1201,8 @@ def _wait(home, slug: str, timeout: float | None, as_json: bool) -> int:
         print(jobs.run_line(root, study, run_dir, build_status)["line"])
     if state != "done" and job.get("error"):
         print(job["error"], file=sys.stderr)
+    if state == "done" and args is not None:
+        _say_next(args, f"study report {slug} --markdown", f"study open {slug}")
     return 0 if state == "done" else 1
 
 
@@ -1224,7 +1246,7 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
     home = _home(args)
     slug = args.slug
     if command == "wait":
-        return _wait(home, slug, args.timeout, args.json)
+        return _wait(home, slug, args.timeout, args.json, args)
     if command == "watch":
         return _watch(home, slug, args.every, args.json)
     root, study, _ = home.load(slug)
@@ -1239,7 +1261,10 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         else:
             document, line = {"run": run, "started": True}, f"started run {run}"
         print(json.dumps(document) if args.json else line, flush=True)
-        return _wait(home, slug, args.timeout, args.json) if args.wait else 0
+        if args.wait:
+            return _wait(home, slug, args.timeout, args.json, args)
+        _say_next(args, f"study wait {slug}", tail=" (or study watch)")
+        return 0
     if command == "stop":
         run = _run_of(root)
         answer = jobs.stop(root, run)
@@ -1289,6 +1314,7 @@ def cmd_study(args: argparse.Namespace) -> int:
         home = _home(args)
         given = Path(args.harness)  # a harness folder on disk, else an id the home knows
         slug = home.create_study(args.harness, args.template, args.name, folder=given if given.is_dir() else None)
+        answer = None
         if args.app:
             answer = home.set_application(slug, _full_path(args.app))
             if not answer["ok"]:
@@ -1298,8 +1324,12 @@ def cmd_study(args: argparse.Namespace) -> int:
             _advance_step(home.study_root(slug), _STEP_AFTER_APPLICATION)
         if args.json:
             print(json.dumps({"slug": slug, "root": str(home.study_root(slug))}))
-        else:
-            print(slug)
+            return 0
+        print(slug)
+        if answer is not None:
+            print(f"application: {answer['path']}" + (f" (version {answer['version']})" if answer.get("version") else ""),
+                  file=sys.stderr)
+        _say_next(args, f"study cases {slug} --add <files> --hold-back N")
         return 0
     if command in ("application", "list", "check", "cases"):
         return _study_library_command(command, args)

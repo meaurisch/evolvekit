@@ -1331,7 +1331,8 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 
 def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) -> dict[str, Any]:
     """The home card's state in a few words: "draft · step 4 of 7", "running ·
-    1 h 10 min left · 3.2 % lower real cost so far, not checked yet", "finished · probably better: 3.1 %
+    round 2 of 6 · 1 h 10 min left · 3.2 % lower real cost so far, not checked yet" (the round only with
+    `document_of`; no time left when the rounds were set by hand), "finished · probably better: 3.1 %
     lower real cost", "finished · not proven on the held-back cases". A draft
     is `study` as it is today; a run is described by the study it was
     started with (the copy the latest run keeps). Besides the words, the
@@ -1366,6 +1367,15 @@ def _check_progress(run_dir: Path, job: dict[str, Any], plan: dict[str, Any], st
             done = sum(1 for line in handle if '"eval_finished"' in line)
     planned = 2 * cases * seeds
     return {"done": min(done, planned), "planned": planned}
+
+
+def _rounds_by_hand(plan: dict[str, Any], study: Study | None) -> bool:
+    """Whether the run's rounds were set by hand (`plan: {auto: false, generations: …}`):
+    then the rounds stop the search, and the hours are only an upper bound."""
+    if "adjusted" in plan:
+        return bool({"rounds", "generations"} & set(plan.get("adjusted") or ()))
+    chosen = getattr(study, "plan", None) or {}
+    return not chosen.get("auto", True) and bool({"rounds", "generations"} & set(chosen))
 
 
 def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None) -> dict[str, Any]:
@@ -1410,7 +1420,19 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         started, hours = _window(job, run_dir, float(plan.get("hours")
                                                       or (study.budget.hours if study is not None else 0)))
         left = max(0.0, hours * 3600 - (_now() - started).total_seconds()) if started and hours else None
-        line = "running" + (" · continued" if _continued(job) else "") + (f" · {_duration(left)} left" if left is not None else "")
+        if _rounds_by_hand(plan, study) and not _continued(job):
+            # The rounds stop a manual plan, not the hours: the hours' "time left" would be wrong.
+            left = None
+        planned = facts["rounds"]["planned"]
+        where = ""
+        if state == "check":
+            where = " · final check"
+        elif isinstance(last, int):
+            current = max(1, last + 1)
+            current = min(current, planned) if planned else current
+            where = f" · round {current}" + (f" of {planned}" if planned else "")
+        line = ("running" + (" · continued" if _continued(job) else "") + where
+                + (f" · {_duration(left)} left" if left is not None else ""))
         if document_of is not None and (run_dir / "events.jsonl").exists():
             if pct is not None and pct > 0:
                 # Not "better": nothing claims that before the final check does.

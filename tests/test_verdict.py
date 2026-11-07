@@ -85,6 +85,24 @@ def test_page_line_equals_verdict_line(decision, run_of):
     assert r["final"]["line"] == v["line"] and r["final"]["advice"] == v["advice"]
 
 
+@pytest.mark.parametrize("decision", ["keep", "worse", "single", "pending", "stopped", "skipped", "none"])
+def test_advice_says_keep_todays_settings_unless_use(decision, run_of):
+    """The action outright, as the app says it: anything but `use` keeps today's settings, with why after the colon."""
+    v = build_verdict(*run_of(decision))
+    assert v["advice"].startswith("Keep today's settings"), v["advice"]
+    assert ": " in v["advice"], "the reason after the colon"
+
+
+def test_advice_for_use_says_use(use_run):
+    assert build_verdict(*use_run)["advice"].startswith("Use the new settings")
+
+
+def test_verdict_combinations_count_the_starting_point(use_run):
+    """`combinations` counts every combination measured, the starting point among them (stable meaning)."""
+    v = build_verdict(*use_run)
+    assert v["combinations"] == 2, "the starting point and c1"
+
+
 def test_verdict_pending_has_no_numbers(run_of):
     v = build_verdict(*run_of("pending"))
     assert v["decision"] == "pending"

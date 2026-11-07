@@ -750,3 +750,66 @@ def test_open_refuses_a_study_that_is_not_there(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(detach, "spawn_detached", never)
     assert main(["study", "open", "nope", "--no-browser", "--home", str(tmp_path / "home")]) == 1
     assert "there is no study" in capsys.readouterr().err
+
+
+# -- the next step, on stderr: for people, never in the way of a script
+
+
+def test_a_ready_check_says_start_next(tmp_path, capsys):
+    _new(tmp_path, "Depot A", "--template", "tune", "--app", str(SOLVER))
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    assert f'next: evolvekit study check depot-a --home "{tmp_path}"' in capsys.readouterr().err
+    assert main(["study", "check", "depot-a", "--home", str(tmp_path)]) == 0
+    out, err = capsys.readouterr()
+    assert out == "ready: no problems\n", "stdout keeps its contract"
+    assert f'next: evolvekit study start depot-a --home "{tmp_path}"' in err
+
+
+def test_study_new_says_the_application_then_the_next_step(tmp_path, capsys):
+    assert _new(tmp_path, "Depot A", "--app", str(SOLVER)) == 0
+    out, err = capsys.readouterr()
+    assert out == "depot-a\n"
+    lines = err.splitlines()
+    assert lines[0].startswith(f"application: {SOLVER} (version ")
+    assert lines[1].startswith("next: evolvekit study cases depot-a --add <files> --hold-back N --home ")
+
+
+def test_no_hint_with_json_or_without_home(tmp_path, monkeypatch, capsys):
+    _new(tmp_path, "Depot A", "--json")
+    assert "next:" not in capsys.readouterr().err
+    monkeypatch.setenv("EVOLVEKIT_HOME", str(tmp_path))
+    assert main(["study", "new", "Depot B", "--harness", "demo-tour"]) == 0
+    assert "next: evolvekit study cases depot-b --add <files> --hold-back N\n" in capsys.readouterr().err, "no --home given"
+
+
+def test_start_and_a_finished_wait_say_what_comes_next(tmp_path, monkeypatch, capsys):
+    from evolvekit.app import jobs
+
+    _new(tmp_path)
+    monkeypatch.setattr(jobs, "start", lambda home, root: {"run": "20260101-000000", "started": True})
+    capsys.readouterr()
+    assert main(["study", "start", "depot-a", "--home", str(tmp_path)]) == 0
+    out, err = capsys.readouterr()
+    assert out == "started run 20260101-000000\n"
+    assert "next: evolvekit study wait depot-a" in err and "(or study watch)" in err
+    run_dir = tmp_path / "studies" / "depot-a" / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "job.json").write_text(json.dumps({
+        "phase": "done", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00",
+        "finished_at": "2026-01-01T00:10:00+00:00", "plan": {"generations": 2, "rounds": 2, "hours": 0.05},
+        "final": {"skipped": "no cases were held back"}}), encoding="utf-8")
+    assert main(["study", "wait", "depot-a", "--home", str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    assert f'next: evolvekit study report depot-a --markdown --home "{tmp_path}", or study open depot-a' in err
+    assert main(["study", "wait", "depot-a", "--json", "--home", str(tmp_path)]) == 0
+    assert "next:" not in capsys.readouterr().err
+
+
+def test_a_run_with_a_job_is_never_gone(tmp_path):
+    from evolvekit.cli import _gone
+
+    run_dir = tmp_path / "runs" / "r"
+    run_dir.mkdir(parents=True)
+    assert _gone(run_dir, "unknown"), "nothing in it: gone"
+    (run_dir / "job.json").write_text("{}", encoding="utf-8")
+    assert not _gone(run_dir, "unknown"), "a job.json is a run, whatever its phase reads as"

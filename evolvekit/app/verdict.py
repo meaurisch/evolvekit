@@ -8,7 +8,12 @@ needs no server and starts no process -- and returns a document with the keys
 `held_back`, the statistics (`mean_pct`, `ci95_pct`, `worst_pct`, `chance`,
 `chance_words`; absent while there is no answer: `pending`, `stopped`,
 `skipped`), `levels` (goals in order of importance), `learned_from`, `rule`,
-`by_case`, `changed`, `files` and how it ran. The page (`jobs.results`), the
+`by_case`, `changed`, `files` and how it ran. In `by_case`, `start` and `best`
+are a held-back case's means over the final check's runs and `change_pct` is
+the paired mean of the runs' changes (the statistic of `mean_pct`), so the two
+need not agree with each other. `combinations` counts every combination the
+search measured, the starting point among them: a plan of 2 combinations a
+round for 2 rounds gives 5. The page (`jobs.results`), the
 command line and the report all render from it, so they cannot disagree.
 
 The words themselves -- the chance in twentieths, the decision of a run made
@@ -113,20 +118,23 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     final = job.get("final") or {}
     new = f"the new {what}"
     they = "it is" if what.startswith("combination") else "they are"
-    keep = {"settings": "Keep your current settings", "data changes": "Keep your data as it is"}.get(
-        what, "Keep your current settings and data")
+    # Anything but "use" says the action outright, as the page does: keep today's settings, then why.
+    keep = {"settings": "Keep today's settings", "data changes": "Keep today's data"}.get(
+        what, "Keep today's settings and data")
     if baseline and what != "data changes":
         keep += f" ({baseline})"
     if final.get("skipped"):
         reason = str(final["skipped"])
         advice = (f"{keep}: the search found nothing better." if "starting point stayed the best" in reason else
-                  f"Not sure: nothing was held back to check {new} on. A study that holds back a few cases can tell.")
+                  f"{keep}: nothing was held back to check {new} on; a study that holds back a few cases can tell.")
         return {"state": "skipped", "line": reason[0].upper() + reason[1:] + ".", "advice": advice}
     if final.get("stopped"):
         return {"state": "stopped", "line": "The final check was stopped before it finished.",
-                "advice": "Run the final check to get an answer; the runs it already did are kept."}
+                "advice": f"{keep}: the final check was stopped before it could tell; run it again for an answer "
+                          "(the runs it already did are kept)."}
     if comparison is None:
-        return {"state": "missing", "line": "There is no final check for this run.", "advice": ""}
+        return {"state": "missing", "line": "There is no final check for this run.",
+                "advice": f"{keep}: there is no final check yet to tell."}
     candidate = final.get("candidate") or next(iter(comparison.get("per_candidate") or {}), None)
     result = (comparison.get("per_candidate") or {}).get(candidate) or {}
     summary = result.get("summary") or {}
@@ -158,7 +166,7 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     if ci is None or decision == "single":
         return {**base, "state": "single",
                 "line": f"On the one held-back case: {_pct(mean)} {word} {goal['says']}.",
-                "advice": "Not sure: one held-back case is too few to tell. A study that holds back three or more can."}
+                "advice": f"{keep}: one held-back case is too few to tell; a study that holds back three or more can."}
     low, high = ci
     words = _chance_words(chance)
     sure = words == "almost certain"
@@ -377,6 +385,12 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
         document["levels"] = levels
     document["learned_from"] = {"cases": len(study.training), "pct": learned_pct}
     document["rule"] = RULE_WORDS
+    # A case's change is the comparison's own: the paired mean over the final check's runs, the
+    # statistic the line is made of -- not the change of the means, which can differ by a few tenths.
+    paired = {} if "levels" in result else {
+        str(r.get("instance")): r["improvement_pct"] for r in result.get("per_instance") or []
+        if isinstance(r, dict) and _number(r.get("improvement_pct")) is not None}
+    held = [{**row, "change_pct": paired.get(row["case"], row["change_pct"])} for row in held]
     document["by_case"] = [{"name": row["case"], "start": row["start"], "best": row["best"],
                             "change_pct": row["change_pct"], "outcome": _outcome(row)} for row in held]
     document["changed"] = [{"name": c["name"], "label": c["label"], "from": c["old_text"], "to": c["new_text"]}

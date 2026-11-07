@@ -60,7 +60,7 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     keep = words_for([-9.0, 11.5, -0.4])
     assert keep["state"] == "unclear" and keep["decision"] == "keep"
     assert keep["line"].startswith("Not proven on 3 held-back cases: a chance of about 11 in 20 of a gain; at worst 24.9 % worse")
-    assert keep["advice"] == "Keep your current settings for now: the gain is not proven."
+    assert keep["advice"] == "Keep today's settings for now: the gain is not proven."
     worse = words_for([-1.5, -1.0, -1.2, -0.8])
     assert worse["state"] == "worse" and worse["decision"] == "worse"
     assert worse["line"].startswith("Worse on 4 held-back cases: 1.1 % higher real cost, a chance of 1 in 20 or less of a gain")
@@ -79,7 +79,7 @@ def test_the_final_check_says_what_to_do():
     assert unclear["state"] == "unclear" and unclear["decision"] == "keep"
     assert unclear["line"] == ("Not proven on 3 held-back cases: a chance of about 12 in 20 of a gain; at worst 10.1 % worse "
                                "(somewhere between 10.1 % worse and 11.5 % better).")
-    assert unclear["advice"] == "Keep your current settings for now: the gain is not proven."
+    assert unclear["advice"] == "Keep today's settings for now: the gain is not proven."
     confirmed = words([1.2, 5.0], 3.1)
     assert confirmed["line"] == ("Probably better: 3.1 % lower real cost on 3 held-back cases, a chance of about 20 in 20; "
                                  "at least 1.2 % better than your starting point.")
@@ -87,14 +87,14 @@ def test_the_final_check_says_what_to_do():
     worse = words([-8.0, -1.0], -4.0)
     assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of 1 in 20 or less of a gain "
                              "(likely between 1.0 % and 8.0 % worse).")
-    assert worse["advice"] == "Keep your current settings: the new settings did worse on cases the search never saw."
-    assert words(None, 2.0)["advice"].startswith("Not sure: one held-back case is too few")
-    assert words([-1.0, 2.0], 0.5, what="data changes")["advice"].startswith("Keep your data as it is")
+    assert worse["advice"] == "Keep today's settings: the new settings did worse on cases the search never saw."
+    assert words(None, 2.0)["advice"].startswith("Keep today's settings: one held-back case is too few")
+    assert words([-1.0, 2.0], 0.5, what="data changes")["advice"].startswith("Keep today's data")
     assert words([-1.0, 2.0], 0.5, baseline="PyVRP's own defaults")["advice"] == \
-        "Keep your current settings (PyVRP's own defaults) for now: the gain is not proven.", "named, when it is known"
+        "Keep today's settings (PyVRP's own defaults) for now: the gain is not proven.", "named, when it is known"
     kept = jobs._final_words({"final": {"skipped": "the starting point stayed the best: there is nothing to check"}},
                              None, GOAL, "settings")
-    assert kept["advice"] == "Keep your current settings: the search found nothing better."
+    assert kept["advice"] == "Keep today's settings: the search found nothing better."
 
 
 def test_an_open_answer_can_be_checked_again_with_twice_the_runs():
@@ -163,7 +163,7 @@ def test_a_summary_to_paste():
     data["context"]["compared_with"] = "PyVRP's own defaults"
     assert jobs._summary_text(data).splitlines() == [
         "PyVRP: tune solver settings (PyVRP), run 20260927-005503",
-        "Answer: Keep your current settings for now: the gain is not proven.",
+        "Answer: Keep today's settings for now: the gain is not proven.",
         "The app says use it when the chance of a gain is at least 9 in 10 and the worst plausible case is within 1 % of today.",
         "Set-up: 20 s per case, 30 min in total; the search learned from 2 cases and was checked on 1 held-back case."
         " Compared with PyVRP's own defaults.",
@@ -315,6 +315,42 @@ def test_every_run_of_a_study_has_its_line_and_kind(tmp_path):
     assert [r["decision"] for r in listed] == ["use", "keep", "keep"]
     assert jobs.state_line(root, study) == jobs.run_line(root, study, root / "runs" / "20260103-000000")
     assert jobs.state_line(root, study)["run"] == "20260103-000000"
+
+
+def test_a_running_run_says_its_round_and_a_manual_plan_no_stale_time(tmp_path, monkeypatch):
+    import json
+    import os
+    import re
+
+    import yaml
+
+    from evolvekit.harness.study import load_study
+
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    now = jobs._now()  # noqa: SLF001
+    job = {"phase": "search", "pid": os.getpid(), "started_at": now.isoformat(), "plan": {"hours": 1.0, "rounds": 6}}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
+
+    def status(_run_dir: Path) -> dict:
+        return {"health": {"generation": {"last_finished": 1}}}
+
+    line = jobs.run_line(root, load_study(root), run_dir, status)["line"]
+    assert re.fullmatch(r"running · round 2 of 6 · (60|59) min left", line), line
+    # Rounds set by hand stop the search, not the hours: no "time left" from the hours.
+    job["plan"] = {"hours": 1.0, "rounds": 2, "adjusted": ["generations"]}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    assert jobs.run_line(root, load_study(root), run_dir, status)["line"] == "running · round 2 of 2"
+    # ... also read from the study when the plan does not say.
+    job["plan"] = {"hours": 1.0, "rounds": 2}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    data = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    data["plan"] = {"auto": False, "children": 2, "generations": 2}
+    (root / "study.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    assert jobs.run_line(root, load_study(root), run_dir, status)["line"] == "running · round 2 of 2"
 
 
 def test_a_running_run_says_how_far_it_got_only_when_asked(tmp_path, monkeypatch):
