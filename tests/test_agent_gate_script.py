@@ -176,7 +176,9 @@ def test_fixture_prints_bash_lines(tmp_path, capsys):
     where = tmp_path / "persona round"
     assert agent_gate.main(["--fixture", str(where), "--no-harness"]) == 0
     lines = capsys.readouterr().out.strip().splitlines()
-    assert lines.pop(0) == "unset CLAUDECODE"
+    unset = [line for line in lines if line.startswith("unset ")]
+    assert "unset CLAUDECODE" in unset and lines[:len(unset)] == unset
+    del lines[:len(unset)]
     home, repo = (where / "home").resolve(), (where / "repo").resolve()
     assert lines[0] == f'export EVOLVEKIT_HOME="{home.as_posix()}"'
     assert lines[1].startswith('export PATH="') and lines[1].endswith(':$PATH"') and "\\" not in lines[1]
@@ -191,17 +193,42 @@ def test_fixture_prints_bash_lines(tmp_path, capsys):
     assert not (repo / ".claude" / "settings.json").exists()
 
 
-def test_gate_env_drops_the_launching_sessions_variables(tmp_path, monkeypatch):
-    dropped = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_PID", "CLAUDE_EFFORT",
-               "CLAUDE_PREVIEW_PORT", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_SMALL_FAST_MODEL"]
-    for name in dropped:
+DROPPED = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_PID", "CLAUDE_EFFORT",
+           "CLAUDE_PREVIEW_PORT"]
+KEPT = ["CLAUDE_CODE_GIT_BASH_PATH", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+        "ANTHROPIC_API_KEY", "CLAUDE_CLI_PATH"]
+
+
+def _session_env(monkeypatch):
+    for name in list(agent_gate.os.environ):
+        if agent_gate._from_session(name):
+            monkeypatch.delenv(name)
+    for name in DROPPED + KEPT:
         monkeypatch.setenv(name, "1")
-    monkeypatch.setenv("CLAUDE_CLI_PATH", "/bin/claude")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+
+def test_gate_env_drops_the_launching_sessions_identity_and_keeps_the_sign_in(tmp_path, monkeypatch):
+    _session_env(monkeypatch)
     env = agent_gate.gate_env(tmp_path / "home")
-    assert not set(dropped) & {k.upper() for k in env}
-    assert env["CLAUDE_CLI_PATH"] == "/bin/claude" and env["ANTHROPIC_API_KEY"] == "test-key"
+    upper = {k.upper() for k in env}
+    assert not set(DROPPED) & upper
+    assert set(KEPT) <= upper
+    assert set(agent_gate.KEEP) == set(KEPT[:6])
     assert env["EVOLVEKIT_HOME"] == str(tmp_path / "home")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("shell", ["bash", "powershell"])
+def test_fixture_unsets_what_the_gate_drops(tmp_path, monkeypatch, capsys, shell):
+    _session_env(monkeypatch)
+    monkeypatch.delenv("CLAUDECODE")
+    assert agent_gate.main(["--fixture", str(tmp_path / "f"), "--shell", shell]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    unset = "unset " if shell == "bash" else "Remove-Item Env:"
+    names = [line[len(unset):].split()[0] for line in lines if line.startswith(unset)]
+    assert sorted(names) == sorted(DROPPED), "CLAUDECODE always, and every dropped name present"
+    assert lines[:len(names)] == [line for line in lines if line.startswith(unset)]
 
 
 def test_posix_path():
@@ -216,7 +243,9 @@ def test_fixture_prints_powershell_lines_and_refuses_a_taken_folder(tmp_path, ca
     where = tmp_path / "persona round"
     assert agent_gate.main(["--fixture", str(where), "--shell", "powershell"]) == 0
     lines = capsys.readouterr().out.strip().splitlines()
-    assert lines.pop(0) == "Remove-Item Env:CLAUDECODE -ErrorAction SilentlyContinue"
+    unset = [line for line in lines if line.startswith("Remove-Item Env:")]
+    assert "Remove-Item Env:CLAUDECODE -ErrorAction SilentlyContinue" in unset and lines[:len(unset)] == unset
+    del lines[:len(unset)]
     home, repo = (where / "home").resolve(), (where / "repo").resolve()
     scripts = Path(sys.executable).parent
     assert lines[:3] == [f'$env:EVOLVEKIT_HOME = "{home}"', f'$env:PATH = "{scripts}{agent_gate.os.pathsep}" + $env:PATH',
@@ -249,15 +278,20 @@ def test_a_timeout_kills_the_whole_tree(tmp_path, monkeypatch):
     transcript = tmp_path / "logs" / "t.txt"
     env = {**agent_gate.os.environ, "EVOLVEKIT_HOME": str(tmp_path / "home")}
     began = time.monotonic()
-    output = agent_gate.run_tool("fake", tmp_path, str(pid_file), timeout_s=2, env=env, transcript=transcript)
-    assert time.monotonic() - began < 15
-    assert "partial output" in output and "stopped the tool after 2 s" in output
+    output = agent_gate.run_tool("fake", tmp_path, str(pid_file), timeout_s=5, env=env, transcript=transcript)
+    assert "stopped the tool after 5 s" in output
     assert transcript.is_file()
+    deadline = time.monotonic() + 10  # under load the fake tool may write its pid file late
+    while not pid_file.is_file() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert pid_file.is_file(), "the fake tool never started its child"
+    assert "partial output" in output
     pid = int(pid_file.read_text(encoding="utf-8"))
     deadline = time.monotonic() + 5
     while _alive(pid) and time.monotonic() < deadline:
         time.sleep(0.2)
     assert not _alive(pid)
+    assert time.monotonic() - began < 40
 
 
 def _gate_args(tmp_path, monkeypatch):
@@ -296,3 +330,23 @@ def test_a_failing_verdict_and_clean_up_are_fail_lines(tmp_path, monkeypatch, ca
     out = capsys.readouterr().out
     assert "FAIL report_equals_verdict_line: no verdict: RuntimeError: boom" in out
     assert "FAIL clean_up: RuntimeError: boom" in out and "PASS study_exists" in out
+
+
+def test_a_study_wait_that_hangs_is_a_fail_line(tmp_path, monkeypatch, capsys):
+    argv = _gate_args(tmp_path, monkeypatch)
+    monkeypatch.setattr(agent_gate, "run_tool", lambda *a, **k: "said")
+    monkeypatch.setattr(agent_gate, "checks", lambda home, output: [{"name": n, "ok": True, "detail": ""} for n in (
+        "study_exists", "application_set", "study_started_or_queued")])
+    monkeypatch.setattr(agent_gate, "the_study", lambda home: ("gate", tmp_path / "study"))
+    monkeypatch.setattr(agent_gate, "_clean_up", lambda *a, **k: None)
+    given = {}
+
+    def hangs(*args, env, timeout=None):
+        given["timeout"] = timeout
+        raise subprocess.TimeoutExpired(args, timeout)
+
+    monkeypatch.setattr(agent_gate, "_evolvekit", hangs)
+    assert agent_gate.main([*argv, "--wait-timeout", "30"]) == 1
+    assert given["timeout"] == 150
+    out = capsys.readouterr().out
+    assert "FAIL study_finished: study wait: TimeoutExpired" in out and "Traceback" not in out

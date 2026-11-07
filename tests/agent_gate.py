@@ -15,8 +15,8 @@ runs a real study, and the full gate has timing-sensitive tests):
 
 Exit 0 when every check passes, 1 when one fails (a failure is always a FAIL line, never a traceback), 2 when
 the tool is not installed (the gate did not run). `--fixture DIR` only builds `DIR/repo` and `DIR/home` (the
-persona rounds' materials) and prints, in the chosen shell's syntax, the three lines to set before working
-there and the one-shot, isolated command to run there.
+persona rounds' materials) and prints, in the chosen shell's syntax, the lines to set before working there
+(one unset per session variable the gate drops) and the one-shot, isolated command to run there.
 """
 
 from __future__ import annotations
@@ -136,15 +136,24 @@ def build_fixture(repo: Path, *, home: Path, harness: bool = True) -> None:
 
 
 SESSION_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_PREVIEW_")
-SESSION_NAMES = ("CLAUDECODE", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_SMALL_FAST_MODEL")
-"""Variables a launching coding-agent session leaves in the environment. With them the one-shot tool runs as
-that session's child (or refuses to start), on its model and endpoint: a fresh agent sees none of them.
-`CLAUDE_CLI_PATH` (evolvekit's own) and `ANTHROPIC_API_KEY` (the sign-in) are kept."""
+SESSION_NAMES = ("CLAUDECODE",)
+KEEP = ("CLAUDE_CODE_GIT_BASH_PATH", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH")
+"""The launching coding-agent session's identity: with it the one-shot tool runs as that session's child (or
+refuses to start), so a fresh agent sees none of it. `KEEP` is configuration an engineer's sign-in may need, and
+every `ANTHROPIC_*` variable (the key, the endpoint, the model) and `CLAUDE_CLI_PATH` (evolvekit's own) are kept."""
 
 
 def _from_session(name: str) -> bool:
     upper = name.upper()
+    if upper in KEEP:
+        return False
     return upper in SESSION_NAMES or upper.startswith(SESSION_PREFIXES)
+
+
+def _session_names() -> list[str]:
+    """What `--fixture` unsets: `CLAUDECODE`, and every other name the gate drops that is set here."""
+    return ["CLAUDECODE", *sorted(k for k in os.environ if _from_session(k) and k.upper() != "CLAUDECODE")]
 
 
 def gate_env(home: Path) -> dict[str, str]:
@@ -333,10 +342,12 @@ def fixture_lines(repo: Path, home: Path, shell: str = "bash") -> list[str]:
     flags = TOOLS["claude"][1:]
     if shell == "powershell":
         rest = " ".join(f'"{home}"' if a == "{home}" else a for a in flags)
-        return ["Remove-Item Env:CLAUDECODE -ErrorAction SilentlyContinue", f'$env:EVOLVEKIT_HOME = "{home}"', f'$env:PATH = "{scripts}{os.pathsep}" + $env:PATH',
+        return [*(f"Remove-Item Env:{name} -ErrorAction SilentlyContinue" for name in _session_names()),
+                f'$env:EVOLVEKIT_HOME = "{home}"', f'$env:PATH = "{scripts}{os.pathsep}" + $env:PATH',
                 f'Set-Location "{repo}"', f'claude -p "<message>" {rest}']
     rest = " ".join(f'"{Path(home).as_posix()}"' if a == "{home}" else a for a in flags)
-    return ["unset CLAUDECODE", f'export EVOLVEKIT_HOME="{Path(home).as_posix()}"', f'export PATH="{_posix(scripts)}:$PATH"',
+    return [*(f"unset {name}" for name in _session_names()),
+            f'export EVOLVEKIT_HOME="{Path(home).as_posix()}"', f'export PATH="{_posix(scripts)}:$PATH"',
             f'cd "{Path(repo).as_posix()}"', f'claude -p "<message>" {rest}']
 
 
@@ -390,7 +401,8 @@ def _gate(args: argparse.Namespace, work: Path, results: list[dict], transcripts
         return
     slug, root = found
     try:
-        code = _evolvekit("study", "wait", slug, "--home", str(home), "--timeout", str(args.wait_timeout), env=env)
+        code = _evolvekit("study", "wait", slug, "--home", str(home), "--timeout", str(args.wait_timeout), env=env,
+                          timeout=args.wait_timeout + 120)
     except Exception as exc:  # noqa: BLE001
         results.append(_check("study_finished", False, f"study wait: {type(exc).__name__}: {exc}"))
         return

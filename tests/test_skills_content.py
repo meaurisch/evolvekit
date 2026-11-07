@@ -404,11 +404,13 @@ ENGINEER_ONLY = ("Questions 1–3 may be answered from the application's `--help
                  "Questions 4 and 5 only the engineer can answer, in the request or a reply; never from `--help`, a "
                  "case file or a harness you copy. Ask those in one message and write nothing until they are "
                  "answered: in a one-shot run your whole answer is those questions.")
-REUSE_FINDING = ("An application that evolvekit already has a harness for (`evolvekit harness list`, or the probe "
-                 "accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to reuse it, "
-                 "and if yes hand over to `evolvekit-study`.")
-ONLY_WHAT_WAS_ASKED = ("Write only what the interview named: no lever, template, data change, request format or retry "
-                       "the engineer did not ask for; a smaller harness that passes beats a fuller one.")
+REUSE_FINDING = ("An application that evolvekit already has a harness for (`evolvekit harness list`, or "
+                 "`evolvekit doctor --app PATH`, which shows which harness takes it) is a finding to tell the "
+                 "engineer, not a shortcut to take: ask whether to reuse it, and if yes hand over to "
+                 "`evolvekit-study`.")
+ONLY_WHAT_WAS_ASKED = ("Write only what the interview named: no lever, data change, request format or retry the "
+                       "engineer did not ask for, and no template beyond the one the smoke test needs; a smaller "
+                       "harness that passes beats a fuller one.")
 CHECK_WITH_APP = ("Run `evolvekit harness check harness/ --app PATH --json` — without `--app` it exits 2 before "
                   "checking anything — and quote the command and its exit code in your answer.")
 CHECK_FOR_PEOPLE = ("Show the engineer the command without `--json`, `evolvekit harness check harness/ --app PATH`: "
@@ -501,3 +503,49 @@ def test_reference_names_the_extra_commands_and_the_lock_exit():
     named = {tuple(w[:2]) for c in commands_in(commands) for w in command_variants(c)}
     assert {("harness", "pack"), ("harness", "install")} <= named
     assert "exits 3 when another run holds the run lock" in commands
+
+
+# The whole-branch review's fixes.
+
+START_WITHOUT_A_QUESTION = ("A plan that fits, for a request complete as first sent, goes on to step 5 without a "
+                            "further question; for a request completed by the engineer's answers, wait for a yes "
+                            "after the plan line.")
+COMPILE_AGAIN = ("When time has passed since step 4 (the start waited for a yes), compile again just before "
+                 "`study start`, and quote the new line.")
+POWERSHELL_REPORT = ("In Windows PowerShell, write it with `evolvekit study report SLUG --markdown` piped to "
+                     "`Out-File -Encoding utf8 evolvekit-report.md`, since `>` writes UTF-16 there.")
+LOCK_EXIT = "A command that runs a study exits 3 when another run holds the run lock."
+HARNESS_PATHS = ("AGENTS.md", "harness.yaml", "runner.py", "evk_harness.py", "templates/", "samples/")
+
+
+def test_study_skill_says_which_request_starts_without_a_question():
+    body = _body(STUDY)
+    plan = _section(body, "4. Show the plan")
+    assert START_WITHOUT_A_QUESTION in plan and THIN_PLAN_RULE in plan and SHOW_PLAN_FIRST in plan
+    assert "after a complete request" not in body
+    assert COMPILE_AGAIN in _section(body, "5. Start and hand over")
+    assert POWERSHELL_REPORT in _section(body, "6. Report the verdict")
+
+
+def test_reference_compile_new_and_lock_rows():
+    commands = _section(_text(REFERENCE), "Commands")
+    compile_row = next(line for line in commands.splitlines() if line.startswith("| `evolvekit study compile"))
+    assert compile_row.rstrip().endswith("| 0 a plan; 2 a thin plan or a problem |")
+    new_row = next(line for line in commands.splitlines() if line.startswith("| `evolvekit study new"))
+    assert "ID, or a harness folder" in new_row
+    assert LOCK_EXIT in commands and "`main()`" not in commands
+
+
+def test_harness_new_makes_every_path_the_harness_skill_names(tmp_path, capsys):
+    from evolvekit.cli import main
+
+    body = _body(HARNESS)
+    named = set(re.findall(r"`harness/([^`\s<*]+)`", body))
+    assert named and named <= set(HARNESS_PATHS), named
+    for leaf in HARNESS_PATHS:
+        assert re.search(rf"`(harness/)?{re.escape(leaf.rstrip('/'))}", body), f"the harness skill names no {leaf}"
+    assert main(["harness", "new", str(tmp_path / "harness"), "--kind", "program"]) == 0
+    capsys.readouterr()
+    for leaf in HARNESS_PATHS:
+        path = tmp_path / "harness" / leaf
+        assert (path.is_dir() if leaf.endswith("/") else path.is_file()), f"harness new made no {leaf}"

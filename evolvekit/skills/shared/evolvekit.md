@@ -44,14 +44,14 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit harness pack DIR [--out OUT]` | zip a harness to share it; the zip goes next to the harness, or into OUT | |
 | `evolvekit harness install ARCHIVE [--home DIR]` | install a packed harness into the library home | |
 | `evolvekit harness check DIR --app PATH --json` | does the harness work with this application; prints `{"ok", "checks"}` | 0 all pass, 1 warnings only, 2 failures |
-| `evolvekit study new NAME --harness ID [--template T] [--app PATH] [--json]` | a new study folder in the library home from a harness (and a template); `--dir PATH` writes a standalone study folder outside the home instead | |
+| `evolvekit study new NAME --harness ID [--template T] [--app PATH] [--json]` | a new study folder in the library home from a harness (`--harness` takes ID, or a harness folder) and a template; `--dir PATH` writes a standalone study folder outside the home instead | |
 | `evolvekit study application SLUG PATH` | say where the study's application is | |
 | `evolvekit study application SLUG --detect` | list the applications found on this computer | |
 | `evolvekit study list [--json]` | the studies in the library home | |
 | `evolvekit study cases SLUG --add FILE... [--hold-back N] [--json]` | add cases and hold some back for the final check | |
 | `evolvekit study check SLUG` | name what is still missing before the study can run | 0 ready, 2 problems |
 | `evolvekit study preview SLUG` | solve the smallest training case at the starting values | |
-| `evolvekit study compile SLUG` | prints the plan: rounds, combinations, the final check, "done around HH:MM", or the thin plan with its three ways out | |
+| `evolvekit study compile SLUG` | prints the plan: rounds, combinations, the final check, "done around HH:MM", or the thin plan with its three ways out | 0 a plan; 2 a thin plan or a problem |
 | `evolvekit study run SLUG` | compile, search and run the final check in the foreground | |
 | `evolvekit study start SLUG [--wait [--timeout S]] [--json]` | start the study as the app's Start does (queued while another study runs) | |
 | `evolvekit study stop SLUG [--json]` | stop the running run, or take back a queued one | |
@@ -64,7 +64,7 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit skill list` | the skills that ship with evolvekit | |
 | `evolvekit skill install [--dir DIR] [--force]` | write the skills into a project (`.agents/skills`, with a pointer for a tool that reads only its own skills folder) | |
 
-Exit codes: 0 success; 1 a problem the message names; 2 a configuration or validation error, and `study check` with problems; 4 a timeout. `harness check` and `doctor` have their own, in the table. `main()` exits 3 when another run holds the run lock.
+Exit codes: 0 success; 1 a problem the message names; 2 a configuration or validation error, and `study check` with problems; 4 a timeout. `harness check` and `doctor` have their own, in the table. A command that runs a study exits 3 when another run holds the run lock.
 
 ## The verdict document
 

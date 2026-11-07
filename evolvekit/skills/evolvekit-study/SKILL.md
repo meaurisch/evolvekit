@@ -71,12 +71,13 @@ evolvekit study application SLUG PATH
 - On a thin plan `study compile` exits 2 with `plan: … fewer than 3 rounds …`; the sentences after it are the ways out — relay them, change nothing in `study.yaml` yourself.
 - Show that line to the engineer as it is.
 - Put the plan line (rounds, combinations, held-back cases, done around) in your message before `study start`, whether or not you must wait for a yes.
-- A plan that fits, after a complete request, goes on to step 5 without a question. Otherwise wait for a yes.
+- A plan that fits, for a request complete as first sent, goes on to step 5 without a further question; for a request completed by the engineer's answers, wait for a yes after the plan line.
 - A plan with fewer than 3 rounds is thin: show its three ways out, start nothing, and wait for the engineer's choice; in a one-shot run, say so and end.
 - The ways out are the ones the line names: fewer cases, a shorter time per case, more time in total. Change `study.yaml` only as the engineer chooses, then check and compile again.
 
 ## 5. Start and hand over
 
+- When time has passed since step 4 (the start waited for a yes), compile again just before `study start`, and quote the new line.
 - Run `evolvekit study start SLUG`. It says `started run …`, or `queued behind <name>` while another study runs.
 - Run `evolvekit study open SLUG`. It prints the study's address in the app (starting the app when none runs) and opens it.
 - Fill in one of these two sentences and say it, word for word apart from the blanks (N, R and HH:MM from step 4's line; `<name>` from `study start`; `<url>` from `study open`):
@@ -91,6 +92,7 @@ evolvekit study application SLUG PATH
 
 - Run `evolvekit study verdict SLUG`. It prints the verdict's line and its advice.
 - Run `evolvekit study report SLUG --markdown > evolvekit-report.md` and name the file. Never paste the report or its numbers.
+  In Windows PowerShell, write it with `evolvekit study report SLUG --markdown` piped to `Out-File -Encoding utf8 evolvekit-report.md`, since `>` writes UTF-16 there.
 - Report only the verdict's line and its advice, word for word, and add no sentence that claims more.
 - The gain on the cases it learned from is said only when asked, and named so.
 - An interpretation, if any, is one sentence below the line and the advice, marked as yours, and claims nothing the line does not.

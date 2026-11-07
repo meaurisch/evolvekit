@@ -28,7 +28,7 @@ Answer from the application and its files first (questions 1–3); ask the engin
 - [ ] What must never reach a model? → goes into: `private: true` on those columns.
 
 Questions 1–3 may be answered from the application's `--help` and a case file: say what you read. Questions 4 and 5 only the engineer can answer, in the request or a reply; never from `--help`, a case file or a harness you copy. Ask those in one message and write nothing until they are answered: in a one-shot run your whole answer is those questions.
-An application that evolvekit already has a harness for (`evolvekit harness list`, or the probe accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to reuse it, and if yes hand over to `evolvekit-study`.
+An application that evolvekit already has a harness for (`evolvekit harness list`, or `evolvekit doctor --app PATH`, which shows which harness takes it) is a finding to tell the engineer, not a shortcut to take: ask whether to reuse it, and if yes hand over to `evolvekit-study`.
 
 ## 3. Start from something that passes
 
@@ -40,7 +40,7 @@ An application that evolvekit already has a harness for (`evolvekit harness list
 ## 4. Write it, in this order
 
 Run step 5's check after each item.
-Write only what the interview named: no lever, template, data change, request format or retry the engineer did not ask for; a smaller harness that passes beats a fuller one.
+Write only what the interview named: no lever, data change, request format or retry the engineer did not ask for, and no template beyond the one the smoke test needs; a smaller harness that passes beats a fuller one.
 
 1. `harness.yaml`, tables first: the request tables (`source: request`, a case as the application receives it) and the solution tables (`source: solution`). Every column has a `type`, a `unit` and a one-line `describe`. Use the people's words, units in the names (`distance_m`), a stable id per row. Give `private: true` to what must never reach a model (names, addresses, coordinates); `categorical: true` only to values safe to show one.
 2. `runner.py`: `read_case` builds the request tables, `solve` builds the problem from `case.tables` and keeps to the time limit, `solution_tables` builds the solution tables; `discover()`, optional, reports what the installed application offers (its version, its settings and their defaults). It runs under the application's Python (or evolvekit's, for a program) and imports only `evk_harness`, never the `evolvekit` package. A value the application cannot take raises `evk.InvalidValues("…")`, a sentence.

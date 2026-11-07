@@ -1751,9 +1751,11 @@ sentence in a fixture folder and must turn it into a running study, then
 report only the verdict.
 
 ```
-python tests/agent_gate.py --tool claude
+.venv/Scripts/python.exe tests/agent_gate.py --tool claude
 ```
 
+Run it with the project's own Python, as above: the agent must find
+`evolvekit` on `PATH`, and the gate puts that Python's folder first there.
 It takes about 25 minutes. Never run it beside `python tasks.py check`: both
 are timing-sensitive. It needs `claude` on `PATH`; with `--tool copilot` it
 records "not installed" when `copilot` is absent. Give a sentence without the
