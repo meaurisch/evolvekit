@@ -8,13 +8,18 @@ from __future__ import annotations
 import html
 import http.client
 import json
+import os
 import re
+import socket
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from evolvekit.app import jobs
 from evolvekit.app.server import AppServer
+from evolvekit.events import utc_now
 from test_app_server import call
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -202,3 +207,189 @@ def test_a_run_whose_process_died_without_a_word_is_reported_from_its_log(app, t
     (run_dir / "job.log").write_text("Traceback ...\nModuleNotFoundError: No module named 'yaml'\n")
     status, answer = call(app, "GET", f"/api/studies/{slug}/status")
     assert answer["phase"] == "failed" and "No module named 'yaml'" in answer["error"]
+
+
+# -- a run is alive when its process is, and that process is the one we started
+
+
+def test_a_recycled_pid_is_not_a_running_run(tmp_path):
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+    assert jobs.run_alive(tmp_path, os.getpid(), long_ago, socket.gethostname()) is False, "this process is younger than the launch"
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    assert jobs.run_alive(tmp_path, os.getpid(), now, socket.gethostname()) is True
+    assert jobs.run_alive(tmp_path, None, now, None) is False
+
+
+def test_a_run_from_another_computer_is_judged_by_its_heartbeat(tmp_path):
+    (tmp_path / "heartbeat.json").write_text(json.dumps({"ts": utc_now()}), encoding="utf-8")
+    assert jobs.run_alive(tmp_path, 1, utc_now(), "elsewhere") is True
+    old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="milliseconds")
+    (tmp_path / "heartbeat.json").write_text(json.dumps({"ts": old}), encoding="utf-8")
+    assert jobs.run_alive(tmp_path, 1, utc_now(), "elsewhere") is False
+    (tmp_path / "heartbeat.json").unlink()
+    assert jobs.run_alive(tmp_path, 1, utc_now(), "elsewhere") is False, "no beat at all is not alive"
+
+
+def test_a_dead_run_reads_as_failed_with_the_last_thing_it_wrote(tmp_path):
+    run_dir = tmp_path / "runs" / "r"; run_dir.mkdir(parents=True)
+    (run_dir / "launch.json").write_text(json.dumps({"pid": os.getpid(), "started_at": "2020-01-01T00:00:00+00:00",
+                                                      "host": socket.gethostname()}), encoding="utf-8")
+    (run_dir / "job.json").write_text(json.dumps({"phase": "search", "pid": os.getpid(), "started_at": "2020-01-01T00:00:00+00:00"}), encoding="utf-8")
+    assert jobs.phase(run_dir)["phase"] == "failed"
+
+
+def test_a_run_stopped_before_it_began_offers_no_final_check(app):
+    slug = _ready_study(app, "Early stop")
+    run_dir = app.home.study_root(slug) / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "job.json").write_text(json.dumps({
+        "phase": "stopped", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00", "finished_at": "2026-01-01T00:00:01+00:00",
+        "search": {"stop_reason": "stopped on request before the search began", "generations": 0, "aborted": False}}), encoding="utf-8")
+    status, answer = call(app, "GET", f"/api/studies/{slug}/status")
+    assert status == 200 and answer["phase"] == "stopped" and answer["can_check"] is False, answer
+    assert answer["sentence"] == "Stopped. stopped on request before the search began."
+    assert answer["can_resume"] is False, "nothing was searched: there is nothing to continue from"
+
+
+# -- a run that died resumes where it was
+
+
+@pytest.mark.slow
+def test_the_app_offers_to_continue_a_run_that_died(app):
+    slug = _ready_study(app, "Continue me")
+    call(app, "PATCH", f"/api/studies/{slug}", {"plan": {"auto": False, "children": 2, "generations": 4}})
+    status, started = call(app, "POST", f"/api/studies/{slug}/start")
+    assert status == 200 and "resumed" not in started
+    _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] == "search" and b["rounds"]["done"] >= 1, timeout=120)
+    call(app, "POST", f"/api/studies/{slug}/stop")
+    s = _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] in ("done", "failed", "stopped"), timeout=120)
+    assert s["phase"] == "stopped" and s["can_resume"] is True, s
+    status, body = call(app, "POST", f"/api/studies/{slug}/start", {"resume": s["run"]})
+    assert status == 200 and body == {"run": s["run"], "resumed": True}
+    status, again = call(app, "POST", f"/api/studies/{slug}/start", {"resume": s["run"]})
+    assert status == 409, "it is running again: not twice"
+    final = _until(app, f"/api/studies/{slug}/status", lambda b: b["phase"] in ("done", "failed"), timeout=180)
+    assert final["phase"] == "done" and final["can_resume"] is False, final
+    assert final["rounds"]["done"] == 4 and final["time"]["used_s"] > 0
+    listed = call(app, "GET", f"/api/studies/{slug}")[1]["runs"]
+    assert [r["id"] for r in listed] == [s["run"]], "the same run, continued: not a second one"
+
+
+def test_a_resumed_run_is_starting_while_its_job_is_still_the_old_one(tmp_path):
+    # Between the launch of the resume and the first word of the new process,
+    # job.json still says the old run ended; the live, younger launch says it
+    # is starting again -- so nothing launches it twice meanwhile.
+    run_dir = tmp_path / "runs" / "r"; run_dir.mkdir(parents=True)
+    now = utc_now()
+    (run_dir / "job.json").write_text(json.dumps({"phase": "stopped", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00",
+                                                   "finished_at": "2026-01-01T00:10:00+00:00", "search": {"generations": 1}}), encoding="utf-8")
+    (run_dir / "launch.json").write_text(json.dumps({"pid": os.getpid(), "started_at": now, "host": socket.gethostname()}), encoding="utf-8")
+    seen = jobs.phase(run_dir)
+    assert seen["phase"] == "starting" and seen["started_at"] == "2026-01-01T00:00:00+00:00", seen
+    assert jobs.running(tmp_path) is True
+    # The launch that wrote the old job is the old process itself: not a resume.
+    (run_dir / "launch.json").write_text(json.dumps({"pid": 2 ** 22 + 7, "started_at": now, "host": socket.gethostname()}), encoding="utf-8")
+    assert jobs.phase(run_dir)["phase"] == "stopped"
+
+
+# -- one study at a time, and unique run names
+
+
+def _fake_active_run(app: AppServer, slug: str, run: str = "20260101-000000") -> Path:
+    """A run of `slug` that reads as starting: a launch by this very process,
+    which is alive, has written no job yet -- and nothing is really launched."""
+    run_dir = app.home.study_root(slug) / "runs" / run
+    run_dir.mkdir(parents=True)
+    (run_dir / "launch.json").write_text(json.dumps({"pid": os.getpid(), "started_at": utc_now(), "host": socket.gethostname()}),
+                                         encoding="utf-8")
+    return run_dir
+
+
+@pytest.mark.slow
+def test_a_second_study_waits_its_turn(app):
+    first, second = _ready_study(app, "First"), _ready_study(app, "Second")
+    status, started = call(app, "POST", f"/api/studies/{first}/start")
+    assert status == 200 and "queued" not in started
+    status, body = call(app, "POST", f"/api/studies/{second}/start")
+    assert status == 200 and body["queued"] is True, body
+    s = call(app, "GET", f"/api/studies/{second}/status")[1]
+    assert s["phase"] == "queued" and s["sentence"] == "Waiting for 'First' to finish.", s
+    assert s["time"]["left_s"] is None and s["can_resume"] is False and s["can_check"] is False
+    lines = {st["slug"]: st for st in call(app, "GET", "/api/home")[1]["studies"]}
+    assert lines[second]["kind"] == "queued" and lines[second]["line"] == "queued · after First"
+    assert call(app, "POST", f"/api/studies/{second}/start")[0] == 409, "queued is running, as far as a second start goes"
+    assert call(app, "PATCH", f"/api/studies/{second}", {"plan": {"auto": True}})[0] == 409, "a queued study is not edited"
+    _until(app, f"/api/studies/{first}/status", lambda b: b["phase"] == "done", timeout=180)
+    s = _until(app, f"/api/studies/{second}/status", lambda b: b["phase"] != "queued", timeout=30)  # the ticker launched it
+    assert s["phase"] in ("starting", "search", "check", "done"), s
+    assert not (app.home.study_root(second) / "runs" / body["run"] / "queued.json").exists()
+    _until(app, f"/api/studies/{second}/status", lambda b: b["phase"] in ("done", "failed", "stopped"), timeout=180)
+
+
+def test_a_queued_run_can_be_taken_back(app):
+    first, second = _ready_study(app, "First"), _ready_study(app, "Second")
+    _fake_active_run(app, first)
+    assert app.home.active_run() == (first, "20260101-000000")
+    status, body = call(app, "POST", f"/api/studies/{second}/start")
+    assert status == 200 and body["queued"] is True, body
+    run_dir = app.home.study_root(second) / "runs" / body["run"]
+    assert (run_dir / "queued.json").is_file() and jobs.phase(run_dir)["phase"] == "queued"
+    assert jobs.launch_queued(app.home) is None, "the first study is active: nothing is launched"
+    assert (run_dir / "queued.json").is_file()
+    assert call(app, "PATCH", f"/api/studies/{second}", {"plan": {"auto": True}})[0] == 409
+    status, body = call(app, "POST", f"/api/studies/{second}/stop")
+    assert status == 200 and body == {"stopping": False, "dequeued": True}, body
+    assert not run_dir.exists()
+    document = call(app, "GET", f"/api/studies/{second}")[1]
+    assert document["runs"] == [] and document["state"]["kind"] == "draft"
+    assert call(app, "PATCH", f"/api/studies/{second}", {"plan": {"auto": True}})[0] == 200, "editable again"
+
+
+def test_two_starts_in_one_second_get_two_visible_run_ids(app, monkeypatch):
+    fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_now", lambda: fixed)
+
+    def launched_and_done(home, root, run_dir, extra):  # a run that finished within the second
+        (run_dir / "job.json").write_text(json.dumps({"phase": "done", "pid": 2 ** 22 + 7, "started_at": fixed.isoformat(),
+                                                       "finished_at": fixed.isoformat()}), encoding="utf-8")
+        return 2 ** 22 + 7
+
+    monkeypatch.setattr(jobs, "_launch", launched_and_done)
+    slug, other = _ready_study(app, "Twice"), _ready_study(app, "Other")
+    status, one = call(app, "POST", f"/api/studies/{slug}/start")
+    assert status == 200 and one == {"run": fixed.astimezone().strftime("%Y%m%d-%H%M%S")}
+    _fake_active_run(app, other)  # so the second start waits, in a directory of its own
+    status, two = call(app, "POST", f"/api/studies/{slug}/start")
+    assert status == 200 and two == {"run": one["run"] + "-2", "queued": True}, two
+    listed = call(app, "GET", f"/api/studies/{slug}")[1]["runs"]
+    assert [r["id"] for r in listed] == [one["run"], two["run"]] and [r["phase"] for r in listed] == ["done", "queued"]
+    assert all(jobs._RUN.match(r["id"]) and "~" not in r["id"] for r in listed)  # noqa: SLF001
+    assert jobs.latest_run(app.home.study_root(slug)) == two["run"]
+
+
+# -- the running page costs nothing while it waits
+
+
+def test_the_status_reads_the_runs_file_once(app, monkeypatch):
+    slug = _ready_study(app, "Once")
+    root = app.home.study_root(slug)
+    run_dir = root / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "job.json").write_text(json.dumps({
+        "phase": "stopped", "pid": 2 ** 22 + 7, "started_at": "2026-01-01T00:00:00+00:00", "finished_at": "2026-01-01T00:10:00+00:00",
+        "plan": {"generations": 2, "rounds": 2, "hours": 0.05},
+        "search": {"stop_reason": "stopped on request", "generations": 1, "aborted": False}}), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"id": "seed", "operator": "human-seed", "score": 100.0},
+        {"id": "c1", "operator": "mutate", "score": 90.0},
+        {"id": "c2", "operator": "mutate", "score": 120.0, "gated": True},
+    ]) + "\n", encoding="utf-8")
+    reads = []
+    read_rows = jobs._rows  # noqa: SLF001
+    monkeypatch.setattr(jobs, "_rows", lambda run_dir: reads.append(run_dir) or read_rows(run_dir))
+    # No improvement on record: the sentence about the closest try, the seed and the gated count all need the rows.
+    answer = jobs.status(root, "20260101-000000", lambda _run_dir: {"progress": {"improvement": {"pct": None}}})
+    assert reads == [run_dir], "runs.jsonl is read once per status"
+    assert answer["gated"] == 1 and "1 tried; the closest came within 10.0 % of it." in answer["best"]["line"]
+    assert answer["phase"] == "stopped" and answer["can_resume"] is True

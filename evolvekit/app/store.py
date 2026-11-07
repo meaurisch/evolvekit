@@ -230,6 +230,15 @@ class Home:
     def slugs(self) -> list[str]:
         return sorted(p.name for p in self.studies_dir.iterdir() if (p / "study.yaml").is_file() and _SLUG.match(p.name))
 
+    def active_run(self) -> tuple[str, str] | None:
+        """The `(slug, run)` that has the computer now: the oldest run across
+        the home that is starting, searching or checking; None when nothing
+        runs. The rule is `jobs.active_run`'s (imported here, not above:
+        `jobs` reads studies through this module)."""
+        from evolvekit.app import jobs
+
+        return jobs.active_run(self)
+
     def create_study(self, harness_id: str, template: str | None, name: str) -> str:
         name = str(name or "").strip()
         if not name:

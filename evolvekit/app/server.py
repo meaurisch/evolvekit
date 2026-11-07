@@ -23,7 +23,6 @@ import json
 import re
 import sys
 import threading
-import time
 import traceback
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,10 +37,30 @@ __all__ = ["AppServer", "DEFAULT_PORT", "FileResponse", "PAGE", "Request"]
 
 DEFAULT_PORT = 8780
 PORT_ATTEMPTS = 20
+TICK_S = 5.0
+"""How often the server looks for a queued run to launch (`jobs.launch_queued`)."""
 PAGE = Path(__file__).with_name("static") / "app.html"
 CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DASHBOARD = re.compile(r"^/studies/(?P<slug>[^/]+)/runs/(?P<run>[^/]+)/dashboard/(?P<rest>.*)$")
+STATUS_FILES = ("events.jsonl", "runs.jsonl", "heartbeat.json")
+"""The files of a run the status document is built from; a change to any
+of them is a reason to build it again."""
+
+RunStamp = tuple[tuple[int, int] | None, ...]
+"""`(size, mtime_ns)` of each of `STATUS_FILES`, or `None` where the file is missing."""
+
+
+def _run_stamp(run_dir: Path) -> RunStamp:
+    stamp: list[tuple[int, int] | None] = []
+    for name in STATUS_FILES:
+        try:
+            found = (run_dir / name).stat()
+        except OSError:
+            stamp.append(None)
+        else:
+            stamp.append((found.st_size, found.st_mtime_ns))
+    return tuple(stamp)
 
 
 @dataclass
@@ -249,9 +268,11 @@ class AppServer:
         self.assistant_provider: Any = None
         """A provider object to use instead of the one Settings name: for tests."""
         self.lock = threading.Lock()
-        self._status_cache: dict[str, tuple[float, Any]] = {}
+        self._status_cache: dict[str, tuple[RunStamp, Any]] = {}
         self._server = self._bind(host, port)
         self._thread: threading.Thread | None = None
+        self._ticker: threading.Thread | None = None
+        self._stopping = threading.Event()
 
     def _bind(self, host: str, port: int) -> ThreadingHTTPServer:
         handler = _handler(self)
@@ -272,28 +293,59 @@ class AppServer:
         return f"http://127.0.0.1:{self.port}/"
 
     def status_document(self, run_dir: Path) -> Any:
-        """`build_status`, rebuilt at most once a second per run."""
+        """`build_status`, rebuilt only when a file of the run changed: a page
+        that polls a run that waits, or one that ended, costs no more than
+        three `stat` calls."""
         from evolvekit.status import build_status
 
-        key = str(run_dir)
+        key, stamp = str(run_dir), _run_stamp(run_dir)
         with self.lock:
             cached = self._status_cache.get(key)
-            if cached and time.monotonic() - cached[0] < 1.0:
+            if cached and cached[0] == stamp:
                 return cached[1]
         document = build_status(run_dir)
         with self.lock:
-            self._status_cache[key] = (time.monotonic(), document)
+            self._status_cache[key] = (stamp, document)
         return document
 
+    def _tick(self) -> None:
+        """Every `TICK_S`, launch the run that waits longest if nothing is
+        active (one study at a time); a fault in one tick is logged, not fatal."""
+        from evolvekit.app import jobs
+
+        while not self._stopping.wait(TICK_S):
+            try:
+                jobs.launch_queued(self.home)
+            except Exception:  # noqa: BLE001 - the ticker must outlive a bad run directory
+                traceback.print_exc(file=sys.stderr)
+
+    def _start_ticker(self) -> None:
+        if self._ticker is None or not self._ticker.is_alive():
+            self._stopping.clear()
+            self._ticker = threading.Thread(target=self._tick, name="evolvekit-app-ticker", daemon=True)
+            self._ticker.start()
+
     def start(self) -> str:
+        self._start_ticker()
         self._thread = threading.Thread(target=self._server.serve_forever, name="evolvekit-app", daemon=True)
         self._thread.start()
         return self.url
 
     def serve_forever(self) -> None:
-        self._server.serve_forever()
+        self._start_ticker()
+        try:
+            self._server.serve_forever()
+        finally:
+            self._stop_ticker()
+
+    def _stop_ticker(self) -> None:
+        self._stopping.set()
+        if self._ticker is not None:
+            self._ticker.join(timeout=TICK_S + 5)
+            self._ticker = None
 
     def stop(self) -> None:
+        self._stop_ticker()
         if self._thread is not None:
             self._server.shutdown()
             self._thread.join(timeout=5)

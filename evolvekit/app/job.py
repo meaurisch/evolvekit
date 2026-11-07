@@ -3,6 +3,7 @@
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID            the search, then the final check
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID --check    the final check again, after a stop
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID --check --seeds 6    ... with 6 runs per case
+    python -m evolvekit.app.job STUDY_FOLDER RUN_ID --resume   the search again from where it stopped, then the check
 
 Everything it does is `evolvekit.harness.execute`; this module only reads the
 models the app chose (`runs/<id>/models.json`, when AI search help is on) and
@@ -17,7 +18,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from evolvekit.harness.execute import JOB, Job, final_check, read_job, run_study
+from evolvekit.harness.execute import JOB, Job, final_check, read_job, resume_study, run_study
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("run")
     parser.add_argument("--check", action="store_true", help="run the final check again")
     parser.add_argument("--seeds", type=int, default=None, help="with --check: runs per case")
+    parser.add_argument("--resume", action="store_true", help="continue a stopped or dead search where it was")
     args = parser.parse_args(argv)
     root = Path(args.study).resolve()
     run_dir = root / "runs" / args.run
@@ -39,7 +41,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             models_path = run_dir / "models.json"
             models = json.loads(models_path.read_text(encoding="utf-8")) if models_path.is_file() else None
-            job = run_study(root, args.run, models=models, log=log)
+            run = resume_study if args.resume else run_study
+            job = run(root, args.run, models=models, log=log)
     except Exception as exc:  # noqa: BLE001 - job.json must say how it ended, whatever ended it
         traceback.print_exc()
         state = read_job(run_dir)

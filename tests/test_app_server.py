@@ -6,6 +6,7 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import time
 from pathlib import Path
 
 import pytest
@@ -225,3 +226,28 @@ def test_a_settings_file_is_checked_on_upload(app):
     assert status == 400 and "not a setting of PyVRP" in body["error"]
     status, document = call(app, "PUT", "/api/studies/inputs/inputs/solver_settings/mine.json", b'{"num_neighbours": 30}')
     assert status == 200 and document["study"]["inputs"] == {"solver_settings": "inputs/mine.json"}
+
+
+# ---------------------------------------------------------------------------
+# the status document
+# ---------------------------------------------------------------------------
+
+
+def test_the_status_document_is_rebuilt_only_when_a_run_file_changed(tmp_path, monkeypatch):
+    built = []
+    monkeypatch.setattr("evolvekit.status.build_status", lambda run_dir: built.append(1) or {"n": len(built)})
+    server = AppServer(tmp_path / "home", port=0)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    assert server.status_document(run_dir) == server.status_document(run_dir) and len(built) == 1
+    time.sleep(1.2)  # well past the old once-a-second rule: nothing changed, nothing is rebuilt
+    assert server.status_document(run_dir) == {"n": 1} and len(built) == 1
+    time.sleep(0.01)
+    (run_dir / "events.jsonl").write_text("{}\n{}\n", encoding="utf-8")
+    assert server.status_document(run_dir) == {"n": 2} and len(built) == 2
+    (run_dir / "heartbeat.json").write_text('{"ts": "2026-01-01T00:00:00+00:00"}', encoding="utf-8")
+    assert server.status_document(run_dir) == {"n": 3} and len(built) == 3, "a heartbeat that appears is a change"
+    (run_dir / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+    assert server.status_document(run_dir) == {"n": 4} and len(built) == 4
+    assert server.status_document(run_dir) == {"n": 4} and len(built) == 4
