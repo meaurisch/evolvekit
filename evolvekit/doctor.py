@@ -123,6 +123,13 @@ def _probes(entries: list, app: str) -> list[dict]:
     return [c for c, _ in rows]
 
 
+def _git() -> dict:  # git is asked for here only: settings studies never need it
+    from evolvekit import tree
+
+    found = tree.git_version()
+    return _check(True, "git", f"git {found}" if found else "not found: only code studies need it (git-scm.com)")
+
+
 def _guarded(name: str, fix: str, make):
     try:
         return make()
@@ -157,6 +164,7 @@ def checks(home: Path, *, app: str | None = None) -> list[dict]:
         return check
 
     result.append(_guarded("harnesses", f"Check the folder {root / 'harnesses'}.", harnesses))
+    result.append(_guarded("git", "Install git from git-scm.com.", _git))
     if app:
         result += _probes(loaded, app)
     return result

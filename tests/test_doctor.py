@@ -59,6 +59,17 @@ def test_doctor_text_has_marks(tmp_path, capsys):
     assert lines and all(ln.startswith(("✓ ", "✗ ")) for ln in lines)
 
 
+def test_doctor_lists_git_without_failing_when_missing(tmp_path, capsys, monkeypatch):
+    _, out = _doctor(capsys, tmp_path, "--json")
+    line = next(c for c in json.loads(out) if c["name"] == "git")
+    assert line["ok"] is True and line["message"].startswith("git ")
+    monkeypatch.setattr("evolvekit.tree.git_version", lambda: None)
+    code, out = _doctor(capsys, tmp_path, "--json")
+    line = next(c for c in json.loads(out) if c["name"] == "git")
+    assert line == {"ok": True, "name": "git", "fix": "",
+                    "message": "not found: only code studies need it (git-scm.com)"}
+
+
 def _second_harness(home):
     import shutil
 
