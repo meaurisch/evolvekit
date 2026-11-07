@@ -1519,7 +1519,9 @@ and empty `cases/` and `inputs/`. Without `--template` the study starts
 blank. `--dir PATH` writes a standalone study folder there instead, outside
 the library home.
 
-**Say where the application is**, as a full path. The harness asks the
+**Say where the application is.** From the terminal a relative path works
+and is recorded as the full path (the app's API still wants the full path).
+The harness asks the
 program whether it is its application and records its version:
 
 ```
