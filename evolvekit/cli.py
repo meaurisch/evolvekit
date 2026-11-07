@@ -1406,9 +1406,10 @@ def _tolerant_output() -> None:
         if reconfigure is None:
             continue
         try:
-            reconfigure(errors="backslashreplace")
-            if not stream.isatty():
-                reconfigure(encoding="utf-8")
+            if stream.isatty():
+                reconfigure(errors="backslashreplace")
+            else:  # one call: encoding alone would reset the errors to strict
+                reconfigure(encoding="utf-8", errors="backslashreplace")
         except (ValueError, OSError, AttributeError):  # a stream that cannot be reconfigured is left alone
             pass
 

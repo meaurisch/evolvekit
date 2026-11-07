@@ -113,3 +113,18 @@ def test_doctor_writes_utf8_into_a_pipe(tmp_path):
                           capture_output=True, env=env, cwd=ROOT, timeout=120)
     assert b"\xe2\x9c\x93" in done.stdout, done.stdout
     assert b"\\u2713" not in done.stdout
+
+
+def test_a_piped_stream_is_utf8_and_still_tolerant(monkeypatch):
+    import io
+    import sys
+
+    from evolvekit.cli import _tolerant_output
+
+    pipe = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", pipe)
+    _tolerant_output()
+    assert sys.stdout.encoding.lower().replace("-", "") == "utf8"
+    assert sys.stdout.errors == "backslashreplace"
+    sys.stdout.write("✓ \udcff")
+    sys.stdout.flush()
