@@ -35,6 +35,7 @@ In a one-shot run, where no answer can come, say what is missing and end.
 
 - Step 1 found a close harness: `evolvekit harness new harness/ --from ID`.
 - None is close: `evolvekit harness new harness/ --kind program` for a program, `evolvekit harness new harness/ --kind python` for a Python package.
+- Read `harness/AGENTS.md` (copied in by `harness new`: the file table, the `runner.py` hooks and their signatures, the `kit/` folder) and evolvekit's `docs/harness-authoring.md` for the full format; its section 'What `harness check` runs' says what each check means.
 - The new folder passes its first check. From here on, change one thing at a time.
 
 ## 4. Write it, in this order
@@ -42,7 +43,7 @@ In a one-shot run, where no answer can come, say what is missing and end.
 Run step 5's check after each item.
 
 1. `harness.yaml`, tables first: the request tables (`source: request`, a case as the application receives it) and the solution tables (`source: solution`). Every column has a `type`, a `unit` and a one-line `describe`. Use the people's words, units in the names (`distance_m`), a stable id per row. Give `private: true` to what must never reach a model (names, addresses, coordinates); `categorical: true` only to values safe to show one.
-2. `runner.py`: `read_case` builds the request tables, `solve` builds the problem from `case.tables` and keeps to the time limit, `solution_tables` builds the solution tables. It runs under the application's Python (or evolvekit's, for a program) and never imports evolvekit. A value the application cannot take raises `evk.InvalidValues("…")`, a sentence.
+2. `runner.py`: `read_case` builds the request tables, `solve` builds the problem from `case.tables` and keeps to the time limit, `solution_tables` builds the solution tables; `discover()`, optional, reports what the installed application offers (its version, its settings and their defaults). It runs under the application's Python (or evolvekit's, for a program) and imports only `evk_harness`, never the `evolvekit` package. A value the application cannot take raises `evk.InvalidValues("…")`, a sentence.
 3. Settings: each with a type and range, a default inside it, a `label`, a one-sentence `help` for people and a longer `explain` for a model (what it does, which way it trades off, when it matters). Mark the six to ten that matter most `recommended`, best as a rank (`1`, `2`, …).
 4. Levers and measures: a lever names a request table and the numeric columns it may change, with its modes (`scale`, `set`, `add`). A measure (`kpis`) is SQL over the tables that returns one number, with a `direction`, `lower` or `higher`.
 5. Templates: `templates/<id>.yaml`, a partial `study.yaml` (`title`, `summary`, `vary`, `kpis`, `goal`, …). Write at least one whose goal is the measure people care about, with `vary: {settings: recommended}`; it is T in step 6.
@@ -80,7 +81,7 @@ evolvekit study preview SLUG
 
 - Bump `version:` in `harness.yaml` whenever what the harness does changes (a setting, a table, a measure, the runner), then check again until it exits 0.
 - Studies already made keep their pinned copy of the harness; only new studies get the new version.
-- When the application itself changes, the check names every setting that appeared, disappeared or changed its default: fix `settings`, bump `version:`, check again.
+- When the application itself changes, the check (when `runner.py` has `discover()`) names every setting that appeared, disappeared or changed its default: fix `settings`, bump `version:`, check again.
 
 ## Two rules
 

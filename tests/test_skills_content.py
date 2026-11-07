@@ -359,3 +359,22 @@ def test_harness_skill_forbids_editing_the_sdk():
     assert "#the-comparability-trap" in rules and "#settings-every-value-in-range-must-be-valid" in rules
     assert "`private: true`" in _section(body, "4. Write it, in this order")
     assert "`version:`" in _section(body, "7. Every later change")
+
+
+FORMAT_POINTER = ("Read `harness/AGENTS.md` (copied in by `harness new`: the file table, the `runner.py` hooks and "
+                  "their signatures, the `kit/` folder) and evolvekit's `docs/harness-authoring.md` for the full "
+                  "format; its section 'What `harness check` runs' says what each check means.")
+CHECK_EXITS = "Exit 2 is failures, exit 1 is warnings only: neither is done."
+
+
+def test_harness_skill_points_to_the_full_format():
+    assert FORMAT_POINTER in _section(_body(HARNESS), "3. Start from something that passes")
+
+
+def test_harness_skill_pins_the_interview_smoke_test_and_exits():
+    body = _body(HARNESS)
+    interview = _section(body, "2. Interview")
+    assert len(re.findall(r"^\s*- \[ \] ", interview, re.M)) == 5, "the interview is a checklist of five questions"
+    assert "--template T" in _section(body, "6. Smoke test")
+    assert CHECK_EXITS in _section(body, "5. Check until it exits 0")
+    assert "(when `runner.py` has `discover()`)" in _section(body, "7. Every later change")
