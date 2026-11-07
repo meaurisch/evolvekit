@@ -318,10 +318,11 @@ class Home:
         name = str(name or "").strip()
         if not name:
             raise AppError("name: give the study a name")
-        entry = self.harness_entry(harness_id)
+        folder = Path(harness_id)
+        source = folder if folder.is_dir() else self.harness_entry(harness_id).path
         slug = self._free_slug(name)
         try:
-            create_study(self.studies_dir / slug, entry.path, name, template or None)
+            create_study(self.studies_dir / slug, source, name, template or None)
         except HarnessError as exc:
             shutil.rmtree(self.studies_dir / slug, ignore_errors=True)
             raise AppError(str(exc)) from None

@@ -94,7 +94,7 @@ def test_a_zip_that_would_write_outside_its_folder_is_refused(tmp_path):
 
 def test_a_study_from_the_command_line(tmp_path, capsys):
     folder = tmp_path / "study"
-    assert main(["study", "new", str(folder), "--harness", "demo-tour", "--template", "tune", "--name", "Tour settings"]) == 0
+    assert main(["study", "new", "Tour settings", "--harness", "demo-tour", "--template", "tune", "--dir", str(folder)]) == 0
     capsys.readouterr()
     for sample in ("town-40.json", "county-50.json", "region-60.json"):
         shutil.copy(DEMO / "samples" / sample, folder / "cases" / sample)
@@ -117,7 +117,7 @@ def test_a_study_from_the_command_line(tmp_path, capsys):
 
 def test_a_study_that_is_not_ready_says_what_is_missing(tmp_path, capsys):
     folder = tmp_path / "study"
-    main(["study", "new", str(folder), "--harness", str(DEMO)])
+    main(["study", "new", "Tour", "--harness", str(DEMO), "--dir", str(folder)])
     capsys.readouterr()
     assert main(["study", "compile", str(folder)]) == 1
     assert "error: application: say where the application is" in capsys.readouterr().err

@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
+from evolvekit.app import AppError
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
 from evolvekit.env import LoadedEnv, load_env_files
@@ -395,16 +396,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_study = sub.add_parser("study", help="make, preview, compile and run studies")
     study = p_study.add_subparsers(dest="study_command", required=True)
     s_new = study.add_parser("new", help="a new study folder from a harness (and a template)")
-    s_new.add_argument("directory")
+    s_new.add_argument("name", help="the study's name; its folder in the library home is made from it")
     s_new.add_argument("--harness", required=True, help="a harness folder, or the id of a known harness")
     s_new.add_argument("--template", help="a template id of the harness (default: a blank study)")
-    s_new.add_argument("--name", help="the study's name (default: the folder's)")
-    s_new.add_argument("--home", help="the library home, to find harnesses by id")
+    s_new.add_argument("--app", help="where the application is (a path)")
+    s_new.add_argument("--dir", help="write a standalone study folder here instead of into the library home")
+    s_new.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_new.add_argument("--json", action="store_true", help='print {"slug", "root"} and nothing else')
     for name, text in (("preview", "solve the smallest training case at the starting values"),
                        ("compile", "compile the study into runs/<id>/evolvekit.yaml, with the automatic plan"),
                        ("run", "compile, search, and check the best on the held-back cases")):
         s_cmd = study.add_parser(name, help=text)
-        s_cmd.add_argument("directory")
+        s_cmd.add_argument("directory", help="a study folder, or the name of a study in the library home")
+        s_cmd.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
         if name != "preview":
             s_cmd.add_argument("--run-id", help="the run's folder name (default: the time)")
     return parser
@@ -816,6 +820,23 @@ def cmd_harness(args: argparse.Namespace) -> int:
     return 0
 
 
+def _home(args: argparse.Namespace):
+    from evolvekit.app.store import Home
+    from evolvekit.harness.library import default_home
+
+    return Home(args.home or default_home())
+
+
+def _study_root(value: str, home) -> Path:
+    """A study given as a folder on disk, else as a name in the library home."""
+    folder = Path(value)
+    if folder.is_dir():
+        if (home.studies_dir / value).is_dir():
+            print(f"using the folder {folder.resolve()}", file=sys.stderr)
+        return folder
+    return home.study_root(value)
+
+
 def cmd_study(args: argparse.Namespace) -> int:
     from evolvekit.harness import execute, library
     from evolvekit.harness.compile import write_run
@@ -823,14 +844,27 @@ def cmd_study(args: argparse.Namespace) -> int:
 
     command = args.study_command
     if command == "new":
-        folder = Path(args.directory)
-        study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name or folder.name, args.template)
-        print(f"wrote {folder / 'study.yaml'} ({study.harness_id} {study.harness_version}"
-              + (f", template {study.template}" if study.template else "") + ")")
-        print("next: put the cases in cases/, fill in study.yaml, then  python -m evolvekit study run "
-              f"{folder}")
+        # Task 4: args.app goes to Home.set_application
+        if args.dir:
+            folder = Path(args.dir)
+            study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name, args.template)
+            if args.json:
+                print(json.dumps({"slug": folder.name, "root": str(folder.resolve())}))
+                return 0
+            print(f"wrote {folder / 'study.yaml'} ({study.harness_id} {study.harness_version}"
+                  + (f", template {study.template}" if study.template else "") + ")")
+            print("next: put the cases in cases/, fill in study.yaml, then  python -m evolvekit study run "
+                  f"{folder}")
+            return 0
+        home = _home(args)
+        slug = home.create_study(args.harness, args.template, args.name)
+        if args.json:
+            print(json.dumps({"slug": slug, "root": str(home.study_root(slug))}))
+        else:
+            print(slug)
         return 0
-    folder = Path(args.directory)
+    home = _home(args)
+    folder = _study_root(args.directory, home)
     if command == "preview":
         result = execute.preview(folder)
         if not result["ok"]:
@@ -930,6 +964,9 @@ def main(argv: list[str] | None = None) -> int:
     _load_env(args)
     try:
         return _COMMANDS[args.command](args)
+    except AppError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
