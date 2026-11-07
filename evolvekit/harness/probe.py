@@ -21,7 +21,7 @@ from pathlib import Path
 
 from evolvekit.harness.manifest import Harness
 
-__all__ = ["Probe", "probe_application", "version_matches", "program_command"]
+__all__ = ["Probe", "probe_application", "version_matches", "version_words", "program_command"]
 
 PROBE_TIMEOUT_S = 10.0
 
@@ -63,6 +63,28 @@ def _version_tuple(text: str) -> tuple[int, ...]:
             break
         parts.append(int(match.group()))
     return tuple(parts)
+
+
+def version_words(specifier: str) -> str:
+    """A specifier in words: ">=0.14,<0.15" -> "0.14.x", "==1.2.*" -> "1.2.x",
+    ">=2" -> "2 or later"; anything else as it is."""
+    clauses = [c.strip() for c in specifier.split(",") if c.strip()]
+    ops = {}
+    for clause in clauses:
+        match = re.match(r"^(~=|==|!=|>=|<=|>|<)\s*([0-9][0-9.*]*)$", clause)
+        if not match:
+            return specifier
+        ops[match.group(1)] = match.group(2)
+    if set(ops) == {">=", "<"}:
+        low, high = _version_tuple(ops[">="]), _version_tuple(ops["<"])
+        if len(low) >= 2 and len(high) == 2 and low[0] == high[0] and high[1] == low[1] + 1 and not any(low[2:]):
+            return f"{low[0]}.{low[1]}.x"
+        return f"{ops['>=']} or later, before {ops['<']}"
+    if set(ops) == {"=="} and ops["=="].endswith(".*"):
+        return ops["=="][:-2] + ".x"
+    if set(ops) == {">="}:
+        return f"{ops['>=']} or later"
+    return specifier
 
 
 def version_matches(version: str, specifier: str) -> bool:
@@ -127,7 +149,7 @@ def probe_application(harness: Harness, app: str, *, timeout: float = PROBE_TIME
             return Probe(False, f"Python {short}, no {spec.module}", python=python)
         version = answer.get("version") or "?"
         if spec.version and not version_matches(version, spec.version):
-            return Probe(False, f"{harness.title} {version} found, and this harness needs {spec.version}",
+            return Probe(False, f"{harness.title} {version} found, and this harness needs {harness.title} {version_words(spec.version)}",
                          version=version, python=python)
         return Probe(True, f"{harness.title} {version} found", version=version, python=python)
     tokens = shlex.split(spec.probe, posix=True)

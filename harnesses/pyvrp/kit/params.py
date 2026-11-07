@@ -187,9 +187,10 @@ class Deadline:
         return time.perf_counter() > self.deadline
 
 
-def solve_params(params, cost_scale=1):
+def solve_params(params, cost_scale=1, callbacks=None):
     """A `pyvrp.SolveParams` for `params` (from `resolve`), with the settings
-    in cost units multiplied by `cost_scale`."""
+    in cost units multiplied by `cost_scale`, and the search's `callbacks`
+    (a `pyvrp.IteratedLocalSearchCallbacks`)."""
     import pyvrp
     import pyvrp.search
 
@@ -204,6 +205,7 @@ def solve_params(params, cost_scale=1):
             num_iters_no_improvement=params["num_iters_no_improvement"],
             history_length=params["history_length"],
             exhaustive_on_best=params["exhaustive_on_best"],
+            callbacks=callbacks,
         ),
         penalty=pyvrp.PenaltyParams(
             solutions_between_updates=params["solutions_between_updates"],

@@ -560,9 +560,23 @@ class _Run:
             "in_flight": in_flight,
             "host": self._host_load(finished),
             "stage": stage_now,
-            "eta": self._eta(last_planned, done_generations, live is not None, stage_now),
+            "eta": self._budget_capped(self._eta(last_planned, done_generations, live is not None, stage_now), elapsed),
             "limits": self._limits(last_planned, done_generations, elapsed),
         }
+
+    def _budget_capped(self, eta: dict[str, Any], elapsed_s: float) -> dict[str, Any]:
+        """The generations' estimate, unless `budget.max_hours` ends the run
+        sooner -- which is how a time-planned run (the app's) stops."""
+        cap = _number((self.described.get("budget") or {}).get("max_hours"))
+        seconds = _number(eta.get("seconds"))
+        if cap is None or seconds is None:
+            return eta
+        left = max(0.0, cap * 3600.0 - elapsed_s)
+        if left >= seconds:
+            return eta
+        return {**eta, "seconds": left,
+                "at": datetime.fromtimestamp(self.now.timestamp() + left, timezone.utc).isoformat(timespec="seconds"),
+                "basis": f"the time budget (budget.max_hours, {cap:g} h) ends the run before its last planned generation"}
 
     def _stage_in_progress(
         self, items: Sequence[Mapping[str, Any]], in_flight: Sequence[Mapping[str, Any]]

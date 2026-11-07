@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 600" role="img" aria-label="Five moments on the main path; everything else waits behind a click" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13">
+<rect width="760" height="600" fill="#ffffff"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#a9a79f"/></marker></defs>
+<text x="24" y="34" font-size="15" font-weight="600" fill="#1b1b18">Five moments on the main path; everything else waits behind a click</text>
+<text x="40" y="66" font-size="11.5" fill="#5f5e5a">The main path</text>
+<text x="404" y="66" font-size="11.5" fill="#5f5e5a">Behind Change, or one click away</text>
+<g fill="none" stroke="#a9a79f" stroke-width="1.25">
+<path d="M190 148V172" marker-end="url(#arrow)"/>
+<path d="M190 244V268" marker-end="url(#arrow)"/>
+<path d="M190 340V364" marker-end="url(#arrow)"/>
+<path d="M190 436V460" marker-end="url(#arrow)"/>
+<path d="M340 112H404" stroke-dasharray="4 3"/>
+<path d="M340 208H404" stroke-dasharray="4 3"/>
+<path d="M340 304H404" stroke-dasharray="4 3"/>
+<path d="M340 400H404" stroke-dasharray="4 3"/>
+<path d="M340 496H404" stroke-dasharray="4 3"/>
+<path d="M190 532V556H20V208H40" marker-end="url(#arrow)"/>
+</g>
+<rect x="40" y="76" width="300" height="72" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25"/>
+<text x="56" y="100" font-weight="600" fill="#1b1b18">1. Start a study</text>
+<text x="56" y="120" font-size="11.5" fill="#5f5e5a">Application found for you,</text>
+<text x="56" y="136" font-size="11.5" fill="#5f5e5a">what to find out, the cases</text>
+<rect x="40" y="172" width="300" height="72" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25"/>
+<text x="56" y="196" font-weight="600" fill="#1b1b18">2. Set up</text>
+<text x="56" y="216" font-size="11.5" fill="#5f5e5a">What to tune, the goal, the time,</text>
+<text x="56" y="232" font-size="11.5" fill="#5f5e5a">a test run, then Start</text>
+<rect x="40" y="268" width="300" height="72" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25"/>
+<text x="56" y="292" font-weight="600" fill="#1b1b18">3. Running</text>
+<text x="56" y="312" font-size="11.5" fill="#5f5e5a">Time left, best so far, Stop;</text>
+<text x="56" y="328" font-size="11.5" fill="#5f5e5a">people leave and come back</text>
+<rect x="40" y="364" width="300" height="72" rx="8" fill="#2f6fdb" fill-opacity="0.12" stroke="#2f6fdb" stroke-width="2"/>
+<text x="56" y="388" font-weight="600" fill="#1b1b18">4. The answer</text>
+<text x="56" y="408" font-size="11.5" fill="#1b1b18">Use it or not, how sure,</text>
+<text x="56" y="424" font-size="11.5" fill="#1b1b18">each case at a glance</text>
+<rect x="40" y="460" width="300" height="72" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25"/>
+<text x="56" y="484" font-weight="600" fill="#1b1b18">5. Hand over</text>
+<text x="56" y="504" font-size="11.5" fill="#5f5e5a">The settings file, a summary</text>
+<text x="56" y="520" font-size="11.5" fill="#5f5e5a">to paste, the report</text>
+<rect x="404" y="84" width="332" height="56" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25" stroke-dasharray="4 3"/>
+<text x="420" y="108" font-size="11.5" fill="#5f5e5a">Other applications, a blank study,</text>
+<text x="420" y="124" font-size="11.5" fill="#5f5e5a">installing a harness from a .zip</text>
+<rect x="404" y="180" width="332" height="56" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25" stroke-dasharray="4 3"/>
+<text x="420" y="204" font-size="11.5" fill="#5f5e5a">Every setting and range, data changes, rules,</text>
+<text x="420" y="220" font-size="11.5" fill="#5f5e5a">measures, limits, AI help, the assistant</text>
+<rect x="404" y="276" width="332" height="56" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25" stroke-dasharray="4 3"/>
+<text x="420" y="300" font-size="11.5" fill="#5f5e5a">What runs right now, failed runs,</text>
+<text x="420" y="316" font-size="11.5" fill="#5f5e5a">the expert dashboard</text>
+<rect x="404" y="372" width="332" height="56" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25" stroke-dasharray="4 3"/>
+<text x="420" y="396" font-size="11.5" fill="#5f5e5a">Check again, every measure, what changed,</text>
+<text x="420" y="412" font-size="11.5" fill="#5f5e5a">the cases the search learned from</text>
+<rect x="404" y="468" width="332" height="56" rx="8" fill="none" stroke="#a9a79f" stroke-width="1.25" stroke-dasharray="4 3"/>
+<text x="420" y="492" font-size="11.5" fill="#5f5e5a">Files to save: settings, flags,</text>
+<text x="420" y="508" font-size="11.5" fill="#5f5e5a">data changes, the report</text>
+<text x="24" y="574" font-size="11.5" fill="#5f5e5a">The next study starts from this result</text>
+</svg>

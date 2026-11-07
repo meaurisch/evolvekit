@@ -258,6 +258,9 @@ class Setting:
     explain: str = ""
     """The longer explanation a model reads; people see `help`."""
     recommended: bool = False
+    rank: int | None = None
+    """For a recommended setting given as a number: 1 for the one that matters
+    most, 2 for the next; None when it is just `true`."""
 
     @property
     def name(self) -> str:
@@ -275,12 +278,20 @@ class Setting:
             parameter = Parameter.parse(name, {k: v for k, v in data.items() if k not in SETTING_META}, path)
         except SpaceError as exc:
             raise HarnessError(str(exc)) from None
+        raw = data.get("recommended", False)
+        if isinstance(raw, bool):
+            recommended, rank = raw, None
+        elif isinstance(raw, int) and raw >= 1:
+            recommended, rank = True, raw
+        else:
+            raise HarnessError(f"{path}.recommended: true, false, or a rank (1 for the setting that matters most), got {raw!r}")
         return Setting(
             parameter=parameter,
             label=_text(data.get("label", str(name).replace("_", " ")), f"{path}.label"),
             group=_text(data.get("group", "Settings"), f"{path}.group"),
             explain=_text(data.get("explain"), f"{path}.explain", empty=True),
-            recommended=_flag(data.get("recommended", False), f"{path}.recommended"),
+            recommended=recommended,
+            rank=rank,
         )
 
 
@@ -292,22 +303,30 @@ class Column:
     describe: str = ""
     categorical: bool = False
     """Only categorical columns' distinct values may be summarised to a model."""
+    private: bool = False
+    """Never summarised to a model at all, not even its range: coordinates,
+    and anything else that would locate a customer."""
 
     @staticmethod
     def parse(table: str, name: Any, raw: Any) -> "Column":
         path = f"tables.{table}.columns.{name}"
         _name(name, path)
         data = _mapping(raw, path)
-        _known(data, {"type", "unit", "describe", "categorical"}, path)
+        _known(data, {"type", "unit", "describe", "categorical", "private"}, path)
         kind = _text(_required(data, "type", path), f"{path}.type")
         if kind not in COLUMN_TYPES:
             raise HarnessError(f"{path}.type: must be one of {list(COLUMN_TYPES)}, got {kind!r}")
-        return Column(
+        column = Column(
             name=name, type=kind,
             unit=_text(data.get("unit", ""), f"{path}.unit", empty=True),
             describe=_text(data.get("describe"), f"{path}.describe", empty=True),
             categorical=_flag(data.get("categorical", False), f"{path}.categorical"),
+            private=_flag(data.get("private", False), f"{path}.private"),
         )
+        if column.categorical and column.private:
+            raise HarnessError(f"{path}: a column is categorical (its values may be shown to a model) or private "
+                               "(nothing about it is), not both")
+        return column
 
 
 @dataclass(frozen=True)
@@ -400,13 +419,26 @@ class Kpi:
     """Above 0 on every sensible solution: may be normalised per case."""
     changes_with_levers: bool = False
     """Measured with what the solver saw: not comparable once a lever changes it."""
+    guard: dict[str, Any] | None = None
+    """The guardrail this KPI wants beside it as a goal, `{kpi, min}` or
+    `{kpi, max}`: a cost that does not count broken rules wants "feasible at
+    least 1". The app suggests it."""
 
     @staticmethod
     def parse(name: Any, raw: Any) -> "Kpi":
         path = f"kpis.{name}"
         _name(name, path)
         data = _mapping(raw, path)
-        _known(data, {"label", "direction", "sql", "measure", "unit", "help", "positive", "changes_with_levers"}, path)
+        _known(data, {"label", "direction", "sql", "measure", "unit", "help", "positive", "changes_with_levers", "guard"}, path)
+        guard = None
+        if data.get("guard") is not None:
+            raw_guard = _mapping(data["guard"], f"{path}.guard")
+            _known(raw_guard, {"kpi", "min", "max"}, f"{path}.guard")
+            bounds = [key for key in ("min", "max") if key in raw_guard]
+            if len(bounds) != 1:
+                raise HarnessError(f"{path}.guard: give the other KPI and exactly one of min or max")
+            guard = {"kpi": _text(_required(raw_guard, "kpi", f"{path}.guard"), f"{path}.guard.kpi"),
+                     bounds[0]: _number(raw_guard[bounds[0]], f"{path}.guard.{bounds[0]}")}
         direction = _text(_required(data, "direction", path), f"{path}.direction")
         if direction not in DIRECTIONS:
             raise HarnessError(f"{path}.direction: must be 'lower' or 'higher' (which is better), got {direction!r}")
@@ -421,6 +453,7 @@ class Kpi:
             help=_text(data.get("help"), f"{path}.help", empty=True),
             positive=_flag(data.get("positive", False), f"{path}.positive"),
             changes_with_levers=_flag(data.get("changes_with_levers", False), f"{path}.changes_with_levers"),
+            guard=guard,
         )
 
 
@@ -580,7 +613,11 @@ class Harness:
 
     @property
     def recommended(self) -> list[str]:
-        return [name for name, setting in self.settings.items() if setting.recommended]
+        """The recommended settings, the one that matters most first: by rank,
+        then in the order the harness declares them."""
+        order = {name: i for i, name in enumerate(self.settings)}
+        chosen = [name for name, setting in self.settings.items() if setting.recommended]
+        return sorted(chosen, key=lambda n: (self.settings[n].rank is None, self.settings[n].rank or 0, order[n]))
 
 
 def _check_sql(harness: Harness) -> None:
@@ -663,6 +700,9 @@ def load_harness(root: str | Path, *, check_templates: bool = True) -> Harness:
         defaults=Defaults.parse(data.get("defaults")),
         templates=_templates(root),
     )
+    for name, kpi in harness.kpis.items():
+        if kpi.guard is not None and kpi.guard["kpi"] not in harness.kpis:
+            raise HarnessError(f"kpis.{name}.guard.kpi: {kpi.guard['kpi']!r} is not one of the harness's KPIs")
     clash = sorted(set(harness.kpis) & set(harness.settings))
     if clash:
         raise HarnessError(f"kpis.{clash[0]}: a KPI and a setting share the name {clash[0]!r}")

@@ -13,7 +13,7 @@ import yaml
 
 from evolvekit.harness.check import check_harness, exit_code, render
 from evolvekit.harness.manifest import load_harness
-from evolvekit.harness.probe import probe_application, version_matches
+from evolvekit.harness.probe import probe_application, version_matches, version_words
 from harness_toy import MANIFEST, write_toy_harness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +39,15 @@ SOLVER = ROOT / "examples" / "cli-solver" / "solver.py"
 )
 def test_version_specifiers(version, specifier, expected):
     assert version_matches(version, specifier) is expected
+
+
+@pytest.mark.parametrize(
+    "specifier, words",
+    [(">=0.14,<0.15", "0.14.x"), ("==1.2.*", "1.2.x"), (">=2", "2 or later"),
+     (">=1.2,<2", "1.2 or later, before 2"), ("~=1.4", "~=1.4")],
+)
+def test_version_specifiers_in_words(specifier, words):
+    assert version_words(specifier) == words
 
 
 def test_a_python_application_is_asked_for_its_module(tmp_path):

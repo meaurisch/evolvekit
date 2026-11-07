@@ -92,8 +92,8 @@ tables:
     describe: One row per stop of the tour.
     columns:
       stop_id: {type: int, describe: The stop's number within the case}
-      x: {type: float, unit: km, describe: East-west position}
-      y: {type: float, unit: km, describe: North-south position}
+      x: {type: float, unit: km, private: true, describe: East-west position}
+      y: {type: float, unit: km, private: true, describe: North-south position}
       weight: {type: float, describe: How much the solver weighs the legs into this stop (1 is plain distance)}
       tag: {type: text, categorical: true, describe: "The area the stop is in: north or south"}
   tour:

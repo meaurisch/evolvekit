@@ -571,7 +571,9 @@ function renderHealth(doc) {
   const busy = (he.host?.stages || []).filter((s) => s.flagged || s.busier_throughout);
   const host = busy.length ? h("div", { class: "hostwarn", role: "status", title: he.host.why || "" },
     h("b", null, "⚠ The machine was not this run's alone. "),
-    busy.map((s) => `Stage ${s.id}: ${s.flagged} of ${s.n} runs shared it with something else (typically ${Math.round(s.typical * 100)} % of all CPUs busy; this run's workers explain ${Math.round(s.explained * 100)} %)` + (s.busier_throughout ? " — busier than explained throughout: a multi-threaded solver, or other work." : ".")).join(" "),
+    busy.map((s) => (s.flagged
+      ? `Stage ${s.id}: ${s.flagged} of ${s.n} runs shared it with something else (typically ${Math.round(s.typical * 100)} % of all CPUs busy; this run's workers explain ${Math.round(s.explained * 100)} %)` + (s.busier_throughout ? " — and it was busier than explained throughout: a multi-threaded solver, or other work." : ".")
+      : `Stage ${s.id}: busier than this run's workers explain throughout its ${s.n} runs (typically ${Math.round(s.typical * 100)} % of all CPUs busy; the workers explain ${Math.round(s.explained * 100)} %): a multi-threaded solver, or other work.`)).join(" "),
     " A time-limited evaluation that shares the machine scores worse than it should.") : null;
   return [cardHead("health", "Health", "Is the run healthy, and how far along is it?"),
           h("div", { class: "tiles" }, tiles), host, ribbon, h("div", { class: "strip" }, flight, limits)];

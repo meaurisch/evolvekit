@@ -69,10 +69,17 @@ unchanged with PyVRP on the requests as written (with the benchmark's
 | `routes` | route of the plan: vehicle type and class, times, distance, overtime, waiting, lateness, trips, `cost` at the untouched request's rates and `solver_cost` at the rates PyVRP saw |
 | `visits` | task served, in route order: trip, start and end of service, waiting, lateness, load on board, previous and next task |
 | `unassigned` | task left out, with the prize forgone |
-| `summary` | the plan: PyVRP's objective, feasibility, required tasks left out, iterations, runtime |
+| `summary` | the plan: PyVRP's objective, feasibility, required tasks left out, iterations, runtime, and `stopped` |
 
 `orig_tasks`, `orig_vehicle_types`, … hold the request before a study's data
 changes.
+
+For some settings PyVRP 0.14's local search goes round in circles and never
+comes back, whatever the time limit. So PyVRP runs in a process of its own
+that reports every better plan as it finds it: a search still running two
+seconds (or a tenth of the time limit, if longer) after the limit is stopped,
+its best plan is the result, and `summary.stopped` says so. Such settings
+simply score what their plan scores; the run goes on.
 
 ## Settings
 

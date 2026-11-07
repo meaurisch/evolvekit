@@ -5,18 +5,16 @@ It runs under the Python that has PyVRP installed. A case is a delivery
 request -- JSON in the benchmark's format, or a VRPLIB file -- shown to a
 study as tables (kit/request.py); `solve` rebuilds the request from those
 tables, so the study's data changes reach PyVRP, and solves it within the time
-limit; `solution_tables` turns the plan into routes, visits, unassigned tasks
-and a summary (kit/plan.py). Everything else -- data changes, constraints,
-KPIs, guardrails, exports, exit codes -- is the SDK's.
+limit, in a process of its own (kit/solving.py); `solution_tables` turns the
+plan into routes, visits, unassigned tasks and a summary (kit/plan.py).
+Everything else -- data changes, constraints, KPIs, guardrails, exports, exit
+codes -- is the SDK's.
 """
 
 import copy
-import faulthandler
-import sys
-import time
 
 import evk_harness as evk
-from kit import params, plan, request
+from kit import params, plan, request, solving
 
 DEFAULT_TIME_LIMIT_S = 60.0
 
@@ -41,25 +39,12 @@ def apply_lever(case, name, rows, value, mode=None):
 
 
 def solve(case, settings, time_limit_s, seed):
-    import pyvrp
-
     values = params.resolve(settings)
     built = request.problem(case.native, case.tables)
-    solve_params = params.solve_params(values, case.native.scale)
     limit = float(time_limit_s or DEFAULT_TIME_LIMIT_S)
-    # If PyVRP does not come back from the limit, say where it is: the Python
-    # stack on stderr at 1.4 times the limit, before a stage timeout kills it.
-    faulthandler.dump_traceback_later(max(5.0, 1.4 * limit), repeat=False, file=sys.stderr)
-    started = time.perf_counter()
-    try:
-        result = pyvrp.solve(
-            built.data, stop=params.Deadline(started + limit), seed=int(seed) % 2**32,
-            collect_stats=False, display=False, params=solve_params,
-        )
-    finally:
-        faulthandler.cancel_dump_traceback_later()
-    return plan.Solved(result.best, built, iterations=result.num_iterations,
-                       runtime_s=time.perf_counter() - started)
+    # In a process of its own, so a search that never comes back is stopped
+    # after the time limit with the best plan it had (kit/solving.py).
+    return solving.search(built, values, case.native.scale, limit, int(seed) % 2**32)
 
 
 def solution_tables(case, solution):

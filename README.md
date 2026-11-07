@@ -1561,6 +1561,20 @@ python -m evolvekit harness install pyvrp-1.0.0.zip      # into the library home
 through. The library home is `EVOLVEKIT_HOME`, else `~/evolvekit`; the
 harnesses in this repository's `harnesses/` folder are found as built-ins.
 
+### The app
+
+```
+python -m evolvekit app
+```
+
+opens a local web app in which someone who is not a programmer does all of
+the above: picks the application (it finds the Python that has PyVRP), brings
+the cases, says what may change and what counts as better — with an optional
+AI assistant that proposes measures and data changes, each checked on a real
+solve before it is shown — starts the study, watches it, and reads the result
+in plain words, with the settings file and a report to hand on. Studies keep
+running when the app is closed. [docs/app.md](docs/app.md) is its manual.
+
 ## Adding a problem
 
 1. **Write a skeleton.** A normal Python file with the part you want evolved

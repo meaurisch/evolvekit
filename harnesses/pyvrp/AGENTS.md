@@ -59,8 +59,10 @@ if __name__ == "__main__":
   (the plan; `solution_tables`). Every column is declared in `harness.yaml`
   with a type, a unit and a one-line description; mark a column
   `categorical: true` only when its distinct values are safe to show a model
-  (tags, classes — never names, addresses or coordinates). The check fails
-  when the tables you produce differ from the declaration.
+  (tags, classes — never names, addresses or coordinates), and
+  `private: true` when nothing about it may reach a model, not even its range
+  (coordinates). The check fails when the tables you produce differ from the
+  declaration.
 - **`solve` must build the problem from `case.tables`** for every column a
   lever can change: the SDK changes those cells, never your native object.
 - A lever with `code: true` is yours to apply: `apply_lever` gets the rows
@@ -87,7 +89,8 @@ The check's "three random settings vectors" step finds ranges that break.
 
 Every setting has `label` and `help` (for people: plain words, one sentence)
 and `explain` (for the model: what it does, which way it trades off, when it
-matters). Mark about eight as `recommended: true` — the ones that matter most.
+matters). Mark about eight as `recommended` — the ones that matter most —
+with a rank (`recommended: 1` for the most important, `2` next, …), or `true`.
 
 ## When the application's API changes
 
