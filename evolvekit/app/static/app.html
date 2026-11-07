@@ -331,6 +331,33 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
   if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
 })();
 
+// ------------------------------------------------------------------ the key
+// The app prints and opens an address that carries the key of this launch (`?token=`);
+// every request must carry it, so nothing but this page -- opened from that address --
+// can drive the app. The page takes it from the URL into sessionStorage (a reload or a
+// hash link keeps working), strips it from the address bar and sends it as a header.
+const TOKEN_KEY = "evolvekit.token";
+const TOKEN_HEADER = "X-Evolvekit-Token";
+let TOKEN = (() => {
+  const params = new URLSearchParams(location.search);
+  const given = params.get("token");
+  let remembered = null;
+  try { remembered = sessionStorage.getItem(TOKEN_KEY); } catch (err) { /* storage refused: the URL's key serves this load */ }
+  if (!given) return remembered;
+  try { sessionStorage.setItem(TOKEN_KEY, given); } catch (err) { /* same */ }
+  params.delete("token");
+  const search = params.toString();
+  try { history.replaceState(null, "", location.pathname + (search ? "?" + search : "") + location.hash); } catch (err) { /* the key stays visible; it still works */ }
+  return given;
+})();
+// A link that opens in a new tab or downloads cannot carry a header: it carries the key in its query.
+function withToken(url) { return TOKEN ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN) : url; }
+function forgetToken() {
+  TOKEN = null;
+  try { sessionStorage.removeItem(TOKEN_KEY); } catch (err) { /* nothing to forget */ }
+}
+const NO_TOKEN_SENTENCE = "Open the app from the address printed in the window it runs in.";
+
 // ------------------------------------------------------------------ helpers
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $("#view");
@@ -427,7 +454,7 @@ function undo(message, action) {
 function hideUndo() { const el = $("#undo"); el.hidden = true; el.replaceChildren(); clearTimeout(undo.timer); }
 
 async function api(method, path, body, options = {}) {
-  const init = { method, headers: {} };
+  const init = { method, headers: { [TOKEN_HEADER]: TOKEN || "" } };
   if (body instanceof Blob || body instanceof ArrayBuffer) { init.body = body; init.headers["Content-Type"] = "application/octet-stream"; }
   else if (body !== undefined) { init.body = JSON.stringify(body); init.headers["Content-Type"] = "application/json"; }
   let response;
@@ -436,6 +463,11 @@ async function api(method, path, body, options = {}) {
   const type = response.headers.get("Content-Type") || "";
   const payload = type.startsWith("application/json") ? await response.json() : await response.blob();
   if (!response.ok) {
+    if (response.status === 403 && payload && /carries its key/.test(payload.error || "")) {
+      // The app was started again since this tab got its key: the old one is no good now.
+      forgetToken(); showNoToken();
+      throw new Error(NO_TOKEN_SENTENCE);
+    }
     const error = new Error(sentence((payload && payload.error) || `the app answered ${response.status}`));
     error.status = response.status; throw error;
   }
@@ -462,7 +494,13 @@ function crumbs(...parts) {
   });
 }
 
+function showNoToken() {
+  clearTimers(); hideUndo(); crumbs({ text: "evolvekit" });
+  view.replaceChildren(h("div", { class: "narrow" }, h("p", { class: "lede" }, NO_TOKEN_SENTENCE)));
+}
+
 async function route() {
+  if (!TOKEN) { showNoToken(); return; }
   clearTimers(); hideUndo();
   // `#/study/<slug>/results?run=<id>`: the path before the "?", the query after it (a bare path means the latest run).
   const [path, queryText] = location.hash.replace(/^#\/?/, "").split("?", 2);
@@ -1028,7 +1066,7 @@ async function step2(box) {
     problemsOf(2), stepFoot(2));
   found.replaceChildren(h("div", { class: "row muted" }, h("span", { class: "spinner" }), kind === "python" ? `Looking for Python installations with ${harness.title}… this takes up to 10 seconds.` : "Looking…"));
   try {
-    detected = await api("GET", `/api/detect?study=${encodeURIComponent(current.slug)}`);
+    detected = await api("POST", `/api/detect?study=${encodeURIComponent(current.slug)}`);
     drawList();
   } catch (err) { found.replaceChildren(note("bad", h("p", { style: "margin:0" }, err.message))); }
 }
@@ -1826,7 +1864,7 @@ async function step7(box) {
     plan && plan.blocked ? note("bad", h("p", { style: "margin:0" }, sentence(plan.blocked))) : null,
     h("h2", {}, "Test run"), testResult, h("div", { class: "row", style: "margin-top:8px" }, testBtn),
     h("p", { class: "faint", style: "margin-top:18px" }, "The study's setup — its cases, choices and harness — travels as one file: ",
-      h("a", { href: studyPath("/download/study"), download: "" }, "Save as zip"), ". Dropped on the home page of another library, it becomes a study there."),
+      h("a", { href: withToken(studyPath("/download/study")), download: "" }, "Save as zip"), ". Dropped on the home page of another library, it becomes a study there."),
     h("div", { class: "step-foot" }, h("a", { class: "btn", href: `#/study/${current.slug}/6` }, "Back"),
       h("div", { class: "row" }, h("span", { class: "faint" }, "The study runs on even if you close the app."), start)));
   drawTest(doc.test_run);
@@ -2111,7 +2149,7 @@ async function renderRunning(slug, run) {
       s.busy_line ? note("info", h("p", { style: "margin:0" }, s.busy_line)) : null,
       s.failures.length ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Runs that failed"),
         s.failures.map((f) => h("div", { class: "item" }, h("span", { class: "badge" }, `${f.count}×`), h("div", { class: "body" }, h("div", { class: "what small" }, sentence(f.message)), h("div", { class: "muted small" }, f.todo))))) : null,
-      h("div", { class: "step-foot" }, h("a", { class: "btn", href: s.dashboard, target: "_blank", rel: "noopener", title: "Every number the engine keeps, in its own words: for experts" }, "Detailed dashboard (for experts)"),
+      h("div", { class: "step-foot" }, h("a", { class: "btn", href: withToken(s.dashboard), target: "_blank", rel: "noopener", title: "Every number the engine keeps, in its own words: for experts" }, "Detailed dashboard (for experts)"),
         running || queued ? stop : h("div", { class: "row" },
           s.can_check ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => { await api("POST", studyPath("/final-check" + runQuery)); toast("The final check runs again."); draw(); }, e.currentTarget) }, "Run the final check again") : null,
           // A fresh run: the page follows it, not the run it was opened on.
@@ -2224,12 +2262,12 @@ async function renderResults(slug, run) {
   }
   const summary = h("button", { class: "btn", type: "button", onclick: () => { const pre = show("A summary for your message:", r.summary_text); copyText(r.summary_text, pre); } }, "Copy a summary");
   const settingsButton = r.downloads.some((d) => d.name === "settings_json") ? h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
-    const response = await fetch(`${studyPath("/download/settings_json")}${runQuery}`);
+    const response = await fetch(`${studyPath("/download/settings_json")}${runQuery}`, { headers: { [TOKEN_HEADER]: TOKEN || "" } });
     if (!response.ok) throw new Error("The settings could not be read.");
     show("The settings file, ready for the application:", await response.text());
   }, e.currentTarget) }, "Show the settings") : null;
-  const report = h("a", { class: "btn", href: `${studyPath("/download/report")}${runQuery}&view=1`, target: "_blank", rel: "noopener" }, "Open the report");
-  const downloads = h("div", { class: "row" }, r.downloads.map((d) => h("a", { class: "btn small" + (d.name === "settings_json" || d.name === "data_changes" ? " primary" : ""), href: `${studyPath("/download/" + d.name)}${runQuery}`, download: "" }, d.label)));
+  const report = h("a", { class: "btn", href: withToken(`${studyPath("/download/report")}${runQuery}&view=1`), target: "_blank", rel: "noopener" }, "Open the report");
+  const downloads = h("div", { class: "row" }, r.downloads.map((d) => h("a", { class: "btn small" + (d.name === "settings_json" || d.name === "data_changes" ? " primary" : ""), href: withToken(`${studyPath("/download/" + d.name)}${runQuery}`), download: "" }, d.label)));
   const again = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
     const doc = await api("POST", studyPath(`/next${runQuery}`), { name: `${current.doc.study.name} (next)` });
     location.hash = `#/study/${doc.slug}/4`;
@@ -2272,7 +2310,7 @@ async function renderResults(slug, run) {
       h("div", { class: "row" }, summary, report, settingsButton), shown,
       h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads,
       h("p", { class: "faint", style: "margin:14px 0 0" }, "The study itself — its cases, choices and harness, not the runs — as one file to pass on: ",
-        h("a", { href: studyPath("/download/study"), download: "" }, "Save as zip"), ".")),
+        h("a", { href: withToken(studyPath("/download/study")), download: "" }, "Save as zip"), ".")),
     h("h2", {}, "Next steps"), h("div", { class: "card" },
       more ? h("p", { class: "muted", style: "margin-top:0" }, "Give this run more time: the search goes on from its best, and the final check runs again.") : null,
       more ? h("div", { class: "row", style: "margin-bottom:14px" }, more) : null,

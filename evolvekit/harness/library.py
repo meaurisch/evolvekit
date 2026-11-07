@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +38,11 @@ __all__ = [
     "pack_harness",
     "slugify",
 ]
+
+MAX_MEMBERS = 2000
+MAX_UNPACKED = 500 * 1024 * 1024
+"""What a harness zip may hold: a harness is a runner, a manifest and some
+samples. Judged from the archive's directory, before anything is written."""
 
 BUILT_IN = Path(__file__).resolve().parents[2] / "harnesses"
 """`harnesses/` of the checkout evolvekit runs from (absent in an installed package)."""
@@ -129,7 +135,11 @@ def pack_harness(folder: str | Path, out_dir: str | Path | None = None) -> Path:
 
 def install_harness(archive: str | Path, home: Path | None = None) -> Harness:
     """Unpack a harness `.zip` into the library home and check it. A path in
-    the archive that would land outside its folder is refused."""
+    the archive that would land outside its folder is refused; so is an
+    archive with more than `MAX_MEMBERS` files or more than `MAX_UNPACKED`
+    bytes once unpacked, before anything of it is written. Whatever else a
+    zip can do wrong -- it is not one, it is encrypted, compressed in a way
+    Python cannot undo, or corrupt -- is a `HarnessError` with the reason."""
     archive = Path(archive)
     root = (home or default_home()) / "harnesses"
     root.mkdir(parents=True, exist_ok=True)
@@ -138,6 +148,11 @@ def install_harness(archive: str | Path, home: Path | None = None) -> Harness:
         shutil.rmtree(staging)
     try:
         with zipfile.ZipFile(archive) as bundle:
+            members = bundle.infolist()
+            unpacked = sum(info.file_size for info in members)
+            if len(members) > MAX_MEMBERS or unpacked > MAX_UNPACKED:
+                raise HarnessError(f"{archive.name}: {len(members)} files / {round(unpacked / 2**20)} MB unpacked "
+                                   "is more than a harness can be")
             names = [n for n in bundle.namelist() if not n.endswith("/")]
             tops = {n.split("/", 1)[0] for n in names}
             strip = len(tops) == 1 and all("/" in n for n in names)
@@ -148,9 +163,16 @@ def install_harness(archive: str | Path, home: Path | None = None) -> Harness:
                     raise HarnessError(f"{archive.name}: {name!r} would land outside the harness folder")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(bundle.read(name))
-    except zipfile.BadZipFile:
+    except zipfile.BadZipFile as exc:
         shutil.rmtree(staging, ignore_errors=True)
-        raise HarnessError(f"{archive.name}: not a zip file") from None
+        raise HarnessError(f"{archive.name}: not a zip file ({exc})") from None
+    except (RuntimeError, NotImplementedError, zlib.error, OSError) as exc:
+        # Encrypted, an unsupported compression, a corrupt stream, a disk that is full.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise HarnessError(f"{archive.name}: cannot be unpacked: {exc}") from None
+    except HarnessError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     try:
         harness = load_harness(staging)
     except HarnessError:

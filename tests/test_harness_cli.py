@@ -121,3 +121,43 @@ def test_a_study_that_is_not_ready_says_what_is_missing(tmp_path, capsys):
     capsys.readouterr()
     assert main(["study", "compile", str(folder)]) == 1
     assert "error: application: say where the application is" in capsys.readouterr().err
+
+
+def _no_staging_left(home: Path) -> bool:
+    harnesses = home / "harnesses"
+    return not harnesses.is_dir() or not any(p.name.startswith(".incoming-") for p in harnesses.iterdir())
+
+
+def test_an_encrypted_zip_is_refused_in_a_sentence(tmp_path):
+    locked = tmp_path / "locked.zip"
+    with zipfile.ZipFile(locked, "w") as bundle:
+        info = zipfile.ZipInfo("harness.yaml")
+        bundle.writestr(info, "harness: 1")
+        info.flag_bits |= 0x1  # the directory says: encrypted; `read` then asks for a password
+    with pytest.raises(ValueError, match="locked.zip") as caught:
+        install_harness(locked, tmp_path / "home")
+    assert "encrypted" in str(caught.value) or "password" in str(caught.value)
+    assert _no_staging_left(tmp_path / "home")
+
+
+def test_a_zip_with_too_many_members_is_refused_before_anything_is_written(tmp_path):
+    many = tmp_path / "many.zip"
+    with zipfile.ZipFile(many, "w") as bundle:
+        for index in range(2001):
+            bundle.writestr(f"h/{index}.txt", "")
+    with pytest.raises(ValueError, match="2001 files .* more than a harness can be"):
+        install_harness(many, tmp_path / "home")
+    assert _no_staging_left(tmp_path / "home")
+
+
+def test_a_zip_that_unpacks_past_the_limit_is_refused_before_anything_is_written(tmp_path, monkeypatch):
+    from evolvekit.harness import library
+
+    monkeypatch.setattr(library, "MAX_UNPACKED", 1024)
+    big = tmp_path / "big.zip"
+    with zipfile.ZipFile(big, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("h/harness.yaml", "harness: 1")
+        bundle.writestr("h/blob.bin", b"\0" * 4096)
+    with pytest.raises(ValueError, match="2 files / 0 MB unpacked is more than a harness can be"):
+        install_harness(big, tmp_path / "home")
+    assert _no_staging_left(tmp_path / "home")

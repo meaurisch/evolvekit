@@ -15,6 +15,7 @@ The tests that wait on the clock are `slow`; the rest are not.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -181,3 +182,26 @@ def test_a_run_that_was_pinned_or_never_asked_to_be_is_not_flagged(tmp_path):
         cpus=(0,) if can_pin() else (),
     )
     assert run.returncode == 0 and run.unpinned is None
+
+
+def test_secrets_in_the_parent_never_reach_the_command(tmp_path, monkeypatch):
+    """A solver or a harness runner is started by the evaluator; the API keys
+    the app keeps in its own environment are nothing it should ever see."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-secret")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.invalid")
+    monkeypatch.setenv("MY_TOKEN", "t")
+    monkeypatch.setenv("EVOLVEKIT_PLAIN_SETTING", "visible")
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import os, json; print(json.dumps([os.environ.get(n) for n in "
+        "('OPENROUTER_API_KEY', 'AZURE_OPENAI_ENDPOINT', 'MY_TOKEN', 'EVOLVEKIT_PLAIN_SETTING', 'PATH')]))",
+        encoding="utf-8",
+    )
+    run = run_bounded(
+        [sys.executable, str(script)], timeout=30, cwd=tmp_path,
+        stdout_path=tmp_path / "out.log", stderr_path=tmp_path / "err.log",
+    )
+    assert run.returncode == 0, (tmp_path / "err.log").read_text(encoding="utf-8")
+    seen = json.loads((tmp_path / "out.log").read_text(encoding="utf-8"))
+    assert seen[:4] == [None, None, None, "visible"]
+    assert seen[4]  # the rest of the environment is intact

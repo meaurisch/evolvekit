@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -47,9 +48,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
-__all__ = ["BoundedRun", "run_bounded", "read_tail", "can_pin"]
+__all__ = ["BoundedRun", "SECRET_NAMES", "run_bounded", "read_tail", "can_pin", "scrubbed_environment"]
+
+SECRET_NAMES = re.compile(r"(_API_KEY$|^AZURE_OPENAI_|_SECRET$|_TOKEN$)", re.I)
+"""Environment variables a command started here never inherits: the API keys
+evolvekit (and the app, for its assistant) keep in their own environment are
+not the business of a solver or a harness runner. A caller that gives an
+`env` of its own says what the command sees."""
 
 REAP_TIMEOUT_S = 10.0
 """How long to wait for a killed tree to be reaped before moving on. The kill
@@ -87,6 +94,7 @@ def run_bounded(
     stderr_path: Path,
     cpus: Sequence[int] = (),
     cancel: threading.Event | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> BoundedRun:
     """Run `argv`; never take longer than `timeout` plus the time to kill it.
 
@@ -94,6 +102,8 @@ def run_bounded(
     solver, the difference between a run that had a core and one that shared
     it. `cancel`, once set, ends the run as a timeout would: several runs in
     flight on worker threads have no Ctrl+C of their own to be reached by.
+    `env` is the command's whole environment; without one, this process's
+    without its secrets (`scrubbed_environment`).
     """
     started = time.perf_counter()
     deadline = started + timeout
@@ -107,6 +117,7 @@ def run_bounded(
                 stdout=out,
                 stderr=err,
                 cwd=str(cwd),
+                env=env,
             )
         except OSError as exc:
             return BoundedRun(None, False, time.perf_counter() - started, str(exc))
@@ -197,10 +208,22 @@ def read_tail(path: Path, limit: int) -> str:
     return text[-limit:] if limit > 0 else ""
 
 
+def scrubbed_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """`source` (this process's environment when not given) without the
+    variables whose names `SECRET_NAMES` matches."""
+    return {name: value for name, value in (os.environ if source is None else source).items()
+            if not SECRET_NAMES.search(name)}
+
+
 def _spawn(
     argv: list[str], cpus: tuple[int, ...] = (), **popen_kwargs: Any
 ) -> "_PosixTree | _WindowsTree":
-    """Start `argv` as the root of a tree. Raises `OSError` exactly as `Popen`."""
+    """Start `argv` as the root of a tree. Raises `OSError` exactly as `Popen`.
+
+    The one place a command gets its environment: the caller's `env`, or
+    this process's without its secrets."""
+    if popen_kwargs.get("env") is None:
+        popen_kwargs["env"] = scrubbed_environment()
     if sys.platform == "win32":
         return _WindowsTree.spawn(argv, popen_kwargs, cpus)
     return _PosixTree.spawn(argv, popen_kwargs, cpus)

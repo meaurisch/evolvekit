@@ -15,10 +15,13 @@ asks the questions and explains the answers.
 python -m evolvekit app
 ```
 
-It opens your browser at `http://127.0.0.1:8780/` and prints that address.
-Keep the window it runs in open while you work; closing it stops the app, not
-the studies that are running — they carry on, and the app shows them again
-when it is back.
+It opens your browser at `http://127.0.0.1:8780/?token=…` and prints that
+address. The address carries the key of this launch: open it as printed (a
+bookmark of the bare address, or the page from an earlier launch, shows one
+sentence asking you to), and the page keeps the key for as long as the tab is
+open. Keep the window it runs in open while you work; closing it stops the
+app, not the studies that are running — they carry on, and the app shows
+them again when it is back.
 
 | Option | Does |
 |---|---|
@@ -28,7 +31,9 @@ when it is back.
 | `--shortcut` | Windows: put `evolvekit.cmd` on the desktop, which starts the app with a double-click |
 
 The app answers only to this computer: it listens on 127.0.0.1, refuses
-requests that name another host, and accepts changes only from its own page.
+requests that name another host, accepts changes only from its own page, and
+answers nothing but that page without the key of this launch — so another
+program on the machine that knows the port cannot drive it.
 
 ## Your library
 
@@ -273,8 +278,12 @@ everything it does.
 ## For developers
 
 The page uses nothing but a JSON API (`evolvekit/app/api.py`), so a server
-can take the app's place later: `/api/home`, `/api/settings`,
-`/api/harnesses`, `/api/studies/{name}` and its `application`, `cases`,
+can take the app's place later. Every request to it, and to a run's dashboard,
+carries the key of this launch — the `token` in the address the app printed —
+in an `X-Evolvekit-Token` header or a `?token=` query; without it the answer
+is 403, sent before the body is read. The routes: `/api/home`, `/api/settings`,
+`/api/harnesses`, `POST /api/detect?study=` (looks for installed copies of the
+application: it searches the machine, so it is not a `GET`), `/api/studies/{name}` and its `application`, `cases`,
 `import`, `samples`, `split`, `inputs`, `preview`, `kpis/try`, `choices`,
 `assistant` (a `POST` with `{message, screen, run}` answers at once with a
 `turn` that is thinking; `GET …/assistant?turn=` is polled until it is done

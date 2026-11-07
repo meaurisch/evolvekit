@@ -48,7 +48,7 @@ def _until(app: AppServer, path: str, done, timeout: float = 180.0) -> dict:
 
 def _disposition(app: AppServer, path: str) -> str:
     connection = http.client.HTTPConnection("127.0.0.1", app.port, timeout=120)
-    connection.request("GET", path, headers={"Host": f"127.0.0.1:{app.port}"})
+    connection.request("GET", path, headers={"Host": f"127.0.0.1:{app.port}", "X-Evolvekit-Token": app.token})
     response = connection.getresponse()
     response.read()
     connection.close()
@@ -400,7 +400,7 @@ def test_two_starts_in_one_second_get_two_visible_run_ids(app, monkeypatch):
     fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(jobs, "_now", lambda: fixed)
 
-    def launched_and_done(home, root, run_dir, extra):  # a run that finished within the second
+    def launched_and_done(home, root, run_dir, extra, *, with_keys):  # a run that finished within the second
         (run_dir / "job.json").write_text(json.dumps({"phase": "done", "pid": 2 ** 22 + 7, "started_at": fixed.isoformat(),
                                                        "finished_at": fixed.isoformat()}), encoding="utf-8")
         return 2 ** 22 + 7
@@ -484,3 +484,28 @@ def test_a_running_or_queued_study_cannot_be_deleted_renamed_or_archived(app):
         _until(app, f"/api/studies/{first}/status", lambda b: b["phase"] in ("done", "failed", "stopped"), timeout=120)
     status, gone = call(app, "DELETE", f"/api/studies/{second}")
     assert status == 200 and gone["trashed"].startswith(f"{second}~")
+
+
+def test_a_run_gets_the_api_keys_only_when_ai_help_is_on(tmp_path, monkeypatch):
+    """The keys go to the run through its environment, and only when the
+    study asked for AI search help; the app's own environment, which carries
+    them for the assistant, is scrubbed of them first."""
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    home.set_keys({"OPENROUTER_API_KEY": "sk-or-test"})  # also exported into os.environ
+    monkeypatch.setenv("OTHER_SECRET", "s")
+    run_dir = tmp_path / "home" / "studies" / "x" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    seen: list[dict] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return type("Done", (), {"stdout": "4242\n", "stderr": ""})()
+
+    monkeypatch.setattr(jobs.subprocess, "run", fake_run)
+    jobs._launch(home, run_dir.parent.parent, run_dir, [], with_keys=False)
+    jobs._launch(home, run_dir.parent.parent, run_dir, [], with_keys=True)
+    assert "OPENROUTER_API_KEY" not in seen[0] and "OTHER_SECRET" not in seen[0]
+    assert seen[1]["OPENROUTER_API_KEY"] == "sk-or-test" and "OTHER_SECRET" not in seen[1]
+    assert seen[0]["PYTHONIOENCODING"] == "utf-8" and "PATH" in seen[0]

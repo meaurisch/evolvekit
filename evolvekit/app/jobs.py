@@ -16,7 +16,6 @@ import html
 import io
 import json
 import math
-import os
 import re
 import shutil
 import socket
@@ -32,8 +31,11 @@ from typing import Any, Callable
 
 from evolvekit.app import AppError
 from evolvekit.app.prices import price_of
+from evolvekit.app.store import safe_relative
 from evolvekit.confirm import BASELINE, RULE_WORDS, decide, t_cdf
+from evolvekit.evaluate.process import scrubbed_environment
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
+from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import CONFIG, STUDY_RUN
 from evolvekit.harness.execute import read_job, run_study_of, runner_command
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
@@ -297,13 +299,19 @@ print(process.pid)
 """ % (_DETACHED | _BREAKAWAY, _DETACHED)
 
 
-def _launch(home: Any, root: Path, run_dir: Path, extra: list[str]) -> int:
+def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys: bool) -> int:
     """Start the run so that nothing that ends the app ends the run: through a
     launcher that exits at once, so the run is nobody's child -- a host that
     kills the app's process tree (a terminal, an IDE) does not reach it --
     detached from any console, in a process group (or session) of its own,
-    and outside the app's job object where Windows allows that."""
-    env = {**os.environ, **home.job_environment(), "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    and outside the app's job object where Windows allows that.
+
+    The run's environment is the app's without its secrets (the app carries
+    the API keys for its assistant), plus the keys the app keeps when
+    `with_keys`: only a run with AI search help on has a use for them."""
+    env = {**scrubbed_environment(), "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    if with_keys:
+        env.update(home.job_environment())
     argv = [sys.executable, "-m", "evolvekit.app.job", str(root), run_dir.name, *extra]
     done = subprocess.run([sys.executable, "-c", _LAUNCHER, json.dumps(argv), str(root), str(run_dir / LOG)],
                           env=env, capture_output=True, text=True, timeout=60)
@@ -315,6 +323,16 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str]) -> int:
     (run_dir / LAUNCH).write_text(json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
                                               "host": socket.gethostname(), "argv": argv[1:]}, indent=2), encoding="utf-8")
     return pid
+
+
+def _wants_keys(root: Path, run_dir: Path) -> bool:
+    """Whether a run that goes on (resumed, continued, launched from the
+    queue) has a use for the API keys: its own study -- the copy it pinned
+    when it started, where there is one -- asked for AI search help."""
+    try:
+        return bool(run_study_of(root, run_dir).budget.ai_enabled)
+    except HarnessError:
+        return False
 
 
 def can_resume(run_dir: Path, job: dict[str, Any]) -> bool:
@@ -357,7 +375,7 @@ def continue_run(home: Any, root: Path, run: str, hours: float | None = None) ->
     with _launch_guard:
         _one_at_a_time(home)
         (run_dir / STOP_REQUEST).unlink(missing_ok=True)
-        _launch(home, root, run_dir, ["--continue", "--hours", f"{float(hours):g}"])
+        _launch(home, root, run_dir, ["--continue", "--hours", f"{float(hours):g}"], with_keys=_wants_keys(root, run_dir))
     return {"run": run, "continued": True}
 
 
@@ -377,7 +395,7 @@ def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]
         with _launch_guard:
             _one_at_a_time(home)
             (run_dir / STOP_REQUEST).unlink(missing_ok=True)
-            _launch(home, root, run_dir, ["--resume"])
+            _launch(home, root, run_dir, ["--resume"], with_keys=_wants_keys(root, run_dir))
         return {"run": resume, "resumed": True}
     study, harness = load_study(root), load_harness(root / "harness")
     problems = study_problems(study, harness, root=root)
@@ -404,7 +422,7 @@ def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]
             (run_dir / QUEUED).write_text(json.dumps({"queued_at": _now().isoformat(timespec="seconds")}, indent=2),
                                           encoding="utf-8")
             return {"run": run_id, "queued": True}
-        _launch(home, root, run_dir, [])
+        _launch(home, root, run_dir, [], with_keys=study.budget.ai_enabled)
     return {"run": run_id}
 
 
@@ -433,7 +451,8 @@ def launch_queued(home: Any) -> str | None:
         if not waiting:
             return None
         _, slug, run_dir = min(waiting)
-        _launch(home, run_dir.parent.parent, run_dir, [])
+        root = run_dir.parent.parent
+        _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir))
         (run_dir / QUEUED).unlink(missing_ok=True)  # the launch is the newer word anyway
         return f"{slug}/{run_dir.name}"
 
@@ -466,7 +485,9 @@ def resume_final_check(home: Any, root: Path, run: str, seeds: int | None = None
         raise AppError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case", 400)
     with _launch_guard:
         _one_at_a_time(home)
-        _launch(home, root, run_dir, ["--check"] + (["--seeds", str(int(seeds))] if seeds is not None else []))
+        # A check only runs the application: nothing in it has a use for a key.
+        _launch(home, root, run_dir, ["--check"] + (["--seeds", str(int(seeds))] if seeds is not None else []),
+                with_keys=False)
     return {"run": run}
 
 
@@ -1233,7 +1254,7 @@ def _export(root: Path, run_dir: Path, name: str, values: dict[str, Any], case: 
         "export", "--format", name, "--values", str(scratch / "values.json"), "--study", str(run_dir / STUDY_RUN),
         "--out", str(out)]
     if case:
-        argv += ["--case", str(root / case)]
+        argv += ["--case", str(safe_relative(root, case))]
     done = subprocess.run(argv, cwd=run_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
                           timeout=EXPORT_TIMEOUT_S)
     if done.returncode != 0 or not out.is_file():
@@ -1486,8 +1507,8 @@ def next_study(home: Any, root: Path, run: str, name: str = "") -> str:
             base: dict[str, Any] = {}
             if study.inputs.get(settings_input):
                 try:
-                    base = json.loads((root / study.inputs[settings_input]).read_text(encoding="utf-8"))
-                except (OSError, ValueError):
+                    base = json.loads(safe_relative(root, study.inputs[settings_input]).read_text(encoding="utf-8"))
+                except (OSError, ValueError, AppError):  # a path that is not the study's reads as nothing
                     base = {}
             (new_root / "inputs" / "start-settings.json").write_text(json.dumps({**base, **tuned}, indent=2), encoding="utf-8")
             fresh.inputs[settings_input] = "inputs/start-settings.json"
