@@ -1197,7 +1197,11 @@ def _wait(home, slug: str, timeout: float | None, as_json: bool, args: argparse.
                 return _say_gone(run)
             if not as_json:
                 # What `study watch` prints, on stderr and once per change: a long wait is not a hang.
-                line = jobs.run_line(root, study, run_dir, build_status)["line"]
+                # The progress is cosmetic: a file half-written by the job must never end the wait.
+                try:
+                    line = jobs.run_line(root, study, run_dir, build_status)["line"]
+                except Exception:  # noqa: BLE001 - progress only
+                    line = said
                 if line != said:
                     print(line, file=sys.stderr, flush=True)
                     said = line
