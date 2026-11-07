@@ -162,7 +162,7 @@ def normalise_block(block: str) -> str:
     """The block's canonical form: no docstrings, no comments, no local names."""
     try:
         tree = ast.parse(block)
-    except SyntaxError:
+    except (SyntaxError, ValueError):  # ValueError: a null byte, or a lone surrogate (a diff's non-UTF-8 byte)
         return "\n".join(
             line.rstrip() for line in block.strip().splitlines() if line.strip()
         )
@@ -178,7 +178,7 @@ def novelty_hash(block: str) -> str:
         # Unparseable: fall back to the plain text fingerprint, which at least
         # still catches a byte-identical repeat.
         return block_hash(block)
-    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(normalised.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
 
 
 # --------------------------------------------------------------------------
@@ -195,7 +195,7 @@ def node_type_sequence(block: str) -> list[str]:
     """
     try:
         tree = ast.parse(block)
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return []
     transformer = _Canonicaliser(_protected_names(tree))
     canonical = ast.fix_missing_locations(transformer.visit(tree))

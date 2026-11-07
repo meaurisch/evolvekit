@@ -147,7 +147,8 @@ def test_a_run_folder_keeps_its_tree(project, tmp_path):
 
 def _spans(log: Path) -> list[tuple[float, float]]:
     by_tree: dict[str, tuple[float, float]] = {}
-    for folder, start, end in (json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()):
+    lines = [line for one in sorted(log.iterdir()) for line in one.read_text(encoding="utf-8").splitlines()]
+    for folder, start, end in (json.loads(line) for line in lines):
         lo, hi = by_tree.get(folder, (start, end))
         by_tree[folder] = (min(lo, start), max(hi, end))
     assert len(by_tree) == 3, "the starting point and two combinations"
@@ -157,7 +158,8 @@ def _spans(log: Path) -> list[tuple[float, float]]:
 @pytest.mark.slow
 def test_build_serialises_candidates(project, tmp_path, monkeypatch):
     repo, base = project
-    log = tmp_path / "runs.log"
+    log = tmp_path / "runs"  # a folder: one file per solver run
+    log.mkdir()
     monkeypatch.setenv("TREE_TEST_LOG", str(log))
     monkeypatch.setenv("TREE_TEST_SLEEP", "0.4")
     scripted(monkeypatch, _values(repo, 3, 4))
@@ -170,7 +172,8 @@ def test_build_serialises_candidates(project, tmp_path, monkeypatch):
 @pytest.mark.slow
 def test_no_build_keeps_concurrency(project, tmp_path, monkeypatch):
     repo, base = project
-    log = tmp_path / "runs.log"
+    log = tmp_path / "runs"  # a folder: one file per solver run
+    log.mkdir()
     monkeypatch.setenv("TREE_TEST_LOG", str(log))
     monkeypatch.setenv("TREE_TEST_SLEEP", "0.4")
     scripted(monkeypatch, _values(repo, 3, 4))
@@ -282,3 +285,103 @@ def test_novelty_key_hashes_the_normalised_diff():
     assert index.lookup(b) == "one" and index.check(b, "", "seed").kind == "duplicate"
     assert index.check(a, b, "parent").kind == "no_op"
     assert index.check(odd, "", "seed").novel
+
+
+# -- the review's fixes ----------------------------------------------------------
+
+
+def _latin1_change(repo: Path, value: int, *, spacing: str = " ") -> str:
+    """A change whose diff carries a byte that is not UTF-8 (a Latin-1 e-acute),
+    as `tree` reads it: kept as a lone surrogate."""
+    text = "# -*- coding: latin-1 -*-\n" + SOLVER.replace(
+        "VALUE = 5", f"VALUE{spacing}={spacing}{value}\nNAME = 'caf\xe9'")
+    (repo / "app dir" / "solver.py").write_bytes(text.encode("latin-1"))
+    git(repo, "add", "-A")
+    try:
+        return tree._git(repo, "diff", "--cached")
+    finally:
+        git(repo, "reset", "-q", "--hard", "HEAD")
+
+
+def test_a_diff_with_any_bytes_runs_end_to_end(project, tmp_path, monkeypatch):
+    repo, base = project
+    plain, four = _latin1_change(repo, 3), _latin1_change(repo, 4)
+    spaced = _latin1_change(repo, 3, spacing="   ")
+    assert "\udce9" in plain and plain != spaced
+    scripted(monkeypatch, [plain, four, spaced])
+    raw = _raw(repo, base, generations=2)
+    raw["search"]["novelty"]["near"] = {"method": "local"}  # turned off for a tree, never run on a diff
+    raw["search"]["inspirations"] = 2
+    Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run").run()
+    rows = _rows(tmp_path / "run")
+    first = min((r for r in rows if r["generation"] == 1), key=lambda r: r["id"])
+    assert first["block"] == plain, "the block round-trips through runs.jsonl"
+    assert not first["rejected"] and first["kpis"]["value"] == 3.0 and first["commit"]
+    later = [r for r in rows if r["generation"] == 2]
+    assert later and all(r["rejected"] and r["novelty"] in ("duplicate", "no_op") for r in later)
+    assert json.loads((tmp_path / "run" / "archive.json").read_text(encoding="utf-8"))
+    resumed = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")
+    assert resumed.resume() == 2 and resumed.novelty.lookup(spaced) == first["id"]
+
+
+def test_trees_are_removed_when_the_run_crashes(project, tmp_path, monkeypatch):
+    repo, base = project
+    scripted(monkeypatch, _values(repo, 3, 4))
+    original = Cascade.evaluate_generation
+    calls = []
+
+    def crashing(self, candidates, *args, **kwargs):
+        results = original(self, candidates, *args, **kwargs)
+        calls.append(len(candidates))
+        if len(calls) == 2:  # the first round's children: evaluated, their trees made
+            raise RuntimeError("the evaluator fell over")
+        return results
+
+    monkeypatch.setattr(Cascade, "evaluate_generation", crashing)
+    with pytest.raises(RuntimeError, match="fell over"):
+        Driver(build_config(_raw(repo, base, generations=1), base_dir=tmp_path), run_dir=tmp_path / "run").run()
+    seed = _rows(tmp_path / "run")[0]
+    left = sorted(p.name for p in (tmp_path / "run" / "work" / "trees").iterdir() if p.is_dir())
+    assert left == [seed["id"]], "only the best's tree stays"
+    assert git(repo, "worktree", "list").count("\n") == 1
+
+
+def test_build_and_top_k_are_refused_together(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base, build='{python} -c "pass"')
+    raw["evaluate"]["stages"].insert(-1, {
+        "id": "screen", "kind": "command", "kpis_from": "stdout", "normalize": "none",
+        "command": "{python} {candidate}/solver.py {instance}", "instances": ["a"],
+        "promote": {"top_k_per_generation": 1}})
+    with pytest.raises(ConfigError, match=re.escape(
+            "`promote.top_k_per_generation` cannot be used with `problem.tree.build`: "
+            "candidates are built one at a time")):
+        build_config(raw, base_dir=tmp_path)
+    del raw["problem"]["tree"]["build"]
+    assert build_config(raw, base_dir=tmp_path), "without a build, top-k ranks a whole round"
+
+
+def test_near_duplicates_are_off_for_a_tree(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base)
+    raw["search"]["novelty"]["near"] = {"method": "local"}
+    assert build_config(raw, base_dir=tmp_path).search.novelty.near.method == "off"
+    del raw["search"]["novelty"]
+    assert build_config(raw, base_dir=tmp_path).search.novelty.near.method == "off", "the default too"
+
+
+def test_a_problem_names_what_it_varies(tmp_path):
+    raw = {"problem": {"description": "nothing"},
+           "evaluate": {"stages": [{"id": "static", "kind": "builtin-static"}], "score": {"objective": "value"}},
+           "search": {"operators": {"param_lhs": 1.0}}}
+    with pytest.raises(ConfigError, match=re.escape("problem: give one of `skeleton`, `parameters` or `tree`")):
+        build_config(raw, base_dir=tmp_path)
+
+
+def test_the_tree_identity_holds_build_and_app(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base)
+    raw["problem"]["tree"].update(build='{python} -c "pass"', app="{tree}/solver.py")
+    identity = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")._problem_identity()
+    assert identity["tree"] == {"base": base, "open": ["solver.py"], "build": '{python} -c "pass"',
+                                "app": "{tree}/solver.py"}

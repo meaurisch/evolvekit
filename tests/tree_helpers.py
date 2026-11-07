@@ -18,6 +18,8 @@ VALUE = 5
 started = time.time()
 time.sleep(float(os.environ.get("TREE_TEST_SLEEP", "0")))
 log = os.environ.get("TREE_TEST_LOG")
+if log and os.path.isdir(log):  # one file per run: concurrent appends interleave on Windows
+    log = os.path.join(log, "%d-%d.json" % (os.getpid(), time.time_ns()))
 if log:
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(json.dumps([os.path.dirname(os.path.abspath(__file__)), started, time.time()]) + "\\n")

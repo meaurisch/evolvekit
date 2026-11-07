@@ -282,7 +282,9 @@ class Driver:
         }
         if tree_problem is not None:
             # Only for a tree, so a skeleton run's identity reads as it always did.
-            identity["tree"] = {"base": tree_problem.base, "open": list(tree_problem.open)}
+            # `build` and `app` change what a command runs, so what a score means.
+            identity["tree"] = {"base": tree_problem.base, "open": list(tree_problem.open),
+                                "build": tree_problem.build, "app": tree_problem.app}
         return identity
 
     def _check_same_problem(self) -> None:
@@ -541,6 +543,7 @@ class Driver:
             # The time limit is the run's: earlier sessions' hours count.
             self.run_stop.start(used_s=active_seconds(recorded))
             self.heartbeat.start(phase="starting")
+            summary: RunSummary | None = None
             try:
                 if lock.reclaimed_from:
                     self.log(
@@ -559,6 +562,15 @@ class Driver:
                 raise
             finally:
                 self.run_stop.close()
+                if self.repo is not None and summary is None:
+                    # A crash or Ctrl+C skips `_finalise`, and a tree left
+                    # behind stays registered in the engineer's repository.
+                    # Best effort: it never hides the real error.
+                    try:
+                        best_now = self.best
+                        self._remove_trees(keep={best_now.id} if best_now else set())
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"evolvekit: the run's trees were not all removed ({exc})", file=sys.stderr)
             best = summary.best
             self.events.emit(
                 "run_finished",

@@ -74,7 +74,7 @@ def current_values(block: str, names: "set[str] | frozenset[str]") -> dict[str, 
     """Module-level `NAME = <number>` assignments inside the block."""
     try:
         tree = ast.parse(block)
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return {}
     values: dict[str, Any] = {}
     for node in tree.body:

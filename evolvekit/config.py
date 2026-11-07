@@ -341,9 +341,9 @@ class ProblemConfig:
                 "and this config declares none. Declare the parameters, or remove the constraints"
             )
         else:
-            skeleton = base_dir / _as_str(
-                _require(data, "skeleton", "problem"), "problem.skeleton"
-            )
+            if data.get("skeleton") is None:
+                raise ConfigError("problem: give one of `skeleton`, `parameters` or `tree`")
+            skeleton = base_dir / _as_str(data["skeleton"], "problem.skeleton")
             if not skeleton.is_file():
                 raise ConfigError(f"problem.skeleton: no such file: {skeleton}")
         language = data.get("language", "python")
@@ -1815,6 +1815,7 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
         base_dir=base_dir,
         source=source,
     )
+    config = _tree_rules(config)
     _check_embedding_route(config)
     _check_parameter_placeholders(config)
     _check_typed_operators(config)
@@ -1824,6 +1825,33 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
             "counts steps between levels, not a quantity a target could be stated in"
         )
     return _expand_instance_patterns(config)
+
+
+def _tree_rules(config: Config) -> Config:
+    """What a tree problem changes about the rest of a config.
+
+    The similarity gate (`search.novelty.near`) compares code structure, and a
+    candidate's block is a diff: it is switched off rather than refused, so a
+    config written with the default (`local`) still loads. A build makes the
+    driver evaluate one candidate at a time, so `top_k_per_generation` would
+    rank a round of one and promote everyone: refused.
+    """
+    tree = config.problem.tree
+    if tree is None:
+        return config
+    if tree.build:
+        for index, stage in enumerate(config.evaluate.stages):
+            if stage.promote.top_k_per_generation is not None:
+                raise ConfigError(
+                    f"evaluate.stages[{index}]: `promote.top_k_per_generation` cannot be used with "
+                    "`problem.tree.build`: candidates are built one at a time. Use "
+                    "`promote.archive_percentile` instead"
+                )
+    novelty = config.search.novelty
+    if novelty.near.method == "off":
+        return config
+    near = replace(novelty.near, method="off")
+    return replace(config, search=replace(config.search, novelty=replace(novelty, near=near)))
 
 
 def _expand_instance_patterns(config: Config) -> Config:
