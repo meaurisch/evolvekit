@@ -1726,9 +1726,40 @@ current folder (`--dir DIR` for another), the generic place coding agents
 read skills from. The one exception is `.claude/skills/<name>/SKILL.md`: a
 pointer for the tool that does not read the generic place yet, which says to
 follow the skill in `.agents/skills/`. Files that exist are left alone
-unless `--force`; the command prints what it wrote and what it skipped. Two
-skills ship today, `evolvekit-study` and `evolvekit-harness`, and both are
-placeholders: they are written in the next project.
+unless `--force`; the command prints what it wrote and what it skipped. Each
+skill folder also gets `references/evolvekit.md`: the words, commands and
+rules both skills rely on.
+
+Two skills ship.
+
+**`evolvekit-study`** is for an application evolvekit already knows. Tell your
+coding agent, in one sentence, what to tune, on which cases, against what and
+for how long. It asks only what you did not say. Then it makes the study,
+shows you the plan and its time, starts it, and gives you the study's address
+in the app. Later it reports the verdict's sentence and nothing more.
+
+**`evolvekit-harness`** is for an application evolvekit does not know yet.
+The agent reads what the application exposes, asks only what it cannot read,
+writes `harness/`, and runs `harness check` until it exits 0. It never edits
+`evk_harness.py`. The way to write one is in
+[docs/harness-authoring.md](docs/harness-authoring.md).
+
+Both are Markdown: read them in `.agents/skills/`.
+
+**The agent gate** checks that the skills work. A fresh coding agent gets one
+sentence in a fixture folder and must turn it into a running study, then
+report only the verdict.
+
+```
+python tests/agent_gate.py --tool claude
+```
+
+It takes about 25 minutes. Never run it beside `python tasks.py check`: both
+are timing-sensitive. It needs `claude` on `PATH`; with `--tool copilot` it
+records "not installed" when `copilot` is absent. Give a sentence without the
+total time and add `--expect-question`, and the gate passes only if the agent
+stops and asks for it instead of choosing one. `--help` lists the other
+flags. Its transcripts go to `docs/superpowers/reviews/agent-gate/`.
 
 ### The app
 
