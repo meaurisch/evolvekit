@@ -419,18 +419,56 @@ def choices(req: Request) -> dict[str, Any]:
 
 
 def ask_assistant(req: Request) -> dict[str, Any]:
+    """A question from `screen` (`step-1`…`step-7`, `running`, `results`),
+    with `run` in view where the screen shows one. Answers at once with
+    `{turn, state: "thinking"}`; the answer comes from `GET …/assistant?turn=`."""
     root, _, _ = req.home.load(req.params["slug"])
-    return assistant.ask(req.home, root, str(req.json().get("message") or ""), provider=req.server.assistant_provider)
+    body = req.json()
+    run = body.get("run")
+    return work.start_ask(req.server, req.home, root, str(body.get("message") or ""), provider=req.server.assistant_provider,
+                          screen=str(body.get("screen") or ""), run=str(run) if run else None,
+                          document_of=req.server.status_document)
+
+
+def cancel_assistant(req: Request) -> dict[str, Any]:
+    root, _, _ = req.home.load(req.params["slug"])
+    return work.cancel_ask(req.server, root)
+
+
+def card_event(req: Request) -> dict[str, Any]:
+    """What became of one of the assistant's cards: `{turn, index, state}`,
+    state `applied` or `dismissed`."""
+    root, _, _ = req.home.load(req.params["slug"])
+    body = req.json()
+    return assistant.record_card(root, str(body.get("turn") or ""), body.get("index"), body.get("state"))
 
 
 def add_card(req: Request) -> dict[str, Any]:
-    """Add a card to the study -- one of the assistant's, or one the page's
-    forms made -- after checking it again on the preview."""
+    """Add cards to the study -- the assistant's, or ones the page's forms
+    made -- after checking them again on the preview. `{card}` adds one and
+    refuses (400) when it fails; `{cards: [...]}` adds a whole answer in the
+    right order, answers `{cards, study}` with each card's `ok` and `problem`,
+    and with `turn` given records each applied card's fate by its `index` in
+    that answer."""
     slug = req.params["slug"]
     root, study, pinned = req.home.load(slug)
     if jobs.running(root):
         raise AppError("the study is running; stop it before changing it", 409)
-    card = req.json().get("card")
+    body = req.json()
+    if "cards" in body:
+        cards = body.get("cards")
+        if not isinstance(cards, list):
+            raise AppError("cards: a list of cards")
+        done = assistant.apply_cards(root, cards)
+        turn = str(body.get("turn") or "")
+        for card in done:
+            if turn and card["ok"] and isinstance(card.get("index"), int):
+                try:
+                    assistant.record_card(root, turn, card["index"], "applied")
+                except AppError:
+                    pass  # the card went in; an index that names no card of the turn only loses the note
+        return {"cards": done, "study": _document(req, slug)}
+    card = body.get("card")
     checked = assistant.check_card(card, study, pinned, root, assistant._proposed([card]))  # noqa: SLF001
     if not checked["ok"]:
         raise AppError(checked["problem"])
@@ -439,8 +477,13 @@ def add_card(req: Request) -> dict[str, Any]:
 
 
 def assistant_history(req: Request) -> dict[str, Any]:
+    """With `?turn=`, where that question stands (and its answer when done);
+    without, the whole conversation, plus `thinking`: the id of the question
+    being thought about now, or null."""
     root, _, _ = req.home.load(req.params["slug"])
-    return assistant.history(root)
+    if req.query.get("turn"):
+        return work.ask_state(req.server, root, req.query["turn"])
+    return {**assistant.history(root), "thinking": work.ask_state(req.server, root).get("turn")}
 
 
 def start_test_run(req: Request) -> dict[str, Any]:
@@ -541,6 +584,8 @@ ROUTES = [
     route("GET", "/api/studies/{slug}/choices")(choices),
     route("POST", "/api/studies/{slug}/assistant")(ask_assistant),
     route("GET", "/api/studies/{slug}/assistant")(assistant_history),
+    route("POST", "/api/studies/{slug}/assistant/cancel")(cancel_assistant),
+    route("POST", "/api/studies/{slug}/assistant/cards")(card_event),
     route("POST", "/api/studies/{slug}/cards")(add_card),
     route("POST", "/api/studies/{slug}/test-run")(start_test_run),
     route("GET", "/api/studies/{slug}/test-run")(test_run),

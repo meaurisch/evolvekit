@@ -216,6 +216,20 @@ h3 { font-size: 15px; margin: 18px 0 6px; } .card > h3:first-child { margin-top:
 .rail .dot.todo { background: var(--warning-wash); border-color: transparent; color: var(--warning); }
 .step-foot { display: flex; gap: 10px; justify-content: space-between; align-items: center; margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--hair); flex-wrap: wrap; }
 .side { position: sticky; top: 76px; max-height: calc(100vh - 96px); display: flex; flex-direction: column; }
+/* The assistant is a drawer: a <details> whose summary is its title. Open, it lays out as before (chat, then the box). */
+details.side > summary { list-style: none; display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 16px; color: var(--ink); margin: 0; }
+details.side > summary::-webkit-details-marker { display: none; }
+details.side > summary::before { content: "▸"; color: var(--ink-3); font-size: 13px; }
+details.side[open] > summary::before { content: "▾"; }
+details.side[open] > summary { margin-bottom: 8px; }
+details.side:not([open]) { position: static; }
+/* The log scrolls inside the drawer: a details element does not lay its children out as flex items, so the
+   drawer's max-height alone would not bound it, and a long answer would push the question box out of reach. */
+.side .chat { max-height: calc(100vh - 330px); }
+/* Under the content (every screen but the ones that tune and measure): a full-width block, never a third column. */
+.wizard > .side.below { grid-column: 2; position: static; max-height: none; }
+.side.below .chat { max-height: 50vh; }
+.narrow > .side { position: static; max-height: none; margin-top: 24px; }
 .setting { padding: 14px 0; border-bottom: 1px solid var(--hair); }
 .setting:last-child { border-bottom: 0; }
 .setting .head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
@@ -264,7 +278,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
   .btn { white-space: normal; text-align: center; }
   .top-in { padding: 8px 14px; }
   .wizard, .wizard.with-side { grid-template-columns: 1fr; gap: 14px; }
-  .wizard.with-side .side { grid-column: 1; }
+  .wizard.with-side .side, .wizard > .side.below { grid-column: 1; }
   .rail { position: static; }
   .rail ol { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
   .rail li a { white-space: nowrap; padding: 6px 8px; }
@@ -548,23 +562,59 @@ async function renderSettings() {
   const PROVIDERS = { openrouter: "OpenRouter (one key for many models)", azure: "Azure OpenAI", "claude-cli": "Claude Code on this computer (no key)" };
   const KEYS = { openrouter: ["OPENROUTER_API_KEY"], azure: ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"], "claude-cli": [] };
   const LABELS = { OPENROUTER_API_KEY: "OpenRouter key", AZURE_OPENAI_API_KEY: "Azure OpenAI key", AZURE_OPENAI_ENDPOINT: "Azure OpenAI endpoint (https://….openai.azure.com)" };
+  // The model field's default per provider, and what an empty field means there.
+  const MODEL_DEFAULT = { openrouter: "anthropic/claude-sonnet-5", azure: "", "claude-cli": "" };
+  const MODEL_HINT = { openrouter: "the model's name on OpenRouter", azure: "deployment name", "claude-cli": "the CLI's default" };
   const provider = h("select", { id: "provider" }, Object.entries(PROVIDERS).map(([v, t]) => h("option", { value: v, selected: v === settings.provider }, t)));
   const keysBox = h("div");
   const inputs = {};
+  const removed = new Set();
   function drawKeys() {
     keysBox.replaceChildren();
     for (const name of KEYS[provider.value]) {
       const set = settings.keys[name];
-      inputs[name] = h("input", { type: "password", id: `key-${name}`, autocomplete: "off", placeholder: set ? "set — type to replace it" : "paste it here" });
-      keysBox.append(h("label", { class: "field", for: `key-${name}` }, h("span", { class: "label" }, LABELS[name]), inputs[name],
-        h("span", { class: "hint" }, set ? status("good", "Set. It is kept on this computer and never shown again.") : "Not set yet.")));
+      const input = h("input", { type: "password", id: `key-${name}`, autocomplete: "off", placeholder: set ? "set — type to replace it" : "paste it here" });
+      input.addEventListener("input", () => { input.edited = true; });
+      inputs[name] = input;
+      const hint = h("span", { class: "hint" }, set ? status("good", "Set. It is kept on this computer and never shown again.") : "Not set yet.");
+      const remove = set ? h("button", { class: "btn small quiet", type: "button", onclick: () => {
+        removed.add(name); input.value = ""; input.disabled = true; remove.disabled = true;
+        hint.replaceChildren(status("warn", "Removed when you save."));
+      } }, "Remove") : null;
+      keysBox.append(h("label", { class: "field", for: `key-${name}` }, h("span", { class: "label" }, LABELS[name]), input, hint, remove));
     }
     if (!KEYS[provider.value].length) keysBox.append(note("info", h("p", { style: "margin:0" }, "Uses the Claude Code command on this computer, signed in as you. No key is needed here.")));
   }
-  provider.addEventListener("change", drawKeys);
+  const assistantModel = h("input", { type: "text", id: "model-assistant", value: settings.models.assistant, placeholder: MODEL_HINT[settings.provider] });
+  const searchModel = h("input", { type: "text", id: "model-search", value: settings.models.search, placeholder: MODEL_HINT[settings.provider] });
+  provider.addEventListener("change", () => {
+    drawKeys();
+    // Another provider, another model: the field starts from that provider's default.
+    for (const field of [assistantModel, searchModel]) { field.value = MODEL_DEFAULT[provider.value]; field.placeholder = MODEL_HINT[provider.value]; }
+  });
   drawKeys();
-  const assistantModel = h("input", { type: "text", id: "model-assistant", value: settings.models.assistant });
-  const searchModel = h("input", { type: "text", id: "model-search", value: settings.models.search });
+  // Prices, USD per million tokens, for models the app does not know: the assistant then shows a real cost, and AI search help's cap can hold.
+  const priceRows = h("tbody");
+  function priceRow(model = "", pair = ["", ""]) {
+    const row = h("tr", {}, h("td", {}, h("input", { type: "text", "aria-label": "Model", placeholder: "model or deployment name", value: model, style: "width:100%" })),
+      h("td", {}, numberBox({ "aria-label": "Price per million tokens read", value: pair[0], style: "width:80px" })),
+      h("td", {}, numberBox({ "aria-label": "Price per million tokens written", value: pair[1], style: "width:80px" })),
+      h("td", {}, h("button", { class: "btn small quiet", type: "button", "aria-label": "Remove this price", onclick: () => row.remove() }, "×")));
+    priceRows.append(row);
+  }
+  for (const [model, pair] of Object.entries(settings.prices || {})) priceRow(model, pair);
+  const addPrice = h("button", { class: "btn small", type: "button", onclick: () => priceRow() }, "Add a model's price");
+  function readPrices() {
+    const prices = {};
+    for (const row of priceRows.querySelectorAll("tr")) {
+      const [model, inVal, outVal] = [...row.querySelectorAll("input")];
+      if (!model.value.trim()) continue;
+      const pair = [readNumber(inVal), readNumber(outVal)];
+      if (pair.some((v) => !isFinite(v) || v < 0)) throw new Error(`Give ${model.value.trim()} both prices: dollars per million tokens read and written, 0 or more.`);
+      prices[model.value.trim()] = pair;
+    }
+    return prices;
+  }
   const save = h("button", { class: "btn primary", type: "submit" }, "Save");
   const checked = h("div", { "aria-live": "polite", style: "margin-top:10px" });
   const check = h("button", { class: "btn", type: "button", onclick: (e) => guarded(async () => {
@@ -575,10 +625,15 @@ async function renderSettings() {
   }, e.currentTarget) }, "Test the assistant");
   const form = h("form", { class: "card narrow", onsubmit: async (e) => {
     e.preventDefault();
+    // A key typed is replaced; one emptied or removed is sent as "" and taken out; one left alone stays.
     const keys = {};
-    for (const [name, input] of Object.entries(inputs)) if (input.value.trim() && KEYS[provider.value].includes(name)) keys[name] = input.value.trim();
+    for (const [name, input] of Object.entries(inputs)) {
+      if (!KEYS[provider.value].includes(name)) continue;
+      if (removed.has(name) || (input.edited && !input.value.trim())) keys[name] = "";
+      else if (input.value.trim()) keys[name] = input.value.trim();
+    }
     await guarded(async () => {
-      await api("PUT", "/api/settings", { provider: provider.value, models: { assistant: assistantModel.value, search: searchModel.value }, keys });
+      await api("PUT", "/api/settings", { provider: provider.value, models: { assistant: assistantModel.value, search: searchModel.value }, keys, prices: readPrices() });
       toast("Saved."); renderSettings();
     }, save);
   } },
@@ -589,7 +644,11 @@ async function renderSettings() {
     h("details", {}, h("summary", {}, "Models"),
       h("label", { class: "field", for: "model-assistant" }, h("span", { class: "label" }, "For the assistant"), assistantModel),
       h("label", { class: "field", for: "model-search" }, h("span", { class: "label" }, "For AI search help"), searchModel),
-      h("span", { class: "hint" }, "The default, anthropic/claude-sonnet-5, costs about $2 per million words read and $10 per million written; an answer of the assistant costs a few cents.")),
+      h("span", { class: "hint" }, "The default, anthropic/claude-sonnet-5, costs about $2 per million words read and $10 per million written; an answer of the assistant costs a few cents. With Azure, name the deployment; with Claude Code, an empty field means the CLI's own default model."),
+      h("h3", { style: "margin:16px 0 4px" }, "Prices"),
+      h("p", { class: "hint", style: "margin:0 0 8px" }, "OpenRouter and Claude Code report what each call cost. For any other model, say its price in dollars per million tokens, read and written, or the assistant cannot show a cost and AI search help cannot hold its cap."),
+      h("table", { class: "small" }, h("thead", {}, h("tr", {}, h("th", {}, "Model"), h("th", {}, "$ / M read"), h("th", {}, "$ / M written"), h("th", {}))), priceRows),
+      h("div", { style: "margin-top:6px" }, addPrice)),
     h("div", { class: "row", style: "margin-top:16px" }, save, check), checked);
   view.replaceChildren(h("h1", {}, "Settings"), form,
     h("div", { class: "card narrow" }, h("h2", { style: "margin-top:0" }, "Your library"), h("p", { class: "mono" }, settings.home),
@@ -731,8 +790,11 @@ async function renderStep(slug, step) {
   crumbs({ href: "#/", text: "Your studies", small: true }, { text: doc.study.name });
   current.step = step;
   const content = h("div", { class: "step" });
+  // The assistant is beside the content where the study is tuned and measured (open by default there), under it elsewhere.
   const withSide = step === 4 || step === 5 || (step === 1 && !doc.study.template);
-  const layout = h("div", { class: "wizard" + (withSide ? " with-side" : "") }, railFor(step), content, withSide ? assistantPanel() : null);
+  const drawer = assistantPanel({ screen: `step-${step}`, run: null, open: withSide });
+  if (!withSide) drawer.classList.add("below");
+  const layout = h("div", { class: "wizard" + (withSide ? " with-side" : "") }, railFor(step), content, drawer);
   view.replaceChildren(layout);
   const draw = [null, step1, step2, step3, step4, step5, step6, step7][step];
   await draw(content, step);
@@ -1633,15 +1695,34 @@ async function step7(box) {
 }
 
 // ============================================================== assistant
-function assistantPanel() {
+const ASSISTANT_OPEN = "evolvekit.assistant.open";  // sessionStorage: the drawer stays as it was last left in this tab
+const ASSISTANT_TURNS = 6;      // question-and-answer pairs the panel draws: the ones the model is shown again
+const ASSISTANT_POLL_MS = 1500;
+function assistantPanel(where = {}) {
+  // `where` says which screen the question comes from (`step-4`, `running`, `results`) and which run is in view;
+  // the caller may set `where.run` later (the Running screen learns its run from the first status).
+  // A question is answered in the background: the page polls its turn, so the question outlives a change of
+  // screen (the next panel picks it up from the history) and can be cancelled while the model thinks.
   const slug = current.slug;
-  const panel = h("aside", { class: "side card", "aria-label": "Assistant" });
+  const path = (tail = "") => `/api/studies/${encodeURIComponent(slug)}/assistant${tail}`;
+  let remembered = null;
+  try { remembered = sessionStorage.getItem(ASSISTANT_OPEN); } catch (err) { /* storage refused: the defaults apply */ }
+  const open = remembered === null ? Boolean(where.open) : remembered === "1";
+  const panel = h("details", { class: "side card", "aria-label": "Assistant", open: open || null });
+  let known = open;  // a toggle also fires when the drawer is inserted open: only a change of state is the user's, and kept
+  let polling = null;  // the turn being polled, while one is
+  panel.addEventListener("toggle", () => {
+    if (panel.open === known) return;
+    known = panel.open;
+    try { sessionStorage.setItem(ASSISTANT_OPEN, known ? "1" : "0"); } catch (err) { /* same */ }
+    if (known && !polling) load();  // opened again: the conversation may have moved on, and a question may still be thought about
+  });
   const log = h("div", { class: "chat", "aria-live": "polite" });
-  const input = h("textarea", { id: "ask", placeholder: "Say what you want in your own words, e.g. “count late deliveries to frozen customers”", style: "min-height:70px" });
+  const input = h("textarea", { id: "ask", placeholder: "Say what you want, or ask about this screen, in your own words — e.g. “count late deliveries to frozen customers” or “why is this not proven?”", style: "min-height:70px" });
   const ask = h("button", { class: "btn primary", type: "button" }, "Ask");
   const cost = h("p", { class: "faint", style: "margin:6px 0 0" });
-  panel.append(h("h3", { style: "margin-top:0" }, "Assistant"),
-    h("p", { class: "faint", style: "margin-top:0" }, "It sees the tables' structure and summaries of the smallest case — never rows, names, addresses or coordinates."),
+  panel.append(h("summary", {}, "Assistant"),
+    h("p", { class: "faint", style: "margin-top:0" }, "It sees the tables' structure, summaries of the smallest case and this screen's words and numbers — never rows, names, addresses or coordinates."),
     log, h("label", { for: "ask", class: "sr" }, "Ask the assistant"), input, h("div", { class: "row", style: "margin-top:8px" }, ask), cost);
 
   function bubble(text, me) { log.append(h("div", { class: "bubble" + (me ? " me" : "") }, text)); log.scrollTop = log.scrollHeight; }
@@ -1652,52 +1733,169 @@ function assistantPanel() {
       h("strong", {}, "No answer. "), reason, again ? h("div", {}, again) : null));
     log.scrollTop = log.scrollHeight;
   }
-  function proposal(card) {
-    const kindText = { kpi: "A measure", data_change: "A data change", constraint: "A rule", setting: "A setting", weighted: "A combination", goal: "The goal", guardrail: "A guardrail" }[card.kind] || card.kind;
-    const detail = card.sql || card.expr || (card.kind === "data_change" ? `${card.lever} · ${card.column || "in code"} · where ${card.where || "all rows"} · ${card.mode} ${card.low}–${card.high}` : "")
+  // What became of a card is kept with the conversation, so a reload -- and the model's next answer -- know it.
+  function fate(turn, index, state) { if (turn) api("POST", path("/cards"), { turn, index, state }).catch(() => {}); }
+  function detailOf(card) {
+    return card.sql || card.expr || (card.kind === "data_change" ? `${card.lever} · ${card.column || "in code"} · where ${card.where || "all rows"} · ${card.mode} ${card.low}–${card.high}` : "")
       || (card.kind === "goal" ? card.levels.map((l) => `${l.kpi} ${l.direction}${l.equal_within ? " within " + l.equal_within : ""}`).join(" → ") : "")
-      || (card.kind === "guardrail" ? `${card.kpi} ${card.max !== undefined ? "≤ " + card.max : "≥ " + card.min}` : "")
+      || (card.kind === "guardrail" ? `${card.kpi} ${card.max !== undefined && card.max !== null ? "≤ " + card.max : "≥ " + card.min}` : "")
       || (card.kind === "weighted" ? Object.entries(card.weighted || {}).map(([k, w]) => `${w} × ${k}`).join(" + ") : "")
-      || (card.kind === "setting" ? `${card.name}: ${card.mode}` : "");
+      || (card.kind === "setting" ? `${card.name}: ${card.mode || "tune"}${card.mode === "fixed" ? " = " + fmt(card.value) : card.low !== undefined ? ` ${card.low}–${card.high}` : ""}` : "");
+  }
+  // The card's fields, open on the card, so a proposal can be put right before it goes in. Plain inputs; the
+  // server checks the edited card again, exactly as it checked the model's. `read()` is the edited card.
+  function editor(card) {
+    const fields = [];
+    const text = (key, label, value, wide) => { const input = h(wide ? "textarea" : "input", wide ? { style: "min-height:60px" } : { type: "text" }); input.value = value === undefined || value === null ? "" : String(value);
+      fields.push(h("label", { class: "field" }, h("span", { class: "label" }, label), input)); return { key, input, kind: "text" }; };
+    const number = (key, label, value) => { const got = text(key, label, value); got.kind = "number"; return got; };
+    const pick = (key, label, value, options) => { const select = h("select", { class: "inline" }, options.map((o) => h("option", { value: o, selected: o === value }, o)));
+      fields.push(h("label", { class: "field" }, h("span", { class: "label" }, label), select)); return { key, input: select, kind: "text" }; };
+    const value = (got) => { const raw = got.input.value.trim(); if (raw === "") return undefined; if (got.kind !== "number") return raw; const n = readNumber(got.input); return Number.isNaN(n) ? raw : n; };
+    const plain = (raw) => (/^(true|false)$/i.test(raw) ? raw.toLowerCase() === "true" : raw !== "" && !Number.isNaN(Number(raw)) ? Number(raw) : raw);  // a fixed value: on/off, a number, or a choice
+    const merged = (got) => { const out = { ...card }; for (const g of got) { const v = value(g); if (v === undefined) delete out[g.key]; else out[g.key] = v; } return out; };
+    let read;
+    if (card.kind === "setting") {
+      const got = card.mode === "fixed" ? [text("value", "Value", card.value)] : [number("low", "From", card.low), number("high", "To", card.high), number("start", "Start at", card.start)];
+      read = () => { const out = merged(got); if (card.mode === "fixed" && typeof out.value === "string") out.value = plain(out.value); return out; };
+    } else if (card.kind === "data_change") {
+      const got = [text("where", "Which rows (a condition; empty for all)", card.where), pick("mode", "How", card.mode, ["scale", "set", "add"]), number("low", "From", card.low), number("high", "To", card.high), number("start", "Start at", card.start)];
+      read = () => { const out = merged(got); if (out.where === undefined) out.where = ""; return out; };
+    } else if (card.kind === "constraint") {
+      const got = card.sql ? text("sql", "SQL (true when the rule holds)", card.sql, true) : text("expr", "Rule", card.expr);
+      read = () => ({ ...card, [got.key]: value(got) || "" });
+    } else if (card.kind === "kpi") {
+      const got = [text("sql", "SQL (one number)", card.sql, true), text("rows_sql", "SQL for the rows it counts (optional)", card.rows_sql, true), pick("direction", "Better when", card.direction, ["lower", "higher"]), text("unit", "Unit", card.unit)];
+      read = () => merged(got);
+    } else if (card.kind === "weighted") {
+      const got = Object.entries(card.weighted || {}).map(([name, weight]) => ({ name, got: number(name, `Weight of ${name}`, weight) }));
+      read = () => ({ ...card, weighted: Object.fromEntries(got.map(({ name, got: g }) => [name, value(g)])) });
+    } else if (card.kind === "goal") {
+      const got = (card.levels || []).map((level, i) => [text("kpi", `Level ${i + 1}: measure`, level.kpi), pick("direction", "better when", level.direction, ["lower", "higher"]), text("equal_within", "equal within (e.g. 2%; empty on the last level)", level.equal_within)]);
+      read = () => ({ ...card, levels: got.map((row) => { const level = {}; for (const g of row) { const v = value(g); if (v !== undefined) level[g.key] = v; } return level; }) });
+    } else if (card.kind === "guardrail") {
+      const got = [number("max", "At most", card.max), number("min", "At least", card.min)];
+      read = () => merged(got);
+    } else {
+      read = () => card;
+    }
+    return { el: h("div", { class: "grid", style: "grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap:8px; margin-top:8px" }, fields), read };
+  }
+  function proposal(card, turn, index) {
+    // Returns the card's element with `applied()` and `problem(text)` on it, so Apply all can say what became of it.
+    if (card.state === "dismissed") return null;
+    const kindText = { kpi: "A measure", data_change: "A data change", constraint: "A rule", setting: "A setting", weighted: "A combination", goal: "The goal", guardrail: "A guardrail" }[card.kind] || card.kind;
     const facts = card.ok ? [card.value !== undefined ? `On the smallest case: ${fmt(card.value)}.` : null, card.applies_to !== undefined ? `Applies to ${plural(card.applies_to, "row")}.` : null,
       card.holds_today ? "Holds today." : null].filter(Boolean).join(" ") : "";
+    const detail = h("pre", { class: "mono" }, detailOf(card));
+    const problem = h("p", { class: "small", style: "margin:6px 0 0; color: var(--critical-ink)", hidden: card.ok || null }, card.ok ? "" : card.problem);
     const el = h("div", { class: "proposal" + (card.ok ? "" : " bad") },
       h("div", { class: "faint" }, card.ok ? `Proposed: ${kindText.toLowerCase()} — nothing changes until you apply it` : `${kindText}, not usable`), h("div", { class: "says" }, card.says || card.name || kindText),
-      detail ? h("pre", { class: "mono" }, detail) : null,
-      card.ok ? (facts ? h("p", { class: "small", style: "margin:6px 0 0" }, facts) : null) : h("p", { class: "small", style: "margin:6px 0 0; color: var(--critical-ink)" }, card.problem));
-    if (card.ok) {
+      detailOf(card) ? detail : null,
+      card.ok && facts ? h("p", { class: "small", style: "margin:6px 0 0" }, facts) : null, problem);
+    el.card = card; el.index = index; el.usable = Boolean(card.ok) && card.state !== "applied";
+    const row = h("div", { class: "row", style: "margin-top:8px" });
+    el.applied = () => { el.usable = false; row.replaceChildren(status("good", "Applied to the study")); problem.hidden = true; };
+    el.problem = (text) => { problem.textContent = text; problem.hidden = false; };
+    if (card.ok && card.state === "applied") {
+      row.append(status("good", "Applied to the study"));
+    } else if (card.ok) {
+      let editing = null;  // the open editor, while there is one
       const add = h("button", { class: "btn small primary", type: "button", onclick: () => guarded(async () => {
-        const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/cards`, { card });
-        current.doc = answer.study; add.replaceWith(status("good", "Applied to the study")); edit.remove(); dismiss.remove();
-        if (current.redraw) current.redraw();
+        const edited = editing ? editing.read() : card;
+        let answer;
+        try { answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/cards`, { card: edited }); }
+        catch (err) { el.problem(err.message); return; }  // the server's reason, on the card, with the fields still open to fix
+        current.doc = answer.study; el.card = answer.card; detail.textContent = detailOf(answer.card);
+        if (editing) { editing.el.remove(); editing = null; }
+        el.applied(); if (current.redraw) current.redraw();
+        fate(turn, index, "applied");
       }, add) }, "Apply");
-      const edit = card.kind === "kpi" && current.fillSql ? h("button", { class: "btn small", type: "button", onclick: () => current.fillSql(card) }, "Edit") : h("span");
-      const dismiss = h("button", { class: "btn small quiet", type: "button", onclick: () => el.remove() }, "Dismiss");
-      el.append(h("div", { class: "row", style: "margin-top:8px" }, add, edit, dismiss));
+      const edit = h("button", { class: "btn small", type: "button", onclick: () => {
+        if (editing) { editing.el.remove(); editing = null; edit.textContent = "Edit"; return; }
+        editing = editor(card); row.before(editing.el); edit.textContent = "Keep as proposed";
+      } }, "Edit");
+      const dismiss = h("button", { class: "btn small quiet", type: "button", onclick: () => { el.remove(); fate(turn, index, "dismissed"); } }, "Dismiss");
+      row.append(add, edit, dismiss);
     }
+    if (card.ok) el.append(row);
     log.append(el); log.scrollTop = log.scrollHeight;
+    return el;
   }
-  ask.addEventListener("click", () => guarded(async () => {
-    const message = input.value.trim(); if (!message) return;
-    bubble(message, true); input.value = "";
-    const thinking = h("div", { class: "row muted small" }, h("span", { class: "spinner" }), "Thinking… this takes up to a minute (every proposal is tried on the smallest case first)");
-    log.append(thinking);
+  function answered(answer, question) {
+    // An answer drawn as the history keeps it: what it says, then its cards with what became of them, and
+    // Apply all when two or more of them are still to be applied: the server puts them in in the right order.
+    if (answer.needs_key) { log.append(note("info", h("p", { style: "margin:0" }, answer.say, " ", h("a", { href: "#/settings" }, "Settings")))); return; }
+    if (answer.failed) { failed(answer.failed, question); return; }
+    if (answer.cancelled) { log.append(h("p", { class: "muted small", style: "margin:0" }, "Cancelled: the answer was not kept.")); log.scrollTop = log.scrollHeight; return; }
+    if (answer.say) bubble(answer.say);
+    const drawn = (answer.cards || []).map((card, index) => proposal(card, answer.turn, index)).filter(Boolean);
+    if (drawn.filter((el) => el.usable).length < 2) return;
+    const all = h("button", { class: "btn small primary", type: "button", onclick: () => guarded(async () => {
+      const pending = drawn.filter((el) => el.usable && el.isConnected);
+      if (pending.length < 2) { line.remove(); return; }
+      const reply = await api("POST", `/api/studies/${encodeURIComponent(slug)}/cards`, { cards: pending.map((el) => ({ ...el.card, index: el.index })), turn: answer.turn });
+      current.doc = reply.study;
+      reply.cards.forEach((card, i) => { if (card.ok) pending[i].applied(); else pending[i].problem(card.problem); });
+      if (current.redraw) current.redraw();
+      if (pending.filter((el) => el.usable).length < 2) line.remove();  // what is left has its own Apply, with the reason beside it
+    }, all) }, "Apply all");
+    const line = h("div", { class: "row small" }, all, h("span", { class: "muted" }, "Measures go in first, so a goal can name one proposed here."));
+    log.append(line); log.scrollTop = log.scrollHeight;
+  }
+  function thinking(turn) {
+    const cancel = h("button", { class: "btn small quiet", type: "button", onclick: () => guarded(async () => {
+      await api("POST", path("/cancel")); settle(turn, { state: "cancelled", cancelled: true });
+    }, cancel) }, "Cancel");
+    const row = h("div", { class: "row muted small", "data-turn": turn }, h("span", { class: "spinner" }),
+      h("span", { style: "flex:1" }, "Thinking… this takes up to a minute (every proposal is tried on the smallest case first). You can move to another screen meanwhile."), cancel);
+    log.append(row); log.scrollTop = log.scrollHeight;
+  }
+  function settle(turn, answer, question) {
+    // The turn's end, drawn once: a cancel pressed here and a poll that comes back later both land here.
+    if (polling !== turn) return;
+    polling = null; ask.disabled = false;
+    for (const row of log.querySelectorAll("[data-turn]")) if (row.dataset.turn === turn) row.remove();
+    answered(answer, question);
+    if (answer.state === "done" && !answer.failed && !answer.needs_key) {
+      cost.textContent = answer.usd == null ? `The cost of this answer is not known for this model; this study's assistant has cost $${fmt(answer.total_usd, 3)} so far where known.`
+        : `This answer cost $${fmt(answer.usd, 3)}; this study's assistant, $${fmt(answer.total_usd, 3)} so far.`;
+    }
+  }
+  function poll(turn, question) {
+    polling = turn; ask.disabled = true;
+    const tick = async () => {
+      if (polling !== turn || !panel.isConnected) return;  // settled, or the screen changed: the next panel takes over from the history
+      let state;
+      try { state = await api("GET", path(`?turn=${encodeURIComponent(turn)}`)); }
+      catch (err) { settle(turn, { failed: err.message }, question); return; }
+      if (state.state === "thinking") { setTimeout(tick, ASSISTANT_POLL_MS); return; }
+      settle(turn, state, question);
+    };
+    setTimeout(tick, ASSISTANT_POLL_MS);
+  }
+  ask.addEventListener("click", async () => {
+    const message = input.value.trim(); if (!message || polling) return;
+    bubble(message, true); input.value = ""; ask.disabled = true;
     try {
-      const answer = await api("POST", `/api/studies/${encodeURIComponent(slug)}/assistant`, { message });
-      thinking.remove();
-      if (answer.needs_key) { log.append(note("info", h("p", { style: "margin:0" }, answer.say, " ", h("a", { href: "#/settings" }, "Settings")))); return; }
-      if (answer.failed) { failed(answer.failed, message); return; }
-      if (answer.say) bubble(answer.say);
-      for (const card of answer.cards) proposal(card);
-      cost.textContent = `This answer cost $${fmt(answer.usd, 3)}; this study's assistant, $${fmt(answer.total_usd, 3)} so far.`;
-    } catch (err) { thinking.remove(); failed(err.message, message); }
-  }, ask));
+      const started = await api("POST", path(), { message, screen: where.screen || "", run: where.run || null });
+      thinking(started.turn); poll(started.turn, message);
+    } catch (err) { ask.disabled = false; failed(err.message, message); }
+  });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask.click(); });
-  api("GET", `/api/studies/${encodeURIComponent(slug)}/assistant`).then((history) => {
-    for (const turn of history.turns.slice(-6)) turn.role === "user" ? bubble(turn.text, true) : turn.failed ? failed(turn.failed) : (turn.say ? bubble(turn.say) : null);
-    if (history.total_usd) cost.textContent = `This study's assistant has cost $${fmt(history.total_usd, 3)} so far.`;
-    if (!history.turns.length) log.append(h("p", { class: "muted small", style: "margin:0" }, "For example: “a measure for late deliveries to VIP customers”, or “try cheaper vans and dearer trucks, trucks must stay dearer”."));
-  }).catch(() => {});
+  function load() {
+    api("GET", path()).then((history) => {
+      log.replaceChildren();
+      const questions = history.turns.map((t, i) => (t.role === "user" ? i : -1)).filter((i) => i >= 0);
+      const from = questions.length > ASSISTANT_TURNS ? questions[questions.length - ASSISTANT_TURNS] : 0;
+      for (const turn of history.turns.slice(from)) turn.role === "user" ? bubble(turn.text, true) : answered(turn);
+      if (history.total_usd || history.unknown) cost.textContent = `This study's assistant has cost $${fmt(history.total_usd, 3)} so far` + (history.unknown ? ` (${plural(history.unknown, "answer")} with no known cost).` : ".");
+      if (!history.turns.length) log.append(h("p", { class: "muted small", style: "margin:0" }, "For example: “a measure for late deliveries to VIP customers”, or “try cheaper vans and dearer trucks, trucks must stay dearer”."));
+      // A question asked on another screen, or before a reload, is still being thought about: keep waiting for it here.
+      if (history.thinking && polling !== history.thinking) { thinking(history.thinking); poll(history.thinking); }
+    }).catch(() => {});
+  }
+  load();
   return panel;
 }
 
@@ -1724,13 +1922,15 @@ function chart(series) {
 async function renderRunning(slug) {
   await loadStudy(slug, true);
   crumbs({ href: "#/", text: "Your studies", small: true }, { href: `#/study/${slug}/7`, text: current.doc.study.name, small: true }, { text: "Running" });
-  const box = h("div", { class: "narrow" });
-  view.replaceChildren(box);
+  const box = h("div");
+  const where = { screen: "running", run: null, open: false };  // the run is known once the first status is in
+  view.replaceChildren(h("div", { class: "narrow" }, box, assistantPanel(where)));
   let stopping = false;
   async function draw() {
     let s;
     try { s = await api("GET", studyPath("/status")); }
     catch (err) { fill(box, note("bad", h("p", {}, err.message))); return; }
+    where.run = s.run;
     const running = ["starting", "search", "check"].includes(s.phase);
     const queued = s.phase === "queued";  // waiting for another study's run to finish; the server starts it then
     const $here = $("#crumbs .here");
@@ -1909,7 +2109,8 @@ async function renderResults(slug, run) {
       h("p", { class: "muted", style: "margin-top:0" }, "The summary says how the study was set up, what it found, how sure that is and what changed — ready to paste into a message. The report says the same on one page, with every number."),
       h("div", { class: "row" }, summary, report, settingsButton), shown,
       h("p", { class: "faint", style: "margin:14px 0 6px" }, "Files to save:"), downloads),
-    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again)));
+    h("h2", {}, "Next steps"), h("div", { class: "card" }, h("p", { class: "muted" }, "Search again from here: the same cases and choices, starting from this result."), again),
+    assistantPanel({ screen: "results", run: r.run, open: false })));
 }
 
 route();

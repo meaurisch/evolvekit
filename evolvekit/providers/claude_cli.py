@@ -99,7 +99,9 @@ class ClaudeCliProvider:
     def build_argv(
         self, *, model: str, system: str = "", system_file: str | None = None
     ) -> list[str]:
-        argv = [self._resolve(), *BASE_FLAGS, "--model", model]
+        argv = [self._resolve(), *BASE_FLAGS]
+        if model:  # an empty model is the CLI's own default
+            argv += ["--model", model]
         argv += ["--disallowedTools", DISALLOWED_TOOLS]
         # The system prompt goes through a file: a problem description plus a
         # 40-line scratchpad blew past the Windows command-line limit in the
@@ -117,11 +119,12 @@ class ClaudeCliProvider:
         model: str,
         max_tokens: int,
         temperature: float,
+        response_format: dict[str, Any] | None = None,
     ) -> Completion:
-        # max_tokens/temperature have no CLI equivalent; the loop's output
-        # bound is enforced by the prompt instead. Recorded here so the
-        # signature stays honest across backends.
-        del max_tokens, temperature
+        # max_tokens/temperature/response_format have no CLI equivalent; the
+        # loop's output bound is enforced by the prompt instead. Recorded here
+        # so the signature stays honest across backends.
+        del max_tokens, temperature, response_format
         system, rest = split_system(messages)
         prompt = "\n\n".join(
             f"[{m.get('role', 'user')}]\n{m.get('content', '')}" if len(rest) > 1

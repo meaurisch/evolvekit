@@ -59,7 +59,12 @@ class Provider(Protocol):
         model: str,
         max_tokens: int,
         temperature: float,
-    ) -> Completion: ...
+        response_format: dict[str, Any] | None = None,
+    ) -> Completion:
+        """`response_format` is the OpenAI-shaped request's field (for the
+        assistant, `{"type": "json_object"}`): passed through by the backends
+        whose API has it, accepted and ignored by the others."""
+        ...
 
 
 @runtime_checkable

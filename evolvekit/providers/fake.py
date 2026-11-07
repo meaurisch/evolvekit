@@ -81,6 +81,7 @@ class FakeProvider:
         model: str,
         max_tokens: int,
         temperature: float,
+        response_format: dict[str, Any] | None = None,
     ) -> Completion:
         self.calls.append(
             {
@@ -88,6 +89,7 @@ class FakeProvider:
                 "model": model,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
+                "response_format": response_format,
             }
         )
         prompt = "\n".join(m.get("content", "") for m in messages)

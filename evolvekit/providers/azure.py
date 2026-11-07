@@ -148,6 +148,7 @@ class AzureOpenAIProvider:
         model: str,
         max_tokens: int,
         temperature: float,
+        response_format: dict[str, Any] | None = None,
     ) -> Completion:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -155,6 +156,8 @@ class AzureOpenAIProvider:
             "temperature": temperature,
             "max_completion_tokens": max_tokens,
         }
+        if response_format is not None:
+            kwargs["response_format"] = response_format
         try:
             response = self._send(kwargs)
         except TypeError:

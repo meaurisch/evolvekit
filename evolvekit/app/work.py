@@ -1,14 +1,19 @@
-"""Background work inside the app: the baseline preview and the test run, and
-what the page asks of the preview's tables.
+"""Background work inside the app: the baseline preview, the test run and a
+question to the assistant, and what the page asks of the preview's tables.
 
-Each piece of work runs in a thread of the app and keeps a state file, so a
-reload -- or the app opened again meanwhile -- knows where it is:
+Each piece of work runs in a thread of the app. The preview and the test run
+keep a state file, so a reload -- or the app opened again meanwhile -- knows
+where they are:
 
     <study>/preview/state.json            the preview: running, done or failed
     <study>/preview/test-run/state.json   the test run
 
 A state that says "running" for a process that is gone (the app was closed
 mid-way) reads as "interrupted", and the work can simply be started again.
+
+A question to the assistant keeps its state in `server.work["assistant:<slug>"]`
+only: the history file (`assistant.jsonl`) is the record that lasts, and a
+question the app was closed in the middle of is simply one without an answer.
 """
 
 from __future__ import annotations
@@ -29,8 +34,8 @@ from evolvekit.harness.manifest import Harness
 from evolvekit.harness.sdk import evk_harness as evk
 from evolvekit.ledger import _atomic_write
 
-__all__ = ["preview_state", "preview_summary", "start_preview", "start_test_run", "template_choices",
-           "test_run_state", "try_sql"]
+__all__ = ["ask_state", "cancel_ask", "preview_state", "preview_summary", "start_ask", "start_preview", "start_test_run",
+           "template_choices", "test_run_state", "try_sql"]
 
 STATE = "state.json"
 ROWS = 50
@@ -240,3 +245,93 @@ def start_test_run(server: Any, root: Path) -> dict[str, Any]:
 
 def test_run_state(root: Path, server: Any | None = None) -> dict[str, Any]:
     return _state(server, root, "test-run")
+
+
+# ---------------------------------------------------------------------------
+# a question to the assistant
+# ---------------------------------------------------------------------------
+
+
+def _ask_key(root: Path) -> str:
+    return f"assistant:{root.name}"
+
+
+def start_ask(server: Any, home: Any, root: Path, message: str, *, screen: str = "", run: str | None = None,
+              provider: Any = None, document_of: Any = None) -> dict[str, Any]:
+    """Put `message` to the assistant in a thread of the app and answer at
+    once with the turn's id: the page polls `ask_state` for the answer, so a
+    question outlives a change of screen and can be cancelled. One question
+    of a study at a time (409 while the last one is still thought about)."""
+    from evolvekit.app import assistant
+
+    if not message.strip():
+        raise AppError("say what you would like the study to do")
+    key = _ask_key(root)
+    with server.lock:
+        current = server.work.get(key)
+        if isinstance(current, dict) and current.get("state") == "thinking" and current["thread"].is_alive():
+            raise AppError("the assistant is still thinking about the last question: wait for it, or cancel it", 409)
+        turn = assistant._id()  # noqa: SLF001 - the history's own ids
+        cancel = threading.Event()
+        state: dict[str, Any] = {"turn": turn, "state": "thinking", "started_at": time.time(), "cancel": cancel, "answer": None}
+
+        def body() -> None:
+            try:
+                answer = assistant.ask(home, root, message, provider, screen=screen, run=run, document_of=document_of,
+                                       turn=turn, cancelled=cancel)
+            except AppError as exc:
+                answer = {"failed": str(exc), "say": "", "cards": [], "usd": None, "turn": turn}
+            except Exception as exc:  # noqa: BLE001 - the page must learn how it ended
+                answer = {"failed": f"{type(exc).__name__}: {exc}", "say": "", "cards": [], "usd": None, "turn": turn}
+            with server.lock:
+                state["answer"] = answer
+                state["state"] = "cancelled" if answer.get("cancelled") or cancel.is_set() else "done"
+                state["finished_at"] = time.time()
+
+        thread = threading.Thread(target=body, name="evolvekit-assistant", daemon=True)
+        state["thread"] = thread
+        server.work[key] = state
+        thread.start()
+    return {"turn": turn, "state": "thinking"}
+
+
+def ask_state(server: Any, root: Path, turn: str | None = None) -> dict[str, Any]:
+    """Where a question stands: `thinking`, `cancelled`, or `done` with the
+    answer. Without `turn`, the question being thought about now, if any
+    (`{"state": "none"}` otherwise). A turn this app no longer holds is
+    looked up in the history; one not there either is a 404."""
+    from evolvekit.app import assistant
+
+    with server.lock:
+        current = server.work.get(_ask_key(root))
+        if not isinstance(current, dict):
+            current = None
+        elif current.get("state") == "thinking" and not current["thread"].is_alive():
+            current = {**current, "state": "done", "answer": {"failed": "the question was lost inside the app; ask it again",
+                                                              "say": "", "cards": [], "usd": None, "turn": current["turn"]}}
+    if turn is None:
+        if current is not None and current["state"] == "thinking":
+            return {"state": "thinking", "turn": current["turn"], "started_at": current["started_at"]}
+        return {"state": "none"}
+    if current is not None and current["turn"] == turn:
+        if current["state"] == "thinking":
+            return {"state": "thinking", "turn": turn, "started_at": current["started_at"]}
+        return {"state": current["state"], **(current.get("answer") or {}), "turn": turn}
+    for entry in assistant.history(root)["turns"]:
+        if entry.get("role") == "assistant" and entry.get("turn") == turn:
+            kept = {k: v for k, v in entry.items() if k not in ("raw_cards", "tokens")}
+            return {"state": "cancelled" if entry.get("cancelled") else "done", **kept, "turn": turn}
+    raise AppError("that question is not known to this app any more: ask it again", 404)
+
+
+def cancel_ask(server: Any, root: Path) -> dict[str, Any]:
+    """Stop waiting for the question being thought about: whatever the model
+    answers is thrown away, and the history says the turn was cancelled.
+    `{"cancelled": False}` when nothing is being thought about."""
+    with server.lock:
+        current = server.work.get(_ask_key(root))
+        if not isinstance(current, dict) or current.get("state") != "thinking":
+            return {"cancelled": False}
+        current["cancel"].set()
+        current["state"] = "cancelled"
+    return {"cancelled": True}

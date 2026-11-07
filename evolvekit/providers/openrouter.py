@@ -71,14 +71,20 @@ class OpenRouterProvider:
         model: str,
         max_tokens: int,
         temperature: float,
+        response_format: dict[str, Any] | None = None,
     ) -> Completion:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            # OpenRouter puts what the call cost in `usage.cost` when asked.
+            "extra_body": {"usage": {"include": True}},
+        }
+        if response_format is not None:
+            kwargs["response_format"] = response_format
         response = request_with_retry(
-            lambda: self._client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            ),
+            lambda: self._client.chat.completions.create(**kwargs),
             provider=self.name,
             sleep=self._sleep,
         )

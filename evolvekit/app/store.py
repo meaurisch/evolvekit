@@ -50,8 +50,15 @@ DEFAULT_MODEL = "anthropic/claude-sonnet-5"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "provider": "openrouter",
     "models": {"assistant": DEFAULT_MODEL, "search": DEFAULT_MODEL},
+    "prices": {},
     "recent_applications": [],
 }
+"""`prices`: `{model: [in, out]}`, USD per million tokens, for models the app
+does not know the price of (`evolvekit/app/prices.py`). `models.<role>` may be
+empty for `claude-cli` only: the CLI's own default model."""
+_SET_BY_APP: set[str] = set()
+"""The key names `Home.export_keys` put into this process's environment, so
+that a key the app no longer keeps is taken out again."""
 RECENT = 10
 MAX_UPLOAD = 200 * 1024 * 1024
 INSPECT_TIMEOUT_S = 60
@@ -122,8 +129,14 @@ class Home:
             merged["provider"] = stored["provider"]
         for role in ("assistant", "search"):
             value = (stored.get("models") or {}).get(role)
-            if isinstance(value, str) and value.strip():
+            if isinstance(value, str) and (value.strip() or merged["provider"] == "claude-cli"):
                 merged["models"][role] = value.strip()
+        prices = stored.get("prices")
+        if isinstance(prices, dict):
+            for model, pair in prices.items():
+                checked = self._price_pair(model, pair)
+                if checked is not None:
+                    merged["prices"][str(model).strip()] = checked
         recent = stored.get("recent_applications")
         if isinstance(recent, list):
             merged["recent_applications"] = [str(p) for p in recent if isinstance(p, str)][:RECENT]
@@ -136,13 +149,35 @@ class Home:
                 raise AppError(f"provider: one of {', '.join(PROVIDERS)}")
             current["provider"] = changes["provider"]
         for role, value in (changes.get("models") or {}).items():
-            if role not in ("assistant", "search") or not isinstance(value, str) or not value.strip():
+            if role not in ("assistant", "search") or not isinstance(value, str):
+                raise AppError(f"models.{role}: the model's name, such as {DEFAULT_MODEL}")
+            if not value.strip() and current["provider"] == "azure":
+                raise AppError(f"models.{role}: the deployment name on your Azure OpenAI resource")
+            if not value.strip() and current["provider"] != "claude-cli":
                 raise AppError(f"models.{role}: the model's name, such as {DEFAULT_MODEL}")
             current["models"][role] = value.strip()
+        if "prices" in changes:
+            if not isinstance(changes["prices"], dict):
+                raise AppError("prices: a mapping of model name to [price in, price out], USD per million tokens")
+            current["prices"] = {}
+            for model, pair in changes["prices"].items():
+                checked = self._price_pair(model, pair)
+                if checked is None:
+                    raise AppError(f"prices: {model!r} wants [price in, price out], two numbers of 0 or more, "
+                                   "USD per million tokens")
+                current["prices"][str(model).strip()] = checked
         if "keys" in changes:
             self.set_keys(changes["keys"])
         self._write_yaml(self.root / "settings.yaml", current)
         return current
+
+    @staticmethod
+    def _price_pair(model: Any, pair: Any) -> list[float] | None:
+        if not isinstance(model, str) or not model.strip() or not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return None
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 for v in pair):
+            return None
+        return [float(pair[0]), float(pair[1])]
 
     def remember_application(self, path: str) -> None:
         current = self.settings()
@@ -182,6 +217,22 @@ class Home:
         lines = ["# API keys for evolvekit's app. Written by the app; it never shows them again."]
         lines += [f"{name}={value}" for name, value in sorted(values.items())]
         _atomic_write(self.root / ".env", "\n".join(lines) + "\n")
+        self.export_keys()
+
+    def export_keys(self) -> None:
+        """Put the app's keys into this process's environment, where the
+        providers read them: the app's file wins over a shell variable, and a
+        key the app set earlier and no longer keeps is taken out again. So a
+        key changed in Settings is used by the very next question, and a
+        removed one stops the assistant at once."""
+        values = self._env_values()
+        for name in sorted({n for group in KEY_NAMES.values() for n in group}):
+            if values.get(name):
+                os.environ[name] = values[name]
+                _SET_BY_APP.add(name)
+            elif name in _SET_BY_APP:
+                os.environ.pop(name, None)
+                _SET_BY_APP.discard(name)
 
     def job_environment(self) -> dict[str, str]:
         """The keys a run needs, for its environment: passed explicitly, so the

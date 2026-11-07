@@ -31,6 +31,7 @@ from statistics import fmean
 from typing import Any, Callable
 
 from evolvekit.app import AppError
+from evolvekit.app.prices import price_of
 from evolvekit.confirm import BASELINE, RULE_WORDS, decide, t_cdf
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
 from evolvekit.harness.compile import STUDY_RUN
@@ -61,8 +62,9 @@ LAUNCH_SLACK_S = 120.0
 """A process that started this long after its launch was written is not the
 one launched: the pid was recycled, by a reboot or by chance."""
 EXPORT_TIMEOUT_S = 300
-PRICES = {"anthropic/claude-sonnet-5": (2.0, 10.0)}
-"""USD per million input and output tokens, for the models the app suggests."""
+REPORTS_COST = ("openrouter", "claude-cli")
+"""The providers that say what every call cost, so the dollar cap of AI search
+help holds without a price in the table."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 _BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
@@ -248,10 +250,21 @@ def ai_models(home: Any) -> dict[str, Any] | None:
     if any(not keys.get(name) for name in needed):
         return None
     model = settings["models"]["search"]
-    price_in, price_out = PRICES.get(model, (0.0, 0.0))
+    price_in, price_out = price_of(model, settings.get("prices")) or (0.0, 0.0)
     slot = {"provider": provider, "model": model, "price_in_per_mtok": price_in, "price_out_per_mtok": price_out,
             "max_tokens": 4096}
     return {"small": dict(slot), "strong": dict(slot)}
+
+
+def _cap_holds(home: Any, study: Study) -> None:
+    """AI search help's dollar cap can hold only when every call's cost is
+    known: reported by the provider, or in the price table."""
+    settings = home.settings()
+    model = settings["models"]["search"]
+    if settings["provider"] in REPORTS_COST or price_of(model, settings.get("prices")) is not None:
+        return
+    raise AppError(f"AI search help is on with a ${study.budget.ai_max_usd:g} cap, but the cost of {model} is not known, "
+                   "so the cap cannot hold: add its price under Settings › Models, or turn AI help off", 409)
 
 
 _LAUNCHER = r"""
@@ -329,6 +342,7 @@ def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]
         models = ai_models(home)
         if models is None:
             raise AppError("AI search help is on, and there is no key for it: add one in Settings, or turn AI help off", 409)
+        _cap_holds(home, study)
     base = _now().astimezone().strftime("%Y%m%d-%H%M%S")
     run_id, number = base, 2
     while (root / "runs" / run_id).exists():  # a second start within the second: -2, -3, ...
