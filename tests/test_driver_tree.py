@@ -142,7 +142,8 @@ def test_a_run_folder_keeps_its_tree(project, tmp_path):
     Driver(build_config(_raw(repo, base), base_dir=tmp_path), run_dir=tmp_path / "run").run(generations=0)
     raw = _raw(repo, base)
     raw["problem"]["tree"]["open"] = ["solver.py", "bench.py"]
-    with pytest.raises(ValueError, match="the source's starting commit or its open files changed"):
+    with pytest.raises(ValueError, match="the source's starting commit, its open files, its build, its program "
+                                         "or its Python changed"):
         Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run").run(generations=0)
 
 
@@ -386,7 +387,21 @@ def test_the_tree_identity_holds_build_and_app(project, tmp_path):
     raw["problem"]["tree"]["app"] = "{tree}/solver.py"
     identity = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")._problem_identity()
     assert identity["tree"] == {"base": base, "open": ["solver.py"], "build": '{python} -c "pass"',
-                                "app": "{tree}/solver.py"}
+                                "app": "{tree}/solver.py", "python": sys.executable}
+
+
+@pytest.mark.parametrize("build, refused", [('{python} -c "pass"', True), ('"%s" -c "pass"' % sys.executable, False)])
+def test_the_interpreter_is_part_of_a_run_when_the_build_names_it(project, tmp_path, build, refused):
+    repo, base = project
+    Driver(build_config(_raw(repo, base, build=build), base_dir=tmp_path), run_dir=tmp_path / "run").run(generations=0)
+    raw = _raw(repo, base, build=build)
+    raw["problem"]["tree"]["python"] = str(tmp_path / "another python" / "python.exe")
+    moved = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")
+    if refused:
+        with pytest.raises(ValueError, match="its build, its program or its Python changed"):
+            moved.run(generations=0)
+    else:
+        moved.run(generations=0)  # a build that does not name {python} never installs into it
 
 
 # -- command stages on trees: {candidate} is the tree, {app} the program inside it --

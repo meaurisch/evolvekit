@@ -284,9 +284,13 @@ class Driver:
         }
         if tree_problem is not None:
             # Only for a tree, so a skeleton run's identity reads as it always did.
-            # `build` and `app` change what a command runs, so what a score means.
+            # `build` and `app` change what a command runs, so what a score means; so does
+            # the interpreter a build installs into -- only when the build names `{python}`,
+            # so a program harness's run resumes from a moved evolvekit.
             identity["tree"] = {"base": tree_problem.base, "open": list(tree_problem.open),
                                 "build": tree_problem.build, "app": tree_problem.app}
+            if "{python}" in tree_problem.build:
+                identity["tree"]["python"] = tree_problem.python
         return identity
 
     def _check_same_problem(self) -> None:
@@ -331,7 +335,8 @@ class Driver:
              "direction": f"the direction is now {now['direction']!r}",
              "gates": "the gates changed (evaluate.gates), so earlier candidates were judged by other rules",
              "levels": "the levels changed (evaluate.score.levels), so earlier scores rank by other rules",
-             "tree": "the source's starting commit or its open files changed"}[key]
+             "tree": "the source's starting commit, its open files, its build, its program or its Python "
+                     "changed"}[key]
             for key in changed if key != "stages"
         ]
         raise ValueError(

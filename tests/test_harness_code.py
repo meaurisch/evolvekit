@@ -149,6 +149,48 @@ def test_check_code_open_matches_nothing(tmp_path):
     assert [c.id for c in checks] == ["code.repo", "code.open"], "a failure stops the code checks"
 
 
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@localhost",
+                    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.no-hooks", *args], cwd=cwd, check=True,
+                   capture_output=True)
+
+
+def test_check_code_open_counts_committed_files_only(tmp_path):
+    source = tmp_path / "my source"
+    source.mkdir()
+    _git(source, "init", "-q")
+    (source / "solver.py").write_text("x = 1\n", encoding="utf-8")
+    _git(source, "add", "solver.py")
+    _git(source, "commit", "-q", "--no-verify", "-m", "one")
+    (source / "staged.py").write_text("y = 2\n", encoding="utf-8")
+    _git(source, "add", "staged.py")  # in the index, not in HEAD: a clean checkout would not have it
+    harness = load_harness(_harness(tmp_path, repo=str(source), open=["staged.py"]))
+    checks = _code_checks(harness, str(SOLVER), tmp_path / "scratch")
+    assert [(c.id, c.ok) for c in checks] == [("code.repo", True), ("code.open", False)]
+    assert checks[-1].message == "code.open: no file of the source matches staged.py"
+
+
+def test_check_a_sample_that_fails_names_the_engineer_s_program(tmp_path):
+    harness = load_harness(_harness(tmp_path, repo=str(CLI_SOLVER), app="{tree}/missing.py"))
+    checks = _code_checks(harness, str(SOLVER), tmp_path / "scratch")
+    assert [(c.id, c.ok) for c in checks] == [("code.repo", True), ("code.open", True), ("code.samples", False)]
+    assert f"--app {CLI_SOLVER.resolve() / 'missing.py'} " in checks[-1].fix, "not the removed checkout's path"
+    assert "trees" not in checks[-1].fix
+
+
+def test_check_a_checkout_that_cannot_be_made(tmp_path, monkeypatch):
+    from evolvekit import tree
+
+    def refuse(*_a, **_k):
+        raise tree.TreeError("the disk is full")
+
+    monkeypatch.setattr(tree, "materialise", refuse)
+    harness = load_harness(_harness(tmp_path, repo=str(CLI_SOLVER)))
+    checks = _code_checks(harness, str(SOLVER), tmp_path / "scratch")
+    assert checks[-1].id == "code.checkout" and checks[-1].severity == "failure"
+    assert checks[-1].message.startswith("code.checkout: a clean checkout of ") and "the disk is full" in checks[-1].message
+
+
 def test_check_code_open_counts_tracked_files(tmp_path):
     harness = load_harness(_harness(tmp_path, repo=str(CLI_SOLVER), open=["solver.py", "data/*.json"]))
     checks = _code_checks(harness, str(SOLVER), tmp_path / "scratch")

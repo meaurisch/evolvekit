@@ -232,7 +232,7 @@ class TreeConfig:
         if not isinstance(app, str):
             raise ConfigError(f"{path}.app: expected a path such as '{{tree}}/solver.py', got {app!r}")
         timeout = _as_positive(data.get("build_timeout_s", 600.0), f"{path}.build_timeout_s")
-        python = data.get("python") or sys.executable
+        python = data.get("python", sys.executable)
         if not isinstance(python, str) or not python.strip():
             raise ConfigError(f"{path}.python: expected the path of a Python interpreter, got {python!r}")
         # Only a tree problem needs git: imported here, never for a skeleton.

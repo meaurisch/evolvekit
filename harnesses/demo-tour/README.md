@@ -28,8 +28,10 @@ folder, so inside the evolvekit repository; a study records its own absolute
 path), `open: [solver.py]`, and `app: "{tree}/solver.py"`, the program inside
 each combination's checkout. There is no build: each combination runs its own
 copy of `solver.py`. `harness check` makes a clean checkout of `HEAD` in a
-scratch folder and solves a sample from it; a copy of this harness outside the
-evolvekit folder must point `code.repo` at the solver's source again.
+scratch folder and solves a sample from it. `evolvekit harness new --from
+demo-tour` keeps `code.repo` pointing at the solver's source (it writes the
+absolute path). A copy made by hand, or a packed harness installed elsewhere,
+does not: point its `code.repo` at the solver's source again.
 
 **Tables:** `stops` (the request), `tour` (one row per visit, with the leg
 from the previous stop) and `summary` (lengths and the moves tried).

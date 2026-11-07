@@ -294,17 +294,19 @@ def _code_checks(harness: Harness, app: str, scratch: Path) -> list[Check]:
                       "point code.repo at a folder inside a git repository (git init, then commit it)")]
     checks.append(_pass("code.repo", f"code.repo is {repo.path}, in the git repository {repo.toplevel}"))
     try:
-        listed = [name for name in tree.git(repo.path, "ls-files", "-z", "--cached", "--", ".").split("\0") if name]
+        # What a checkout of HEAD holds (not the index: a staged, uncommitted file is not in it).
+        listed = [name for name in tree.git(repo.path, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ".")
+                  .split("\0") if name]
     except tree.TreeError as exc:
         return checks + [_fail("code.open", f"code.open: the source's files cannot be listed: {exc}",
-                               "run git ls-files in code.repo by hand and fix what it says")]
+                               "run git ls-tree -r HEAD in code.repo by hand and fix what it says")]
     matched: list[str] = []
     for glob in code.open:
         pattern = tree.glob_pattern(glob)  # matched as the static stage matches a change (`tree.touches_only`)
         found = [name for name in listed if pattern.fullmatch(name)]
         if not found:
             return checks + [_fail("code.open", f"code.open: no file of the source matches {glob}",
-                                   f"name files that git tracks under {repo.path}, relative to it")]
+                                   f"name files committed under {repo.path}, relative to it")]
         matched += [name for name in found if name not in matched]
     shown = ", ".join(matched[:CODE_FILES_SHOWN])
     more = f" and {len(matched) - CODE_FILES_SHOWN} more" if len(matched) > CODE_FILES_SHOWN else ""
@@ -314,12 +316,12 @@ def _code_checks(harness: Harness, app: str, scratch: Path) -> list[Check]:
         made = tree.materialise(scratch, repo=repo, base=commit, diff="", candidate_id=CHECKOUT_ID)
     except tree.TreeError as exc:
         tree.remove_all(scratch)
-        return checks + [_fail("code.checkout", f"code.repo: a clean checkout of {repo.toplevel} at {commit[:12]} "
+        return checks + [_fail("code.checkout", f"code.checkout: a clean checkout of {repo.toplevel} at {commit[:12]} "
                                f"could not be made: {exc}", "run git worktree add by hand and fix what it says")]
     found: list[Check] = []
     put_back: list[Check] = []
     try:
-        found = _from_checkout(harness, app, made, scratch, f"{repo.toplevel} at {commit[:12]}")
+        found = _from_checkout(harness, app, made, scratch, f"{repo.toplevel} at {commit[:12]}", repo.path)
     finally:
         tree.remove_all(scratch)
         if code.build:
@@ -330,8 +332,9 @@ def _code_checks(harness: Harness, app: str, scratch: Path) -> list[Check]:
     return checks
 
 
-def _from_checkout(harness: Harness, app: str, made: Any, scratch: Path, where: str) -> list[Check]:
-    """The build and the first sample in a clean checkout (`made`, a `tree.Tree`); stops after a failure."""
+def _from_checkout(harness: Harness, app: str, made: Any, scratch: Path, where: str, own: Path) -> list[Check]:
+    """The build and the first sample in a clean checkout (`made`, a `tree.Tree`); stops after a failure.
+    A fix names the engineer's own folder `own`: the checkout is gone by the time it is read."""
     from evolvekit.evaluate.stages import render_app
 
     code = harness.code
@@ -351,7 +354,9 @@ def _from_checkout(harness: Harness, app: str, made: Any, scratch: Path, where: 
     if not cases:
         return checks + [_warn("code.samples", "the harness has no sample cases, so nothing was solved from a clean "
                                "checkout", f"put a few small cases ({', '.join(harness.cases.formats)}) in samples/")]
-    in_tree = render_app(code.app, made.path) if harness.application.kind == "program" else app
+    program = harness.application.kind == "program"
+    in_tree = render_app(code.app, made.path) if program else app
+    yours = render_app(code.app, own) if program else app
     solving = scratch / "solve"
     solving.mkdir(parents=True, exist_ok=True)
     runner = _Runner(harness, in_tree, solving)
@@ -360,7 +365,7 @@ def _from_checkout(harness: Harness, app: str, made: Any, scratch: Path, where: 
     if done.returncode != 0:
         return checks + [_fail("code.samples", f"code.samples: {cases[0].name} does not solve from a clean checkout: "
                                f"{runner.said(done)}",
-                               f"run runner.py solve by hand on the sample with --app {in_tree} and fix what it says")]
+                               f"run runner.py solve by hand on the sample with --app {yours} and fix what it says")]
     return checks + [_pass("code.samples", f"the samples solve from a clean checkout of {where} "
                            f"(tried on {cases[0].name})")]
 

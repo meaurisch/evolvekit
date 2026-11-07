@@ -74,6 +74,14 @@ def test_build_command_renders_python_with_the_given_interpreter(tmp_path):
     assert build_command("{python} -c pass", tree=tmp_path, python=None)[0] == sys.executable
 
 
+def test_an_empty_python_is_refused(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base, build='{python} -c "pass"')
+    raw["problem"]["tree"]["python"] = ""
+    with pytest.raises(ConfigError, match=re.escape("problem.tree.python: expected the path of a Python interpreter")):
+        build_config(raw, base_dir=tmp_path)
+
+
 OTHER_PYTHON = getattr(sys, "_base_executable", sys.executable)
 """Another interpreter than evolvekit's: the base Python a venv was made from."""
 
