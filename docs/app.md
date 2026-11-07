@@ -47,6 +47,7 @@ opened again at any time:
 ~/evolvekit/
   settings.yaml        the AI provider and models, the applications used before
   .env                 API keys: written by the app, never shown again
+  app.json             while the app runs: where it is, and the key of this launch
   harnesses/           harnesses you installed
   studies/<name>/      one folder per study: study.yaml, the pinned harness,
                        cases/, inputs/, preview/, runs/
@@ -54,6 +55,38 @@ opened again at any time:
 
 A study folder is self-contained: copy it to another computer, point it at
 the application there, and it runs.
+
+**One library, whoever made the study.** The command line
+(`evolvekit study …`, see
+[A study from the command line](../README.md#a-study-from-the-command-line))
+reads and writes the same library through the same code. A study made on the
+command line appears on Home, with its state and its answer; a study made
+here can be started, watched and read from the command line; and a study
+started from either runs the same way, whether the app is open or not.
+`evolvekit study open NAME` prints the study's address in the running app —
+starting the app, without a browser window of its own, when none runs — and
+opens it.
+
+**`app.json`.** As soon as the app is listening it writes `app.json` in the
+library home, and removes it when it stops cleanly:
+
+```json
+{"pid": 1234, "started_at": "2026-11-07T10:00:00+00:00", "host": "127.0.0.1",
+ "port": 8780, "url": "http://127.0.0.1:8780/?token=…"}
+```
+
+That is how a command finds the running app. The `url` carries the key of
+this launch, so the key is on disk while the app runs. That is a deliberate
+choice, and acceptable for the same reasons the app is safe at all: the file
+sits beside `.env`, which already holds your API keys; it is private to you
+(on Linux and macOS it is made readable by you alone, mode 0600; on Windows,
+which has no such mode, it is as private as the folder it is in, your user
+folder by default); and the app's other protections stay —
+it listens only on 127.0.0.1, accepts changes only from its own page, and
+answers no API call without the key. A file left behind by an app that is no
+longer running (its process is gone, or the process with that number is not
+the app that wrote it) counts as "not running": it is ignored, removed, and
+written again by the next app.
 
 **Home** shows your studies as cards: each says where the study is
 (*Running · round 7 of 12*, *Queued*, *Finished · 4 held-back cases*), its
@@ -319,6 +352,33 @@ outside its folder); `POST …/cases/{name}/restore` brings a removed case
 back; `GET /api/compare?a=<name>[/<run>]&b=<name>[/<run>]` is two runs side
 by side. A run is `python -m evolvekit.app.job STUDY RUN`, started so that it
 outlives the app.
+
+**The verdict document.** The verdict is computed in one place:
+`build_verdict(root, run)` in `evolvekit/app/verdict.py`. It reads the study
+folder, the run's `job.json` and its `confirm/final/` files, needs no server,
+and returns one document. The Study page (through `results`), `evolvekit
+study verdict`, `study wait` and the report (`study report --markdown`,
+`evolvekit/app/report.py`) all render from it, so they cannot disagree;
+`evolvekit study verdict NAME --json` prints it. Its keys keep the engine's
+names:
+
+| Key | Holds |
+|---|---|
+| `schema` | 1; bumped when a key changes meaning |
+| `study`, `run`, `phase` | the study's folder name, the run, and where the job is (`queued`, `starting`, `search`, `check`, `done`, `stopped`, `failed`) |
+| `decision` | `use`, `keep` or `worse` by the rule; `none` (nothing beat the starting point), `single` (one held-back case), `pending` (no final check yet), `stopped` (the check was stopped), `skipped` (any other skip, such as no held-back cases) |
+| `reason` | with `none` and `skipped`: the sentence the run recorded |
+| `line`, `advice` | the verdict's one sentence, as the Study page shows it, and the sentence after it |
+| `measure` | `{"kpi", "label", "unit", "direction"}` of the measure that decided |
+| `held_back` | `{"cases", "runs_per_case"}` |
+| `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point; absent with `pending`, `stopped` and `skipped` |
+| `levels` | with goals in order of importance: one entry per goal with the same keys, `deciding: true` on the one that decided |
+| `learned_from` | `{"cases", "pct"}`: the cases the search learned from, labelled as such |
+| `rule` | the fixed rule, in words |
+| `by_case` | one row per held-back case: `name`, `start`, `best`, `change_pct`, `outcome` (`better`, `worse`, `same`, `failed`) |
+| `changed` | the settings and data changes of the best combination: `name`, `label`, `from`, `to` |
+| `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
+| `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
 
 The page is plain HTML, CSS and JavaScript with no build step, under
 `evolvekit/app/static/`: `app.html` (the shell), `css/tokens.css` (every

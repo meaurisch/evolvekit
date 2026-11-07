@@ -15,6 +15,35 @@ Two harnesses in this repository are the worked examples:
   Python, with request loading, unit conversion, a lever applied in code, and
   drift detection. The full picture.
 
+## First: what the application exposes
+
+Before a harness exists, ask the application what it has:
+
+```
+python -m evolvekit harness discover --program examples/cli-solver/solver.py
+python -m evolvekit harness discover --python C:/work/.venv-pyvrp/Scripts/python.exe --module pyvrp
+```
+
+For a program, it runs only `PATH --version` and `PATH --help` (ten seconds
+each; a `.py` file runs with evolvekit's Python) and reads the help: every
+flag but `--help` and `--version` becomes a candidate setting, with a type
+guess (`int`, `float`, `bool`, `choice` with the choices it saw, `text`), the
+default when the help says it, `required` when the usage line shows the flag
+outside brackets, and the help line. For a Python package, it only imports
+the module in that Python and lists the version, the public dataclasses, the
+classes with keyword-only constructors and the functions whose parameters
+have defaults, with their defaults and type annotations. Nothing else of the
+application runs.
+
+It prints the application and its version, one line per candidate, and a
+note; `--json` prints `{"application": {"kind", "path", "version",
+"version_number"}, "settings": [{"name", "type", "default", "choices",
+"required", "help", "source"}], "notes": [...]}`. Treat it as a pointer to
+where to look, not a harness: a flag that is in the help may not be a
+setting worth tuning, a type guess can be wrong, and the ranges, the cases,
+the tables and the measures are yours to write. Then start from the closest
+harness.
+
 ## Start from something that passes
 
 ```

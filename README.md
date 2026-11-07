@@ -1480,34 +1480,145 @@ how to write one.
 
 ### A study from the command line
 
+The command line and the app are one world: they share the library home
+(`EVOLVEKIT_HOME`, else `~/evolvekit`) and the same runner. A study you make
+here shows on the app's Home, with its state and its answer; a study made in
+the app can be driven from here. It does not matter whether the app is open.
+
+**Start here.** `doctor` says whether this computer is ready, with a fix for
+every ✗:
+
 ```
-python -m evolvekit study new studies/depot-a --harness pyvrp --template tune --name "Depot A settings"
+python -m evolvekit doctor
 ```
 
-writes `studies/depot-a/`: `study.yaml`, the harness pinned in `harness/` (an
-updated harness never changes a study that already exists), and empty
-`cases/` and `inputs/`. Put the requests in `cases/`, then fill in
-`study.yaml`:
+```
+✓ python: 3.13.14 at C:\work\evolvekit\.venv\Scripts\python.exe
+✓ evolvekit: 0.3.0
+✓ home: C:\Users\you\evolvekit, writable
+✓ app: not running (start it with: evolvekit app)
+✓ provider: openrouter, key set
+✓ harnesses: demo-tour, pyvrp
+```
+
+It never prints a key. `--app PATH` also asks every harness whether that
+application is its own; `--json` prints the checks as a list of `{"ok",
+"name", "message", "fix"}`. Exit 0 when every line is ✓, else 1.
+
+**Make the study.** On the demo tour, whose application is the example solver
+in this repository:
+
+```
+python -m evolvekit study new "Depot A" --harness demo-tour --template tune
+```
+
+prints the study's short name, `depot-a`, and writes
+`~/evolvekit/studies/depot-a/`: `study.yaml`, the harness pinned in
+`harness/` (an updated harness never changes a study that already exists),
+and empty `cases/` and `inputs/`. Without `--template` the study starts
+blank. `--dir PATH` writes a standalone study folder there instead, outside
+the library home.
+
+**Say where the application is**, as a full path. The harness asks the
+program whether it is its application and records its version:
+
+```
+python -m evolvekit study application depot-a C:/work/evolvekit/examples/cli-solver/solver.py
+python -m evolvekit study application depot-a --detect      # or: list the ones found on this computer
+```
+
+(`study new … --app PATH` does the same in one step.)
+
+**Bring the cases**, and hold some back for the final check:
+
+```
+python -m evolvekit study cases depot-a --hold-back 1 --add harnesses/demo-tour/samples/north-south-30.json harnesses/demo-tour/samples/town-40.json harnesses/demo-tour/samples/region-60.json harnesses/demo-tour/samples/county-50.json
+```
+
+says `4 cases added, 1 held back`. A file the harness cannot read is refused
+with the reason, and the others still go in. Without `--hold-back` the app's
+suggestion is used. Name every file: the Windows shells do not expand
+`*.json`.
+
+**Check it.** `study check` names what is still missing, one line each, and
+exits 2 while anything is; it prints nothing and exits 0 when the study can
+run:
+
+```
+python -m evolvekit study check depot-a
+```
+
+```
+application: say where the application is
+cases.training: the search needs at least one case to learn from
+```
+
+The rest of the study is in its `study.yaml` (in the study's folder; the
+template has filled it in). Edit it for the time per case and the hours:
 
 ```yaml
-application:
-  path: C:/work/.venv-pyvrp/Scripts/python.exe   # absolute: the one path that is not relative
-cases:
-  training: [cases/mon.json, cases/tue.json, cases/wed.json]   # what the search sees
-  test: [cases/thu.json]                                      # held back for the final check
 limits:
-  time_per_case_s: 20      # PyVRP's time limit on each case
+  time_per_case_s: 2.0     # the application's time limit on each case
 budget:
-  hours: 0.5               # the whole study, final check included
+  hours: 0.1               # the whole study, final check included
 ```
 
-and go:
+**Go:**
 
 ```
-python -m evolvekit study preview studies/depot-a    # one solve at the starting values
-python -m evolvekit study compile studies/depot-a    # the automatic plan, and runs/<id>/evolvekit.yaml
-python -m evolvekit study run studies/depot-a        # search, then the final check
+python -m evolvekit study preview depot-a           # one solve at the starting values
+python -m evolvekit study start depot-a             # the run, as the app's Start does
+python -m evolvekit study wait depot-a              # returns when the run has ended, with the verdict
+python -m evolvekit study verdict depot-a           # the verdict again, and what to do about it
+python -m evolvekit study report depot-a --markdown # the report, for a pull request or a note
+python -m evolvekit study open depot-a              # the study in the app (started if none runs)
 ```
+
+`study start` runs the study in the background, exactly as pressing Start in
+the app does, so closing the terminal does not stop it. While another study
+runs, it is queued: it says `queued behind <name>`, and the app, `study
+wait` or `study watch` starts it when that study finishes. `study watch
+depot-a` prints the state line each time it changes; `study status depot-a`
+prints it once; `study stop depot-a` asks the run to stop. `study verdict`
+prints the verdict's own sentence and its advice, nothing more; `--json`
+prints the whole verdict document (see [docs/app.md](docs/app.md#for-developers)).
+
+`study preview`, `study compile` and `study run` take a study folder or a
+study's name: a value that is a folder on disk is a folder, anything else is
+a study in the library home. `study compile` writes the automatic plan into a
+run folder of its own, `runs/<id>/evolvekit.yaml`, for `evolvekit run`;
+`study start` does not need it. `study run` compiles, searches and runs the
+final check in the foreground of this terminal, for scripts and for a
+standalone `--dir` folder; the other `study` commands take a study in the
+library home.
+
+Every command:
+
+| Command | Does |
+|---|---|
+| `doctor [--app PATH] [--json]` | is this computer ready: Python, evolvekit, the library home, the app, the AI provider, the harnesses |
+| `study new NAME --harness ID [--template T] [--app PATH] [--dir DIR] [--json]` | a new study in the library home; prints its short name (`--json`: `{"slug", "root"}`); `--dir` writes a standalone folder instead |
+| `study application SLUG PATH` / `study application SLUG --detect` (`--json`) | where the study's application is, checked by the harness; or the ones found on this computer |
+| `study list [--json]` | every study in the library home: its name, harness and the state line its card shows (`draft · step 3 of 7`, `running · round 2 of 6`, …) |
+| `study cases SLUG --add FILE... [--hold-back N] [--json]` | copies cases into the study, refuses the files the harness cannot read, and holds `N` back for the final check |
+| `study check SLUG` | what is still missing; exit 2 while anything is |
+| `study start SLUG [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running |
+| `study stop SLUG [--json]` | asks the running run to stop, or takes a queued one out of the line |
+| `study status SLUG [--run ID] [--json]` | the state line; `--json` the document the app's Running screen reads |
+| `study watch SLUG [--every S] [--json]` | the status every `S` seconds (default 5) until the run ends; starts a queued run |
+| `study wait SLUG [--timeout S] [--json]` | returns when the run has ended: exit 0 with the verdict when it is done, 1 when it stopped or failed, 4 on timeout; starts a queued run |
+| `study verdict SLUG [--run ID] [--json]` | the verdict and what to do about it; `--json` the verdict document |
+| `study report SLUG [--run ID] [--markdown \| --json]` | the report: Markdown for people, else the verdict document |
+| `study open SLUG [--no-browser]` | prints the study's address in the app, starting the app when none runs, and opens it |
+| `study preview \| compile \| run FOLDER-OR-SLUG` | one solve at the starting values; the plan into `runs/<id>/`; the whole study in the foreground |
+| `harness discover (--program PATH \| --python PATH --module NAME) [--json]` | what an application exposes, before a harness exists ([Harness commands](#harness-commands)) |
+| `skill list` / `skill install [--dir DIR] [--force]` | the skills that ship with evolvekit ([For coding agents](#for-coding-agents)) |
+
+Every one takes `--home DIR` for another library home, except `skill` and
+`harness discover`. Exit codes: 0 success; 1 a problem the message names (a
+missing study, a study already running, a refused file); 2 a configuration
+or validation error, and `study check` with problems; 4 a timeout. Ctrl+C
+stops `wait` and `watch`, never the run.
 
 - **The preview** solves the smallest training case at the starting values,
   and keeps its tables (`preview/tables.sqlite`, with `orig_*` copies of the
@@ -1523,12 +1634,13 @@ python -m evolvekit study run studies/depot-a        # search, then the final ch
   read that copy, so editing the study afterwards changes nothing about the
   run) and `job.json`, which says where the job is: `search`, `check`,
   `done`, `stopped` or `failed`.
-  `python -m evolvekit stop --run-dir studies/depot-a/runs/<id>` ends it
-  cleanly.
-- **The final check** runs the best configuration against the starting point
-  on the held-back test cases, on seeds 1001–1003, with the paired statistics
-  of [`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export), in
-  `runs/<id>/confirm/final/`.
+  `python -m evolvekit study stop depot-a` ends it cleanly.
+- **The final check** runs the best combination against the starting point
+  on the held-back cases, several runs per case (the plan says how many),
+  with the paired statistics of
+  [`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export), in
+  `runs/<id>/confirm/final/`. Its verdict is the study's one answer: `study
+  verdict`, the report and the app all show the same sentence.
 
 What `study.yaml` can say:
 
@@ -1552,6 +1664,7 @@ the untouched request instead (`real_cost`, `deliveries_per_hour`).
 ### Harness commands
 
 ```
+python -m evolvekit harness discover --program examples/cli-solver/solver.py   # before a harness exists
 python -m evolvekit harness list                         # the installed and built-in harnesses
 python -m evolvekit harness new my-solver --from pyvrp   # a copy of the closest harness
 python -m evolvekit harness new my-solver --kind program # or a runnable skeleton to start from
@@ -1565,6 +1678,41 @@ python -m evolvekit harness install pyvrp-1.0.0.zip      # into the library home
 through. The library home is `EVOLVEKIT_HOME`, else `~/evolvekit`; the
 harnesses in this repository's `harnesses/` folder are found as built-ins.
 
+`discover` is where writing a harness starts: it lists what an application
+exposes, as candidate settings with a type guess, the default when the help
+says it, and the help line. For a program (`--program PATH`) it runs only
+`PATH --version` and `PATH --help`; for a Python package (`--python PATH
+--module NAME`) it only imports the module in that Python. It is a pointer to
+where to look, not a harness, and says so in its last line:
+
+```
+program examples/cli-solver/solver.py: cli-solver 1.0
+  neighbours     int, default 8  -- candidate moves per city (default: 8)
+  init           choice random|nearest
+  …
+note: candidate settings read from --help: a pointer to where to look, not a harness; check each one before a harness relies on it
+```
+
+`--json` prints `{"application", "settings", "notes"}` for a script or an AI
+coding tool. [docs/harness-authoring.md](docs/harness-authoring.md) goes on
+from there.
+
+### For coding agents
+
+```
+python -m evolvekit skill list                 # the skills that ship with evolvekit
+python -m evolvekit skill install              # write them into this project
+```
+
+`skill install` copies each skill into `.agents/skills/<name>/` of the
+current folder (`--dir DIR` for another), the generic place coding agents
+read skills from. The one exception is `.claude/skills/<name>/SKILL.md`: a
+pointer for the tool that does not read the generic place yet, which says to
+follow the skill in `.agents/skills/`. Files that exist are left alone
+unless `--force`; the command prints what it wrote and what it skipped. Two
+skills ship today, `evolvekit-study` and `evolvekit-harness`, and both are
+placeholders: they are written in the next project.
+
 ### The app
 
 ```
@@ -1577,7 +1725,9 @@ the cases, says what may change and what counts as better — with an optional
 AI assistant that proposes measures and data changes, each checked on a real
 solve before it is shown — starts the study, watches it, and reads the result
 in plain words, with the settings file and a report to hand on. Studies keep
-running when the app is closed. [docs/app.md](docs/app.md) is its manual.
+running when the app is closed. It shows the studies made on the command line
+too, and `study open SLUG` takes you to one. [docs/app.md](docs/app.md) is its
+manual.
 
 ## Adding a problem
 
