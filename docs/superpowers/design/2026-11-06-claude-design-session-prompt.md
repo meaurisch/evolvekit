@@ -1,26 +1,79 @@
-# Claude Design session: the evolvekit app
+# Claude Design session: the evolvekit app (round 2)
 
-Paste everything below the line into a new Claude Design session. The canvas "evolvekit app: five approaches" (https://claude.ai/artifact/SZBz3JZ8URx6LKqTjkJdA6) holds the five sketches from the first round; this session picks one and makes it in full.
+Paste everything below the line into a new Claude Design session. It starts over: the first round's canvas, "evolvekit app: five approaches", is set aside, and this session sketches five new directions before making the chosen one in full.
 
 ---
 
 I am the owner of evolvekit and I make every decision in this session. Propose, show me options side by side, and wait for my pick before going further. Nothing is settled by default.
 
+## Start over
+
+An earlier session sketched five approaches on the canvas "evolvekit app: five approaches" (Instrument, Report, Conversation, Map, Cards). I rejected all five: they are generic, boring and often ugly. Do not open that canvas, do not reuse anything from it, and do not offer any of the five again, renamed or mixed. Start a new canvas, "evolvekit app: five directions".
+
+Why they failed, so it does not happen again: they varied the layout (a dashboard, a report, a chat, a map, cards) but wore the same anonymous skin, and the personality (mark, colour, type, voice) was left for later. A layout is not an identity. This time every direction is a complete look from its first frame.
+
 ## What we are doing
 
 Redesign the evolvekit app: a local web app in which a planner who is not a programmer tunes a program like PyVRP, a route planner, on their own cases, and gets an honest answer about whether the result can be trusted. The app works end to end and passed a usability test with an intern persona at 8 out of 10. Its problem is the look: a system font, blue buttons and grey cards on beige, and everything told in sentences. It reads as generic and has no personality.
 
-Five approaches were sketched already (the canvas "evolvekit app: five approaches"): Instrument, Report, Conversation, Map, Cards. Each has Set up, Running and Results at 1280 px and Results at 390 px, with a one-line idea and what it gives up.
+The bar: someone who sees one screen with the logo covered knows it is evolvekit, and a design-minded person wants to screenshot it. Calm and accessible, yes. Anonymous, never.
 
 The session has three parts:
 
-1. **The pick.** Show me the five side by side, in two or three sentences each, and ask me which one, or which mix ("the results of B with the set-up of D").
-2. **The personality.** Four decisions, each with two or three options to compare before I pick:
+1. **Five new directions** (next section). Show them side by side: for each, its name, its idea in one sentence, what it borrows from, and what it gives up. Ask me which one, or which mix ("the results of B with the set-up of D"). If none lands, I say what I liked and you make three more that push further that way; do not soften them toward the middle.
+2. **The personality, inside the chosen direction.** The direction arrives with its own mark, accent, type and voice; now I settle each, from two or three variations in the direction's own spirit, never a fallback to safe defaults:
    - the mark: a logo built on an evolution motif (lineage, branching, variation), usable at 16 px and as an empty-state illustration;
    - the accent and the surfaces: one accent colour that is not the default blue; surfaces designed for light and for dark, not inverted;
    - the type: a face with tabular figures and a character of its own, open-licensed so the offline app can ship it;
    - the voice: how the app says the three hard things, *not proven*, *worse*, *it failed*. Plain, exact, warm, never alarming; the number first.
-3. **The chosen approach in full:** every screen below at 1280 px and 390 px, light and dark, every state in the table; the five signature elements first, since they carry the personality more than any colour; components and tokens named so the build maps them one to one; a clickable prototype of the main path (New study, then Start, then Results).
+3. **The chosen direction in full:** every screen below at 1280 px and 390 px, light and dark, every state in the table; the five signature elements first, since they carry the personality more than any colour; components and tokens named so the build maps them one to one; a clickable prototype of the main path (New study, then Start, then Results).
+
+## Five new directions
+
+**Where to look.** Not at other software dashboards. Look at the world the users work in, at the method itself, and at design that treats numbers with care. Starting points, to use or to beat with better ones:
+
+- **Transport and wayfinding:** departure boards, timetables, railway and road signage. A study is a journey with a departure and an arrival: "done around 17:40".
+- **Cartography:** survey and sea charts, contour lines, a route through its stops. Cases are stops; the interval strip is a stretch of road across 0.
+- **Natural history:** specimen plates, field notebooks, the branching tree of descent. Combinations are offspring and rounds are generations, in the picture only, never in the words.
+- **Measurement and inspection:** instrument dials, calibration certificates, an inspector's stamp, a ledger. The verdict is a stamp you can trust.
+- **Editorial data graphics:** newspaper charts, two-colour print, science journals, where one number and one line carry the page.
+
+These are sources of craft, not costumes: no fake paper texture, no skeuomorphic props, no imitation of any real brand, operator, map or logo.
+
+**How the five differ.** Each differs from the others in all of these: typeface, colour world (its dominant hue, and whether it is light-first or dark-first), composition (grid, density, where the big number sits), how a number looks (size, figures, units), the motif carried by the mark and the signature elements, and how it moves while a study runs. No two share a typeface or a dominant hue. At least one is dark-first; at least one sets its big numbers in a serif or a display face; at least one is built on a monospace or a strict typographic grid. One may be bold enough that I might reject it; that is welcome.
+
+**Where the personality lives.** In the five signature elements, the type and the mark, not in decoration. The verdict mark is the hero of every direction: it is what a planner looks at first, so it is the most designed object on the screen. Design it first, then build the screen around it.
+
+**The generic look, which no direction may have:**
+
+- Inter, Roboto, system-ui or a default Helvetica/Arial; nor the faces of the first round: IBM Plex, Newsreader, Public Sans, Figtree, Manrope, Archivo.
+- A blue, indigo or violet accent; purple-to-blue gradients; beige with grey cards.
+- A grid of rounded white cards with soft shadows; stat tiles with an icon in a circle; pill badges on everything; a sidebar of nav icons; a centred hero with one button.
+- A stock icon set as the main visual; emoji; illustrations of people; frosted glass.
+- Colour as decoration instead of meaning.
+
+**Type.** Every face is open-licensed (SIL OFL or equivalent) and has tabular figures, both checked, so the app can ship it offline. Look past the usual choices: for example Instrument Serif, Fraunces, Young Serif, Bricolage Grotesque, Schibsted Grotesk, Overpass, Big Shoulders, Martian Mono, Commit Mono, Recursive, or better ones you find.
+
+**Each direction shows**, with the real data below, never placeholder text or made-up charts:
+
+- **a mood strip:** the typeface with its figures (1,418.3 · 1.3 % · 19 in 20 · 17:40), the palette in light and dark, the mark at 16 px and large, one line in its voice ("Keep today's settings. 11 in 20 · at worst 24.9 % worse");
+- **Results at 1280 px**, use it: 1.3 % cheaper on 3 new cases, 19 in 20, at worst 0.3 % worse. This is the hero frame;
+- **Results at 1280 px in its other theme**, keep today's settings: the second study, at worst 2.7 % worse;
+- **Running at 1280 px:** 3 min in, 12 min left, round 1 of about 6, "Cost rates per vehicle class" queued after it;
+- **Set up at 1280 px;**
+- **Results at 390 px;**
+- its name, its idea in one sentence, what it borrows from, and what it gives up.
+
+Every frame keeps the principles and the word rules below, and every text colour meets WCAG 2.2 AA on its surface in both themes.
+
+**Before you show me,** check each direction and redo any that fails:
+
+- With the logo covered, could this be another product? Then redo it.
+- Does it share a typeface, a hue or a layout idea with another of the five, or with the first round? Then redo it.
+- Is the verdict mark the most designed thing on Results, and read in two seconds?
+- Does any frame show something from the generic list?
+
+Then tell me, in one line per direction, what you changed after this check.
 
 ## The product in a minute
 
@@ -38,7 +91,7 @@ The session has three parts:
 2. **Show, don't tell.** A mark, a strip, a dot or a bar before any sentence.
 3. **Defaults first.** The main path is three choices; everything else sits behind "Change".
 4. **Few words.** Labels of up to 3 words, sentences of up to 12, help behind an (i). No screen shows more than 100 words before a click.
-5. **Calm, alive where it is live.** One accent colour; motion only while a study runs.
+5. **Calm, alive where it is live.** Calm is not plain: one confident accent colour, strong type, a clear order. Motion only while a study runs.
 6. **Honest.** Nothing says "use it" before the final check does, and every estimate shows its range.
 
 ## The five signature elements
@@ -53,7 +106,7 @@ The session has three parts:
 
 ## The main path
 
-Today the path is 11 screens: home, new study, seven set-up steps, running and results. The new one needs five moments, everything else one click away: Start a study → Set up → Running → Results → Hand it over. The order is fixed: an answer needs cases, a goal and a time before Start. How the moments are laid out (pages, one canvas, a chat, cards) is the approach's own choice. Open question for you to settle with me: can the seven set-up steps become one Set up screen?
+Today the path is 11 screens: home, new study, seven set-up steps, running and results. The new one needs five moments, everything else one click away: Start a study → Set up → Running → Results → Hand it over. The order is fixed: an answer needs cases, a goal and a time before Start. How the moments are laid out (pages, one canvas, a chat, cards) is the direction's own choice. Open question for you to settle with me: can the seven set-up steps become one Set up screen?
 
 ## Screens and states
 
@@ -183,6 +236,7 @@ A second study for the *keep* state: 2 held-back cases, chance about 19 in 20 bu
 
 ## What comes back
 
+- The canvas of the five directions, kept as a record of the pick.
 - The chosen design: screens as images and a link, the prototype.
 - Tokens as a list: name, light value, dark value.
 - Components with sizes and states.
