@@ -19,13 +19,13 @@ Use the app's words with the engineer (case, measure, goal, rule, study); the ke
 
 ## 2. Interview
 
-Answer from the application and its files first; ask the engineer only what neither says.
+Answer from the application and its files first (questions 1–3); ask the engineer only what neither says.
 
 - [ ] What is a case, and what is its file format? → `cases` (`label`, `formats`, `describe`) and `read_case`.
 - [ ] What does the application take as settings, and how is it called? → `settings`, `application` and `solve`.
 - [ ] What does a solution contain? → the solution tables and `solution_tables`.
-- [ ] What do people call things? → the words the labels, tables and columns use.
-- [ ] What must never reach a model? → those columns get `private: true`.
+- [ ] What do people call things? → goes into: the labels, table and column names, and units.
+- [ ] What must never reach a model? → goes into: `private: true` on those columns.
 
 Questions 1–3 may be answered from the application's `--help` and a case file: say what you read. Questions 4 and 5 only the engineer can answer, in the request or a reply; never from `--help`, a case file or a harness you copy. Ask those in one message and write nothing until they are answered: in a one-shot run your whole answer is those questions.
 An application that evolvekit already has a harness for (`evolvekit harness list`, or the probe accepting it) is a finding to tell the engineer, not a shortcut to take: ask whether to reuse it, and if yes hand over to `evolvekit-study`.
@@ -47,7 +47,7 @@ Write only what the interview named: no lever, template, data change, request fo
 3. Settings: each with a type and range, a default inside it, a `label`, a one-sentence `help` for people and a longer `explain` for a model (what it does, which way it trades off, when it matters). Mark the six to ten that matter most `recommended`, best as a rank (`1`, `2`, …).
 4. Levers and measures: a lever names a request table and the numeric columns it may change, with its modes (`scale`, `set`, `add`). A measure (`kpis`) is SQL over the tables that returns one number, with a `direction`, `lower` or `higher`.
 5. Templates: `templates/<id>.yaml`, a partial `study.yaml` (`title`, `summary`, `vary`, `kpis`, `goal`, …). Write at least one whose goal is the measure people care about, with `vary: {settings: recommended}`; it is T in step 6.
-6. Samples: `samples/` holds 3–10 small cases that solve in a second or two, with the script that makes them next to them.
+6. Samples: `samples/` holds 3–10 small cases that solve in a second or two, with the script that makes them next to them. Samples are small made-up cases in the engineer's format, never copies of the engineer's own files: a harness folder travels, and what must never reach a model must not sit in it.
 
 ## 5. Check until it exits 0
 
@@ -78,6 +78,7 @@ evolvekit study preview SLUG
 - The `--json` line of `study new` gives `slug`: use it as SLUG.
 - Put the case format's extension (from `cases.formats`) in place of `.json`, so the script beside the samples is not offered as a case.
 - `study check` must exit 0 and `study preview` must solve a sample. A failure here is the harness's fault: fix it in `harness/`, go back to step 5, then make the smoke test again.
+- Run the smoke test yourself and quote each command and its line; never tell the engineer to follow a skill — they are talking to you.
 - Say which values the smoke test used (the harness's default time per case, the template's budget, the cases held back), that they are for the smoke test only, and quote the `study preview` line. The study stays in the library home as a draft; start nothing.
 
 ## 7. Every later change

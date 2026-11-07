@@ -428,6 +428,24 @@ def test_harness_skill_round_b_sentences():
     assert SMOKE_VALUES in _section(body, "6. Smoke test")
 
 
+# Round B3: the smoke test is the agent's to run; samples are never the engineer's files.
+
+SMOKE_YOURSELF = ("Run the smoke test yourself and quote each command and its line; never tell the engineer to "
+                  "follow a skill — they are talking to you.")
+SAMPLES_NOT_PRIVATE = ("Samples are small made-up cases in the engineer's format, never copies of the engineer's own "
+                       "files: a harness folder travels, and what must never reach a model must not sit in it.")
+
+
+def test_harness_skill_round_b3_sentences():
+    body = _body(HARNESS)
+    assert SMOKE_YOURSELF in _section(body, "6. Smoke test")
+    assert SAMPLES_NOT_PRIVATE in _section(body, "4. Write it, in this order")
+    interview = _section(body, "2. Interview")
+    assert "(questions 1–3)" in interview.split("- [ ]", 1)[0], "reading the files first is for questions 1–3"
+    checklist = re.findall(r"^\s*- \[ \] .*$", interview, re.M)
+    assert all("→ goes into:" in line for line in checklist[3:]), "questions 4 and 5 say where the answer goes"
+
+
 # The suite is complete (Task 4).
 
 PHASES = ("queued", "starting", "search", "check", "done", "stopped", "failed")
