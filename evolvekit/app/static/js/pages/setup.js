@@ -31,8 +31,10 @@
   function refresh(main) {
     return EK.get(EK.studyPath(st.slug)).then(function (doc) { st.doc = doc; return loadPlan(); }).then(function () { draw(main); });
   }
+  /** Save a change, then draw the page once, with its new plan: drawn twice (before and after the plan),
+      the page changed under the pointer, and a click on Start between the two could be lost (persona p4, H8). */
   function save(changes, main) {
-    return EK.patch(EK.studyPath(st.slug), changes).then(function (doc) { st.doc = doc; draw(main); return loadPlan(); }).then(function () {
+    return EK.patch(EK.studyPath(st.slug), changes).then(function (doc) { st.doc = doc; return loadPlan(); }).then(function () {
       draw(main);
       if (EK.drawerKind() && redrawDrawer) redrawDrawer();
     }).catch(EK.fail);
@@ -129,6 +131,9 @@
     var lim = study().limits || {}, hours = (study().budget || {}).hours;
     var value = EK.duration(lim.time_per_case_s) + " a case · " + EK.hours(hours) + " in total";
     if (st.plan && st.plan.blocked) return { kicker: "Time", value: value, sub: "Too short for one full look.", state: "open", action: "Change", act: "time" };
+    // A study with a schedule ends on its windows (the plan's `window` line), never "done around 17:34"
+    // from now (persona p4, H1).
+    if (study().schedule) return { kicker: "Time", value: value, sub: st.plan && st.plan.window ? EK.capital(st.plan.window.line) + "." : "", act: "time" };
     var done = hours ? new Date(Date.now() + hours * 3600 * 1000) : null;
     var tomorrow = done && done.toDateString() !== new Date().toDateString();
     return { kicker: "Time", value: value, sub: done ? "Done around " + done.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) + (tomorrow ? " tomorrow." : ".") : "", act: "time" };
@@ -183,13 +188,16 @@
     var thin = !!p.warning;
     var searchH = (p.search_s || 0) / 3600, checkH = (p.final_check_s || 0) / 3600;
     var done = new Date(Date.now() + (p.hours || 0) * 3600 * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+    // A study with a schedule: the engine's line on the window clock ("starts Sat 00:00; about 18 min of
+    // search; done around Sun 12:00"), never "done around" from now (persona p4, H1).
+    var when = p.window ? EK.capital(p.window.line) : EK.hours(p.hours) + " in total · done around " + done;
     var phone = EK.isPhone();
     var bar = EK.planBar({ state: thin ? "thin" : "fits", rounds: p.rounds || 1, searchH: searchH || 1, checkH: checkH,
-      head: thin ? "Thin plan: " + p.combinations + " combinations for " + EK.plural(tunables, "setting") : EK.hours(p.hours) + " in total · done around " + done,
+      head: thin ? "Thin plan: " + p.combinations + " combinations for " + EK.plural(tunables, "setting") : when,
       barText: thin && tunables ? "about " + Math.max(1, Math.floor(p.combinations / tunables)) + " tries per setting" : "",
       left: phone ? "Search · " + p.rounds + " rounds" : "Search · " + EK.plural(p.rounds || 0, "round") + " · " + p.combinations + " combinations · " + EK.hours(searchH),
       right: checkH ? (phone ? "Final check" : "Final check · " + (p.test_cases || 0) + " held back · " + EK.hours(checkH)) : "No final check",
-      aria: "Plan: " + p.rounds + " rounds of search, " + EK.hours(searchH) + ", then the final check, " + EK.hours(checkH) + "; done around " + done });
+      aria: "Plan: " + p.rounds + " rounds of search, " + EK.hours(searchH) + ", then the final check, " + EK.hours(checkH) + "; " + (p.window ? p.window.line : "done around " + done) });
     var fixes = (p.fixes || []).map(function (f, i) {
       var text = f.kind === "fewer" ? "Tune the top " + f.keep.length : "Allow " + EK.hours(f.hours);
       return EK.button(text, { kind: i === 0 ? "secondary" : "quiet", act: "fix", arg: i, describedby: "fix-" + i });
@@ -199,8 +207,19 @@
     // the start besides the plan: too few held-back cases for a firm answer. Neither stops the start.
     var ai = p.ai_change_s > 0 ? html`<p class="type-small ink-2">The plan counts about ${Math.round(p.ai_change_s)} s for each change the AI writes.</p>` : "";
     var notes = (p.notes || []).map(function (note) { return EK.notice("info", note); });
-    return html`${bar}${fixes.length ? html`<div class="actions">${fixes}</div>${details}` : ""}
+    return html`${bar}${wholeWindow()}${fixes.length ? html`<div class="actions">${fixes}</div>${details}` : ""}
       ${ai}${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}${notes}`;
+  }
+
+  /** On a study with a schedule whose time is less than one week of its windows (`schedule_hours`,
+      real hours): the offer to search through them (persona p4, H1). On a rehearsal clock it says the
+      window's hours on that clock and in real time. */
+  function wholeWindow() {
+    var week = st.doc.schedule_hours, hours = (study().budget || {}).hours, speed = (st.doc.clock || {}).speed;
+    if (!study().schedule || !(week > 0) || !(hours < week - 1e-4)) return "";
+    var label = "Search through the whole window (" + (speed && speed !== 1 ? EK.hours(week * speed) + " on the rehearsal clock, " + EK.hours(week) + " of real time" : EK.hours(week)) + ")";
+    return html`<div class="actions">${EK.button(label, { kind: "secondary", act: "whole-window", describedby: "whole-window-what" })}</div>
+      <p class="type-small ink-2" id="whole-window-what">It searches for as long as the windows give in one week; the final check runs at the end.</p>`;
   }
 
   function testRun() {
@@ -257,7 +276,7 @@
     var preview = d.preview || {};
     var previewLine = preview.state === "running" ? EK.notice("info", "Timing one case to plan the study…")
       : preview.state === "failed" || preview.state === "interrupted" ? EK.notice("warning", "The timing run did not finish: " + (preview.error || "the plan is an estimate."), { text: "Try again", act: "preview" }) : "";
-    EK.mount(main, html`<div class="page"><div class="page-inner narrow" style="max-width:1000px">
+    EK.mount(main, html`<div class="page beside-drawer"><div class="page-inner narrow" style="max-width:1000px">
       ${EK.titleBlock("Set up · " + study().name, head)}${notice}${previewLine}
       <div class="summary-rows">${rows.map(EK.summaryRow)}</div>
       <section aria-label="Plan" class="sub-section">${planBlock()}</section>
@@ -288,6 +307,12 @@
           save({ budget: Object.assign({}, study().budget, { hours: f.hours }) }, main).then(function () { EK.toast("done", "Allowed " + EK.hours(f.hours)); });
         }
       },
+      "whole-window": function () {
+        var week = st.doc.schedule_hours;
+        return save({ budget: Object.assign({}, study().budget, { hours: week }) }, main).then(function () {
+          if ((study().budget || {}).hours === week) EK.toast("done", "It searches through the whole window");  // not after a refusal
+        });
+      },
       test: function () {
         EK.post(EK.studyPath(st.slug, "/test-run")).then(function () { return refresh(main); }).catch(EK.fail);
       },
@@ -296,8 +321,12 @@
         EK.openDrawer({ title: "Why the test run failed", wide: true,
           body: html`${(r.failures || []).map(function (f) { return html`<pre class="code">${f}</pre>`; })}${st.doc.test_run.error ? html`<pre class="code">${st.doc.test_run.error}</pre>` : ""}` });
       },
-      start: function () {
-        EK.post(EK.studyPath(st.slug, "/start")).then(function (res) {
+      start: function (el) {
+        // The click shows at once: the button says what it does and stays disabled until the answer
+        // (persona p4, H8: "my first click on Schedule it seemed not to register").
+        var label = el && el.querySelector("span");
+        if (label) label.textContent = study().schedule ? "Scheduling…" : "Starting…";
+        return EK.post(EK.studyPath(st.slug, "/start")).then(function (res) {
           if (res.scheduled) {
             // A study with a schedule waits for its first window (D3): "Scheduled: next window Sat 00:00".
             EK.toast("done", EK.scheduledWords(res));
@@ -306,7 +335,10 @@
           }
           EK.toast("done", res.queued ? "Queued: it starts by itself" : "Started");
           EK.go(EK.studyHref(st.slug));
-        }).catch(EK.fail);
+        }).catch(function (err) {
+          if (label) label.textContent = study().schedule ? "Schedule it" : "Start";
+          EK.fail(err);
+        });
       },
       later: function () { EK.toast("done", "Saved. It waits on Home."); EK.go("#/"); },
       branches: function () { EK.branchesDrawer(st.slug, ((study().cases || {}).test || []).length); }

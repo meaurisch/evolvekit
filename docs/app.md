@@ -99,8 +99,9 @@ The windows follow a clock that starts on Friday 17:30 and runs 120 times
 faster than real time (`--clock-speed` is 1 to 3600), so Monday 08:00 comes
 about half an hour later. The runs keep real time: they spend real search time
 (it is the windows that are speeded up), and the study's hours are real
-hours. Home says the rehearsal is on (*rehearsal clock: Fri 13 Nov 17:30, 120 ×
-real time*), and each line in `app.log` for a campaign gives both times
+hours. Home says the rehearsal is on (*Rehearsal clock: Fri 13 Nov 17:30, 120 ×
+real time. Times of the windows follow this clock; other dates are the real
+time.* — a run's *today 17:19* is real time), and each line in `app.log` for a campaign gives both times
 (`2026-11-14T01:10:00+01:00 rehearsal · 2026-11-13T18:12:03+01:00 real · …`).
 A run is given more search time only when ten real minutes of its window are
 left, so windows shorter than ten real minutes never give a run more time: at
@@ -175,7 +176,11 @@ written again by the next app.
 answer with the likely range, and Pepper — the app's butterfly — in the
 study's phase: eggs for a draft, a caterpillar early in the search, a cocoon
 late in it and during the final check, and a butterfly when it is done
-(bright when the answer is *use it*, in quiet colours otherwise). Every card
+(bright when the answer is *use it*, in quiet colours otherwise). A draft
+says what Set up still lacks by its row's name (*Set up not finished: Goal*),
+or *Ready to start: not started yet* when nothing is missing; under a *keep*
+whose held-back cases all improved, the card says why it is still keep
+(`why_keep`), right under the verdict's line. Every card
 has a menu (⋯): *Rename*; *Duplicate* — a new study with the setup and the
 cases, not the runs; *Compare with…*; *Past runs*; *Save as zip*; *Archive* —
 kept, but out of the way, under **Archived** until *Restore*; and *Delete*.
@@ -192,12 +197,18 @@ studies* and the *Library folder*.
 study) and beside each application in *Applications*. It lists the finished
 studies on that application, each with its own verdict line, and then a table
 with a row for every setting that was tuned: *Tuned in* (how many studies),
-*How strongly it went with the measure* (a bar and a figure such as
-`0.42 · from 2 studies`, or *not enough tries to tell*), *Winning values*
-(`12 in Depot spring (1 Oct)`, or *none yet*) and *Winners moved it* (*up*,
-*down*, *both ways*). That strength is how strongly a setting's values went
-with the measure in the searches: it is not proof of anything, and the page
-claims no gain of its own. A winning value comes only from a study whose
+*How strongly it went with the measure (0 to 1, not proof)* (a bar and a figure such as
+`0.42 · from 2 studies`, or *not enough tries to tell*), *The searches leaned
+to* (each setting's median of the studies' search-best values, for a choice
+the value most of them had and none on a tie, as `4 (search, not checked)`),
+*Winning values* (`12 in Depot spring (1 Oct)`, or *none yet*) and *Winners
+moved it* (*up*, *down*, *both ways*). That strength is how strongly a
+setting's values went with the measure in the searches, and a sentence under
+the table says so: *0 means the setting did not go with the measure in the
+searches, 1 that it went with it every time. It comes from the searches, not
+from final checks: it says which settings are worth tuning, not which value
+wins.* It is not proof of anything, and the page claims no gain of its own;
+where the searches leaned is a search figure, never a winner. A winning value comes only from a study whose
 final check said *use it*. What could not be read across (a setting the
 application no longer has, or one whose meaning changed) is listed under
 *Left out*.
@@ -330,7 +341,12 @@ its facts.
 - **Keep**: *Not proven on 3 held-back cases: …* (*chance under 9 in 10*,
   or a worst case beyond 1 %), then *Keep today's settings … for now: the
   gain is not proven.*; *Check with more runs* keeps the runs it did and
-  adds others.
+  adds others. When every held-back case improved but the range still allows
+  a loss, the verdict's `why_keep` stands between the line and the advice:
+  *Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases
+  the range is too wide to rule out a loss: hold back more cases for a firmer
+  answer.* A campaign's run says among the strip's facts when it ran, on the
+  window clock (*Ran in its windows: Sat 00:04 – Sun 09:27*).
 - **One case**: *Not proven, one held-back case: 4.8 % lower tour length.*,
   then *Keep today's settings …: one held-back case is too few cases to tell
   (the 11 runs were all on it); a study that holds back three or more can.*;
@@ -428,7 +444,11 @@ report* (every number on one page, to read or send as `report.html`), the
 harness's files (the settings, as flags, the data changes, the changed
 requests) and the study itself as one zip; **What next** — *Continue for
 another 22 h* (the same run goes on: the rounds done are kept, then the final
-check runs again), *Start a new study from this*, *Compare with…*; and
+check runs again; on a study with a schedule *Search 18 min more in the next
+window (Sat 00:00)*, which waits for that window, and a smaller *Search now
+instead*; neither while the campaign is armed or a new campaign waits to
+start a fresh run, and both are disabled from the first click until the
+app answers), *Start a new study from this*, *Compare with…*; and
 **Details** — the set-up, every held-back case and every case the search
 learned from, every measure, and *What went wrong*: failed runs grouped with
 what to do about them, and the combinations that had them, each with its
@@ -565,7 +585,12 @@ can take the app's place later. Every request to it, and to a run's dashboard,
 carries the key of this launch — the `token` in the address the app printed —
 in an `X-Evolvekit-Token` header or a `?token=` query; without it the answer
 is 403, sent before the body is read. The routes: `/api/home` (with
-`clock: {line}` while a rehearsal clock is on), `POST /api/shutdown` (what
+`clock: {line}` while a rehearsal clock is on; a draft's card has `missing`,
+the first thing Set up lacks as `{"step", "key", "text"}`, or `null`),
+`/api/harnesses/{id}` (its `learned`: per setting `tuned_in`, `importance`,
+`importance_n`, `winners`, `direction` and `leaned`, the median of the
+settings studies' search-best values — the lower middle for a whole number,
+the most common value of a choice, `null` on a tie or with none), `POST /api/shutdown` (what
 `evolvekit app stop` sends: it answers `{"stopping": true}` and the app ends
 cleanly), `/api/settings`,
 `/api/harnesses`, `POST /api/detect?study=` (looks for installed copies of the
@@ -635,6 +660,12 @@ outlives the app.
 | `schedule_presets` | the windows *When it runs* offers |
 | `schedule_hours` | the hours of search one week of its windows gives, in real hours: weekends about 48, weeknights 25; under a rehearsal clock that week's hours divided by its speed (a weekend at 120 × is 0.4) |
 | `campaign_left_s` | the campaign's search time left on its run, in seconds (the run's plan less what its sessions used, plus the hours `budget.hours` has grown since the run was planned); `null` before its first run |
+| `next_window` | `{"at", "edge", "words"}`: the windows' next edge from the home's clock even when the campaign is finished (`campaign.next` is then `null`), `words` as the engine says them (*Sat 00:00*): the scheduled *Continue*'s button; `null` when no window is left |
+| `new_run_waits` | `true` while an armed campaign waits to start a fresh run after the latest one (its `after` is that run): no *Continue* is offered then |
+
+Any study's document also has `clock: {"line", "speed"}` while a rehearsal
+clock is on, so Set up can say a week of windows on both clocks (*Search
+through the whole window (48 h on the rehearsal clock, 24 min of real time)*).
 
 `plan` then has `window`: `{"line", "starts", "done"}`, the plan on the
 windows from the home's clock (a rehearsal's too) — *starts Sat 00:00; about

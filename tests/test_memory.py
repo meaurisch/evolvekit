@@ -69,6 +69,35 @@ def test_direction_mixed_and_none(tmp_path):
     assert got["init"]["direction"] is None and len(got["init"]["winners"]) == 2
 
 
+def test_learned_says_where_the_searches_leaned(tmp_path):
+    """Persona p4, H4: after three studies with no winner the planner had nothing to try. `leaned` is
+    the median of the settings studies' search-best values (the most common value of a choice; none on
+    a tie), whatever their verdicts; a code study's best never counts."""
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "One", decision="keep", best={"neighbours": 4, "init": "nearest", "accept_worse": 0.02},
+             finished_at="2026-10-01")
+    finished(home, docs, "Two", decision="keep", best={"neighbours": 12, "init": "nearest", "accept_worse": 0.04},
+             finished_at="2026-10-08")
+    finished(home, docs, "Three", decision="use", best={"neighbours": 5, "init": "random"}, finished_at="2026-10-15")
+    finished(home, docs, "Code", decision="keep", best={"neighbours": 30, "init": "random"}, finished_at="2026-10-20",
+             template="faster")
+    got = memory.learned(home, "demo-tour", document_of=docs.get)["settings"]
+    assert got["neighbours"]["leaned"] == 5
+    assert got["init"]["leaned"] == "nearest"
+    assert got["accept_worse"]["leaned"] == pytest.approx(0.03)
+
+
+def test_learned_leans_nowhere_on_a_tie_or_with_no_best(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "One", decision="keep", best={"neighbours": 4, "init": "nearest"},
+             importance={"restart_after": (0.3, 20)}, finished_at="2026-10-01")
+    finished(home, docs, "Two", decision="keep", best={"neighbours": 7, "init": "random"}, finished_at="2026-10-08")
+    got = memory.learned(home, "demo-tour", document_of=docs.get)["settings"]
+    assert got["init"]["leaned"] is None, "one each way: no lean"
+    assert got["neighbours"]["leaned"] == 4, "a whole-number setting: the lower middle of an even count"
+    assert got["restart_after"]["leaned"] is None, "no search-best value"
+
+
 def test_learned_ignores_settings_the_harness_no_longer_has(tmp_path):
     home, docs = Home(tmp_path / "my home"), {}
     root = finished(home, docs, "Depot spring", decision="use", best={"neighbours": 12, "old_knob": 3}, finished_at="2026-10-01")

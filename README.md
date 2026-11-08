@@ -2020,11 +2020,19 @@ and the old run stays a past run. When all the search time is spent and the
 final check is done, Home says *Campaign finished*. More time for a finished
 campaign (the app's *Continue*, or `study start depot-a --more 0.3`) is spent
 in the next window, never now: `Scheduled 18 min more for the next window (Sat
-00:00)`; raising `budget.hours` does the same. Set up's plan of a scheduled
+00:00)`; raising `budget.hours` does the same. In the app that act reads
+*Search 18 min more in the next window (Sat 00:00)*, with *Search now instead*
+beside it as a smaller second act for a person who wants it now; neither is
+offered while the campaign is armed or a new campaign waits to start a fresh
+run. Set up's plan of a scheduled
 study says when it would end on its windows (*starts Sat 00:00; about 18 min
-of search; done around Sat 00:18*). The campaign keeps when each session ran,
+of search; done around Sat 00:18*), and when the study's hours are less than a
+week of its windows give it offers *Search through the whole window (48 h)*:
+it sets `budget.hours` to that week's hours, so the search runs as long as the
+windows give and the final check runs at the end. The campaign keeps when each session ran,
 on the clock the windows follow (`sessions` in the study's `campaign.json`),
-and says it: *Ran in its windows: Sat 00:04 – Sun 09:27*. `study status` says the
+and says it: *Ran in its windows: Sat 00:04 – Sun 09:27* — on the Study page
+beside the campaign's line and under the verdict, and in *Past runs*. `study status` says the
 campaign's line (`campaign · next window Sat 00:00`) and when it ran, and `study wait`
 waits for the campaign's answer, not for the first window's stop (exit 0
 with the verdict; 1 when the campaign paused or ended without a finished
@@ -2065,7 +2073,12 @@ how strongly its values went with the measure in the searches, the values
 that won, and whether winners moved it up, down or both ways. It claims no
 gain of its own: a winning value comes only from a study whose final check
 said *use it*, and a strength rests on at least five fully evaluated
-combinations or says *not enough tries to tell*. Only studies that tune
+combinations or says *not enough tries to tell*. The strength runs from 0 (the
+setting did not go with the measure in the searches) to 1 (it went with it
+every time): it says which settings are worth tuning, not which value wins.
+Beside it, *The searches leaned to* gives each setting's median of the
+studies' search-best values (for a choice, the value most of them had; none on
+a tie), marked *(search, not checked)*: something to try, never a winner. Only studies that tune
 settings count; code studies, bake-offs and per-kind studies are listed with
 their verdicts. A setting the application no longer has, or whose type,
 range, scale or choices changed since, is left out of that study's figures

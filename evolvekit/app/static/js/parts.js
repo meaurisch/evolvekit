@@ -235,7 +235,8 @@
         ${c.menu ? html`<div class="menu-wrap">${EK.iconButton("more", "More for " + c.name, { act: "menu", arg: menuId, haspopup: "menu", expanded: "false", cls: "card-more" })}
           ${EK.menu("Study", c.menu, menuId)}</div>` : ""}</div>
       <div class="card-mid"><div class="card-words"><p class="type-body card-head">${EK.figures(c.head || "")}</p>
-        ${c.sub ? html`<p class="type-small ink-2">${c.sub}</p>` : ""}
+        ${c.why ? html`<p class="type-small card-why">${c.why}</p>` : ""}
+        ${c.sub ?html`<p class="type-small ink-2">${c.sub}</p>` : ""}
         ${c.note ? html`<p class="type-small card-note">${EK.figures(c.note)}</p>` : ""}</div>
         ${c.pepper ? html`<div class="card-pepper">${EK.pepper(c.pepper, 48)}</div>` : ""}</div>${vis}${actions}</article>`;
   };
@@ -451,7 +452,7 @@
     return html`<ul class="run-list">${runs.map(function (r) {
       var on = r.id === current;
       return html`<li><a class="run-row${on ? " is-on" : ""}" href="${hrefFor(r)}"${attrs({ "aria-current": on ? "true" : null })}>
-        ${EK.verdictMark(r.mark || "open", 28)}<span class="run-when">${EK.when(r.started_at) || r.id}</span><span class="type-small ink-2">${r.line || r.phase || ""}</span>
+        ${EK.verdictMark(r.mark || "open", 28)}<span class="run-when">${EK.when(r.started_at) || r.id}</span><span class="type-small ink-2">${r.line || r.phase || ""}${r.history ? html`<span class="run-history">${r.history}</span>` : ""}</span>
         ${on ? html`<span class="type-label accent-ink">this one</span>` : ""}</a></li>`;
     })}</ul>`;
   };

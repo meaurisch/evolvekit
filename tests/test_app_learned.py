@@ -33,12 +33,13 @@ def test_api_harness_learned(tmp_path):
 LEARNED = {"title": "Demo tour", "learned": {"studies": [{"slug": "spring", "name": "Spring", "run": "r1",
     "finished_at": "2026-10-01T00:12:00+00:00", "decision": "use", "line": "Probably better: 3.1 % lower tour length …", "kind": "settings"}],
     "settings": {"neighbours": {"label": "Candidate moves per stop", "tuned_in": 2, "importance": 0.42, "importance_n": 2,
-        "winners": [{"value": 12, "study": "spring", "finished_at": "2026-10-01T00:12:00+00:00"}], "direction": "up"}},
+        "winners": [{"value": 12, "study": "spring", "finished_at": "2026-10-01T00:12:00+00:00"}], "direction": "up",
+        "leaned": 9}},
     "notes": ["old_knob (in Spring) is not a setting of Demo tour 1.1.0 any more: left out"]}}
 
 
 def _view(data: dict) -> str:
-    parts = [_page_function(HARNESS_PAGE, n) for n in ("dayOf", "studiesList", "importanceCell", "winnersCell", "learnedView")]
+    parts = [_page_function(HARNESS_PAGE, n) for n in ("dayOf", "studiesList", "importanceCell", "winnersCell", "leanedCell", "learnedView")]
     out = _node(*parts,
                 f"process.stdout.write(JSON.stringify(String(learnedView({json.dumps(data)}))));")
     return _render_text(out)
@@ -52,6 +53,26 @@ def test_harness_page_shows_learned():
                   "finished 1 Oct", "Probably better: 3.1 % lower tour length", "How strongly it went with the measure",
                   "Winners moved it", "old_knob (in Spring)"):
         assert words in text, words
+
+
+def test_harness_page_says_what_the_strength_means_and_where_the_searches_leaned():
+    """Persona p4, H4: "0.41" had no scale, no direction and no "not proof"; after three studies with no
+    winner there was nothing to try. The heading gives the scale, a sentence under the table says what it
+    means, and a column says where the searches leaned, as a search figure."""
+    text = _view(LEARNED)
+    assert "How strongly it went with the measure (0 to 1, not proof)" in text
+    assert ("0 means the setting did not go with the measure in the searches, 1 that it went with it every time. "
+            "It comes from the searches, not from final checks: it says which settings are worth tuning, "
+            "not which value wins.") in text
+    assert "The searches leaned to" in text and "9 (search, not checked)" in text
+    assert text.index("The searches leaned to") < text.index("Winning values")
+    lone = json.loads(json.dumps(LEARNED))
+    lone["learned"]["settings"]["neighbours"].update(leaned=None)
+    assert "(search, not checked)" not in _view(lone)
+    lone["learned"]["settings"]["neighbours"].update(leaned="nearest")
+    assert "nearest (search, not checked)" in _view(lone)
+    lone["learned"]["settings"]["neighbours"].update(leaned=0.022385)
+    assert "0.0224 (search, not checked)" in _view(lone)
 
 
 def test_harness_page_says_what_is_missing():

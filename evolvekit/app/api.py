@@ -21,7 +21,7 @@ from evolvekit.harness import HarnessError, memory
 from evolvekit.harness.execute import plan_for, read_preview
 from evolvekit.harness.manifest import Harness
 from evolvekit.harness.plan import plan_notes
-from evolvekit.harness.schedule import PRESETS
+from evolvekit.harness.schedule import PRESETS, when_words
 from evolvekit.harness.study import SettingChoice, save_study
 
 __all__ = ["ROUTES", "describe_harness"]
@@ -115,6 +115,12 @@ def home(req: Request) -> dict[str, Any]:
             studies.append({"slug": slug, "name": slug, "harness": "", "kind": "broken", "line": str(exc)})
             continue
         state = jobs.state_line(root, study, req.server.status_document)
+        if state.get("kind") == "draft":
+            # What a draft still lacks, so its card names it (persona p4, H6): the first problem's
+            # step, key and text (`Home.problems`), None when Set up has nothing missing.
+            problems = req.home.problems(slug)
+            state["missing"] = ({"step": problems[0]["step"], "key": problems[0]["key"], "text": problems[0]["text"]}
+                                if problems else None)
         template = (pinned.templates.get(study.template) or {}).get("title") if study.template else None
         studies.append({"slug": slug, "name": study.name, "harness_id": pinned.id, "harness": pinned.title + (f" · {template}" if template else ""),
                         **state, "updated_at": (root / "study.yaml").stat().st_mtime,
@@ -217,6 +223,20 @@ def _document(req: Request, slug: str) -> dict[str, Any]:
         document["schedule_hours"] = scheduler.schedule_hours(study.schedule, now=clock.now(), speed=clock.speed)
         run = scheduler.campaign_run(root)
         document["campaign_left_s"] = (scheduler.campaign_left_s(root / "runs" / run) if run is not None else None)
+        # What the scheduled Continue says on its button ("… in the next window (Sat 00:00)"), even
+        # when the campaign is finished and says no next window; and whether a renewed campaign waits
+        # to start a fresh run after the latest one, when Continue is not offered (persona p4, H5).
+        now = clock.now()
+        found = study.schedule.next_edge(now)
+        document["next_window"] = ({"at": found[0].isoformat(), "edge": found[1], "words": when_words(found[0], now)}
+                                   if found is not None else None)
+        stored = scheduler.read_campaign(root) or {}
+        latest = document["runs"][-1]["id"] if document["runs"] else None
+        document["new_run_waits"] = bool(stored.get("state") == "armed" and latest is not None
+                                         and stored.get("after") == latest)
+    clock = scheduler.clock_of(req.home)
+    if clock.simulated:  # a rehearsal: Set up says a window's hours on its clock and in real time
+        document["clock"] = {"line": clock.words(), "speed": clock.speed}
     document["notes"] = plan_notes(len(study.test))  # too few held-back cases for a firm answer, before any run
     return document
 

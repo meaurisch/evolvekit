@@ -100,8 +100,9 @@
     var active = data.studies.filter(function (s) { return !s.archived; });
     var archived = data.studies.filter(function (s) { return s.archived; });
     var trash = data.trash || [];
-    // A rehearsal clock (`evolvekit app --clock`): the campaigns' windows follow it, runs keep real time.
-    var clock = data.clock ? html`<div class="home-clock">${EK.notice("warning", data.clock.line)}</div>` : "";
+    // A rehearsal clock (`evolvekit app --clock`): the campaigns' windows follow it, runs keep real time,
+    // and the notice says so (persona p4, H3: "today 17:19" beside a rehearsal dated 16 Nov).
+    var clock = data.clock ? html`<div class="home-clock">${EK.notice("warning", EK.capital(data.clock.line) + ". Times of the windows follow this clock; other dates are the real time.")}</div>` : "";
     companion(active);
     var newBtn = EK.button("New study", { act: "new", icon: EK.gl("plus", 18) });
     var body;

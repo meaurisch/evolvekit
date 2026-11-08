@@ -1144,3 +1144,65 @@ def test_the_plan_and_the_study_of_a_scheduled_study_carry_the_window_clock(tmp_
         assert "history_line" in document["campaign"]
     finally:
         server.stop()
+
+
+def test_the_study_names_its_next_window_and_a_waiting_new_run(tmp_path):
+    """Persona p4 (wave H-app), H5: the scheduled Continue's button says when ("in the next window
+    (Sat 00:00)") although a finished campaign has no `next`; it is not offered while a renewed campaign
+    waits to start a fresh run after the latest one (`after` is that run). H1: Set up reads the
+    rehearsal's speed to say a window's hours on both clocks."""
+    from test_app_server import call
+
+    home, root = _finished_campaign(tmp_path)
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        scheduler.write_clock(home.root, local("2026-11-16 08:39"), 120.0)
+        status, document = call(server, "GET", f"/api/studies/{root.name}")
+        assert status == 200 and document["campaign"]["next"] is None, "a finished campaign"
+        assert document["next_window"] == {"at": _at("2026-11-21 00:00"), "edge": "start", "words": "Sat 00:00"}
+        assert document["new_run_waits"] is False
+        assert document["clock"]["speed"] == 120.0 and document["clock"]["line"].startswith("rehearsal clock: Mon 16 Nov")
+        campaign = json.loads((root / scheduler.CAMPAIGN).read_text(encoding="utf-8"))
+        (root / scheduler.CAMPAIGN).write_text(json.dumps({**campaign, "state": "armed", "after": "r1"}), encoding="utf-8")
+        status, document = call(server, "GET", f"/api/studies/{root.name}")
+        assert document["new_run_waits"] is True
+    finally:
+        server.stop()
+    plain = AppServer(home.root, port=0)  # no rehearsal: no clock in the document
+    plain.start()
+    try:
+        (home.root / "clock.json").unlink()
+        status, document = call(plain, "GET", f"/api/studies/{root.name}")
+        assert status == 200 and "clock" not in document
+    finally:
+        plain.stop()
+
+
+def test_a_draft_card_names_what_is_missing(tmp_path):
+    """Persona p4, H6: "Set up not finished" did not say what was missing. A draft's Home card carries
+    its first problem (`missing`), None when nothing is."""
+    from test_app_server import call
+
+    home, root = campaign_study(tmp_path)
+    import yaml
+
+    (root / scheduler.CAMPAIGN).unlink()  # a draft: never scheduled
+    raw = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    raw["application"] = {"path": str(Path(__file__).resolve().parents[1] / "examples" / "cli-solver" / "solver.py"),
+                          "version": "1.0"}
+    raw["step"] = 7
+    (root / "study.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        status, got = call(server, "GET", "/api/home")
+        (card,) = got["studies"]
+        assert status == 200 and card["kind"] == "draft" and card["missing"] is None, card
+        raw["goal"]["levels"] = []
+        (root / "study.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+        status, got = call(server, "GET", "/api/home")
+        (card,) = got["studies"]
+        assert card["missing"]["step"] == 5 and card["missing"]["key"].startswith("goal"), card
+    finally:
+        server.stop()

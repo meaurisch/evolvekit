@@ -3,6 +3,7 @@ rules, and that every file the page loads exists and ships with the package."""
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -693,8 +694,165 @@ def test_home_chooses_its_poll_again_after_every_answer():
 
 def test_home_shows_the_rehearsal_clock():
     draw = _page_function(HOME_PAGE, "draw")
-    assert "data.clock" in draw and 'EK.notice("warning", data.clock.line)' in draw
+    assert "data.clock" in draw and 'EK.notice("warning", EK.capital(data.clock.line)' in draw
     assert draw.index("data.clock") < draw.index("cards(active)"), "above the cards"
+
+
+# ---------------------------------------------------------------------------
+# persona p4 round 1 (wave H-app): a weekend study's plan, its Monday answer, more time for it
+# ---------------------------------------------------------------------------
+
+REHEARSAL_TIMES = "Times of the windows follow this clock; other dates are the real time."
+
+
+def test_the_rehearsal_notice_says_which_times_follow_it():
+    """H3: Home's runs said "today 17:19" (the real clock) beside a rehearsal dated 16 Nov."""
+    draw = _page_function(HOME_PAGE, "draw")
+    assert REHEARSAL_TIMES in draw and "data.clock.line" in draw
+
+
+def test_a_draft_card_names_what_is_missing():
+    """H6: "Set up not finished" did not say what; the first missing row's name does, and a draft with
+    nothing missing is ready, only not started."""
+    out = _node("""function card(m, step) { return EK.cardOf({slug: "d", name: "D", kind: "draft", step: step || 7, missing: m}).head; }
+      process.stdout.write(JSON.stringify([card(null), card({step: 5, key: "goal.levels"}), card({step: 6, key: "budget.hours"}),
+        card({step: 4, key: "vary.settings"}), card({step: 4, key: "vary.code.brief"}), card({step: 4, key: "vary.data"}),
+        card({step: 7, key: "per_group", text: "a campaign runs one search; leave out schedule, or per_group, for now"}),
+        card({step: 3, key: "cases"}, 2)]));""")
+    assert out == ["Ready to start: not started yet", "Set up not finished: Goal", "Set up not finished: Time",
+                   "Set up not finished: What to tune", "Set up not finished: What may change: code",
+                   "Set up not finished: Data changes", "Set up not finished: When it runs", "Cases still to add"]
+
+
+WHY_KEEP = "Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss."
+
+
+def test_a_keep_card_says_why_under_its_line():
+    """H2: under a keep whose held-back cases all improved, the card says why it is still keep, right
+    under the verdict's line and before the advice."""
+    out = _node(f"""var c = EK.cardOf({{slug: "w", name: "W", kind: "finished", decision: "keep",
+        verdict: {{says: "keep", line: "Not proven on 2 held-back cases", advice: "Keep today's settings for now.", why_keep: {json.dumps(WHY_KEEP)}}}}});
+      c.pepper = null;
+      process.stdout.write(JSON.stringify({{why: c.why, card: String(EK.studyCard(c))}}));""")
+    card = out["card"]
+    assert out["why"] == WHY_KEEP
+    assert card.index("Not proven") < card.index("Every held-back case") < card.index("Keep today")
+    plain = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "w", name: "W", kind: "finished", decision: "keep",
+        verdict: {says: "keep", line: "Not proven", advice: "Keep."}}).why || null));""")
+    assert plain is None
+
+
+def test_the_study_strip_says_why_under_the_line():
+    strip = _page_function(STUDY_PAGE, "strip")
+    assert "why_keep" in strip
+    shown = _page_function(STUDY_PAGE, "statusStrip")
+    assert "x.why" in shown and shown.index("x.head") < shown.index("x.why") < shown.index("x.sub"), shown
+
+
+def test_the_study_page_says_when_a_campaigns_run_ran():
+    """H3: on Monday the page did not say when in the weekend the run ran; `history_line` (the
+    campaign's) follows its notice, the run's own (`history_by_run`) is among the strip's facts and in
+    Past runs."""
+    notices = _page_function(STUDY_PAGE, "notices")
+    assert "camp.history_line" in notices
+    assert "history_by_run" in _page_function(STUDY_PAGE, "runFacts")
+    assert "runFacts()" in _page_function(STUDY_PAGE, "statusStrip")
+    assert "history_by_run" in _page_function(STUDY_PAGE, "runsBody")
+    out = _node("""process.stdout.write(JSON.stringify(String(EK.runList([{id: "r1", started_at: "2026-11-08T17:19:00",
+        line: "finished · not proven", history: "Ran in its windows: Sat 00:04 – Sun 09:27"}], "r1", function () { return "#"; }))));""")
+    assert "Ran in its windows: Sat 00:04 – Sun 09:27" in out
+
+
+def test_more_time_for_a_scheduled_study_says_when():
+    """H5: "Continue for 18 min more" did not say whether it would run now or next weekend. On a study
+    with a schedule it says the next window and asks the engine to wait for it; "Search now instead"
+    is a second, smaller act. Neither is offered while a renewed campaign waits to start a fresh run,
+    and both are disabled from the first click until the answer."""
+    words = _node(_page_function(STUDY_PAGE, "continueWords"), """
+      process.stdout.write(JSON.stringify([continueWords(0.3, {at: "2026-11-21T00:00:00+01:00", edge: "start", words: "Sat 00:00"}),
+        continueWords(0.5, {at: "2026-11-15T23:59:00+01:00", edge: "end", words: "Sun 23:59"}), continueWords(0.3, null)]));""")
+    assert words == ["Search 18 min more in the next window (Sat 00:00)",
+                     "Search 30 min more in this window (open until Sun 23:59)",
+                     "Search 18 min more in the next window"]
+    acts = _page_function(STUDY_PAGE, "continueActs")
+    out = _node(*(_page_function(STUDY_PAGE, n) for n in ("continueHours", "continueWords", "continueActs")), """
+      var st = {run: "r1", status: {can_continue: true}, doc: {runs: [{id: "r1"}], study: {budget: {hours: 0.3}, schedule: {windows: []}},
+        next_window: {at: "2026-11-21T00:00:00+01:00", edge: "start", words: "Sat 00:00"}, campaign: {state: "complete"}}};
+      function texts() { return continueActs("Continue for 18 min more").map(function (a) { return a.text + (a.disabled ? " [off]" : ""); }); }
+      var out = {done: texts()};
+      st.continuing = true; out.busy = texts(); st.continuing = false;
+      st.doc.new_run_waits = true; out.waits = texts(); st.doc.new_run_waits = false;
+      st.doc.campaign.state = "armed"; out.armed = texts(); st.doc.campaign.state = "complete";
+      st.status.can_continue = false; out.cannot = texts(); st.status.can_continue = true;
+      st.doc.runs.push({id: "r2"}); out.older = texts(); st.doc.runs.pop();
+      delete st.doc.study.schedule; out.plain = texts();
+      process.stdout.write(JSON.stringify(out));""")
+    assert out == {"done": ["Search 18 min more in the next window (Sat 00:00)", "Search now instead"],
+                   "busy": ["Search 18 min more in the next window (Sat 00:00) [off]", "Search now instead [off]"],
+                   "waits": [], "armed": [], "cannot": [], "older": [], "plain": ["Continue for 18 min more"]}, out
+    assert '"Search now instead"' in acts and 'kind: "quiet"' in acts and "new_run_waits" in acts
+    assert "st.continuing" in acts, "drawn disabled while a request is out"
+    run = _page_function(STUDY_PAGE, "continueRun")
+    assert "body.now = true" in run and "res.scheduled" in run and "EK.toast(\"done\", res.words)" in run
+    assert "st.continuing = true" in run and run.index("if (st.continuing) return") < run.index("EK.post(")
+    assert '"continue-now": function' in STUDY_PAGE
+    assert "continueActs(" in _page_function(STUDY_PAGE, "nextSteps") and "continueActs(" in _page_function(STUDY_PAGE, "strip")
+
+
+def test_setup_makes_room_for_its_drawer_and_shows_a_click_at_once():
+    """H8: at 800 px the When it runs drawer covered the plan's right edge (the Final check label, the
+    note), and a first click on Schedule it seemed lost. Set up's page moves aside for a drawer on a
+    wide screen (a wide drawer overlays below 1100 px, where too little would be left); a save draws the
+    page once, not twice; Start says it is at work and stays disabled until the answer."""
+    css = (STATIC / "css" / "app.css").read_text(encoding="utf-8")
+    room = css[css.index("body.drawer-open .page.beside-drawer"):]
+    assert "420px" in room.split("}")[0] and "@media (min-width: 760px)" in css[:css.index("body.drawer-open .page.beside-drawer")][-200:]
+    assert "body.drawer-open.drawer-wide .page.beside-drawer" in css
+    assert "beside-drawer" in _page_function(SETUP_PAGE, "draw")
+    drawer = (STATIC / "js" / "drawer.js").read_text(encoding="utf-8")
+    assert 'classList.toggle("drawer-wide", !!o.wide)' in drawer and '"drawer-open", "drawer-dims", "drawer-wide"' in drawer
+    save = _page_function(SETUP_PAGE, "save")
+    assert save.count("draw(main)") == 1, save
+    start = SETUP_PAGE[SETUP_PAGE.index("      start: function (el) {"):SETUP_PAGE.index("      later: function")]
+    assert '"Scheduling…"' in start and "return EK.post(" in start, start
+
+
+def _plan_block(doc: dict, plan: dict) -> str:
+    out = _node(_page_function(SETUP_PAGE, "wholeWindow"), _page_function(SETUP_PAGE, "planBlock"), f"""
+      EK.isPhone = function () {{ return false; }};
+      var st = {{doc: {json.dumps(doc)}, plan: {json.dumps(plan)}}};
+      function study() {{ return st.doc.study; }}
+      process.stdout.write(JSON.stringify(String(planBlock())));""")
+    out = re.sub(r'<span class="fig">([^<]*)</span>', r"\1", out)  # the figures of a heading, as read
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", out))
+
+
+PLAN = {"hours": 0.3, "search_s": 1000, "final_check_s": 80, "rounds": 17, "combinations": 204, "tunables": 4,
+        "test_cases": 2, "window": {"line": "starts Sat 00:00; about 18 min of search; done around Sun 12:00",
+                                    "starts": "2026-11-14T00:00:00+01:00", "done": "2026-11-15T12:00:00+01:00"}}
+WEEKENDS = {"windows": [{"days": ["sat", "sun"], "from": "00:00", "to": "23:59"}]}
+
+
+def test_a_scheduled_plan_says_its_windows_and_offers_the_whole_window():
+    """H1: after choosing weekends the plan bar still said "18 min in total · done around 17:34"; and
+    nothing offered the 48 h the weekend gives. The bar says the engine's window line; the offer sets
+    the study's hours to a week of its windows (in real hours: on a rehearsal, both clocks)."""
+    rehearsal = _plan_block({"study": {"schedule": WEEKENDS, "budget": {"hours": 0.3}}, "schedule_hours": 0.3999,
+                             "clock": {"speed": 120.0, "line": "rehearsal clock: Fri 13 Nov 17:38, 120 × real time"}}, PLAN)
+    assert "Starts Sat 00:00; about 18 min of search; done around Sun 12:00" in rehearsal
+    assert "done around 1" not in rehearsal.replace("done around Sun 12:00", ""), rehearsal
+    assert "Search through the whole window (48 h on the rehearsal clock, 24 min of real time)" in rehearsal
+    assert "It searches for as long as the windows give in one week; the final check runs at the end." in rehearsal
+    real = _plan_block({"study": {"schedule": WEEKENDS, "budget": {"hours": 0.3}}, "schedule_hours": 47.9833}, PLAN)
+    assert "Search through the whole window (48 h)" in real
+    whole = _plan_block({"study": {"schedule": WEEKENDS, "budget": {"hours": 47.9833}}, "schedule_hours": 47.9833}, PLAN)
+    assert "whole window" not in whole, "already the whole window"
+    unscheduled = {k: v for k, v in PLAN.items() if k != "window"}
+    now = _plan_block({"study": {"budget": {"hours": 0.3}}}, unscheduled)
+    assert "18 min in total · done around" in now and "whole window" not in now
+    setup = _page_function(SETUP_PAGE, "acts")
+    assert '"whole-window": function' in setup and "st.doc.schedule_hours" in setup
+    assert "st.plan.window" in _page_function(SETUP_PAGE, "timeSummary"), "the Time row never says done around 17:34 either"
 
 
 START_PAGE = (STATIC / "js" / "pages" / "start.js").read_text(encoding="utf-8")

@@ -74,6 +74,19 @@
     return res && res.renewed ? "Scheduled a new campaign: the last one " + res.renewed + " · " + words : "Scheduled: " + words;
   };
 
+  /** The name of the Set up row a study's first problem belongs to (`missing`: its step and key):
+      "What to tune", "What may change: code", "Data changes", "Goal", "Time", "When it runs"; "Cases"
+      before Set up; "the plan" for anything else. */
+  EK.missingWords = function (m) {
+    var key = String((m && m.key) || ""), step = (m && m.step) || 7;
+    if (/^schedule\b/.test(key) || /\bschedule\b/.test(String((m && m.text) || ""))) return "When it runs";
+    if (step < 4) return "Cases";
+    if (step === 4) return key.indexOf("vary.code") === 0 ? "What may change: code" : key.indexOf("vary.data") === 0 ? "Data changes" : "What to tune";
+    if (step === 5) return "Goal";
+    if (step === 6) return "Time";
+    return "the plan";
+  };
+
   /** A Home card from one study of GET /api/home. */
   EK.cardOf = function (s) {
     var phase = EK.pepperPhase(s), r = s.rounds || {};
@@ -81,7 +94,9 @@
     var round = r.planned ? "round " + Math.min((r.done || 0) + 1, r.planned) + " of " + r.planned : (r.done ? "round " + (r.done + 1) : "");
     if (s.kind === "draft") {
       c.kicker = "Draft";
-      c.head = s.step >= 4 ? "Set up not finished" : "Cases still to add";
+      // What is missing, by its Set up row's name (persona p4, H6): "Set up not finished: Goal";
+      // a draft with nothing missing is ready, only not started.
+      c.head = s.step >= 4 ? (s.missing ? "Set up not finished: " + EK.missingWords(s.missing) : "Ready to start: not started yet") : "Cases still to add";
       c.sub = s.harness || "";
       c.pepper = "egg";
       c.href = (s.step >= 4 ? "#/setup/" : "#/start/") + EK.q(s.slug);
@@ -113,6 +128,8 @@
       var v = s.verdict || { says: String(s.line || "finished").replace(/^finished · /, "").split(":")[0], line: "", advice: "" };
       c.kicker = EK.capital(v.says);
       c.head = v.line || EK.capital(v.says);
+      // Why a keep is still keep when every held-back case improved (persona p4, H2): under the line.
+      if (v.why_keep) c.why = v.why_keep;
       c.sub = v.advice || "";
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
     } else if (s.kind === "campaign") {

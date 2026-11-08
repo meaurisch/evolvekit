@@ -256,7 +256,7 @@
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Search done" + (s.time && s.time.used ? " · " + s.time.used : ""),
         head: verdictHead(f), sub: verdictSub(f),
         caption: EK.capital(roundWord()) + " · no final check", stoppedAt: true,
-        acts: [s.can_continue ? { text: "Search for longer", kind: "secondary", act: "continue" } : null].filter(Boolean) });
+        acts: continueActs("Search for longer") });
     } else if (d === "stopped") {
       Object.assign(x, { kickerTone: "", kicker: "Final check stopped" + (ch && ch.planned ? " · " + ch.pairs + " of " + ch.planned + " runs" : ""), head: verdictHead(f),
         sub: verdictSub(f), right: ch && ch.mean != null ? "both" : "timeline",
@@ -265,6 +265,8 @@
     } else {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Finished", head: verdictHead(f), sub: verdictSub(f), acts: [] });
     }
+    // Why a keep is still keep when every held-back case improved (persona p4, H2): under the line.
+    if (s.phase === "done" && f.why_keep) x.why = f.why_keep;
     if (s.group && s.phase === "stopped") {
       // A run per kind of case cannot carry on, nor check again (D37): it starts again.
       x.sub = PER_GROUP_STOPPED;
@@ -291,6 +293,12 @@
     if ((s.phase === "search" || s.phase === "check") && s.spent && s.spent.line) out.push(s.spent.line);
     if (s.phase === "search" && s.pace && s.pace.line) out.push(s.pace.line);
     return out;
+  }
+  /** When the shown run ran in its campaign's windows, on the window clock (`history_by_run`, persona
+      p4, H3): "Ran in its windows: Sat 00:04 – Sun 09:27"; nothing for a run with no session kept. */
+  function runFacts() {
+    var line = ((st.doc.campaign || {}).history_by_run || {})[st.run];
+    return line ? [line] : [];
   }
   /** The verdict in the results document's own words (design 3.4): its `line` is the headline and
       its `advice` the sentence under it, verbatim, so the page and the terminal say the same. */
@@ -320,13 +328,13 @@
       : x.range ? EK.intervalStrip(x.range[0], x.range[1], x.range[2], { width: w, onAccent: acc }) : "";
     var acts = x.acts.map(function (a) { return EK.button(a.text, Object.assign({ kind: "primary", onAccent: acc }, a)); });
     var rule = x.rule ? html`<p class="type-small strip-rule${acc ? "" : " ink-2"}">The rule: use it at 9 in 10 or better, worst within 1 %. ${EK.link("Why", { act: "why", cls: acc ? "on-accent-link" : "" })}</p>` : "";
-    var facts = liveFacts(st.status);
+    var facts = liveFacts(st.status).concat(runFacts());
     var factLine = facts.length ? html`<div class="strip-facts${acc ? "" : " ink-2"}">${facts.map(function (f) { return html`<span>${f}</span>`; })}</div>` : "";
     return html`<section class="status-strip${acc ? " is-accent" : ""}" aria-label="Status" aria-live="polite" aria-atomic="true">
       <div class="strip-main">${EK.verdictMark(x.mark, phone ? 36 : 44, acc)}<div class="strip-words">
         <span class="type-label${x.kickerTone === "accent" && !acc ? " accent-ink" : x.kickerTone === "critical" ? " tone-critical" : ""}">${x.kicker}</span>
         <p class="${acc ? "type-display" : "strip-head"}">${EK.figures(x.head)}${x.tag ? html` <span class="strip-tag">${x.tag}</span>` : ""}</p>
-        <p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p>${factLine}${branchLines(acc)}</div></div>
+        ${x.why ? html`<p class="type-body strip-why">${x.why}</p>` : ""}<p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p>${factLine}${branchLines(acc)}</div></div>
       <div class="strip-side">${vis}${x.caption ? html`<span class="type-small${acc ? "" : " ink-2"}">${x.caption}</span>` : ""}
         ${acts.length ? html`<div class="actions">${acts}</div>` : ""}${rule}</div></section>`;
   }
@@ -689,12 +697,57 @@
   }
   function nextSteps() {
     var s = st.status, out = [];
-    if (s.can_continue) out.push(EK.button("Continue for " + EK.hours((st.doc.study.budget || {}).hours || 1) + " more", { kind: "secondary", act: "continue" }));
+    continueActs("Continue for " + EK.hours(continueHours()) + " more").forEach(function (a) { out.push(EK.button(a.text, a)); });
     // A per-group run has one result per group, so no one result to start from (`s.group`).
     if ((s.phase === "done" || s.phase === "stopped") && !s.group) out.push(EK.button("Start a new study from this", { kind: "secondary", act: "next" }));
     // A run per kind of case is compared group by group on its own page, never as one side of a compare.
     if (!s.group) out.push(EK.link("Compare with…", { href: "#/compare?a=" + EK.q(st.slug + "/" + st.run) }));
     return html`<section class="section" aria-labelledby="next-title"><h2 id="next-title">What next</h2><div class="actions">${out}</div></section>`;
+  }
+  function continueHours() { return (st.doc.study.budget || {}).hours || 1; }
+  /** The scheduled Continue's words (persona p4, H5), from the study's next window (`next_window`):
+      "Search 18 min more in the next window (Sat 00:00)", or inside an open window "… in this window
+      (open until Sun 23:59)". */
+  function continueWords(hours, w) {
+    var more = "Search " + EK.hours(hours) + " more";
+    if (!w) return more + " in the next window";
+    return w.edge === "end" ? more + " in this window (open until " + w.words + ")" : more + " in the next window (" + w.words + ")";
+  }
+  /** The acts that give a run more search time: `plain` on a study without a schedule; on one with a
+      schedule, the next window's, and "Search now instead" as a second, smaller act (never the
+      default). None while a renewed campaign waits to start a fresh run after the latest run (its
+      `after`: `new_run_waits`), nor while the campaign is armed (it goes on in its next window); drawn
+      disabled while a request is out (`st.continuing`). */
+  function continueActs(plain) {
+    var s = st.status, latest = (st.doc.runs || []).slice(-1)[0];
+    if (!s.can_continue) return [];
+    if (!st.doc.study.schedule) return [{ text: plain, kind: "secondary", act: "continue", disabled: !!st.continuing }];
+    if (st.doc.new_run_waits && latest && latest.id === st.run) return [];
+    if (latest && latest.id !== st.run) return [];  // only the latest run of a campaign goes on (409 otherwise)
+    // An armed campaign goes on by itself in its next window: more time is asked for once, not again.
+    if ((st.doc.campaign || {}).state === "armed") return [];
+    return [{ text: continueWords(continueHours(), st.doc.next_window), kind: "secondary", act: "continue", disabled: !!st.continuing },
+      { text: "Search now instead", kind: "quiet", act: "continue-now", disabled: !!st.continuing }];
+  }
+  /** More search time for the run: on a study with a schedule the engine keeps it for the next window
+      (its answer's `words` are the toast) unless `now`; once at a time, its buttons disabled until the
+      answer, so a double click never adds the hours twice. */
+  function continueRun(now) {
+    if (st.continuing) return;
+    var hours = continueHours(), body = { run: st.run, hours: hours };
+    if (now) body.now = true;
+    st.continuing = true;
+    EK.$$('[data-act="continue"], [data-act="continue-now"]').forEach(function (b) { b.disabled = true; });
+    return EK.post(EK.studyPath(st.slug, "/continue"), body).then(function (res) {
+      st.continuing = false;
+      if (res.scheduled) { EK.toast("done", res.words); EK.rerender(); return; }
+      EK.toast("done", "Searching on for " + EK.hours(hours));
+      EK.go(EK.studyHref(st.slug, res.run));
+    }, function (err) {
+      st.continuing = false;
+      EK.$$('[data-act="continue"], [data-act="continue-now"]').forEach(function (b) { b.disabled = false; });
+      EK.fail(err);
+    });
   }
   /** What the AI spent of its cap: the verdict's figure (`r.spent`) once there is one, the live one
       (`s.spent`) before it; null for a run without AI. A fact, not a claim. */
@@ -774,7 +827,8 @@
     // A study with a schedule: its campaign's line under the header (the next window, a pause, a missed window).
     var camp = (st.doc.state || {}).campaign;
     // A paused campaign is resumed from here: Start arms it again (D4: a person's stop pauses it).
-    if (camp && camp.line) out.push(EK.notice(camp.tone === "warn" ? "warning" : "info", camp.line,
+    // When its runs ran, on the window clock (persona p4, H3): "Campaign finished · Ran in its windows: …".
+    if (camp && camp.line) out.push(EK.notice(camp.tone === "warn" ? "warning" : "info", camp.line + (camp.history_line ? " · " + camp.history_line : ""),
       camp.state === "paused" ? { text: "Resume the campaign", act: "resume-campaign" } : null));
     if (s.phase === "search" && /again/.test(s.sentence || "")) out.push(EK.notice("info", "Continued where it stopped, after a restart."));
     if (s.busy_line && isLive()) out.push(EK.notice("warning", "Your computer is busy. Tries may run slower.", { text: "Is it still fair?", act: "busy" }));
@@ -899,10 +953,8 @@
           EK.go(EK.studyHref(st.slug, res.run));
         }).catch(EK.fail);
       },
-      "continue": function () {
-        var hours = (st.doc.study.budget || {}).hours || 1;
-        EK.post(EK.studyPath(st.slug, "/continue"), { run: st.run, hours: hours }).then(function (res) { EK.toast("done", "Searching on for " + EK.hours(hours)); EK.go(EK.studyHref(st.slug, res.run)); }).catch(EK.fail);
-      },
+      "continue": function () { return continueRun(false); },
+      "continue-now": function () { return continueRun(true); },
       next: function () {
         EK.post(EK.studyPath(st.slug, "/next" + runQ()), { name: st.doc.study.name + " (next)" }).then(function (doc) { EK.go("#/setup/" + EK.q(doc.slug)); }).catch(EK.fail);
       },
@@ -982,9 +1034,11 @@
   function branchesDrawer() { EK.branchesDrawer(st.slug, heldCount()); }
   /** The runs drawer's body: every run as the page last heard of it, newest first. */
   function runsBody() {
+    var hist = (st.doc.campaign || {}).history_by_run || {};
     var runs = (st.doc.runs || []).slice().reverse().map(function (r) {
       var mark = r.kind === "finished" ? EK.markOf({ kind: "finished", decision: r.decision, tone: r.tone }) : r.kind === "failed" ? "error" : "open";
-      return Object.assign({}, r, { mark: mark });
+      // When a campaign's run ran, on the window clock (persona p4, H3).
+      return Object.assign({}, r, { mark: mark, history: hist[r.id] || "" });
     });
     // The newest two runs that can be compared: a run per kind of case is not one side of a compare.
     var pair = runs.filter(function (r) { return !r.per_group; });

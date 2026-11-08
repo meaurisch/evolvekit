@@ -198,7 +198,7 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .card-mid { display: flex; gap: 12px; align-items: flex-end; }
 .card-words { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .card-head { font-weight: 600; }
-.card-note, .head-note { overflow-wrap: anywhere; }
+.card-note, .head-note, .card-why { overflow-wrap: anywhere; }
 .head-note { margin: 4px 0 0; }
 .card-pepper { flex: none; margin: -6px -4px 0 0; }
 .card-vis { padding-top: 4px; }
@@ -360,6 +360,16 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .drawer-foot { display: flex; gap: 10px; padding: 12px 16px 14px; border-top: 1px solid var(--line-rule); flex-direction: column; }
 .drawer-foot .actions { gap: 10px; }
 body.drawer-dims main { opacity: .5; }
+/* Set up's page moves aside for its drawer, so the plan it changes stays in view beside it (persona p4,
+   H8: at 800 px the drawer covered the plan's Final check label and its note). Below 1100 px a wide
+   drawer would leave too little beside it: it overlays there, as before. */
+@media (min-width: 760px) {
+  body.drawer-open .page.beside-drawer { padding-right: calc(var(--space-6) + 420px); }
+  body.drawer-open.drawer-wide .page.beside-drawer { padding-right: calc(var(--space-6) + 560px); }
+}
+@media (min-width: 760px) and (max-width: 1099.98px) {
+  body.drawer-open.drawer-wide .page.beside-drawer { padding-right: var(--space-6); }
+}
 @media (max-width: 759.98px) {
   .drawer, .drawer.is-wide { top: 0; width: 100vw; z-index: 45; }
   .drawer-head { padding: 6px 6px 6px 8px; }
@@ -438,6 +448,7 @@ body.drawer-dims main { opacity: .5; }
 .run-row:hover { background: var(--surface-panel); }
 .run-row.is-on { background: var(--surface-wash); }
 .run-when { font: 600 15px/1.2 var(--sans); }
+.run-history { display: block; }
 .section { display: flex; flex-direction: column; gap: 12px; padding-top: 14px; border-top: 1px solid var(--ink-1); }
 .section > h2 { font: var(--type-title); }
 .sub-section { display: flex; flex-direction: column; gap: 8px; }

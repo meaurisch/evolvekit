@@ -34,6 +34,15 @@
     })}</ul>`;
   }
 
+  /** Where the searches leaned (`leaned`, the median of the studies' search-best values): a search
+      figure, never a winner, so it says so beside it. */
+  function leanedCell(s) {
+    var v = s.leaned;
+    if (v == null) return html`<span class="type-small ink-2">—</span>`;
+    var text = typeof v === "number" ? (Number.isInteger(v) ? EK.int(v) : String(Number(v.toPrecision(3)))) : String(v);
+    return html`<span class="type-small"><span class="strong">${text}</span> <span class="ink-2">(search, not checked)</span></span>`;
+  }
+
   /** The page's body: the title, the studies, the settings table, what was left out. */
   function learnedView(h) {
     var learned = h.learned, studies = learned.studies || [], names = {};
@@ -46,10 +55,12 @@
     var rows = Object.keys(learned.settings || {}).map(function (name) {
       var s = learned.settings[name];
       return html`<tr><td><span class="strong">${s.label || name}</span></td><td>${s.tuned_in}</td><td>${importanceCell(s)}</td>
-        <td>${winnersCell(s, names)}</td><td>${moved[s.direction] || "—"}</td></tr>`;
+        <td>${leanedCell(s)}</td><td>${winnersCell(s, names)}</td><td>${moved[s.direction] || "—"}</td></tr>`;
     });
+    // The strength's scale and what it is not (persona p4, H4): a search figure, not proof.
     var table = rows.length ? html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Tuned in</th>
-      <th>How strongly it went with the measure</th><th>Winning values</th><th>Winners moved it</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      <th>How strongly it went with the measure (0 to 1, not proof)</th><th>The searches leaned to</th><th>Winning values</th><th>Winners moved it</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="type-small ink-2">0 means the setting did not go with the measure in the searches, 1 that it went with it every time. It comes from the searches, not from final checks: it says which settings are worth tuning, not which value wins.</p>`
       : "";
     var notes = (learned.notes || []).length ? html`<section class="sub-section"><h2 class="type-heading">Left out</h2>
       <ul class="plain-list">${learned.notes.map(function (n) { return html`<li class="type-small ink-2">${n}</li>`; })}</ul></section>` : "";

@@ -2,7 +2,8 @@
 
 `finished_studies` lists each study's newest finished run on a harness id; `learned` turns the
 settings studies among them into facts: how often a setting was tuned, how much it mattered,
-the values that won and the direction they moved. Code studies, bake-offs and per-group studies
+the values that won and the direction they moved, and where the searches leaned (`leaned`: the median
+of the search-best values, whatever the verdict -- a lean to try, not a winner). Code studies, bake-offs and per-group studies
 are listed with their verdicts but give no settings facts (a code study's winner is a diff, a
 bake-off has no search, a per-group winner is not one value per setting). Figures are from the
 searches ("on the cases they learned from"); only a verdict claims an improvement.
@@ -22,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import threading
-from statistics import fmean
+from statistics import fmean, median, median_low
 from typing import Any, Callable
 
 from evolvekit.harness import HarnessError
@@ -233,7 +234,8 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
                 gone.append(f"{name} (in {f.name}) is not a setting of {current.title} {current.version} any more: left out")
                 continue
             entry = seen.setdefault(name, {"label": setting.label, "tuned_in": 0, "importance": None, "importance_n": 0,
-                                           "winners": [], "direction": None, "_values": [], "_starts": []})
+                                           "winners": [], "direction": None, "leaned": None, "_values": [], "_starts": [],
+                                           "_bests": [], "_type": setting.parameter.type})
             then = f.pinned.settings.get(name)
             difference = _difference(then.parameter, setting.parameter) if then is not None else None
             if difference:
@@ -242,12 +244,15 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
             entry["tuned_in"] += 1
             if item["importance"] is not None and item["n"] >= IMPORTANCE_MIN_N:
                 entry["_values"].append(float(item["importance"]))
+            if item["best"] is not None:
+                entry["_bests"].append(item["best"])
             if f.decision == "use" and item["best"] is not None:
                 entry["winners"].append({"value": item["best"], "study": f.slug, "finished_at": f.finished_at.isoformat()})
                 entry["_starts"].append(item["default"])
         out["notes"] += gone + changed
     for name, entry in seen.items():
         values, starts = entry.pop("_values"), entry.pop("_starts")
+        entry["leaned"] = _leaned(entry.pop("_bests"), entry.pop("_type"))
         entry["importance_n"] = len(values)
         entry["importance"] = fmean(values) if values else None
         moves = set()
@@ -258,6 +263,26 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
         entry["direction"] = "mixed" if len(moves) == 2 else next(iter(moves), None)
         out["settings"][name] = entry
     return out
+
+
+def _leaned(bests: list[Any], kind: str) -> Any:
+    """Where the searches leaned (persona p4, H4): the median of the studies' search-best values -- the
+    lower middle of an even count for a whole-number setting -- or, for a choice or an on/off setting,
+    the value most of them had (None on a tie); None without a value. From the searches, not checked."""
+    if not bests:
+        return None
+    numbers = [_number(b) for b in bests]
+    if kind in ("int", "float") and all(n is not None for n in numbers):
+        if kind == "int":
+            return int(median_low(numbers))
+        return median(numbers)
+    counts: dict[str, list[Any]] = {}
+    for b in bests:
+        counts.setdefault(repr(b), []).append(b)
+    ranked = sorted(counts.values(), key=len, reverse=True)
+    if len(ranked) > 1 and len(ranked[0]) == len(ranked[1]):
+        return None
+    return ranked[0][0]
 
 
 def _settings_studies(finished: list[Finished]) -> list[Finished]:
