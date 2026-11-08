@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ from typing import Any, Mapping
 import yaml
 
 from evolvekit.harness import HarnessError
+from evolvekit.harness.sdk.evk_harness import _read_only as evk_read_only
 from evolvekit.harness.sql import placeholders, schema_database, sql_problem
 from evolvekit.space import Parameter, SpaceError
 
@@ -746,10 +748,26 @@ def _check_sql(harness: Harness) -> None:
         return
     # A feature describes the case before anything solves it: the request tables alone.
     request = {name: columns for name, columns in harness.declared().items() if name in harness.request_tables}
+    private = {(table, column.name) for table in harness.request_tables
+               for column in harness.tables[table].columns.values() if column.private}
+    private |= {(f"orig_{table}", column) for table, column in private}
+    read = getattr(sqlite3, "SQLITE_READ", 20)
     db = schema_database(request, harness.request_tables)
     try:
         for name, feature in harness.features.items():
+            # A feature's value is shown (groups.json, the rule): a private column is never one of its inputs.
+            touched: list[str] = []
+
+            def authorizer(action: int, table: Any, column: Any, *rest: Any) -> int:
+                if action == read and (table, column) in private:
+                    touched.append(f"{str(table).removeprefix('orig_')}.{column}")
+                    return sqlite3.SQLITE_DENY
+                return evk_read_only(action, table, column, *rest)
+
+            db.set_authorizer(authorizer)
             problem = sql_problem(db, feature.sql)
+            if touched:
+                raise HarnessError(f"features.{name}.sql: reads the private column {touched[0]}")
             if problem:
                 raise HarnessError(f"features.{name}.sql: {problem}")
     finally:

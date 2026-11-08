@@ -691,3 +691,5 @@ def test_the_cases_drawer_edits_a_tag():
     assert "<th>Kind</th>" in drawer and 'act: "tag"' in drawer
     assert 'EK.put(EK.studyPath(st.slug, "/cases/" + EK.q(name) + "/tag")' in drawer
     assert "c.group" in drawer and "c.tag" in drawer, "the tag in its field, the group of groups.json beside it"
+    failed = drawer[drawer.index(".catch(function (err)"):]
+    assert "el.value = kept && kept.tag" in failed and "EK.fail(err)" in failed, "a refused tag puts the old one back"

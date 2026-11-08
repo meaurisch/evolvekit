@@ -1884,31 +1884,47 @@ def cmd_study(args: argparse.Namespace) -> int:
 
 
 def _study_groups(args: argparse.Namespace) -> int:
-    """`study groups SLUG [--k N] [--json]`: the groups of the study's cases, into groups.json."""
+    """`study groups SLUG [--k N] [--json]`: the groups of the study's cases, into groups.json.
+    Exit 1 when a case cannot be solved for its features (as `study preview`) or a run is going."""
+    import functools
+
+    from evolvekit.app import jobs
+    from evolvekit.app.store import RUN_GOING
     from evolvekit.harness import groups
 
     if args.k is not None and not 2 <= args.k <= 5:
         print(f"--k: 2 to 5 groups, got {args.k}", file=sys.stderr)
         return 2
     root = _home(args).study_root(args.slug)
-    doc = groups.compute(root, k=args.k)
+    if jobs.running(root):  # the first time solves every case: never beside a timed run
+        print(RUN_GOING, file=sys.stderr)
+        return 1
+
+    def say(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
+    try:
+        doc = groups.compute(root, k=args.k, tables=functools.partial(groups.case_tables, say=say))
+    except groups.SolveFailed as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(doc))
         return 0
 
-    def cases(n: int) -> str:
-        return f"{n} case" + ("" if n == 1 else "s")
+    def plural(n: int, word: str) -> str:
+        return f"{n} {word}" + ("" if n == 1 else "s")
 
     count = len(doc["groups"])
     if doc["method"] == "features":
-        print(f"{count} groups by the cases' features (silhouette {doc['silhouette']:.2f}):")
+        print(f"{plural(count, 'group')} by the cases' features (silhouette {doc['silhouette']:.2f}):")
     elif doc["method"] == "tags":
-        print(f"{count} groups by the cases' tags:")
+        print(f"{plural(count, 'group')} by the cases' tags:")
     else:
         print("1 group:")
     for name, group in doc["groups"].items():
         training, test = len(group["training"]), len(group["test"])
-        print(f"  {name}: {cases(training + test)} ({training} to learn from, {test} held back)")
+        print(f"  {name}: {plural(training + test, 'case')} ({training} to learn from, {test} held back)")
     print(f"wrote {groups.GROUPS}", flush=True)
     for note in doc["notes"]:  # why it is one group, a feature that tells nothing apart
         print(f"note: {note}", file=sys.stderr)

@@ -27,6 +27,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import sqlite3
 import threading
@@ -43,7 +44,7 @@ from evolvekit.harness.study import Study, load_study
 from evolvekit.ledger import _atomic_write
 
 __all__ = [
-    "GROUPS", "KS", "MIN_TRAINING", "RESTARTS", "TAGS", "TAG_MAX",
+    "SolveFailed", "GROUPS", "KS", "MIN_TRAINING", "RESTARTS", "TAGS", "TAG_MAX",
     "case_tables", "compute", "features_of", "kmeans", "read_groups", "read_tag", "silhouette", "slug_of",
     "standardise", "write_tag",
 ]
@@ -65,6 +66,10 @@ FOLDER = "groups"
 ONE_GROUP = "a group needs at least two cases to learn from; all cases are one group"
 
 
+class SolveFailed(HarnessError):
+    """The application did not solve a case for its tables (as a failed preview: exit 1)."""
+
+
 # ---------------------------------------------------------------------------
 # tags
 # ---------------------------------------------------------------------------
@@ -75,6 +80,11 @@ def _tag_path(root: Path, case: str) -> Path:
     return path.with_name(path.name + TAGS)
 
 
+def _has_slug(tag: str) -> bool:
+    """Whether the tag names a group's folder of its own (`slug_of`): a letter or a digit."""
+    return re.search(r"[a-z0-9]", tag.lower()) is not None
+
+
 def read_tag(root: Path, case: str) -> str:
     """The case's tag: the first line of its `.tags` file with a BOM, CR and
     surrounding space stripped (a file written by hand on Windows reads the
@@ -83,7 +93,7 @@ def read_tag(root: Path, case: str) -> str:
         data = _tag_path(root, case).read_bytes()
     except OSError:
         return ""
-    text = data.decode("utf-8-sig", errors="replace").replace("﻿", "")
+    text = data.decode("utf-8-sig", errors="replace").replace("\ufeff", "")
     for line in text.replace("\r", "\n").split("\n"):
         if line.strip():
             return line.strip()[:TAG_MAX].strip()
@@ -97,6 +107,8 @@ def write_tag(root: Path, case: str, tag: str) -> None:
         raise HarnessError(f"{case}: a tag is one line")
     if len(tag) > TAG_MAX:
         raise HarnessError(f"{case}: a tag is at most {TAG_MAX} characters, this one is {len(tag)}")
+    if tag and not _has_slug(tag):
+        raise HarnessError(f"{case}: a tag needs a letter or a digit")
     path = _tag_path(root, case)
     if not tag:
         path.unlink(missing_ok=True)
@@ -109,10 +121,11 @@ def write_tag(root: Path, case: str, tag: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def case_tables(root: Path, case: str) -> Path:
+def case_tables(root: Path, case: str, *, say: Callable[[str], None] | None = None) -> Path:
     """The case's tables as `solve --tables-out` writes them, at the starting
     values and the preview's time limit: `<study>/groups/tables/<file>.sqlite`,
-    solved again only when the case file or the application changes."""
+    solved again only when the case file or the application changes. `say`
+    hears one line before each solve."""
     root = Path(root)
     study = load_study(root)
     harness = execute.study_harness(root)
@@ -129,6 +142,8 @@ def case_tables(root: Path, case: str) -> Path:
             return target
     except (OSError, ValueError):
         pass
+    if say is not None:
+        say(f"solving {Path(case).stem} for its features …")
     # The case as it is: no data change, no rule; one folder per solve, so two never meet.
     kept = replace(study, constraints=[], data={})
     work = root / FOLDER / "work" / f"{name}.{os.getpid()}.{threading.get_ident()}"
@@ -141,9 +156,9 @@ def case_tables(root: Path, case: str) -> Path:
             study_run=study_run, time_limit=execute.preview_time_limit(kept, harness), tables_out=True, up=up,
         )
         if not result.get("ok"):
-            raise HarnessError(f"{case}: the solve that shows its tables failed: {result.get('error')}")
+            raise SolveFailed(f"{case}: the solve that shows its tables failed: {result.get('error')}")
         if not (work / "tables.sqlite").is_file():
-            raise HarnessError(f"{case}: the solve wrote no tables")
+            raise SolveFailed(f"{case}: the solve wrote no tables")
         folder.mkdir(parents=True, exist_ok=True)
         os.replace(work / "tables.sqlite", target)
         _atomic_write(stamp_file, json.dumps(stamp) + "\n")
@@ -321,6 +336,47 @@ def _fits(named: dict[str, dict[str, list[str]]]) -> bool:
     return all(len(group["training"]) >= MIN_TRAINING for group in named.values())
 
 
+def _stamps(root: Path, cases: list[str]) -> dict[str, list[int] | None]:
+    """Each case file's `[size, mtime_ns]`: a case replaced under its name is another case."""
+    out: dict[str, list[int] | None] = {}
+    for case in cases:
+        try:
+            stat = (Path(root) / case).stat()
+            out[case] = [stat.st_size, stat.st_mtime_ns]
+        except OSError:
+            out[case] = None
+    return out
+
+
+def _tag_groups(study: Study, cases: list[str], tags: dict[str, str],
+                notes: list[str]) -> dict[str, dict[str, list[str]]]:
+    """The groups the tags make. Tags that share a folder name (`slug_of`: "Big"
+    and "big", "north side" and "north-side") are one group, named by the first
+    spelling in the cases' order; untagged cases form `untagged`, last."""
+    label_of: dict[str, str] = {}
+    spellings: dict[str, list[str]] = {}
+    key_of: dict[str, str] = {}
+    for case in cases:
+        tag = tags[case]
+        if tag and not _has_slug(tag):
+            notes.append(f"{case}: its tag {tag!r} has no letter or digit, so it counts as untagged")
+            tag = ""
+        label = tag or "untagged"
+        key = slug_of(label)
+        label_of.setdefault(key, label)
+        if label not in spellings.setdefault(key, []):
+            spellings[key].append(label)
+        key_of[case] = key
+    for key, spelled in spellings.items():
+        if len(spelled) > 1:
+            others = ", ".join(repr(s) for s in spelled[1:])
+            notes.append(f"{others} counted as {spelled[0]!r}: the same group")
+    untagged = slug_of("untagged")
+    order = sorted((key for key in label_of if key != untagged), key=lambda key: (label_of[key].lower(), key))
+    order += [untagged] if untagged in label_of else []
+    return {label_of[key]: _split(study, {c for c in cases if key_of[c] == key}) for key in order}
+
+
 def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], Path] = case_tables) -> dict[str, Any]:
     """Group the study's training and held-back cases, write `groups.json` and return it."""
     root = Path(root)
@@ -331,17 +387,23 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
     cases = list(study.training) + list(study.test)
     if not cases:
         raise HarnessError("cases: there are no cases to group yet; add some first")
-    features = {case: features_of(root, case, tables=tables) for case in cases}
-    names = list(features[cases[0]])
-    words = {name: said for name, (_, said) in _features(harness).items()}
     tags = {case: read_tag(root, case) for case in cases}
+    by_tags = any(tags.values())
     notes: list[str] = []
+    features: dict[str, dict[str, float]] = {}
+    for case in cases:
+        if not by_tags:
+            features[case] = features_of(root, case, tables=tables)
+            continue
+        try:  # the tags decide; a case that cannot be solved only lacks its features
+            features[case] = features_of(root, case, tables=tables)
+        except HarnessError as exc:
+            notes.append(f"features left out: {exc}")
+    names = list(next(iter(features.values()), {}))
+    words = {name: said for name, (_, said) in _features(harness).items()}
     method, named, score = "one", {}, None
-    if any(tags.values()):
-        keys = sorted({tag for tag in tags.values() if tag and tag != "untagged"})
-        if any(not tag or tag == "untagged" for tag in tags.values()):
-            keys.append("untagged")
-        named = {key: _split(study, {c for c in cases if (tags[c] or "untagged") == key}) for key in keys}
+    if by_tags:
+        named = _tag_groups(study, cases, tags, notes)
         if _fits(named):
             method = "tags"
         else:
@@ -360,8 +422,12 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
             best: tuple[float, dict[str, dict[str, list[str]]]] | None = None
             for count in ([k] if k is not None else list(KS)):
                 if count > len(cases):
+                    notes.append(f"asked for {count} groups; there are only {len(cases)} cases")
                     continue
                 labels = kmeans(points, count)
+                made = len(set(labels))
+                if k is not None and made < count:
+                    notes.append(f"asked for {count} groups; the cases make only {made}")
                 # Named in the order of their mean of the first feature.
                 means = {g: sum(points[i][0] for i in range(len(cases)) if labels[i] == g)
                          / sum(1 for label in labels if label == g) for g in set(labels)}
@@ -382,7 +448,7 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
     doc = {
         "format": 1, "method": method, "k": len(named), "silhouette": score, "groups": named,
         "features": features, "describe": {name: words.get(name, name) for name in names}, "notes": notes,
-        "cases": cases, "tags": {case: tag for case, tag in tags.items() if tag},
+        "cases": cases, "tags": {case: tag for case, tag in tags.items() if tag}, "stamps": _stamps(root, cases),
     }
     _atomic_write(root / GROUPS, json.dumps(doc, indent=2) + "\n")
     return doc
@@ -390,7 +456,7 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
 
 def read_groups(root: Path, study: Study) -> dict[str, Any] | None:
     """`groups.json` while it describes the study's cases as they are: the same
-    cases on the same sides, with the same tags; else `None`."""
+    cases on the same sides, with the same tags and the same files; else `None`."""
     root = Path(root)
     try:
         doc = json.loads((root / GROUPS).read_text(encoding="utf-8"))
@@ -410,5 +476,7 @@ def read_groups(root: Path, study: Study) -> dict[str, Any] | None:
         return None
     tags = {case: tag for case in cases if (tag := read_tag(root, case))}
     if (doc.get("tags") or {}) != tags:
+        return None
+    if doc.get("stamps") != _stamps(root, cases):
         return None
     return doc

@@ -79,6 +79,8 @@ ARCHIVED = ".archived"
 STUDY_PARTS = ("study.yaml", "harness", "cases", "inputs")
 """What a study is made of, as against what it produced: `runs/`, `preview/`, `assistant.jsonl`."""
 STEP_KEYS = ("template", "step", "schedule", "warm")
+RUN_GOING = "a run is going: tag or group the cases after it ends"
+"""`set_tag` and `study groups` while a run of the study is going (or queued)."""
 """Parts `save_step` accepts though the study's `study.yaml` may not have them yet."""
 OPTIONAL_KEYS = ("schedule", "warm")
 """Parts `save_step` takes out when given `None`."""
@@ -587,7 +589,11 @@ class Home:
         """Say what kind of case `name` is (`""` takes the tag away); as soon as
         one case has a tag, tags decide its groups (`study groups`). The answer
         is the study document."""
+        from evolvekit.app import jobs  # jobs reads the store: imported when used
+
         root, _, _ = self.load(slug)
+        if jobs.running(root):
+            raise AppError(RUN_GOING, 409)
         filename = safe_name(name)
         if not (root / "cases" / filename).is_file():
             raise AppError(f"there is no case {filename!r} in this study", 404)

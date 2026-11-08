@@ -6,7 +6,6 @@ solve runs except in the slow test."""
 
 from __future__ import annotations
 
-import functools
 import json
 import sqlite3
 from pathlib import Path
@@ -26,7 +25,11 @@ def fake_tables(sizes: dict[str, int]):
     """`tables=` for `features_of` and `compute`: a SQLite file per case with
     a `stops` table of `sizes[case]` rows (stop_id 0.., weight 1, x and y)."""
 
-    def tables(root: Path, case: str) -> Path:
+    def tables(root: Path, case: str, say=None) -> Path:
+        if sizes.get(case) is None:
+            raise groups.SolveFailed(f"{case}: the solve that shows its tables failed: exit code 1")
+        if say is not None:
+            say(f"solving {Path(case).stem} for its features …")
         path = Path(root) / "fake-tables" / (Path(case).name + ".sqlite")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.unlink(missing_ok=True)
@@ -260,21 +263,163 @@ def test_slug_of_a_group():
     assert groups.slug_of("group 1") == "group-1" and groups.slug_of("North Side") == "north-side"
 
 
+def test_a_feature_may_not_read_a_private_column(tmp_path):
+    root, _ = study_with_runs(tmp_path)
+    path = root / "harness" / "harness.yaml"
+    original = path.read_text(encoding="utf-8")
+    for sql in ("SELECT AVG(x) FROM stops", "SELECT MAX(y) FROM orig_stops", "SELECT COUNT(*) FROM stops WHERE x > 3"):
+        path.write_text(original, encoding="utf-8")
+        _add_features(root, f'features:\n  near:\n    sql: "{sql}"\n')
+        with pytest.raises(HarnessError, match=r"features\.near\.sql: reads the private column stops\.[xy]$"):
+            load_harness(root / "harness")
+    path.write_text(original, encoding="utf-8")
+    _add_features(root, 'features:\n  heavy_share:\n    sql: "SELECT AVG(weight > 1) FROM stops"\n')
+    assert list(load_harness(root / "harness").features) == ["heavy_share"], "the docs' example loads"
+    path.write_text(original, encoding="utf-8")
+    _add_features(root, 'features:\n  sneaky:\n    sql: "DELETE FROM stops"\n')
+    with pytest.raises(HarnessError, match=r"features\.sneaky\.sql: it may only read the tables"):
+        load_harness(root / "harness")
+
+
+def test_tags_that_share_a_folder_name_are_one_group(tmp_path):
+    sizes = [20, 22, 24, 80, 82, 84, 21, 83]
+    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    for i, tag in enumerate(["Big", "big", "BIG", "north side", "north-side", "North Side", "big", "north side"]):
+        groups.write_tag(root, f"cases/c{i}.json", tag)
+    doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    assert doc["method"] == "tags" and list(doc["groups"]) == ["Big", "north side"], "the first spelling names it"
+    assert doc["groups"]["Big"] == {"training": ["cases/c0.json", "cases/c1.json", "cases/c2.json"],
+                                    "test": ["cases/c6.json"]}
+    assert "'big', 'BIG' counted as 'Big': the same group" in doc["notes"]
+    assert "'north-side', 'North Side' counted as 'north side': the same group" in doc["notes"]
+    assert len({groups.slug_of(name) for name in doc["groups"]}) == len(doc["groups"]), "one folder per group"
+
+
+def test_a_tag_needs_a_letter_or_a_digit(tmp_path):
+    root, _ = study_with_runs(tmp_path)
+    with pytest.raises(HarnessError, match="a tag needs a letter or a digit"):
+        groups.write_tag(root, "cases/town-40.json", "!!!")
+    assert not (root / "cases" / "town-40.json.tags").exists()
+    groups.write_tag(root, "cases/town-40.json", "Ä 1")
+    assert groups.read_tag(root, "cases/town-40.json") == "Ä 1"
+
+
+def test_a_hand_written_tag_without_a_letter_counts_as_untagged(tmp_path):
+    sizes = [20, 22, 80, 82]
+    root = study_with_cases(tmp_path, sizes=sizes, held=0)
+    groups.write_tag(root, "cases/c0.json", "small")
+    groups.write_tag(root, "cases/c1.json", "small")
+    (root / "cases" / "c2.json.tags").write_text("!!!\n", encoding="utf-8")
+    doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    assert doc["groups"]["untagged"]["training"] == ["cases/c2.json", "cases/c3.json"]
+    assert "cases/c2.json: its tag '!!!' has no letter or digit, so it counts as untagged" in doc["notes"]
+
+
+def test_one_tag_for_every_case_is_one_group_by_tags(tmp_path, capsys, monkeypatch):
+    from evolvekit.cli import main
+
+    sizes = [20, 22, 80, 82]
+    root = study_with_cases(tmp_path, sizes=sizes, held=1)
+    for i in range(4):
+        groups.write_tag(root, f"cases/c{i}.json", "depot")
+    monkeypatch.setattr(groups, "case_tables", fake_tables(sizes_of(sizes)))
+    assert main(["study", "groups", root.name, "--home", str(tmp_path / "home")]) == 0
+    assert capsys.readouterr().out.splitlines()[:2] == ["1 group by the cases' tags:",
+                                                        "  depot: 4 cases (3 to learn from, 1 held back)"]
+
+
+def test_with_tags_a_case_that_cannot_be_solved_only_lacks_its_features(tmp_path):
+    sizes = [20, 22, 24, 80, 82, 84]
+    root = study_with_cases(tmp_path, sizes=sizes, held=0)
+    for i in range(6):
+        groups.write_tag(root, f"cases/c{i}.json", "small" if i < 3 else "large")
+    solvable = {case: n for case, n in sizes_of(sizes).items() if case != "cases/c4.json"}
+    doc = groups.compute(root, tables=fake_tables(solvable))
+    assert doc["method"] == "tags" and doc["groups"]["large"]["training"] == ["cases/c3.json", "cases/c4.json",
+                                                                               "cases/c5.json"]
+    assert "cases/c4.json" not in doc["features"] and "cases/c5.json" in doc["features"]
+    assert any(n.startswith("features left out: cases/c4.json: the solve") for n in doc["notes"]), doc["notes"]
+
+
+def test_features_that_never_vary_make_one_group(tmp_path):
+    sizes = [40, 40, 40, 40, 40]
+    root = study_with_cases(tmp_path, sizes=sizes, held=1)
+    doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    assert doc["method"] == "one" and list(doc["groups"]) == ["all"]
+    assert doc["notes"] == ["the cases' features are the same in every case; all cases are one group"]
+
+
+def test_a_forced_k_that_the_cases_cannot_make_says_so(tmp_path):
+    sizes = [20, 20, 20, 20, 80, 80, 80, 80]
+    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    doc = groups.compute(root, k=3, tables=fake_tables(sizes_of(sizes)))
+    assert "asked for 3 groups; the cases make only 2" in doc["notes"], doc["notes"]
+    assert doc["method"] == "features" and doc["k"] == 2
+
+
+def test_groups_json_is_stale_when_a_case_file_changes(tmp_path):
+    import os
+
+    sizes = [80, 20, 82, 22, 84, 24, 83, 21]
+    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    assert groups.read_groups(root, load_study(root)) is not None
+    case = root / "cases" / "c0.json"
+    stat = case.stat()
+    os.utime(case, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000_000))
+    assert groups.read_groups(root, load_study(root)) is None, "the same name, another file"
+
+
 def test_cli_groups_prints_the_groups(tmp_path, capsys, monkeypatch):
     from evolvekit.cli import main
 
     sizes = [80, 20, 82, 22, 84, 24, 83, 21]
     root = study_with_cases(tmp_path, sizes=sizes, held=2)
-    monkeypatch.setattr(groups, "compute", functools.partial(groups.compute, tables=fake_tables(sizes_of(sizes))))
-    assert main(["study", "groups", root.name, "--home", str(tmp_path / "home")]) == 0
-    lines = capsys.readouterr().out.splitlines()
+    monkeypatch.setattr(groups, "case_tables", fake_tables(sizes_of(sizes)))
+    home = str(tmp_path / "home")
+    assert main(["study", "groups", root.name, "--home", home]) == 0
+    said = capsys.readouterr()
+    lines = said.out.splitlines()
     assert lines[0].startswith("2 groups by the cases' features (silhouette 0.") and lines[0].endswith("):")
     assert lines[1:] == ["  group 1: 4 cases (3 to learn from, 1 held back)",
                          "  group 2: 4 cases (3 to learn from, 1 held back)", "wrote groups.json"]
-    assert main(["study", "groups", root.name, "--json", "--home", str(tmp_path / "home")]) == 0
+    err = said.err.splitlines()
+    assert err[:8] == [f"solving c{i} for its features …" for i in range(8)], "one line per case, on stderr"
+    assert err[8:] == ["note: mean_stops_weight: the same in every case, so not used to tell them apart"]
+    assert main(["study", "groups", root.name, "--json", "--home", home]) == 0
     assert json.loads(capsys.readouterr().out)["method"] == "features"
-    assert main(["study", "groups", root.name, "--k", "6", "--home", str(tmp_path / "home")]) == 2
-    assert "--k" in capsys.readouterr().err
+    for k in ("6", "1"):
+        assert main(["study", "groups", root.name, "--k", k, "--home", home]) == 2
+        assert "--k: 2 to 5 groups" in capsys.readouterr().err
+    assert main(["study", "groups", root.name, "--k", "5", "--home", home]) == 0
+    said = capsys.readouterr()
+    assert said.out.splitlines()[0] == "1 group:"
+    assert "note: a group needs at least two cases to learn from; all cases are one group" in said.err
+
+
+def test_cli_groups_a_case_that_cannot_be_solved_is_exit_1(tmp_path, capsys, monkeypatch):
+    from evolvekit.cli import main
+
+    sizes = [80, 20, 82, 22]
+    root = study_with_cases(tmp_path, sizes=sizes, held=0)
+    monkeypatch.setattr(groups, "case_tables", fake_tables({"cases/c0.json": 80}))
+    assert main(["study", "groups", root.name, "--home", str(tmp_path / "home")]) == 1
+    assert "error: cases/c1.json: the solve that shows its tables failed" in capsys.readouterr().err
+
+
+def test_no_tag_and_no_groups_while_a_run_is_going(tmp_path, capsys, monkeypatch):
+    from evolvekit.app import AppError, jobs
+    from evolvekit.app.store import Home
+    from evolvekit.cli import main
+
+    root = study_with_cases(tmp_path, sizes=[80, 20, 82, 22], held=0)
+    monkeypatch.setattr(jobs, "running", lambda _root: True)
+    assert main(["study", "groups", root.name, "--home", str(tmp_path / "home")]) == 1
+    assert "a run is going: tag or group the cases after it ends" in capsys.readouterr().err
+    with pytest.raises(AppError) as refused:
+        Home(tmp_path / "home").set_tag(root.name, "c0.json", "big")
+    assert refused.value.status == 409 and "a run is going" in str(refused.value)
+    assert not (root / groups.GROUPS).exists() and groups.read_tag(root, "cases/c0.json") == ""
 
 
 def test_the_case_tables_are_kept_until_the_case_changes(tmp_path, monkeypatch):

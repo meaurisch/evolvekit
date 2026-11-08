@@ -453,7 +453,12 @@
             var c = rows[g.getAttribute("data-group-of")];
             g.textContent = c && c.group ? c.group : "";
           });
-        }).catch(EK.fail);
+        }).catch(function (err) {
+          // Not saved: the field shows the tag the case still has, and the toast says why.
+          var kept = (st.doc.cases || []).filter(function (c) { return c.name === name; })[0];
+          el.value = kept && kept.tag ? kept.tag : "";
+          EK.fail(err);
+        });
       },
       remove: function (el) {
         var name = el.getAttribute("data-arg");
