@@ -474,13 +474,15 @@ def test_the_tab_counts_follow_the_plot_and_the_chip_ends_with_the_verdict():
       process.stdout.write(JSON.stringify({
         counts: tabCounts(t), none: tabCounts({available: false}), empty: tabCounts({available: true, cases: [], combinations: [{id: "s", base: true}]}),
         live: chipAfter(null, "c1", c), checked: chipAfter("keep", "c1", c), use: chipAfter("use", "c1", c), other: chipAfter("keep", "c9", c),
-        stopped: chipAfter("stopped", "c1", c),
+        stopped: chipAfter("stopped", "c1", c), skipped: chipAfter("skipped", "c1", c), missing: chipAfter("missing", "c1", c),
+        failed: chipAfter(null, "c1", c, true), liveSearch: chipAfter(null, "c1", c, false),
         chipLive: String(EK.chosenChip(c, {pct: 7.4, direction: "lower"})),
         chipDone: String(EK.chosenChip(c, {after: chipAfter("keep", "c1", c)})),
         chipOther: String(EK.chosenChip(c, {after: chipAfter("keep", "c9", c)}))}));""")
     assert out["counts"] == {"tries": 3, "cases": 2, "settings": 0, "code": 2}, out["counts"]
     assert out["none"] is None and out["empty"] == {"tries": 0, "cases": 0, "settings": 0, "code": 0}
-    assert out["live"] is None and out["stopped"] is None, "no decision: the figure, labelled as not checked"
+    assert out["live"] is None and out["liveSearch"] is None, "no decision: the figure, labelled as not checked"
+    assert out["stopped"] == out["skipped"] == out["missing"] == out["failed"] == "", "no check, no figure either"
     assert out["checked"] == "final check: keep" and out["use"] == "final check: use it" and out["other"] == ""
     assert "7.4 % lower" in out["chipLive"] and "not checked" in out["chipLive"]
     for done in (out["chipDone"], out["chipOther"]):

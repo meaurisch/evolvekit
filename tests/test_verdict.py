@@ -448,6 +448,26 @@ def test_a_finished_runs_best_is_said_in_finished_words(tmp_path, decision, chec
         assert line.endswith("It was not checked on cases the search never saw."), line
 
 
+def test_a_done_run_without_its_comparison_does_not_point_to_a_final_check(tmp_path):
+    """The verdict says "There is no final check for this run"; the best line must not name one."""
+    root, run = _run_of(tmp_path, "keep")
+    run_dir = root / "runs" / run
+    rows = [
+        {"id": "seed", "operator": "human-seed", "score": -100.0, "kpis": {"tour_length": 100.0, "tour_length_raw": RAW_SEED}},
+        {"id": "c1", "operator": "mutate", "score": -93.6, "kpis": {"tour_length": 93.6, "tour_length_raw": RAW_BEST}},
+    ]
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    for found in run_dir.rglob("comparison.json"):
+        found.unlink()
+
+    def status(_run_dir: Path) -> dict:
+        return {"progress": {"best": {"id": "c1"}, "improvement": {"pct": 6.4, "verdict": "within noise"}}}
+
+    line = jobs.status(root, run, status)["best"]["line"]
+    assert line.endswith("It was not checked on cases the search never saw."), line
+    assert "final check" not in line, line
+
+
 @pytest.mark.slow
 def test_final_check_writes_exports(tmp_path):
     from evolvekit.harness.execute import run_study

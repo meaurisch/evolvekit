@@ -492,14 +492,15 @@
     var r = st.results, best = c && r && r.best_id === c.id && r.learned_pct != null;
     var now = c && st.status && isLive() && st.status.best && st.status.best.id === c.id && st.status.best.pct != null;
     return { pct: best ? r.learned_pct : now ? st.status.best.pct : null, direction: (goalOf() || {}).direction,
-      after: c ? chipAfter(decisionOf(), r && r.best_id, c) : null };
+      after: c ? chipAfter(decisionOf(), r && r.best_id, c, ["done", "stopped", "failed"].indexOf(st.status.phase) >= 0) : null };
   }
   /** Once the final check has decided, the chip says no figure (a figure there reads as a live search):
       on the combination it checked, the decision ("final check: keep"); on any other, nothing. Null
-      while there is no decision, and the chip says the figure, not checked. */
-  function chipAfter(decision, checkedId, c) {
+      while a search is live, and the chip says the figure, not checked. A skipped, stopped or missing
+      check, or a run that ended without one, says no figure either. */
+  function chipAfter(decision, checkedId, c, finished) {
     var word = { use: "use it", keep: "keep", worse: "worse", single: "one case" }[decision];
-    if (!word) return null;
+    if (!word) return decision || finished ? "" : null;
     return c && c.id === checkedId ? "final check: " + word : "";
   }
   function chosenCombo() { var c = st.chosen && combo(st.chosen); return c && !c.base ? c : null; }

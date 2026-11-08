@@ -70,8 +70,6 @@
     });
   }
 
-  /** A bake-off's branches side by side (design 5.5): the starting point's column, then one column per
-      branch with its mark, its own verdict line verbatim and its likely range. Nothing here composes a verdict. */
   /** A case's name as the tables say it: its file name without folder or extension ("b-60"). */
   function caseName(name) { return String(name || "").split("/").pop().replace(/\.[A-Za-z0-9]+$/, ""); }
   /** A branch's held-back cases, each with its change (the paired mean of the final check's runs,
@@ -84,6 +82,8 @@
         return html`<tr><td class="mono">${caseName(r.name)}</td><td>${r.outcome === "failed" ? "no runs finished" : EK.change(r.change_pct, direction)}</td></tr>`;
       })}</tbody></table>`;
   }
+  /** A bake-off's branches side by side (design 5.5): the starting point's column, then one column per
+      branch with its mark, its own verdict line verbatim and its likely range. Nothing here composes a verdict. */
   function candidatesView(d, w) {
     var cols = [], c, mark = { use: "use", keep: "keep", worse: "worse" };
     var direction = ["higher", "maximize"].indexOf((d.measure || {}).direction) >= 0 ? "higher" : "lower";

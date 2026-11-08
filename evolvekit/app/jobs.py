@@ -852,7 +852,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     learned = (f"on the {len(study.training)} case{'s' if len(study.training) != 1 else ''} the search "
                f"{'learned' if finished else 'learns'} from ({'one run' if runs == 1 else f'{runs} runs'} each)")
     final_state = job.get("final") or {}
-    checked = job.get("phase") == "done" and bool(final_state) and not (final_state.get("skipped") or final_state.get("stopped"))
+    # The verdict's own test for "there is a final check": the comparison it reads must exist.
+    checked = (job.get("phase") == "done" and bool(final_state) and not (final_state.get("skipped") or final_state.get("stopped"))
+               and verdict_doc._check_of(run_dir, final_state)[0] is not None)
     if pct is None or verdict in ("none", None) or (pct or 0) <= 0:
         best_line = (f"No combination beat {start_words}." if finished
                      else f"No combination has beaten {start_words} yet.") + _closest(run_dir, finished, rows)
