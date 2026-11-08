@@ -4,7 +4,7 @@ The app is how someone who is not a programmer tunes an application with
 evolvekit: pick the application, bring the cases, say what may change and
 what counts as better, press Start, and read the answer — in the browser, on
 your own computer. Under the hood every study is an ordinary evolvekit run
-(see [Harnesses and studies](../README.md#harnesses-and-studies)); the app
+(see [Harnesses and studies](reference.md#harnesses-and-studies)); the app
 asks the questions and explains the answers.
 
 ![Home](app/home-light.png)
@@ -67,13 +67,13 @@ study that is running holds them. When Home shows no study running, stop the
 app and extract over the old folder; while one runs, extract into a new folder
 and start it from there (make the shortcut and the logon task again from the
 new folder if you use them). The README's
-[For planners: the installer](../README.md#for-planners-the-installer) has the
+[For planners: the installer](reference.md#for-planners-the-installer) has the
 rest: the command line, updating and removing.
 
 ### The app as a service
 
 A study with a `schedule` (a *campaign*, see the README's
-[Studies over time](../README.md#studies-over-time)) starts, stops and carries
+[Studies over time](reference.md#studies-over-time)) starts, stops and carries
 on at its windows only while the app runs. For that the app can run without a
 browser or a console:
 
@@ -173,7 +173,7 @@ the application there, and it runs.
 
 **One library, whoever made the study.** The command line
 (`evolvekit study …`, see
-[A study from the command line](../README.md#a-study-from-the-command-line))
+[A study from the command line](reference.md#a-study-from-the-command-line))
 reads and writes the same library through the same code. A study made on the
 command line appears on Home, with its state and its answer; a study made
 here can be started, watched and read from the command line; and a study
@@ -434,7 +434,7 @@ against today's code (*HEAD (e973d92)* → *+18 −9 lines in solver.py*) with
 speaks of the code (*Keep today's code …*), and the change is taken away
 from the command line: `study export SLUG --diff` writes it as a patch, and
 `study pr SLUG` makes a branch and a pull request of it (only with `--yes`;
-see the README's [Code studies](../README.md#code-studies)).
+see the README's [Code studies](reference.md#code-studies)).
 
 A run per kind of case (`per_group: true`, see the README's *Settings per
 kind of case*) has one search and one final check per group. Its strip says

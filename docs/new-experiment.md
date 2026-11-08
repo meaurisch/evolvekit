@@ -1,7 +1,7 @@
 # Setting up a new experiment
 
 A checklist for pointing evolvekit at a new iterative-optimization problem.
-It compresses the README's [Adding a problem](../README.md#adding-a-problem)
+It compresses the README's [Adding a problem](reference.md#adding-a-problem)
 section into the order an agent should actually work in; every step links to
 the README section that explains the why. `examples/binpacking/` is the worked
 version of everything below; `examples/pyvrp/` is the heavyweight version
@@ -9,7 +9,7 @@ version of everything below; `examples/pyvrp/` is the heavyweight version
 
 An application that already has a **harness** — PyVRP, or anything else
 under `harnesses/` — needs no experiment directory at all: make a study on it
-instead ([Harnesses and studies](../README.md#harnesses-and-studies)). An
+instead ([Harnesses and studies](reference.md#harnesses-and-studies)). An
 application that several people will tune is worth a harness of its own:
 [harness-authoring.md](harness-authoring.md).
 
@@ -48,7 +48,7 @@ configuration is validated before the program is started, and with
 program reports however it already does: a JSON file at `{out}`, a JSON object
 on its last line of stdout (`kpis_from: stdout`), or text that `kpi_patterns`
 picks numbers out of. See
-[Tuning a command](../README.md#tuning-a-command-problemparameters).
+[Tuning a command](reference.md#tuning-a-command-problemparameters).
 
 Otherwise: a normal Python file with the evolvable part fenced:
 
@@ -94,7 +94,7 @@ one argparse line, and `seeds: N` becomes available later without touching
 the evaluator. Emit `text_feedback`: a sentence like "losing on the Weibull
 instances, using 0.02 % of the time budget" is worth more to the next child
 than any vector of numbers
-([README: evaluator notes](../README.md#evaluator-notes-what-the-kpis-cannot-say)).
+([README: evaluator notes](reference.md#evaluator-notes-what-the-kpis-cannot-say)).
 
 ## 3. Stages
 
@@ -143,7 +143,7 @@ side by side, `pin_cpus` so a time-limited run has a core to itself),
 per-instance comparison on the dashboard, and `normalize: baseline` — each
 instance counts as a percentage of what the defaults reached on it, so the
 largest instance does not decide the search
-([README: one run per instance](../README.md#one-run-per-instance-instances-workers-retries)).
+([README: one run per instance](reference.md#one-run-per-instance-instances-workers-retries)).
 For a slow solver the cheap stage is the same command with a shorter time
 limit and fewer instances, and `promote: {top_k_per_generation: 2}` decides who
 gets the full budget.
@@ -155,7 +155,7 @@ gets the full budget.
 - `search.archive.descriptors`: one or two axes describing *what a candidate
   does*, not how well it scores (`complexity` comes free). A quality-monotone
   axis makes the grid a second copy of the leaderboard
-  ([README: the archive](../README.md#the-archive)).
+  ([README: the archive](reference.md#the-archive)).
 - Fill in `problem.description`, `problem.tools`, `problem.constraints`,
   `problem.what_counts_as_new`. If the skeleton offers a helper the block
   should call, name it in `tools` with its signature — the framework cannot
@@ -190,7 +190,7 @@ stop:
 ```
 
 Provider choices and their environment variables:
-[README: configuring a provider](../README.md#configuring-a-provider). Secrets
+[README: configuring a provider](reference.md#configuring-a-provider). Secrets
 come from the environment only — copy `.env.example` to `.env` (gitignored).
 Keep the offline config (`provider: fake` + `fake_responses.yaml`) as the base
 and fold the paid variant on top via `extends`, so the two can never drift.

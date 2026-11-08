@@ -48,7 +48,7 @@ EXIT_ABORTED = 4
 4 aborted -- the seed failed its own evaluation or the model backend kept failing."""
 
 _STARTER_CONFIG = """\
-# evolvekit configuration. See README.md and docs/new-experiment.md.
+# evolvekit configuration. See docs/reference.md and docs/new-experiment.md.
 
 problem:
   skeleton: skeleton.py

@@ -5,7 +5,7 @@ settings — behind evolvekit once, so that studies on it are a matter of
 choices: which settings or data to vary, which KPIs count, which cases to use.
 This page is for the person (or the AI coding tool) who writes one. Using
 harnesses is in the README, under
-[Harnesses and studies](../README.md#harnesses-and-studies).
+[Harnesses and studies](reference.md#harnesses-and-studies).
 
 Three harnesses in this repository are the worked examples:
 
@@ -190,7 +190,7 @@ settings` or `for: data`; any other name goes to the runner's `export` hook.
 ## The `code:` section
 
 Optional: what a code study may change in the application's source (the
-README's [Code studies](../README.md#code-studies) is how a study uses it).
+README's [Code studies](reference.md#code-studies) is how a study uses it).
 It sits beside the settings, levers and measures of the same harness: one
 harness per application, and a study picks what it varies.
 
