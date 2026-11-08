@@ -849,17 +849,23 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     seed, _ = _seed_and_best(run_dir, document, rows) if document else (None, None)
     start_words = f"the starting point ({_baseline(study, harness, seed)})"
     runs = study.limits.runs_per_case
-    learned = (f"on the {len(study.training)} case{'s' if len(study.training) != 1 else ''} the search learns from "
-               f"({'one run' if runs == 1 else f'{runs} runs'} each)")
+    learned = (f"on the {len(study.training)} case{'s' if len(study.training) != 1 else ''} the search "
+               f"{'learned' if finished else 'learns'} from ({'one run' if runs == 1 else f'{runs} runs'} each)")
+    final_state = job.get("final") or {}
+    checked = job.get("phase") == "done" and bool(final_state) and not (final_state.get("skipped") or final_state.get("stopped"))
     if pct is None or verdict in ("none", None) or (pct or 0) <= 0:
         best_line = (f"No combination beat {start_words}." if finished
                      else f"No combination has beaten {start_words} yet.") + _closest(run_dir, finished, rows)
-    else:
+    elif not finished:
         # Only the final check says whether it is better: the search picks
         # what did best on its own cases, which flatters it.
         best_line = (f"So far {_pct(pct)} {better} {goal['says']} than {start_words}, {learned}. "
-                     + ("Whether that holds on cases the search never saw, the final check tells."
-                        if not finished else "The results say whether it held on the cases the search never saw."))
+                     "Whether that holds on cases the search never saw, the final check tells.")
+    else:
+        # A finished run's best is past: the verdict is the answer, or there was no final check.
+        best_line = (f"The search's best was {_pct(pct)} {better} {goal['says']} than {start_words}, {learned}. "
+                     + ("The final check's verdict is the answer on the cases the search never saw." if checked
+                        else "It was not checked on cases the search never saw."))
     levels = (progress.get("levels") or {})
     series = [[s.get("elapsed_s"), s.get("improvement_pct")] for s in progress.get("series") or []
               if s.get("elapsed_s") is not None]

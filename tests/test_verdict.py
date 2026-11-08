@@ -422,6 +422,32 @@ def test_the_best_so_far_is_one_figure_that_never_moves_while_the_best_stays(tmp
     assert "6.1 % lower tour length so far" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("decision,checked", [("keep", True), ("pending", False), ("stopped", False)])
+def test_a_finished_runs_best_is_said_in_finished_words(tmp_path, decision, checked):
+    """Persona round 2, D5: after the verdict the Study page's Details still said "So far ... The results
+    say whether it held". A finished run's best line is past: the search's best, on the cases it learned
+    from, and whether the final check is the answer or it was never checked."""
+    root, run = _run_of(tmp_path, decision)
+    run_dir = root / "runs" / run
+    rows = [
+        {"id": "seed", "operator": "human-seed", "score": -100.0, "kpis": {"tour_length": 100.0, "tour_length_raw": RAW_SEED}},
+        {"id": "c1", "operator": "mutate", "score": -93.6, "kpis": {"tour_length": 93.6, "tour_length_raw": RAW_BEST}},
+    ]
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    def status(_run_dir: Path) -> dict:
+        return {"progress": {"best": {"id": "c1"}, "improvement": {"pct": 6.4, "verdict": "within noise"}}}
+
+    line = jobs.status(root, run, status)["best"]["line"]
+    assert not line.startswith("So far") and "The results say whether it held" not in line, line
+    assert line.startswith("The search's best was 6.1 % lower tour length than the starting point"), line
+    assert "on the 3 cases the search learned from" in line, line
+    if checked:
+        assert line.endswith("The final check's verdict is the answer on the cases the search never saw."), line
+    else:
+        assert line.endswith("It was not checked on cases the search never saw."), line
+
+
 @pytest.mark.slow
 def test_final_check_writes_exports(tmp_path):
     from evolvekit.harness.execute import run_study
