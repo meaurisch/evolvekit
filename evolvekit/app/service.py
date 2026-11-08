@@ -9,7 +9,8 @@ start finds the first in `app.json` and leaves it be, so two tickers never share
 
 * Windows: a Task Scheduler task, "evolvekit app", from an XML definition (D16): a logon trigger,
   no time limit, never held back or stopped on battery, one instance. It runs `pythonw.exe`, so no
-  console window opens; runs are still launched with `python.exe` (`detach.python_for_runs`).
+  console window opens (installed, the windowless `evolvekit-app.exe`); runs are still launched
+  with `python.exe` (`resources.python_argv`).
 * macOS and Linux: the launchd agent or systemd user unit is printed, with the commands that
   install it -- nothing is run.
 
@@ -232,7 +233,12 @@ def windowless(python: str) -> str:
 
 
 def service_argv(home_root: Path, *, python: str | None = None) -> list[str]:
-    return [windowless(python or sys.executable), "-m", "evolvekit", "app", "--service", "--home", str(home_root)]
+    """What the logon task runs: the app (`resources.app_argv`, the app exe when installed) or
+    `python -m evolvekit app` under the given `python`, windowless, as a service of the home."""
+    from evolvekit.resources import app_argv
+
+    argv = app_argv() if python is None else [python, "-m", "evolvekit", "app"]
+    return [windowless(argv[0]), *argv[1:], "--service", "--home", str(home_root)]
 
 
 def task_xml(argv: list[str], user: str) -> str:

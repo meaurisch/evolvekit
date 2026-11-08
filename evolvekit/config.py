@@ -11,13 +11,13 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 import yaml
 
+from evolvekit import resources
 from evolvekit.space import ParameterSpace, SpaceError
 
 __all__ = [
@@ -211,7 +211,7 @@ class TreeConfig:
     build_timeout_s: float = 600.0
     app: str = ""
     """The program inside a candidate's tree, as `{tree}/...`: what `{app}` is."""
-    python: str = sys.executable
+    python: str = field(default_factory=lambda: resources.python_argv()[0])
     """The interpreter `{python}` stands for in `build`: the study's application
     Python for a python harness, evolvekit's own otherwise."""
 
@@ -234,7 +234,7 @@ class TreeConfig:
         if not isinstance(app, str):
             raise ConfigError(f"{path}.app: expected a path such as '{{tree}}/solver.py', got {app!r}")
         timeout = _as_positive(data.get("build_timeout_s", 600.0), f"{path}.build_timeout_s")
-        python = data.get("python", sys.executable)
+        python = data.get("python", resources.python_argv()[0])
         if not isinstance(python, str) or not python.strip():
             raise ConfigError(f"{path}.python: expected the path of a Python interpreter, got {python!r}")
         # Only a tree problem needs git: imported here, never for a skeleton.

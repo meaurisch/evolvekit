@@ -15,12 +15,12 @@ import json
 import re
 import shlex
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from evolvekit.harness.manifest import Harness
 from evolvekit.app.detach import no_window_flags
+from evolvekit.resources import python_script_argv
 
 __all__ = ["Probe", "probe_application", "version_matches", "version_words", "program_command"]
 
@@ -120,7 +120,7 @@ def version_matches(version: str, specifier: str) -> bool:
 
 def program_command(app: str) -> list[str]:
     """How to start a program: a `.py` file with evolvekit's interpreter."""
-    return [sys.executable, app] if app.lower().endswith(".py") else [app]
+    return python_script_argv(app) if app.lower().endswith(".py") else [app]
 
 
 def probe_application(harness: Harness, app: str, *, timeout: float = PROBE_TIMEOUT_S) -> Probe:

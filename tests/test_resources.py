@@ -81,3 +81,65 @@ def test_skills_come_from_package_root_when_frozen(tmp_path, monkeypatch):
     extra.mkdir()
     (extra / "SKILL.md").write_text("---\nname: evolvekit-extra\ndescription: one line\n---\n", encoding="utf-8")
     assert "evolvekit-extra" in skills.available()
+
+ALLOWED_EXECUTABLE = {"resources.py", "harness/sdk/evk_harness.py"}   # the SDK runs under the application's Python
+
+def _sys_executable(node) -> bool:
+    return ((isinstance(node, ast.Attribute) and node.attr == "executable" and isinstance(node.value, ast.Name)
+             and node.value.id == "sys")
+            or (isinstance(node, ast.ImportFrom) and node.module == "sys" and any(a.name == "executable" for a in node.names)))
+
+def test_every_sys_executable_use_goes_through_resources():
+    hits = [h for h in _uses(_sys_executable) if h.split(":")[0] not in ALLOWED_EXECUTABLE]
+    assert hits == [], "evolvekit's Python is evolvekit.resources.python_argv()"
+
+def test_python_argv_frozen_and_not(tmp_path, monkeypatch):
+    here = sys.executable
+    script = str(tmp_path / "Zoë Intern" / "run me.py")
+    assert resources.python_argv() == [here]
+    assert resources.python_module_argv("evolvekit.app.job") == [here, "-m", "evolvekit.app.job"]
+    assert resources.python_script_argv(script) == [here, script]
+    assert resources.python_code_argv("pass") == [here, "-c", "pass"]
+    assert resources.app_argv() == [here, "-m", "evolvekit", "app"]
+    bundle = fake_bundle(monkeypatch, tmp_path / "Zoë Intern" / "evolvekit app")
+    cli = str(bundle / resources.CLI_EXE)
+    assert resources.python_argv() == [cli], "the console exe, also when the windowless one asks"
+    assert resources.python_module_argv("evolvekit.app.job") == [cli, "-m", "evolvekit.app.job"]
+    assert resources.python_script_argv(script) == [cli, "--script", script]
+    assert resources.python_code_argv("pass") == [cli, "-c", "pass"]
+    assert resources.app_argv() == [str(bundle / resources.APP_EXE)]
+    (bundle / resources.CLI_EXE).unlink()
+    assert resources.python_argv() == [str(bundle / resources.APP_EXE)]
+
+def test_python_argv_is_never_pythonw(tmp_path, monkeypatch):
+    (tmp_path / "python.exe").write_bytes(b""); (tmp_path / "pythonw.exe").write_bytes(b"")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "pythonw.exe"))
+    assert resources.python_argv() == [str(tmp_path / "python.exe")]
+
+def test_exe_name_is_the_running_exes(tmp_path, monkeypatch):
+    assert resources.exe_name() == Path(sys.executable).name
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    assert resources.exe_name() == resources.CLI_EXE
+
+def test_stages_python_is_the_cli_exe_when_frozen(tmp_path, monkeypatch):
+    from evolvekit.evaluate.stages import build_argv, build_command
+    from evolvekit.harness.probe import program_command
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    cli = str(bundle / resources.CLI_EXE)
+    assert build_argv("{python} runner.py --seed {seed}", candidate=tmp_path, inputs=(), out=tmp_path / "o.json", seed=1)[:2] == [cli, "runner.py"]
+    assert build_command("{python} -m pip install -q {tree}", tree=tmp_path)[:3] == [cli, "-m", "pip"]
+    assert program_command(r"C:\Zoë\solver.py") == [cli, "--script", r"C:\Zoë\solver.py"]
+    assert program_command(r"C:\Zoë\solver.exe") == [r"C:\Zoë\solver.exe"]
+
+def test_detect_leaves_out_the_bundled_exe_when_frozen(tmp_path, monkeypatch):
+    from evolvekit.app import detect
+    monkeypatch.setattr(detect, "_py_launcher", lambda: [])
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    listed = detect.candidates(cwd=tmp_path, home=tmp_path / "user")
+    assert not any(Path(p).parent == bundle for p in listed)
+
+def test_doctor_says_python_is_bundled_when_frozen(tmp_path, monkeypatch):
+    from evolvekit import doctor
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    line = doctor._python()
+    assert line["ok"] and line["message"].startswith("bundled (Python ")

@@ -26,8 +26,12 @@ def _check(ok: bool, name: str, message: str, fix: str = "") -> dict:
 
 
 def _python() -> dict:
+    from evolvekit.resources import is_frozen, python_argv
+
     version = ".".join(str(n) for n in sys.version_info[:3])
-    message = f"{version} at {sys.executable}"
+    if is_frozen():  # the app's own Python, inside its exe (D11)
+        return _check(True, "python", f"bundled (Python {version})")
+    message = f"{version} at {python_argv()[0]}"
     wanted = ".".join(str(n) for n in MIN_PYTHON)
     return _check(
         sys.version_info[:2] >= MIN_PYTHON, "python", message,

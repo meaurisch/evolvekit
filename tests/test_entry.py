@@ -1,10 +1,10 @@
-import json, os, sys
+import json, os, subprocess, sys, types
 from pathlib import Path
 
 import pytest
 
 from evolvekit import cli, resources
-from evolvekit.app import entry
+from evolvekit.app import entry, service
 from evolvekit.app.running import write_running
 from evolvekit.app.server import AppServer
 from evolvekit.harness.library import default_home
@@ -299,3 +299,66 @@ def test_bundle_folder_holds_no_state(tmp_path, monkeypatch, capsys):
     assert entry.main([]) == 0 and wrote == [True]   # the app ran, its app.json in the home (cmd_app reads port 0 as the default)
     assert _snapshot(bundle) == before
     assert (profile / "evolvekit" / "studies").is_dir() and not (profile / "evolvekit" / "app.json").exists()
+
+@pytest.mark.parametrize("windowless", [True, False])
+@pytest.mark.parametrize("given", [["--home", "."], ["--home", "_internal"], ["--home=."]])
+def test_the_app_form_refuses_a_home_in_the_bundle(tmp_path, monkeypatch, capsys, calls, windowless, given):
+    bundle = fake_bundle(monkeypatch, tmp_path / "Zoë Intern" / "evolvekit app")
+    monkeypatch.chdir(bundle)                                   # `evolvekit-app.exe --home .` started there
+    before = _snapshot(bundle)
+    boxes = []
+    monkeypatch.setattr(entry, "_message_box", boxes.append)
+    if windowless:
+        monkeypatch.setattr(sys, "stdout", None); monkeypatch.setattr(sys, "stderr", None)
+    assert entry.main([*given, "--no-browser"]) == 2 and calls == []
+    said = boxes if windowless else [capsys.readouterr().err.strip()]
+    assert said == ["error: this is the app's own folder: run evolvekit-cli.exe from a folder of yours "
+                    "(its full path works from anywhere)"]
+    assert boxes == [] or windowless
+    assert _snapshot(bundle) == before and os.path.samefile(Path.cwd(), bundle)
+
+def test_install_startup_names_the_exe_when_frozen(tmp_path, monkeypatch):
+    bundle = fake_bundle(monkeypatch, tmp_path / "Zoë Intern" / "evolvekit app")
+    home = tmp_path / "Zoë Intern" / "evolvekit"; home.mkdir(parents=True)
+    ok = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")
+    assert service.install_startup(home, platform="win32", run=ok, out=lambda line: None, user="PC\\zoe") == 0
+    xml = (home / service.TASK_XML).read_bytes().decode("utf-16")
+    assert f"<Command>{bundle / resources.APP_EXE}</Command>" in xml
+    assert f'<Arguments>--service --home "{home}"</Arguments>' in xml
+
+def test_study_open_starts_the_app_exe_when_frozen(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "my home"
+    assert cli.main(["study", "new", "Depot", "--harness", "demo-tour", "--home", str(home)]) == 0  # before faking: the checkout's demo-tour
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    started = []
+    monkeypatch.setattr("evolvekit.app.detach.spawn_detached", lambda argv, **kw: started.append(argv) or 1)
+    monkeypatch.setattr(cli, "OPEN_WAIT_S", 0.2)
+    assert cli.main(["study", "open", "depot", "--no-browser", "--home", str(home)]) == 1   # nothing really starts
+    assert started == [[str(bundle / resources.APP_EXE), "--home", str(home.resolve()), "--service"]]
+
+def test_jobs_launch_runs_the_cli_exe_when_frozen(tmp_path, monkeypatch):
+    from evolvekit.app import jobs
+    from evolvekit.app.store import Home
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    seen = []
+    monkeypatch.setattr(jobs, "_spawn", lambda env, argv, root, run_dir: seen.append(argv) or 4242)
+    run_dir = tmp_path / "study" / "runs" / "r1"; run_dir.mkdir(parents=True)
+    jobs._launch(Home(tmp_path / "home"), tmp_path / "study", run_dir, [], with_keys=False)
+    assert seen[0][:3] == [str(bundle / resources.CLI_EXE), "-m", "evolvekit.app.job"]
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_shortcut_is_crlf_utf8_with_chcp(tmp_path, monkeypatch, capsys, frozen):
+    windows = types.ModuleType("os"); windows.__dict__.update(os.__dict__); windows.name = "nt"
+    monkeypatch.setattr(cli, "os", windows)        # never os.name itself: pathlib picks its flavour from it (D38)
+    monkeypatch.setattr(cli, "_desktop", lambda: tmp_path)
+    if frozen:
+        bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    home = tmp_path / "Zoë Intern" / "evolvekit"
+    assert cli.main(["app", "--shortcut", "--home", str(home)]) == 0
+    raw = (tmp_path / "evolvekit.cmd").read_bytes()
+    lines = raw.decode("utf-8").split("\r\n")
+    assert b"\n" not in raw.replace(b"\r\n", b"") and lines[1] == "chcp 65001 >nul"
+    if frozen:
+        assert f'start "" "{bundle / resources.APP_EXE}" --home "{home.resolve()}"' in lines
+    else:
+        assert f'"{sys.executable}" -m evolvekit app --home "{home.resolve()}"' in lines and "pause" in lines

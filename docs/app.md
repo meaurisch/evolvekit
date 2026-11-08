@@ -70,7 +70,8 @@ python -m evolvekit app uninstall-startup
 ```
 
 On Windows the first registers the logon task "evolvekit app" (it starts
-`pythonw.exe`, with no console window; it does not end after 72 hours or stop
+`pythonw.exe`, or the installed app's `evolvekit-app.exe`, with no console
+window; it does not end after 72 hours or stop
 on battery) and prints what it runs; the second removes the task. There is one
 such task per user, so one library starts at logon: the last one installed.
 Installing it for another library replaces the first one's task, and says so

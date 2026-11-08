@@ -386,7 +386,9 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys
     env = {**scrubbed_environment(), "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     if with_keys:
         env.update(home.job_environment())
-    argv = [detach.python_for_runs(), "-m", "evolvekit.app.job", str(root), run_dir.name, *extra]  # never pythonw (D16)
+    from evolvekit.resources import python_module_argv
+
+    argv = [*python_module_argv("evolvekit.app.job"), str(root), run_dir.name, *extra]  # never pythonw (D16)
     try:
         previous: str | None = (run_dir / LAUNCH).read_text(encoding="utf-8")
     except OSError:

@@ -29,6 +29,7 @@ from evolvekit.app.detach import no_window_flags
 from evolvekit.harness.library import BUILT_IN
 from evolvekit.harness.manifest import Harness
 from evolvekit.harness.probe import PROBE_TIMEOUT_S, probe_application
+from evolvekit.resources import is_frozen, python_argv
 
 __all__ = ["candidates", "detect"]
 
@@ -76,7 +77,8 @@ def candidates(*, cwd: Path | None = None, recent: Iterable[str] = (), home: Pat
     """Every interpreter worth asking, in the order they are listed when
     nothing matches, without duplicates."""
     user = home or Path.home()
-    places: list[Path] = [Path(sys.executable)]
+    # evolvekit's own Python first; frozen it is the app's exe, where no application is installed (D10)
+    places: list[Path] = [] if is_frozen() else [Path(python_argv()[0])]
     places += _py_launcher()
     for base in (cwd or Path.cwd(), BUILT_IN.parent, user):
         try:

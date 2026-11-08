@@ -47,15 +47,12 @@ def no_window_flags() -> int:
 
 
 def python_for_runs() -> str:
-    """The interpreter runs and launchers are started with: `sys.executable`, or `python.exe`
-    beside it when this process is `pythonw.exe` (the service started at logon, D16) -- a run's
-    output goes to its log, and pythonw has no standard streams to give it."""
-    exe = Path(sys.executable)
-    if exe.name.lower() == "pythonw.exe":
-        console = exe.with_name("python.exe")
-        if console.is_file():
-            return str(console)
-    return sys.executable
+    """The interpreter runs and launchers are started with: evolvekit's Python
+    (`resources.python_argv`), never `pythonw.exe` (D16) -- a run's output goes to its log, and
+    pythonw has no standard streams to give it. Frozen, the console exe."""
+    from evolvekit import resources
+
+    return resources.python_argv()[0]
 
 
 class DetachError(OSError):
@@ -84,10 +81,12 @@ def spawn_detached(argv: list[str], *, cwd: Path | None = None, env: dict | None
 
     The log is the user's alone (0600 on POSIX): the app's carries its
     address with the key."""
+    from evolvekit.resources import python_code_argv
+
     if log:
         _private_file(Path(log))
     # No console window for the launcher either: the service that starts it has none to share.
-    done = subprocess.run([python_for_runs(), "-c", _LAUNCHER, json.dumps(list(argv)), str(cwd) if cwd else "",
+    done = subprocess.run([*python_code_argv(_LAUNCHER), json.dumps(list(argv)), str(cwd) if cwd else "",
                            str(log) if log else ""],
                           env=env, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S,
                           creationflags=no_window_flags())

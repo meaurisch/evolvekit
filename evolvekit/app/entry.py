@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 from evolvekit import cli
-from evolvekit.resources import APP_EXE, bundle_dir, is_frozen
+from evolvekit.resources import APP_EXE, bundle_dir, exe_name, is_frozen
 
 __all__ = ["WRITE_TARGETS", "main", "writes_into_bundle"]
 
@@ -123,7 +123,7 @@ def writes_into_bundle(argv: list[str]) -> bool:
 
 
 def _is_app_exe() -> bool:
-    return Path(sys.executable).name.lower() == APP_EXE.lower()
+    return exe_name().lower() == APP_EXE.lower()
 
 
 def _frozen_process() -> list[tuple[str, io.TextIOBase]]:
@@ -233,20 +233,29 @@ def _with_absolute_home(argv: list[str]) -> tuple[Path, list[str]]:
     return home, out
 
 
-def _enter_home(argv: list[str], *, windowless: bool) -> list[str] | None:
-    """Frozen, the app form works in its home (D5); None when the home cannot be
-    made or entered, said in a message box when windowless."""
+def _say(text: str, *, windowless: bool) -> None:
+    """An error of the app form: in a message box when windowless, else on stderr."""
+    if windowless:
+        _message_box(text)
+    else:
+        print(text, file=sys.stderr)
+
+
+def _enter_home(argv: list[str], *, windowless: bool) -> list[str] | int:
+    """Frozen, the app form works in its home (D5): `argv` with the home made
+    absolute, or the exit code when the home is inside the app's own folder (2,
+    as the CLI's refusal, D34) or cannot be made or entered (1), said in a
+    message box when windowless."""
     home, argv = _with_absolute_home(argv)
+    if _inside(home, bundle_dir().resolve()):  # type: ignore[union-attr]
+        _say(_REFUSED, windowless=windowless)
+        return 2
     try:
         home.mkdir(parents=True, exist_ok=True)
         os.chdir(home)
     except OSError as exc:
-        text = f"error: the library home {home} cannot be used: {exc.strerror or exc}"
-        if windowless:
-            _message_box(text)
-        else:
-            print(text, file=sys.stderr)
-        return None
+        _say(f"error: the library home {home} cannot be used: {exc.strerror or exc}", windowless=windowless)
+        return 1
     return argv
 
 
@@ -265,8 +274,8 @@ def _dispatch(argv: list[str], *, frozen: bool, windowless: bool) -> int:
         return cli.main(argv)
     if frozen:  # the app works in the home: nothing relative lands in the app's folder
         entered = _enter_home(argv, windowless=windowless)
-        if entered is None:
-            return 1
+        if isinstance(entered, int):
+            return entered
         argv = entered
     return cli.main(["app", *argv])
 
