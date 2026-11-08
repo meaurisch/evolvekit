@@ -117,8 +117,16 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     if candidates:
         # A bake-off: each branch against the starting point, in its own verdict's words.
         out += ["", "## Branches compared", ""]
-        out += _table(["Branch", "Commit", "Verdict"],
-                      [[c.get("ref") or "", str(c.get("commit") or "")[:7], c.get("line") or ""] for c in candidates])
+        # Each held-back case's change for each branch: the paired mean of its runs, as the verdict gives it.
+        cases = list(dict.fromkeys(r.get("name") for c in candidates for r in c.get("by_case") or [] if r.get("name")))
+
+        def per_case(c: dict[str, Any]) -> list[str]:
+            rows = {r.get("name"): r for r in c.get("by_case") or []}
+            return [_change(rows[case].get("change_pct"), direction) if case in rows else "-" for case in cases]
+
+        out += _table(["Branch", "Commit", "Verdict", *cases],
+                      [[c.get("ref") or "", str(c.get("commit") or "")[:7], c.get("line") or "", *per_case(c)]
+                       for c in candidates])
 
     out += ["", "## Held-back cases", ""]
     rows = verdict.get("by_case") or []
@@ -167,6 +175,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         ran = [f"{count} branch{'es were' if count != 1 else ' was'} compared; the more are compared, "
                "the likelier one looks ahead by chance."]
         rounds = tried = None
+    if (verdict.get("spent") or {}).get("line"):
+        ran.append(verdict["spent"]["line"])  # what the AI spent: a fact, in the verdict's own words
     for label, value in (("Rounds", rounds), ("Combinations tried", tried),
                          ("Time", _duration(verdict.get("elapsed_s"))), ("Started", _when(verdict.get("started_at"))),
                          ("Held-back cases", held.get("cases")),

@@ -15,6 +15,7 @@ from pathlib import Path
 from evolvekit import __version__
 from evolvekit.app import AppError
 from evolvekit.harness import HarnessError
+from evolvekit.harness.plan import plan_notes
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
 from evolvekit.env import LoadedEnv, load_env_files
@@ -998,7 +999,10 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
             return 2
         _advance_step(home.study_root(slug), len(STEPS))  # ready: the Set up's last step, Review and start
         print("ready: no problems")
-        print(_plan_line(home.load(slug)[1]))
+        study = home.load(slug)[1]
+        print(_plan_line(study))
+        for note in plan_notes(len(study.test)):  # a note, not a problem: the study runs as it is
+            print(f"note: {note}")
         _say_next(args, f"study start {slug}")
         return 0
     if command == "application":
@@ -1168,6 +1172,8 @@ def _say_verdict(document: dict) -> None:
         print(document["advice"])
     if document.get("how_it_ran"):
         print(document["how_it_ran"])
+    if (document.get("spent") or {}).get("line"):
+        print(document["spent"]["line"])  # "AI: $0.87 of $1.00": a fact, as the report says it
 
 
 OPEN_WAIT_S = 15.0
@@ -1418,6 +1424,10 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         card = (jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status) if args.run  # noqa: SLF001
                 else jobs.state_line(root, study, build_status))
         print(card["line"])
+        if (card.get("pace") or {}).get("line"):
+            print(card["pace"]["line"])  # a live search: how many of the planned rounds its pace buys
+        if card.get("kind") == "running" and (card.get("spent") or {}).get("line"):
+            print(card["spent"]["line"])  # a live search with AI: what it spent so far, of its cap
         verdict = card.get("verdict") or {}
         if verdict.get("line"):
             # A finished run: the verdict's own words under the card's, each branch's for a bake-off.
@@ -1521,10 +1531,10 @@ def cmd_study(args: argparse.Namespace) -> int:
     require_valid(study, harness, root=folder)
     models = _study_models(args, study, keys=command == "run")
     if command == "compile":
-        plan = execute.plan_for(study, harness, execute.measured(folder))
+        plan = execute.plan_for(study, harness, execute.measured(folder), models=models)
         run_dir = write_run(study, harness, plan, folder, args.run_id or datetime.now().strftime("%Y%m%d-%H%M%S"),
                             models=models)
-        print(f"compiled into {run_dir}: {plan.summary(ai=study.budget.ai_enabled)}")
+        print(f"compiled into {run_dir}: {plan.summary()}")
         if not Path(args.directory).is_dir():  # a name in the library home: start it as the skills say
             _say_next(args, f"study start {args.directory}")
             return 0

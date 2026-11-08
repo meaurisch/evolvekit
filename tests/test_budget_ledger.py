@@ -213,3 +213,17 @@ def test_traces_are_written_per_candidate(tmp_path):
     assert payload["response"] == "there"
     assert payload["messages"][0]["content"] == "hi"
     assert payload["meta"]["operator"] == "diff"
+
+
+def test_usage_rows_carry_the_requests_a_plan_counts(tmp_path):
+    """Persona round 2, D3: a provider that counts requests (copilot-cli) records them, so the verdict
+    can say what the run's AI spent; a provider that bills money writes no `requests` at all."""
+    ledger = Ledger(tmp_path / "run")
+    for requests in (2.0, None):
+        ledger.record_usage(
+            Completion(text="x", input_tokens=1, output_tokens=1, model="m", provider="copilot-cli", usd=0.0,
+                       requests=requests),
+            model(), candidate_id="c1", generation=1, operator="diff",
+        )
+    first, second = ledger.usage()
+    assert first["requests"] == 2.0 and "requests" not in second

@@ -48,6 +48,7 @@ from evolvekit.harness.compile import (
     runner_input,
     runner_kpi,
     runner_settings,
+    study_operators,
     write_run,
 )
 from evolvekit.harness.manifest import Harness, load_harness
@@ -227,15 +228,22 @@ def read_preview(root: str | Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def plan_for(study: Study, harness: Harness, measured: dict[str, Any], *, hours: float | None = None) -> Plan:
+def plan_for(study: Study, harness: Harness, measured: dict[str, Any], *, hours: float | None = None,
+             models: dict[str, Any] | None = None, operators: dict[str, float] | None = None,
+             bakeoff: bool = False) -> Plan:
     """The automatic plan, from the preview's measured time; for the study's
-    hours, or for `hours` (a run continued with more time)."""
+    hours, or for `hours` (a run continued with more time). Each round pays
+    the AI's time of the search's operators (`operators`, else
+    `compile.study_operators` with `models`, the ones the run is compiled
+    with); a bake-off searches nothing."""
     overrides = None if study.plan.get("auto", True) else {k: v for k, v in study.plan.items() if k != "auto"}
+    if operators is None:
+        operators = study_operators(study, models, bakeoff=bakeoff)
     return make_plan(
         training=len(study.training), test=len(study.test), runs_per_case=study.limits.runs_per_case,
         time_limit_s=float(study.limits.time_per_case_s), hours=float(study.budget.hours if hours is None else hours),
         overhead_s=float(measured.get("overhead_s") or 0.0), measured_s=float(measured.get("wall_s") or study.limits.time_per_case_s),
-        accepts_time_limit=harness.time_limit.accepts, overrides=overrides,
+        accepts_time_limit=harness.time_limit.accepts, overrides=overrides, operators=operators,
     )
 
 
@@ -348,7 +356,7 @@ def run_study(
         return job.state
     harness = study_harness(root)
     require_valid(study, harness, root=root)
-    plan = plan_for(study, harness, measured(root))
+    plan = plan_for(study, harness, measured(root), models=models)
     write_run(study, harness, plan, root, run_id, models=models)  # compiles into `run_dir`
     job = Job(run_dir, run_id=run_id, study=study.name, plan=plan.to_json())
     try:
@@ -423,7 +431,7 @@ def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
             raise HarnessError(str(exc)) from None
         # No rounds: the compiled config keeps the one generation it must have to load, and no driver runs it
         # (a blocked plan is not blocked here: it is the search's time that does not fit).
-        plan = replace(plan_for(study, harness, measured(root)), generations=1, rounds=0, children=len(refs),
+        plan = replace(plan_for(study, harness, measured(root), bakeoff=True), generations=1, rounds=0, children=len(refs),
                        blocked="", ways_out=())
         write_run(study, harness, plan, root, run_id, bakeoff=True)  # pins the base to a commit
         config = load_config(run_dir / CONFIG)
@@ -639,7 +647,7 @@ def continue_study(
     study = run_study_of(root, run_dir)
     harness = study_harness(root)
     stored = state.get("plan") or _read_plan(run_dir)
-    rounds = max(1, _more_plan(study, harness, stored, hours).rounds)
+    rounds = max(1, _more_plan(study, harness, stored, hours, _run_operators(run_dir)).rounds)
     before = max((int(r.get("generation") or 0) for r in read_jsonl(run_dir / "runs.jsonl")), default=0)
     (run_dir / STOP_REQUEST).unlink(missing_ok=True)
     job = Job.resume(run_dir, {**state, "plan": stored, "run_id": run_id, "study": study.name}, "search")
@@ -676,15 +684,28 @@ def continue_study(
     return job.state
 
 
-def _more_plan(study: Study, harness: Harness, stored: dict[str, Any], hours: float) -> Plan:
+def _more_plan(study: Study, harness: Harness, stored: dict[str, Any], hours: float,
+               operators: dict[str, float] | None = None) -> Plan:
     """The plan `hours` would buy this run: `plan_for` on the run's own
     measured numbers (`run_s` from `plan.json`, which is the time limit plus
     the overhead the preview measured, or the whole measured run when the
-    application does not stop itself), not today's preview."""
+    application does not stop itself), not today's preview, and on the run's
+    own operators (`_run_operators`)."""
     limit = float(study.limits.time_per_case_s)
     run_s = float(stored.get("run_s") or limit)
     numbers = {"overhead_s": max(0.0, run_s - limit) if harness.time_limit.accepts else 0.0, "wall_s": run_s}
-    return plan_for(study, harness, numbers, hours=hours)
+    return plan_for(study, harness, numbers, hours=hours, operators=operators)
+
+
+def _run_operators(run_dir: Path) -> dict[str, float] | None:
+    """The operator shares a run was compiled with (`search.operators` of its
+    `evolvekit.yaml`); None when it cannot be read."""
+    try:
+        loaded = yaml.safe_load((run_dir / CONFIG).read_text(encoding="utf-8"))
+        operators = loaded["search"]["operators"]
+    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
+        return None
+    return {str(k): float(v) for k, v in operators.items()} if isinstance(operators, dict) else None
 
 
 def _read_plan(run_dir: Path) -> dict[str, Any]:

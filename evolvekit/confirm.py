@@ -623,7 +623,7 @@ def identical_runs(runs: Sequence[dict[str, Any]], candidate: str, kpis: Sequenc
     """Whether every planned (instance, seed) pair gave exactly the baseline's
     result: both sides finished it, and every one of `kpis` is equal. Such a
     candidate measured nothing but the baseline again -- its change was never
-    exercised (a fixed setting can override changed code) -- so no interval
+    exercised (a fixed setting, or a code path the cases never reach) -- so no interval
     or chance can say anything about it. `runs` are a comparison's (or its
     `results.json`): configuration, instance, seed, ok, kpis."""
     if not kpis or not instances or not seeds:

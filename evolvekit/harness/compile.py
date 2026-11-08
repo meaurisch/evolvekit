@@ -45,7 +45,8 @@ from evolvekit.harness.plan import Plan
 from evolvekit.harness.study import Study, parse_within, resolve_kpi
 
 __all__ = [
-    "compile_study", "write_run", "runner_input", "runner_kpi", "base_settings", "runner_settings",
+    "compile_study", "write_run", "runner_input", "runner_kpi", "base_settings", "runner_settings", "study_operators",
+    "ai_cap_usd",
     "OPERATORS", "OPERATORS_WITH_AI", "OPERATORS_CODE", "OPERATORS_CODE_AGENT", "OPERATORS_NO_SEARCH",
     "ACT_PROVIDERS", "STUDY_RUN", "CONFIG", "UP",
 ]
@@ -78,6 +79,27 @@ OPERATORS_NO_SEARCH = {"param_lhs": 1.0}
 config still loads without models (decision D13). The operator is never invoked."""
 
 UP = "../.."
+
+
+def ai_cap_usd(study: Study) -> float:
+    """The dollars a study's AI may spend in one run (`budget.max_usd` of the
+    compiled run): `budget.ai.max_usd`, or 1.0 when the study gives none."""
+    cap = float(study.budget.ai_max_usd or 0.0)
+    return cap if cap > 0 else 1.0
+
+
+def study_operators(study: Study, models: dict[str, Any] | None = None, *, bakeoff: bool = False) -> dict[str, float]:
+    """The search's operator shares for `study`: what `compile_study` writes as
+    `search.operators`, and what the plan counts the AI's time by. With AI, a
+    code study whose strong model's provider can act gets the coding agent
+    beside the diff prompt; one without `models` is planned as the diff prompt
+    alone. A bake-off searches nothing."""
+    code = getattr(study, "code", None)
+    ai = study.budget.ai_enabled and not (code is not None and bakeoff)
+    if code is not None:
+        acts = ai and (models or {}).get("strong", {}).get("provider") in ACT_PROVIDERS
+        return dict((OPERATORS_CODE_AGENT if acts else OPERATORS_CODE) if ai else OPERATORS_NO_SEARCH)
+    return dict(OPERATORS_WITH_AI if ai else OPERATORS)
 """From a run's directory to its study's."""
 
 
@@ -310,11 +332,9 @@ def compile_study(
     if code is not None:
         problem = {"description": _description(study, harness) + "\nWhat to improve: " + code.brief,
                    "tree": _tree(study, harness)}
-        acts = ai and (models or {}).get("strong", {}).get("provider") in ACT_PROVIDERS
-        operators = (OPERATORS_CODE_AGENT if acts else OPERATORS_CODE) if ai else OPERATORS_NO_SEARCH
     else:
         problem = {"description": _description(study, harness), "parameters": parameters}
-        operators = OPERATORS_WITH_AI if ai else OPERATORS
+    operators = study_operators(study, models, bakeoff=bakeoff)
     expressions = [{"expr": c.expr, "says": c.says} for c in study.constraints if c.expr]
     if expressions:
         problem["parameter_constraints"] = expressions
@@ -335,7 +355,7 @@ def compile_study(
         },
         "budget": {
             "max_hours": round(plan.max_hours, 4),
-            "max_usd": float(study.budget.ai_max_usd) if ai and study.budget.ai_max_usd > 0 else 1.0,
+            "max_usd": ai_cap_usd(study) if ai else 1.0,
             # Every child that reaches the final stage counts: the default (20
             # a day) would stop a two-hour study in its second round.
             "max_full_evals_per_day": plan.generations * plan.children + 10,

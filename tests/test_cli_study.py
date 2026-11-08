@@ -213,7 +213,8 @@ def test_study_check_echoes_a_manual_plan(tmp_path, capsys):
     capsys.readouterr()
     assert main(["study", "check", "depot-a", "--home", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert out == "ready: no problems\nplan: 2 rounds × 2 combinations, budget 0.05 h\n"
+    # One case held back: the thin final check's note follows the plan (persona round 2, D2).
+    assert out.startswith("ready: no problems\nplan: 2 rounds × 2 combinations, budget 0.05 h\nnote: With 1 held-back")
 
 
 def test_study_steps_advance_from_the_command_line(tmp_path, capsys):
@@ -309,7 +310,10 @@ def test_compile_takes_the_models_of_settings_on_a_study_with_ai(tmp_path, capsy
     Home(tmp_path).save_settings({"provider": "claude-cli", "models": {"search": ""}})
     assert main(["study", "compile", "depot-a", "--run-id", "c1", "--home", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert "(fewer if the AI is slow)" in out, "the plan says it does not count the AI's time"
+    # Persona round 2, D1: the plan counts the AI's time, and says what it assumes for each change:
+    # the coding agent beside the diff prompt in a code study with claude-cli, a reply in a settings study.
+    seconds = 20 if template == "faster" else 10
+    assert f"tried (assumes about {seconds} s for each AI change), " in out
     config = yaml.safe_load((tmp_path / "studies" / "depot-a" / "runs" / "c1" / "evolvekit.yaml").read_text(encoding="utf-8"))
     assert config["models"]["strong"]["provider"] == "claude-cli"
 
@@ -987,3 +991,23 @@ def test_a_run_with_a_job_is_never_gone(tmp_path):
     assert _gone(run_dir, "unknown"), "nothing in it: gone"
     (run_dir / "job.json").write_text("{}", encoding="utf-8")
     assert not _gone(run_dir, "unknown"), "a job.json is a run, whatever its phase reads as"
+
+
+THIN_ONE = "With 1 held-back case a 'use' is unlikely: the worst case stays wide. Hold back more cases for a firmer answer."
+
+
+def test_study_check_and_compile_say_a_thin_final_check_before_the_run(tmp_path, capsys):
+    """Persona round 2, D2: a note, not a problem: the study still checks ready and compiles (exit 0)."""
+    _new(tmp_path, "Depot A", "--template", "tune", "--app", str(SOLVER))
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert main(["study", "check", "depot-a", "--home", str(tmp_path)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "ready: no problems" and f"note: {THIN_ONE}" in out
+    assert main(["study", "compile", "depot-a", "--home", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.rstrip().endswith(THIN_ONE), "the plan line ends with it"
+    _new(tmp_path, "Depot B", "--template", "tune", "--app", str(SOLVER))
+    assert main(["study", "cases", "depot-b", "--add", *map(str, SAMPLES), "--hold-back", "3", "--home", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert main(["study", "check", "depot-b", "--home", str(tmp_path)]) == 0
+    assert "note:" not in capsys.readouterr().out

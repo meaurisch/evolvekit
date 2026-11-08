@@ -72,6 +72,7 @@ evolvekit study application SLUG PATH
 - On a thin plan `study compile` exits 2 with `plan: … fewer than 3 rounds …`; the sentences after it are the ways out — relay them, change nothing in `study.yaml` yourself.
 - Show that line to the engineer as it is.
 - Put the plan line (rounds, combinations, held-back cases, done around) in your message before `study start`, whether or not you must wait for a yes.
+- When `study check` or `study compile` ends with a note on the held-back cases ("With H held-back cases a 'use' is unlikely: …"), say that note with the plan line, word for word, and offer to hold back more cases; it does not stop the start.
 - A plan that fits, for a request complete as first sent, goes on to step 5 without a further question; for a request completed by the engineer's answers, wait for a yes after the plan line.
 - A plan with fewer than 3 rounds is thin: show its three ways out, start nothing, and wait for the engineer's choice; in a one-shot run, say so and end.
 - The ways out are the ones the line names: fewer cases, a shorter time per case, more time in total. Change `study.yaml` only as the engineer chooses, then check and compile again.
@@ -95,6 +96,7 @@ evolvekit study application SLUG PATH
 - Run `evolvekit study report SLUG --markdown > evolvekit-report.md` and name the file. Never paste the report or its numbers.
   In Windows PowerShell, write it with `evolvekit study report SLUG --markdown` piped to `Out-File -Encoding utf8 evolvekit-report.md`, since `>` writes UTF-16 there.
 - Report only the verdict's line and its advice, word for word, and add no sentence that claims more.
+- The line `AI: $… of $…` (or `AI: N requests`) after the advice is a fact, not a claim: you may quote it beside the line and the advice.
 - The gain on the cases it learned from is said only when asked, and named so.
 - An interpretation, if any, is one sentence below the line and the advice, marked as yours, and claims nothing the line does not.
 - A later request to report on the study starts here: `evolvekit study status SLUG` says whether it has ended. When it has not, say where it is and hand over as in step 5.

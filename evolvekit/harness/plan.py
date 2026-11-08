@@ -8,8 +8,14 @@ workers (physical cores but one, at most n * r; `evolvekit/cpus.py`).
     final check      C = ceil(2 * m * k / w) * T          k check seeds, see below
     search           S = 0.95 * H - C
     starting point   B = ceil(n * r / w) * T
-    one round        R = ceil(c * q * r / w) * T_q + ceil(2 * n * r / w) * T    with screening
-                     R = ceil(c * n * r / w) * T                                without
+    one round        R = ceil(c * q * r / w) * T_q + ceil(2 * n * r / w) * T + c * A    with screening
+                     R = ceil(c * n * r / w) * T + c * A                                without
+
+A is the time the AI takes per child, on average: the children of a round are
+written one after another before any of them runs, so a study with AI pays c
+times A every round (`ai_seconds`: AI_CHANGE_S for a reply to the diff or the
+rewrite prompt, AGENT_CHANGE_S for the coding agent, 0 for the operators that
+call no model). A study without AI has A = 0: its plan is the plan it always had.
 
 Screening -- every combination first on q = min(4, ceil(n / 3)) cases at a
 quarter of the time limit, the best two on everything -- needs n >= 6 and a
@@ -33,7 +39,8 @@ from typing import Any, Mapping
 
 from evolvekit.cpus import plan_workers
 
-__all__ = ["Plan", "make_plan", "CHECK_SEEDS", "CHECK_SHARE", "DEFAULT_CHECK_SEEDS"]
+__all__ = ["Plan", "make_plan", "ai_seconds", "plan_notes", "AI_CHANGE_S", "AGENT_CHANGE_S", "CHECK_SEEDS",
+           "CHECK_SHARE", "DEFAULT_CHECK_SEEDS", "THIN_CHECK_CASES"]
 
 CHECK_SEEDS = tuple(range(1001, 1013))
 """The seeds of the final check: never among the search's own (0 .. r-1).
@@ -46,6 +53,48 @@ CHECK_SHARE = 0.15
 
 MIN_ROUNDS, GOOD_ROUNDS = 3, 6
 CHILDREN = range(4, 13)
+
+AI_CHANGE_S = 10.0
+"""The seconds the plan assumes for one AI change written as one reply (`diff`,
+`rewrite`, `crossover`). Persona round 2's run (claude-cli, 2026-11-08): 14
+diff replies took 4.7 to 12.8 s, 8.1 s on average."""
+AGENT_CHANGE_S = 30.0
+"""The seconds the plan assumes for one change by the coding agent
+(`agent_patch`). The same run: 10 calls took 16.5 to 24.7 s, 18.9 s on
+average -- on one file of 124 lines. The agent reads, edits and re-reads
+files over several turns, so its time grows with the source and the brief:
+that run is its floor, and the figure is its slowest call and a fifth more."""
+_MODEL_FREE = frozenset({"param_lhs", "param_local", "param_cross", "param_tpe"})
+"""`config.MODEL_FREE_OPERATORS`, here without importing the config."""
+
+THIN_CHECK_CASES = 3
+"""Below this many held-back cases a "use" is unlikely even for a real gain:
+examples/cli-solver/README.md, step 4 -- with only two held-back cases, "not
+distinguishable" is the likely outcome even for a real gain; "Hold back more
+instances than that for a claim"."""
+
+
+def ai_seconds(operators: Mapping[str, float] | None) -> tuple[float, float]:
+    """`(per child, per AI change)`: the seconds the AI takes for one child of a
+    round on average, over every operator's share, and for one change it
+    writes. (0, 0) for a search that calls no model."""
+    shares = {name: float(share) for name, share in (operators or {}).items() if float(share) > 0}
+    total = sum(shares.values())
+    ai = {name: share for name, share in shares.items() if name not in _MODEL_FREE}
+    if not total or not ai:
+        return 0.0, 0.0
+    seconds = sum(share * (AGENT_CHANGE_S if name == "agent_patch" else AI_CHANGE_S) for name, share in ai.items())
+    return seconds / total, seconds / sum(ai.values())
+
+
+def plan_notes(test_cases: int) -> list[str]:
+    """What a study should hear before it runs, besides the plan: with fewer
+    than THIN_CHECK_CASES held-back cases (but some), that a "use" is unlikely.
+    A note, not a warning: the study may run as it is."""
+    if not 0 < test_cases < THIN_CHECK_CASES:
+        return []
+    return [f"With {test_cases} held-back case{'s' if test_cases != 1 else ''} a 'use' is unlikely: the worst case "
+            "stays wide. Hold back more cases for a firmer answer."]
 
 
 @dataclass(frozen=True)
@@ -73,6 +122,15 @@ class Plan:
     ways_out: tuple[str, ...] = ()
     adjusted: tuple[str, ...] = ()
     """The numbers an expert set by hand under "Adjust"."""
+    ai_change_s: float = 0.0
+    """The seconds the plan assumes for each AI change (`ai_seconds`); 0 without AI."""
+    ai_child_s: float = 0.0
+    """The AI's seconds per child of a round, on average: what each round pays for it."""
+
+    @property
+    def notes(self) -> list[str]:
+        """`plan_notes` for this plan's held-back cases."""
+        return plan_notes(self.test_cases)
 
     @property
     def max_hours(self) -> float:
@@ -92,10 +150,10 @@ class Plan:
             round_s=1.0, check_seeds=3, hours=1.0,
         )
 
-    def summary(self, now: datetime | None = None, *, ai: bool = False) -> str:
-        """The plan in words, for the study's Limits step. With `ai` (the study
-        lets a model take part) the rounds may be fewer: the plan does not
-        count the time the AI's replies take, so the line says so."""
+    def summary(self, now: datetime | None = None) -> str:
+        """The plan in words, for the study's Limits step. A study with AI says
+        the time it assumes for each AI change, and a study with too few
+        held-back cases for a firm answer ends with that note (`notes`)."""
         if self.blocked:
             return self.blocked
         moment = (now or datetime.now()) + timedelta(hours=self.hours)
@@ -104,10 +162,10 @@ class Plan:
             f"with {self.check_seeds} run{'s' if self.check_seeds != 1 else ''} each (≈ {_minutes(self.final_check_s)})"
             if self.test_cases else "no final check (no case is held back)"
         )
-        return (
+        assumes = f" (assumes about {self.ai_change_s:g} s for each AI change)" if self.ai_change_s else ""
+        return " ".join([
             f"about {self.rounds} round{'s' if self.rounds != 1 else ''}, about {self.combinations} combinations "
-            f"tried{' (fewer if the AI is slow)' if ai else ''}, {check}; done around {moment:%H:%M}."
-        )
+            f"tried{assumes}, {check}; done around {moment:%H:%M}.", *self.notes])
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -118,6 +176,7 @@ class Plan:
             "final_check_s": self.final_check_s, "search_s": self.search_s, "max_hours": self.max_hours,
             "check_seeds": self.check_seeds, "hours": self.hours, "test_cases": self.test_cases,
             "blocked": self.blocked, "ways_out": list(self.ways_out), "adjusted": list(self.adjusted),
+            "ai_change_s": self.ai_change_s, "notes": self.notes,
         }
 
 
@@ -141,6 +200,8 @@ class _Shape:
     hours: float
     workers: int
     pin: tuple[int, ...] = field(default_factory=tuple)
+    ai_s: float = 0.0
+    """The AI's seconds per child (`ai_seconds`)."""
 
     def run_s(self, time_limit: float | None = None) -> float:
         limit = self.time_limit_s if time_limit is None else time_limit
@@ -163,6 +224,7 @@ def _layout(shape: _Shape, children: int, check_seeds: int, screening: bool) -> 
         round_s = math.ceil(children * q * r / w) * screen_run + math.ceil(2 * n * r / w) * run
     else:
         round_s = math.ceil(children * n * r / w) * run
+    round_s += children * shape.ai_s  # the children are written one after another, before any runs
     return {"final": final, "search": search, "seed": seed, "round": round_s, "q": q, "screen_run": screen_run,
             "rounds": (search - seed) / round_s if round_s > 0 else 0.0}
 
@@ -196,11 +258,13 @@ def make_plan(
     workers: int | None = None,
     pin_cpus: tuple[int, ...] | list[int] | None = None,
     overrides: Mapping[str, Any] | None = None,
+    operators: Mapping[str, float] | None = None,
 ) -> Plan:
     """The plan for a study (see the module docstring). `overhead_s` is what a
     run takes beyond its time limit (loading the case, starting the
     interpreter), from the preview; `measured_s` is the preview's whole run,
-    for an application that does not stop itself."""
+    for an application that does not stop itself; `operators` the search's
+    operator shares, whose AI time each round pays (`ai_seconds`)."""
     n, m, r = max(1, training), max(0, test), max(1, runs_per_case)
     if workers is None:
         workers, pin = plan_workers(n * r)
@@ -211,7 +275,7 @@ def make_plan(
         n=n, m=m, r=r, time_limit_s=float(time_limit_s), overhead_s=max(0.0, float(overhead_s)),
         accepts_time_limit=accepts_time_limit,
         measured_s=float(measured_s if measured_s is not None else time_limit_s),
-        hours=float(hours), workers=workers, pin=tuple(pin[:workers]),
+        hours=float(hours), workers=workers, pin=tuple(pin[:workers]), ai_s=ai_seconds(operators)[0],
     )
     overrides = dict(overrides or {})
     screening = n >= 6 and accepts_time_limit and time_limit_s >= 10
@@ -263,7 +327,7 @@ def make_plan(
         run_s=shape.run_s(), screen_run_s=layout["screen_run"], final_check_s=layout["final"],
         search_s=max(0.0, layout["search"]), seed_round_s=layout["seed"], round_s=layout["round"],
         check_seeds=check_seeds, hours=shape.hours, test_cases=m, blocked=blocked, ways_out=ways_out,
-        adjusted=tuple(adjusted),
+        adjusted=tuple(adjusted), ai_change_s=ai_seconds(operators)[1], ai_child_s=shape.ai_s,
     )
     if "workers" in overrides:
         workers = max(1, min(int(overrides["workers"]), n * r))

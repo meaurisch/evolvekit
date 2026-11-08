@@ -52,7 +52,7 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study cases SLUG --add FILE... [--hold-back N] [--json]` | add cases and hold some back for the final check | |
 | `evolvekit study check SLUG` | name what is still missing before the study can run | 0 ready, 2 problems |
 | `evolvekit study preview SLUG` | solve the smallest training case at the starting values | |
-| `evolvekit study compile SLUG` | prints the plan: rounds, combinations, the final check, "done around HH:MM", or the thin plan with its three ways out | 0 a plan; 2 a thin plan or a problem |
+| `evolvekit study compile SLUG` | prints the plan: rounds, combinations (with AI help, the seconds it assumes for each AI change), the final check, "done around HH:MM" and a note when too few cases are held back for a firm answer, or the thin plan with its three ways out | 0 a plan; 2 a thin plan or a problem |
 | `evolvekit study run SLUG` | compile, search and run the final check in the foreground | |
 | `evolvekit study start SLUG [--wait [--timeout S]] [--json]` | start the study as the app's Start does (queued while another study runs) | |
 | `evolvekit study bakeoff SLUG --ref REF [--ref REF] [--wait [--timeout S]] [--json]` | a code study: check given branches against the starting point on the held-back cases, with no search; the verdict's `candidates` hold each branch's own line; needs no AI help | 0 started or queued (with `--wait`, as `study wait`); 2 a settings study, a study not ready, no held-back case, no such ref, a branch outside the open files or one that does not apply on the starting commit |
@@ -92,12 +92,13 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `rule` | the fixed rule in words |
 | `by_case` | one row per held-back case, with `name`, `start`, `best`, `change_pct`, `outcome` |
 | `changed` | the settings and data changes of the best combination: from, to |
-| `candidates` | only on a `study bakeoff` run: one entry per branch in the order given (`ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, or `same: true` and no figures when every run of the branch gave exactly today's result); the run's own `line` names the chosen branch as one of N, or says none is shown to beat the starting point, or -- when no run of any branch differed -- says so; a branch at the starting commit says it is today's code |
+| `candidates` | only on a `study bakeoff` run: one entry per branch in the order given (`ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, or `same: true` and no figures when every run of the branch gave exactly today's result; `by_case`, the branch's held-back rows as in `by_case` above); the run's own `line` names the chosen branch as one of N, or says none is shown to beat the starting point, or -- when no run of any branch differed -- says so; a branch at the starting commit says it is today's code |
 | `files` | the exports that exist in `runs/<id>/downloads/` |
 | `started_at`, `finished_at`, `elapsed_s` | when and how long |
 | `rounds`, `combinations` | how much the search tried |
 | `planned` | `rounds`, `combinations`: what the plan said the search would try (not on a bake-off) |
 | `how_it_ran` | only when the search stopped on time with fewer rounds than planned: the sentence that says how much of the plan ran, and why |
+| `spent` | only on a run with AI help: what its AI spent, `usd`, `cap_usd` and `line` ("AI: $0.87 of $1.00"), or `requests` and `line` for a provider that counts requests |
 
 The `decision` values:
 
@@ -113,7 +114,7 @@ The `decision` values:
 | `skipped` | the final check was skipped (such as no held-back cases); see `reason` |
 
 `line` and `advice` are the only sentences an agent repeats. `how_it_ran`, when there is one, claims nothing:
-pass it on when the plan's rounds did not all run.
+pass it on when the plan's rounds did not all run. `spent`'s `line` claims nothing either: it may be quoted beside them.
 
 ## Rules
 

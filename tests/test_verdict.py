@@ -228,7 +228,7 @@ def test_chance_words_table(p, words):
 
 
 SAME_SETTINGS = ("No difference in any run: every run of this change gave exactly today's result, so the study "
-                 "may not exercise it (the setting may not reach the program).")
+                 "may not exercise it: the setting may not reach the program.")
 
 
 def _same_run(tmp_path: Path, *, flagged: bool, apart: bool = False) -> tuple[Path, str]:
@@ -293,9 +293,9 @@ def test_the_no_difference_line_names_what_may_not_reach_the_program():
 
     assert no_difference_line("code change") == (
         "No difference in any run: every run of this change gave exactly today's result, so the study may not "
-        "exercise it (a fixed setting can override changed code).")
+        "exercise it: a fixed setting, or a code path these cases never reach, can leave a change without effect."), "persona round 2, D7: a code path these cases never reach, not only a fixed setting"
     assert no_difference_line("settings") == SAME_SETTINGS
-    assert no_difference_line("data changes").endswith("(the data change may not reach the program).")
+    assert no_difference_line("data changes").endswith(" may not exercise it: the data change may not reach the program.")
 
 
 @pytest.mark.parametrize("low,high,words", [
@@ -355,7 +355,7 @@ def test_a_search_that_ran_short_of_its_plan_says_so(tmp_path, capsys):
     assert said.rstrip(".") in how and "- Rounds:" not in how and "- Combinations tried:" not in how
     capsys.readouterr()
     _say_verdict(v)
-    assert capsys.readouterr().out.splitlines()[-1] == said
+    assert capsys.readouterr().out.splitlines()[-2:] == [said, "AI: $0.00 of $1.00"], "then what the AI spent (D3)"
     assert build_verdict(*_short_run(tmp_path / "b", ai=False, stop=TIME_LIMIT))["how_it_ran"].endswith(
         "the time ran out; the rounds took longer than the plan assumed.")
 
@@ -449,3 +449,60 @@ def test_final_check_writes_exports(tmp_path):
     assert "--neighbours" in (downloads / "settings_flags.txt").read_text(encoding="utf-8")
     v = build_verdict(folder, "r1")
     assert {"runs/r1/downloads/settings_json.json", "runs/r1/downloads/settings_flags.txt"} <= set(v["files"])
+
+
+SPENT = [0.1308835, 0.084216, 0.0062953, 0.0539862, 0.0552962, 0.0546002, 0.0148953, 0.0072853, 0.0530502, 0.0568059,
+         0.0107453, 0.0534011, 0.0297458, 0.051386, 0.00534, 0.0380658, 0.0511728, 0.00543, 0.0098885, 0.062312,
+         0.0151285, 0.00568, 0.0130085, 0.00535]
+"""Persona round 2's usage.jsonl: 24 AI changes, $0.87 in all of its $1 cap."""
+
+
+def _usage(run_dir: Path, rows: list[dict]) -> None:
+    (run_dir / "usage.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_the_ai_spend_is_a_fact_of_the_verdict_the_report_and_the_status(tmp_path, capsys):
+    """Persona round 2, D3: "$0.87 of my $1, summed from usage.jsonl, is not shown anywhere". It is a fact,
+    not a claim: the verdict document's `spent`, the report's How it ran, `study verdict`, `study status`."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import main
+
+    root, run = _short_run(tmp_path, ai=True, stop="no improvement for 3 rounds", generations=11)
+    run_dir = root / "runs" / run
+    _usage(run_dir, [{"operator": "diff", "provider": "claude-cli", "usd": usd} for usd in SPENT])
+    v = build_verdict(root, run)
+    assert v["spent"] == {"usd": pytest.approx(sum(SPENT)), "cap_usd": 1.0, "line": "AI: $0.87 of $1.00"}
+    assert "- AI: $0.87 of $1.00" in render_report(v).split("## How it ran", 1)[1]
+    assert jobs.results(root, run, document_of)["spent"] == v["spent"], "the page's Details read the same"
+    home = str(root.parents[1])
+    for argv in (["study", "verdict", root.name], ["study", "status", root.name]):
+        capsys.readouterr()
+        assert main([*argv, "--home", home]) == 0
+        assert capsys.readouterr().out.splitlines()[-1] == "AI: $0.87 of $1.00"
+    # A run that counts requests, not dollars: how many; a run without AI says nothing of it.
+    _usage(run_dir, [{"operator": "diff", "provider": "copilot-cli", "usd": 0.0, "requests": 1.0}] * 3
+           + [{"operator": "diff", "provider": "copilot-cli", "usd": 0.0}])
+    assert build_verdict(root, run)["spent"] == {"requests": 4.0, "line": "AI: 4 requests"}
+    assert "spent" not in build_verdict(*_short_run(tmp_path / "b", ai=False, stop="no improvement for 3 rounds"))
+
+
+def test_a_live_search_carries_its_ai_spend(tmp_path, monkeypatch):
+    """D3: the status document says the spend while the run searches, for the app's strip."""
+    import os
+
+    import yaml
+
+    root, run = _short_run(tmp_path, ai=True, stop="")
+    run_dir = root / "runs" / run
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job.update({"phase": "search", "pid": os.getpid(), "started_at": jobs._now().isoformat()})  # noqa: SLF001
+    job.pop("finished_at", None)
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
+    _usage(run_dir, [{"operator": "agent_patch", "provider": "claude-cli", "usd": 0.42}])
+    assert jobs.status(root, run, document_of)["spent"] == {"usd": 0.42, "cap_usd": 1.0, "line": "AI: $0.42 of $1.00"}
+    copy = run_dir / "study.yaml"
+    data = yaml.safe_load(copy.read_text(encoding="utf-8"))
+    data["budget"]["ai"] = {"enabled": False}
+    copy.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    assert jobs.status(root, run, document_of)["spent"] is None

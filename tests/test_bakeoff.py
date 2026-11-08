@@ -92,7 +92,9 @@ def test_bakeoff_two_refs_on_demo_tour(tmp_path):
         assert verdict["decision"] == "use" and verdict["line"] == f"Of 2 branches, {chosen}: {own['line'][0].lower()}{own['line'][1:]}"
     else:
         assert verdict["decision"] == "keep"
-        assert verdict["line"] == "None of the 2 branches is shown to beat the starting point."
+        # C1: when no run of either branch differed from today's, the headline says that instead.
+        assert verdict["line"] == (NO_DIFFERENCE_N if all(c.get("same") for c in verdict["candidates"])
+                                   else "None of the 2 branches is shown to beat the starting point.")
     assert verdict["advice"].startswith(("Use", "Keep today's code"))
     report = render_report(verdict)
     assert "2 branches were compared; the more are compared, the likelier one looks ahead by chance." in report
@@ -135,7 +137,7 @@ def test_a_branch_that_changes_only_a_default_is_measured_with_it(tmp_path, caps
     same = next(c for c in verdict["candidates"] if c["ref"] == "same")
     assert same["decision"] == "keep" and same["same"] is True and "chance" not in same and "mean_pct" not in same
     assert same["line"] == ("No difference in any run: every run of this change gave exactly today's result, so the "
-                            "study may not exercise it (a fixed setting can override changed code).")
+                            "study may not exercise it: a fixed setting, or a code path these cases never reach, can leave a change without effect.")
     nearest = next(c for c in verdict["candidates"] if c["ref"] == "nearest")
     assert not nearest.get("same") and nearest["line"] != same["line"]
     assert same["line"] in render_report(verdict)
@@ -420,7 +422,7 @@ def _all_identical(run_dir: Path) -> None:
 
 
 NO_DIFFERENCE_N = ("No difference in any run: every run of each of the 2 branches gave exactly today's result, so the "
-                   "study may not exercise their changes (a fixed setting can override changed code).")
+                   "study may not exercise their changes: a fixed setting, or a code path these cases never reach, can leave a change without effect.")
 
 
 def test_a_bakeoff_where_no_run_differed_says_so_in_its_headline(tmp_path, monkeypatch):
@@ -519,3 +521,34 @@ def test_a_running_bakeoff_is_comparing_branches(tmp_path):
     del job["bakeoff"]
     (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
     assert jobs.run_line(root, None, run_dir)["line"].startswith("running · final check")
+
+
+def test_each_branch_carries_its_own_figures_case_by_case(tmp_path):
+    """Persona round 2, D6: neither the bake-off report nor the Compare page gave each branch's per-case
+    figures (b-60, e-150), only its line. Each `candidates[i]` has `by_case`, as the search verdict's:
+    each held-back case's paired mean change in %, and the report's table shows them."""
+    from test_app_results import document_of
+
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    finished_run(run_dir, decision="use")
+    _as_bakeoff(run_dir)
+    folder = run_dir / "confirm" / "final"
+    rows = json.loads((folder / "results.json").read_text(encoding="utf-8"))
+    held = rows[0]["instance"]
+    rows += [{**r, "configuration": "c2", "kpis": {**r["kpis"], "tour_length": 50.25}}
+             for r in rows if r["configuration"] == "baseline"]
+    (folder / "results.json").write_text(json.dumps(rows), encoding="utf-8")
+    comparison = json.loads((folder / "comparison.json").read_text(encoding="utf-8"))
+    comparison["per_candidate"]["c1"]["per_instance"] = [{"instance": held, "improvement_pct": 4.2}]
+    comparison["per_candidate"]["c2"]["per_instance"] = [{"instance": held, "improvement_pct": -0.5}]
+    (folder / "comparison.json").write_text(json.dumps(comparison), encoding="utf-8")
+    verdict = build_verdict(root, RUN)
+    same, restart = verdict["candidates"]
+    assert restart["by_case"] == [{"name": held, "start": 50.0, "best": pytest.approx(47.9), "change_pct": 4.2,
+                                   "outcome": "better"}]
+    assert same["by_case"] == [{"name": held, "start": 50.0, "best": 50.25, "change_pct": -0.5, "outcome": "worse"}]
+    branches = render_report(verdict).split("## Branches compared", 1)[1].split("##", 1)[0]
+    assert f"| Branch | Commit | Verdict | {held} |" in branches
+    assert "| 4.2 % lower |" in branches and "| 0.5 % higher |" in branches
+    assert jobs.results(root, RUN, document_of)["candidates"] == verdict["candidates"], "the Compare page reads the same"

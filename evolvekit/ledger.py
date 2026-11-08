@@ -121,7 +121,11 @@ class Ledger:
             priced_from=str((completion.raw or {}).get("priced_from")
                             or ("provider" if completion.usd is not None else "table")),
         )
-        self._append(self.usage_path, asdict(usage))
+        record = asdict(usage)
+        if completion.requests is not None:
+            # Requests counted against a plan rather than dollars (copilot-cli): what the run spent.
+            record["requests"] = float(completion.requests)
+        self._append(self.usage_path, record)
         return usage
 
     def record_embedding(

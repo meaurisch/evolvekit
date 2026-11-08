@@ -28,7 +28,7 @@ GROUPS = ("study", "harness", "skill")
 VERDICT_KEYS = ("schema", "study", "run", "phase", "decision", "reason", "line", "advice", "measure", "held_back",
                 "mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words", "levels", "learned_from", "rule",
                 "by_case", "changed", "files", "started_at", "finished_at", "elapsed_s", "rounds", "combinations",
-                "planned", "how_it_ran")
+                "planned", "how_it_ran", "spent")
 REPORTING_RULE = "Report only the verdict's line and its advice, word for word, and add no sentence that claims more."
 PRE_VERDICT_RULE = 'Until the verdict exists, write no "better", "improved", "faster" or "cheaper", and no percentage.'
 SDK_RULE = "Never edit `evk_harness.py`"
@@ -567,3 +567,21 @@ def test_study_skill_says_the_direction_without_better():
     assert DIRECTION_WORDS in _section(body, "2. Interview")
     rest = body.replace(DIRECTION_WORDS, "").replace(PRE_VERDICT_RULE, "")
     assert not re.search(r"\bbetter\b", rest, re.I), "no 'better' outside the pinned rule sentences"
+
+
+THIN_CHECK_NOTE = ("When `study check` or `study compile` ends with a note on the held-back cases (\"With H held-back "
+                   "cases a 'use' is unlikely: …\"), say that note with the plan line, word for word, and offer to hold "
+                   "back more cases; it does not stop the start.")
+SPENT_FACT = ("The line `AI: $… of $…` (or `AI: N requests`) after the advice is a fact, not a claim: you may quote it "
+              "beside the line and the advice.")
+
+
+def test_the_study_skill_says_the_thin_check_note_with_the_plan_and_may_quote_the_spend():
+    """Persona round 2, D2 and D3: the plan step says the note before the start; the report step may
+    quote what the AI spent, which claims nothing. The reference names `spent` and each branch's `by_case`."""
+    body = _body(STUDY)
+    assert THIN_CHECK_NOTE in _section(body, "4. Show the plan")
+    assert SPENT_FACT in _section(body, "6. Report the verdict")
+    section = _section(_text(REFERENCE), "The verdict document")
+    candidates = next(line for line in section.splitlines() if line.startswith("| `candidates`"))
+    assert "`by_case`" in candidates

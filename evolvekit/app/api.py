@@ -19,6 +19,7 @@ from evolvekit.app.server import FileResponse, Request, route
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import plan_for, read_preview
 from evolvekit.harness.manifest import Harness
+from evolvekit.harness.plan import plan_notes
 from evolvekit.harness.study import SettingChoice, save_study
 
 __all__ = ["ROUTES", "describe_harness"]
@@ -192,6 +193,7 @@ def _document(req: Request, slug: str) -> dict[str, Any]:
     document["test_run"] = work.test_run_state(root, req.server)
     document["runs"] = jobs.runs(root)
     document["state"] = jobs.state_line(root, study, req.server.status_document)
+    document["notes"] = plan_notes(len(study.test))  # too few held-back cases for a firm answer, before any run
     return document
 
 
@@ -372,8 +374,9 @@ def plan(req: Request) -> dict[str, Any]:
     measured = read_preview(root)
     estimated = not (measured and measured.get("ok"))
     timing = measured if not estimated else {"overhead_s": 0.0, "wall_s": study.limits.time_per_case_s}
+    models = jobs.ai_models(req.home) if study.budget.ai_enabled else None  # what `study start` compiles with
     try:
-        chosen = plan_for(study, pinned, timing)  # type: ignore[arg-type]
+        chosen = plan_for(study, pinned, timing, models=models)  # type: ignore[arg-type]
     except (HarnessError, ValueError, ZeroDivisionError) as exc:
         raise AppError(f"no plan yet: {exc}") from None
     tunables = len(study.tunables())
@@ -390,11 +393,11 @@ def plan(req: Request) -> dict[str, Any]:
                 "detail": (", ".join(pinned.settings[n].label for n in ranked[:keep] if n in pinned.settings)
                            + f": about {chosen.combinations // keep} tries each. The others keep their starting values."),
             })
-        hours = _hours_for(study, pinned, timing, GOOD * tunables)
+        hours = _hours_for(study, pinned, timing, GOOD * tunables, models)
         if hours is not None and hours > study.budget.hours:
             fixes.append({"kind": "time", "hours": hours, "label": f"Allow {_hours_words(hours)} in total",
                           "detail": f"About {GOOD * tunables} combinations for all {tunables}."})
-    return {"summary": chosen.summary(ai=study.budget.ai_enabled), "estimated": estimated, "warning": warning, "fixes": fixes,
+    return {"summary": chosen.summary(), "estimated": estimated, "warning": warning, "fixes": fixes,
             "tunables": tunables, **chosen.to_json()}
 
 
@@ -402,7 +405,8 @@ THIN, GOOD = 6, 10
 """Combinations per thing tuned: below THIN the plan is thin; GOOD is what a fix aims for."""
 
 
-def _hours_for(study: Any, harness: Any, timing: dict[str, Any], combinations: int) -> float | None:
+def _hours_for(study: Any, harness: Any, timing: dict[str, Any], combinations: int,
+               models: dict[str, Any] | None = None) -> float | None:
     """The least total time, in quarter hours up to two days, whose plan tries `combinations`."""
     import dataclasses
 
@@ -410,7 +414,7 @@ def _hours_for(study: Any, harness: Any, timing: dict[str, Any], combinations: i
         hours = quarters / 4
         trial = dataclasses.replace(study, budget=dataclasses.replace(study.budget, hours=hours))
         try:
-            if plan_for(trial, harness, timing).combinations >= combinations:
+            if plan_for(trial, harness, timing, models=models).combinations >= combinations:
                 return hours
         except (HarnessError, ValueError, ZeroDivisionError):
             return None
@@ -611,11 +615,19 @@ def status(req: Request) -> dict[str, Any]:
     return jobs.status(root, _run(req, root), req.server.status_document)
 
 
+RUNS_POLL_LIVE_S, RUNS_POLL_IDLE_S = 5, 10
+"""How often the open Study page asks for the runs: while a run is live, and while none is."""
+
+
 def runs_of(req: Request) -> dict[str, Any]:
     """Every run of the study as it is now (`jobs.runs`, no status document read) and the newest:
-    what the open Study page asks every few seconds, so it notices a run that started or ended."""
+    what the open Study page asks every few seconds, so it notices a run that started or ended.
+    `poll_s` is when to ask again: RUNS_POLL_LIVE_S while a run is queued or live, else RUNS_POLL_IDLE_S.
+    A finished run's line is kept between calls (`jobs.run_line`), so asking costs little."""
     root, _, _ = req.home.load(req.params["slug"])
-    return {"runs": jobs.runs(root), "latest": jobs.latest_run(root)}
+    listed = jobs.runs(root)
+    live = any(r.get("phase") in (*jobs.ACTIVE, "queued") for r in listed)
+    return {"runs": listed, "latest": jobs.latest_run(root), "poll_s": RUNS_POLL_LIVE_S if live else RUNS_POLL_IDLE_S}
 
 
 def tries_of(req: Request) -> dict[str, Any]:

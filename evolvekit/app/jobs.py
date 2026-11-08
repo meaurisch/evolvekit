@@ -49,7 +49,7 @@ from evolvekit.harness.execute import (
     run_study_of,
     write_exports,
 )
-from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
+from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS, plan_notes
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
 from evolvekit.ledger import _atomic_write, read_jsonl
@@ -865,6 +865,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
               if s.get("elapsed_s") is not None]
 
     stage = health.get("stage") or {}
+    written = writing(run_dir, job) if not stage else None
     # The round being run is the one after the last finished; round 0 is the
     # starting point alone.
     current = done_rounds + 1 if isinstance(done_rounds, int) else (0 if stage else None)
@@ -883,6 +884,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         count = stage.get("candidates") or 0
         now_line = (f"Measuring the starting point {on}: {runs}." if current == 0
                     else f"Round {current}: {count} combination{'s' if count != 1 else ''} {on}, {runs}.")
+    elif written:
+        # The round's changes are being written, one after another, before any of them runs.
+        now_line = f"Writing changes: {written['done']} of {written['planned']}."
     elif job.get("phase") in ("starting", "search"):
         now_line = "Getting ready: preparing the runs."
     else:
@@ -921,7 +925,15 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
                  "levels": levels.get("levels") if levels.get("available") else None,
                  "levels_verdict": levels.get("verdict") if levels.get("available") else None},
         "series": series,
+        # What the run's AI spent so far, of its cap (`verdict.ai_spent`); None for a run without AI.
+        "spent": verdict_doc.ai_spent(run_dir, study, job),
+        # What to hear before and while the study runs, besides the plan: too few held-back cases for a firm answer.
+        "notes": plan_notes(len(study.test)),
+        # After the first round: how many of the planned rounds the pace so far buys, when fewer (`pace`).
+        "pace": pace(progress.get("series") or [], plan, job),
         "now": now_line,
+        # While a round's changes are being written: how many of how many (`writing`); else None.
+        "writing": written,
         "failures": _failures_in_words((health.get("evaluations") or {}).get("failure_reasons") or [],
                                        float((_read(run_dir / STUDY_RUN) or {}).get("time_limit_s") or study.limits.time_per_case_s)),
         "gated": gated,
@@ -1257,7 +1269,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     # The headline, the advice, the decision and its numbers are the verdict
     # document's, so the page and `build_verdict` cannot say two things.
     verdict = verdict_doc._document(root, run_dir, study, harness, job, final, comparison, by_case["held"], changed,
-                                    facts, learned_pct, baseline=baseline)
+                                    facts, learned_pct, baseline=baseline, check_runs=check_runs)
     final["line"], final["advice"] = verdict["line"], verdict["advice"]
     # The held-back table's change is the document's: the paired mean over the final check's runs.
     paired = {row["name"]: row["change_pct"] for row in verdict["by_case"]}
@@ -1284,7 +1296,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "cases": {"training": list(study.training), "test": list(study.test)},
         "can_continue": can_continue(run_dir, job),
     }
-    for key in ("how_it_ran", "planned"):  # how much of the plan ran, in the verdict's own words
+    for key in ("how_it_ran", "planned", "spent"):  # how much of the plan ran and what the AI spent, as the verdict says
         if verdict.get(key):
             data[key] = verdict[key]
     if "candidates" in verdict:  # a bake-off: every branch with its own decision and line
@@ -1525,6 +1537,85 @@ def _rounds_by_hand(plan: dict[str, Any], study: Study | None) -> bool:
     return not chosen.get("auto", True) and bool({"rounds", "generations"} & set(chosen))
 
 
+WRITING_TAIL = 256 * 1024
+"""How much of the end of `events.jsonl` `writing` reads: a round's writing phase is a
+`generation_started` and one `candidate_bred` per child, a few hundred bytes each."""
+
+
+def writing(run_dir: Path, job: dict[str, Any]) -> dict[str, int] | None:
+    """While a round's changes are being written, before any of them runs:
+    `{"done", "planned"}`, the round's `candidate_bred` events since its
+    `generation_started` (each child written, or given up on) of its
+    `children_planned`. None outside a search, for the starting point's round,
+    once the round's runs started (`stage_started`), or when the round began
+    before the end of the log `WRITING_TAIL` reads. Read from the end of the
+    run's own event log, which every child's writing appends to."""
+    if job.get("phase") != "search":
+        return None
+    path = run_dir / "events.jsonl"
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - WRITING_TAIL))
+            tail = handle.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    done = 0
+    for line in reversed(tail if size <= WRITING_TAIL else tail[1:]):  # the first line may be cut
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        kind = event.get("type") if isinstance(event, dict) else None
+        if kind in ("stage_started", "generation_finished", "run_finished"):
+            return None
+        if kind == "candidate_bred":
+            done += 1
+        elif kind == "generation_started":
+            planned = event.get("children_planned")
+            if not isinstance(event.get("generation"), int) or event["generation"] < 1 or not isinstance(planned, int):
+                return None
+            return {"done": min(done, planned), "planned": planned}
+    return None
+
+
+def pace(series: list[dict[str, Any]], plan: dict[str, Any], job: dict[str, Any]) -> dict[str, Any] | None:
+    """After the first round of a live search: how many of the planned rounds
+    the time will buy at the pace so far, `{"rounds", "planned", "line"}` --
+    "At this pace about 2 of the 11 planned rounds will run." -- when that is
+    fewer than planned; else None. `series` is the status document's
+    `progress.series` (each round's `generation` and the active seconds when it
+    ended, `elapsed_s`). The search stops on time as `RunStop.before_generation`
+    does: no round is started that the longest of the last two would not let
+    finish within `plan.max_hours`. None for a run whose rounds were set by hand
+    (they, not the hours, stop it), continued or resumed (its plan is not this
+    session's), or not searching. It claims nothing about any result."""
+    if job.get("phase") != "search" or _continued(job) or job.get("resumed_at") or job.get("bakeoff"):
+        return None
+    if {"rounds", "generations"} & set(plan.get("adjusted") or ()):
+        return None
+    planned = plan.get("rounds")
+    limit = plan.get("max_hours")
+    limit_s = float(limit) * 3600.0 if isinstance(limit, (int, float)) else float(plan.get("search_s") or 0.0)
+    if not isinstance(planned, int) or planned <= 0 or limit_s <= 0:
+        return None
+    ends = {int(s["generation"]): float(s["elapsed_s"]) for s in series
+            if isinstance(s.get("generation"), int) and isinstance(s.get("elapsed_s"), (int, float))}
+    done = sorted(g for g in ends if g >= 1 and g - 1 in ends)
+    if not done:
+        return None
+    last = done[-1]
+    longest = max(ends[g] - ends[g - 1] for g in done[-2:])
+    if longest <= 0:
+        return None
+    rounds = last + max(0, math.floor((limit_s - ends[last]) / longest))
+    if rounds >= planned:
+        return None
+    return {"rounds": rounds, "planned": planned,
+            "line": f"At this pace about {rounds} of the {planned} planned round{'s' if planned != 1 else ''} will run."}
+
+
 def _best_says(pct: float | None, goal: dict[str, Any]) -> str | None:
     """The best so far in `study status`'s words, "6.1 % lower tour length"; None until it beats the
     starting point. Not "better": nothing claims that before the final check does."""
@@ -1533,7 +1624,53 @@ def _best_says(pct: float | None, goal: dict[str, Any]) -> str | None:
     return f"{_pct(pct)} {_better_word(goal.get('direction') or 'lower')} {goal.get('says') or 'the goal'}"
 
 
+_FINISHED_CARDS: dict[tuple[Any, ...], dict[str, Any]] = {}
+"""Finished runs' cards without a status document (`run_line`), by `_finished_key`: what the runs route
+(asked every few seconds by an open Study page) would otherwise read from every paired run each time."""
+_FINISHED_LOCK = threading.Lock()
+_FINISHED_MAX = 512
+
+
+def _stamp(path: Path | None) -> tuple[int, int] | None:
+    try:
+        stat = path.stat() if path is not None else None
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size) if stat is not None else None
+
+
+def _finished_key(run_dir: Path, job: dict[str, Any]) -> tuple[Any, ...]:
+    """What a finished run's card is made of: its job (as `phase` read it), and as file stamps its final
+    check's comparison and runs and the copy of the study it kept. A check run again, or a job rewritten,
+    is a new key."""
+    final = job.get("final") or {}
+    comparison = run_dir / str(final["comparison"]) if final.get("comparison") else None
+    return (str(run_dir), json.dumps(job, sort_keys=True, default=str), _stamp(comparison),
+            _stamp(comparison.parent / "results.json") if comparison is not None else None,
+            _stamp(run_dir / "study.yaml"))
+
+
 def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None) -> dict[str, Any]:
+    """`_run_line`; a finished run's card without a status document is read once and then kept while
+    the files it is made of stay as they are (`_finished_key`): the runs route asks for it every few seconds."""
+    job = phase(run_dir)
+    if document_of is not None or job.get("phase") != "done":
+        return _run_line(root, study, run_dir, document_of, job)
+    key = _finished_key(run_dir, job)
+    with _FINISHED_LOCK:
+        kept = _FINISHED_CARDS.get(key)
+    if kept is not None:
+        return json.loads(json.dumps(kept))  # a copy: no caller changes the kept card
+    card = _run_line(root, study, run_dir, None, job)
+    with _FINISHED_LOCK:
+        if len(_FINISHED_CARDS) >= _FINISHED_MAX:
+            _FINISHED_CARDS.clear()
+        _FINISHED_CARDS[key] = json.loads(json.dumps(card))
+    return card
+
+
+def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None,
+              job: dict[str, Any]) -> dict[str, Any]:
     """One run's state in the card's few words (`state_line`): `kind`, `run`,
     `line`, and a `tone` where the news is bad or open. The run is described
     by the study it was started with; `study` (today's) is the fallback for a
@@ -1550,7 +1687,6 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
     run gave exactly the starting point's result -- for a bake-off, every
     branch's; `check_stopped` for a final check stopped before it decided.
     `best_pct` is `verdict.best_so_far`'s figure, `best_says` that figure in words."""
-    job = phase(run_dir)
     state = job.get("phase")
     try:
         study = run_study_of(root, run_dir)
@@ -1606,6 +1742,12 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
                       "finish_at": (started + timedelta(hours=hours)).astimezone().strftime("%H:%M") if started and hours else None})
         if state == "check":
             facts["check"] = _check_progress(run_dir, job, plan, study)
+        ahead = pace(((document.get("progress") or {}).get("series") or []), plan, job)
+        if ahead:
+            facts["pace"] = ahead
+        spent = verdict_doc.ai_spent(run_dir, study, job) if document_of is not None and study is not None else None
+        if spent is not None:
+            facts["spent"] = spent
         return {"kind": "running", "run": run_dir.name, "line": line, **facts}
     if state == "done":
         final = job.get("final") or {}
@@ -1662,6 +1804,8 @@ def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, car
                "advice": document.get("advice", ""), "says": says}
     if document.get("how_it_ran"):
         verdict["how_it_ran"] = document["how_it_ran"]
+    if document.get("spent"):
+        verdict["spent"] = document["spent"]
     if document.get("candidates"):
         # A bake-off: each branch's own line, by its ref.
         verdict["candidates"] = [{"ref": c.get("ref"), "line": c.get("line", "")} for c in document["candidates"]]
