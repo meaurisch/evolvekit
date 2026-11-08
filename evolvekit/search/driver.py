@@ -1284,10 +1284,10 @@ class Driver:
             role=role,
             inspiration_ids=[i.id for i in inspirations],
         )
-        # A failed agent call is billed (it carries a completion) and still counts as a failure.
+        # A failed agent call is billed (it carries a completion) and still counts as a failure; a reply stopped at its cap does not.
         if outcome.completion is not None and not outcome.provider_error:
             self._provider_failures = 0
-        elif outcome.provider_error:
+        elif outcome.provider_error and not _stopped_at_cap(outcome):
             self._provider_failures += 1
             self._provider_halt = outcome.error or "provider error"
         if not outcome.ok:
@@ -1788,3 +1788,9 @@ def _fingerprint_line(block: str, limit: int = 90) -> str:
         return ""
     line = code[-1]
     return line if len(line) <= limit else line[: limit - 3] + "..."
+
+
+def _stopped_at_cap(outcome: OperatorResult) -> bool:
+    """A reply the backend stopped at its spending cap: billed, but the backend is alive."""
+    raw = outcome.completion.raw if outcome.completion is not None else None
+    return bool(raw) and raw.get("stopped_at") == "error_max_budget_usd"

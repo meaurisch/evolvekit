@@ -136,3 +136,31 @@ def test_how_it_ran_says_the_ai_budget_was_used_up():
         "The AI budget was used up in round 4 (25 combinations, about 21 planned)."
     assert how_it_ran({"search": {"generations": 3, "stop_reason": "generations exhausted"}},
                       {"rounds": 3}, 21, True) == ""
+
+
+class AlwaysCapped:
+    """Every reply is stopped at its cap: billed, no text."""
+
+    name = "capped"
+
+    def complete(self, messages, *, model, max_tokens, temperature, response_format=None, max_usd=None):
+        stopped = Completion(text="", input_tokens=10, output_tokens=5, model=model, provider=self.name, usd=0.001,
+                             raw={"failed": True, "stopped_at": "error_max_budget_usd"})
+        raise ProviderError("stopped at its budget cap", completion=stopped)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_replies_stopped_at_their_cap_are_billed_but_are_not_a_dead_backend(tmp_path):
+    repo = make_repo(tmp_path)
+    raw = _raw(repo, head(repo), generations=3)
+    raw["budget"] = {"max_usd": 10.0, "max_consecutive_provider_errors": 2}
+    provider = AlwaysCapped()
+    summary = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run",
+                     providers={"small": provider, "strong": provider}, log=lambda _line: None).run()
+    try:
+        rows = read_jsonl(tmp_path / "run" / "usage.jsonl")
+        rows = list(rows)
+        assert len(rows) > 2 and sum(r["usd"] for r in rows) > 0, "the capped replies are billed"
+        assert not summary.aborted and not summary.stop_reason.startswith("provider failing"), summary.stop_reason
+    finally:
+        tree.remove_all(tmp_path / "run")

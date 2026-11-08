@@ -195,3 +195,21 @@ def test_export_and_pr_agree_with_the_block(tmp_path, capsys, monkeypatch):
     branch = json.loads(capsys.readouterr().out)["branch"]
     assert git(repo, "diff", "--numstat", base, branch) == "2\t2\tapp dir/solver.py", "the commit is the same two lines"
     assert git(repo, "rev-parse", f"{branch}^{{tree}}") == git(repo, "rev-parse", f"{commit}^{{tree}}")
+
+
+def test_a_file_git_does_not_treat_as_text_is_left_as_written(tmp_path):
+    top = _repo(tmp_path, autocrlf="false", attributes=b"*.dat -text\n")
+    lf = b"one\ntwo\nthree\n"
+    (top / "app dir" / "x.dat").write_bytes(lf)
+    git(top, "add", "-A")
+    git(top, "commit", "-q", "-m", "data")
+    located = tree.Repo(top / "app dir")
+    made = tree.materialise(tmp_path / "scratch", repo=located, base=head(top), diff="", candidate_id="c1")
+    written = b"one\r\ntwo\r\nthree CHANGED\r\n"
+    (made.path / "x.dat").write_bytes(written)
+    try:
+        block = tree.staged_diff(made, head(top))
+        assert (made.path / "x.dat").read_bytes() == written, "its bytes are left exactly as written"
+        assert "+three CHANGED\r" in block and "-one\n" in block, "recorded as the repository's rules say"
+    finally:
+        tree.remove(tmp_path / "scratch", "c1")

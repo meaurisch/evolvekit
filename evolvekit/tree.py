@@ -590,6 +590,17 @@ def _ending(data: bytes) -> bytes | None:
     return b"\r\n" if crlf == lf else b"\n" if not crlf else None
 
 
+def _unset_text(made: Tree, names: list[str]) -> set[str]:
+    """The paths among `names` whose `text` attribute is unset (`-text`, `binary`):
+    git does not treat them as text, so their bytes are not ours to touch."""
+    unset: set[str] = set()
+    for start in range(0, len(names), UNSTAGE_BATCH):
+        out = _git(made.worktree, "check-attr", "text", "-z", "--", *names[start:start + UNSTAGE_BATCH])
+        fields = out.split("\0")
+        unset.update(fields[i] for i in range(0, len(fields) - 2, 3) if fields[i + 2] == "unset")
+    return unset
+
+
 def keep_endings(made: Tree) -> list[str]:
     """Give every tracked file an operator rewrote the line endings the tree's
     commit holds it with: a file that was all LF is LF again, one that was all
@@ -599,7 +610,9 @@ def keep_endings(made: Tree) -> list[str]:
     rewrite of every line. The toplevel paths changed, sorted."""
     listed = _git(made.worktree, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=M", "HEAD", "--")
     fixed: list[str] = []
-    for rel in sorted(name for name in listed.split("\0") if name):
+    names = sorted(name for name in listed.split("\0") if name)
+    unset = _unset_text(made, names)
+    for rel in names:
         target = made.worktree / rel
         try:
             data = target.read_bytes()
@@ -607,7 +620,7 @@ def keep_endings(made: Tree) -> list[str]:
         except (OSError, TreeError):
             continue
         want = _ending(old)
-        if want is None or b"\0" in data or b"\0" in old:
+        if want is None or (want == b"\n" and rel in unset) or b"\0" in data or b"\0" in old:
             continue
         lf = data.replace(b"\r\n", b"\n")
         kept = lf if want == b"\n" else lf.replace(b"\n", b"\r\n")

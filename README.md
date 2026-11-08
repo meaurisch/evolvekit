@@ -1626,14 +1626,15 @@ with AI help what its AI spent (`AI: $0.87 of $1.00`, from the run's
 report's *How it ran* says the same. Nothing else; `--json` prints the whole
 verdict document (see [docs/app.md](docs/app.md#for-developers)).
 
-The AI spend stays within its cap. Every claude call, a reply or a coding
-agent's run, is told what is left (`--max-budget-usd`, when the installed
-claude lists it in its `--help`), and before each AI call the run checks that
-what is left covers the largest call it has seen so far ($0.05 before the
-first). When it does not, the run writes no more AI changes: the round ends,
-the run goes to its final check, and its log and *How it ran* say "the AI
-budget was used up". A single call can overspend only when the installed
-claude has no per-call limit; the run's log then says so once.
+The AI spend stays within its cap, give or take one call. Every claude call,
+a reply or a coding agent's run, is told what is left (`--max-budget-usd`, when
+the installed claude lists it in its `--help`); other providers and embedding
+calls get no per-call limit. Before each AI call the run checks that what is
+left covers the largest call it has seen so far ($0.05 before the first). When
+it does not, the run starts no more AI calls and writes no more AI changes: the
+round ends, the run goes to its final check, and its log and *How it ran* say
+"the AI budget was used up". A call larger than any before it can still cross
+the cap, so the spend can exceed it by at most that one call.
 
 `study preview`, `study compile` and `study run` take a study folder or a
 study's name: a value that is a folder on disk is a folder, anything else is
