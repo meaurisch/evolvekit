@@ -286,3 +286,6 @@ change follows the repository's line-ending rules, so the review surface is the 
 visible; no "better" over unchecked figures anywhere. Each wave had its own review; all approved.
 
 ### PR
+
+[meaurisch/evolvekit#74](https://github.com/meaurisch/evolvekit/pull/74), stacked on #73; opened 2026-11-08 from `agent/3-code` (dd58f55 plus the logs).
+
