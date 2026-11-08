@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import time
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -295,7 +296,7 @@ def test_a_stale_lock_is_taken_over(tmp_path):
     assert not lock.exists(), "released after the tick"
     lock.write_text(json.dumps({"pid": os.getppid(), "at": "2026-11-08T00:00:00+00:00"}), encoding="utf-8")
     with scheduler.tick_lock(home, wait_s=0):
-        assert json.loads(lock.read_text(encoding="utf-8"))["pid"] == os.getpid(), "a minute old: taken over"
+        assert json.loads(lock.read_text(encoding="utf-8"))["pid"] == os.getpid(), "hours old: taken over, though its process lives"
     lock.write_text(json.dumps({"pid": os.getppid(), "at": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
     with pytest.raises(AppError):
         with scheduler.tick_lock(home, wait_s=0.2):
@@ -361,3 +362,118 @@ def test_wait_and_watch_tick_the_scheduler(tmp_path, monkeypatch):
     home, _ = campaign_study(tmp_path)
     cli._tick_queue(home)
     assert len(seen) == 1 and seen[0].tzinfo is not None
+
+
+# -- fix round 1
+
+
+def _stamp(root):
+    return scheduler.read_campaign(root)["ticked_at"]
+
+
+def test_ticked_at_is_on_the_window_clock(tmp_path):
+    home, root = campaign_study(tmp_path)
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-13 20:00"), speed=120.0, **rec.calls_for())
+    assert _stamp(root) == local("2026-11-13 20:00").isoformat(timespec="seconds"), "the clock the spans are read on"
+    scheduler.tick(home, now=local("2026-11-13 20:00:30"), speed=120.0, **rec.calls_for())
+    assert _stamp(root) == local("2026-11-13 20:00").isoformat(timespec="seconds"), "at most every minute of that clock"
+    scheduler.tick(home, now=local("2026-11-13 20:01"), speed=120.0, **rec.calls_for())
+    assert _stamp(root) == local("2026-11-13 20:01").isoformat(timespec="seconds")
+    scheduler.tick(home, now=local("2026-11-10 08:00"), **rec.calls_for())
+    assert _stamp(root) == local("2026-11-10 08:00").isoformat(timespec="seconds"), "a stamp in the future: a rehearsal ended"
+
+
+def test_every_armed_campaign_is_stamped_after_a_launch(tmp_path):
+    home, a = campaign_study(tmp_path, "A", armed_at="2026-11-13T09:00:00+01:00")
+    _, b = campaign_study(tmp_path, "B", armed_at="2026-11-13T10:00:00+01:00")
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
+    assert rec.calls == [("start", (home, a), {})]
+    assert _stamp(b) == local("2026-11-14 10:00").isoformat(timespec="seconds"), "B waited, and was looked at"
+
+
+def test_a_continuation_stopped_by_its_window_is_checked_again(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=8, planned=6, used_s=3480)
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
+    assert rec.calls == [("recheck", (home, root, "r1"), {})], "two minutes of search left, and no verdict yet"
+    write_run(root, "r1", "done", generations=8, planned=6, used_s=3480, final={"decision": "keep"}, launch=2)
+    scheduler.tick(home, now=local("2026-11-14 11:00"), **rec.calls_for())
+    assert len(rec.calls) == 1 and scheduler.read_campaign(root)["state"] == "complete", "not left armed for ever"
+
+
+def test_a_continuation_whose_process_died_is_checked_again(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "failed", generations=6, planned=6, used_s=1200,
+              error="the run's process ended without finishing: the computer restarted")
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
+    assert rec.calls == [("recheck", (home, root, "r1"), {})]
+    assert scheduler.read_campaign(root)["failed_sessions"] == ["r1:1"]
+
+
+def test_a_launch_lost_to_another_run_is_not_a_failure(tmp_path):
+    home, root = campaign_study(tmp_path)
+    _, other = campaign_study(tmp_path, "Other")
+    (other / scheduler.CAMPAIGN).unlink()
+    calls = []
+
+    def start(*args, **kwargs):  # a person started Other between the tick's look and this launch
+        calls.append(args)
+        write_run(other, "o1", "search", alive=True)
+        raise AppError("'Other' is running: continue this one when it has finished", 409)
+    said = scheduler.tick(home, now=local("2026-11-14 10:00"), start=start)
+    campaign = scheduler.read_campaign(root)
+    assert len(calls) == 1 and said == [] and campaign["failed_sessions"] == [] and campaign["actions"] == 0
+
+
+def test_a_live_lock_is_kept_ten_minutes_and_refreshed_before_a_launch(tmp_path, monkeypatch):
+    home, root = campaign_study(tmp_path)
+    lock = home.root / scheduler.LOCK
+    five_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    lock.write_text(json.dumps({"pid": os.getppid(), "at": five_minutes_ago}), encoding="utf-8")
+    rec = Recorder()
+    assert scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for()) == [] and rec.calls == [], \
+        "its process lives: a slow launcher, not a crash"
+    lock.write_text(json.dumps({"pid": os.getppid(), "at": "2026-11-08T00:00:00+00:00"}), encoding="utf-8")
+    taken = []
+    real_try = scheduler._try_lock
+    monkeypatch.setattr(scheduler, "_try_lock", lambda path: taken.append(real_try(path)) or taken[-1])
+    seen = []
+
+    def start(*args, **kwargs):
+        seen.append(lock.read_text(encoding="utf-8"))
+        return {"run": "x"}
+    scheduler.tick(home, now=local("2026-11-14 10:00"), start=start)
+    assert taken[0] is not None and seen and seen[0] != taken[0], "refreshed before the launch"
+    assert json.loads(seen[0])["pid"] == os.getpid() and not lock.exists(), "and released after the tick"
+
+
+def test_the_queue_is_launched_under_the_scheduler_lock(tmp_path, monkeypatch):
+    home, root = campaign_study(tmp_path)
+    launched = []
+    monkeypatch.setattr(jobs, "launch_queued", lambda home: launched.append(home))
+    monkeypatch.setattr(scheduler, "tick", lambda home, **kw: [])
+    lock = home.root / scheduler.LOCK
+    lock.write_text(json.dumps({"pid": os.getppid(), "at": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
+    cli._tick_queue(home)
+    assert launched == [], "another process is ticking"
+    lock.unlink()
+    cli._tick_queue(home)
+    assert launched == [home] and not lock.exists()
+
+
+def test_a_final_check_that_is_starting_is_not_stopped(tmp_path):
+    home, root = campaign_study(tmp_path)
+    run_dir = write_run(root, "r1", "stopped", generations=6, planned=6, final={"stopped": True})
+    for flag, expected in (("--check", []), ("--continue", [("stop", (root, "r1"), {})])):
+        (run_dir / jobs.LAUNCH).write_text(json.dumps({
+            "pid": os.getpid(), "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "host": socket.gethostname(), "argv": ["-m", "evolvekit.app.job", str(root), "r1", flag], "launch": 2}),
+            encoding="utf-8")
+        assert jobs.phase(run_dir)["phase"] == "starting"
+        rec = Recorder()
+        scheduler.tick(home, now=local("2026-11-16 00:01"), **rec.calls_for())
+        assert rec.calls == expected, flag

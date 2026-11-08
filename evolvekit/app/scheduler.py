@@ -45,7 +45,8 @@ from evolvekit.stopping import STOP_REQUEST, active_seconds
 
 __all__ = [
     "ACTIONS_PER_WINDOW", "CAMPAIGN", "CLOCK_FILE", "Clock", "FAILED_PAUSE_LINE", "FAILURES_TO_PAUSE", "LOCK",
-    "MIN_SESSION_S", "SPAN_FILE", "TICK_WRITE_S", "arm", "clear_clock", "clock_of", "mark_by_hand", "pause",
+    "MIN_SESSION_S", "SPAN_FILE", "TICK_WRITE_S", "arm", "clear_clock", "clock_of", "launch_queued", "mark_by_hand",
+    "pause",
     "read_campaign", "search_left_s", "session_of", "tick", "tick_lock", "write_clock",
 ]
 
@@ -64,7 +65,10 @@ TICK_WRITE_S = 60.0
 LOCK = "scheduler.lock"
 """In the home: held through every tick (D13)."""
 LOCK_STALE_S = 60.0
-"""A lock this old, or whose process is gone, is taken over."""
+"""A lock whose process is gone, or an empty or damaged one this old, is taken over."""
+LOCK_LIVE_STALE_S = 600.0
+"""A lock whose process is alive is taken over only this old: a tick waiting on a slow launcher
+(up to `detach.LAUNCH_TIMEOUT_S`) keeps it, and refreshes it before each launch."""
 CLOCK_FILE = "clock.json"
 """In the home: the rehearsal clock (D15), honoured while the app that wrote it runs."""
 SPAN_FILE = "campaign-span.json"
@@ -263,13 +267,17 @@ def _stale(path: Path, held: str) -> bool:
     if pid <= 0 or not pid_alive(pid):
         return True
     at = _moment(doc.get("at"))
-    return at is None or (datetime.now(timezone.utc) - at).total_seconds() > LOCK_STALE_S
+    return at is None or (datetime.now(timezone.utc) - at).total_seconds() > LOCK_LIVE_STALE_S
+
+
+def _lock_text() -> str:
+    return json.dumps({"pid": os.getpid(), "at": datetime.now(timezone.utc).isoformat()})
 
 
 def _try_lock(path: Path) -> str | None:
     """Create the lock (`open(..., "x")`), taking over a stale one; the text written, or None
     when another live holder has it."""
-    text = json.dumps({"pid": os.getpid(), "at": datetime.now(timezone.utc).isoformat()})
+    text = _lock_text()
     for _ in range(3):
         try:
             with open(path, "x", encoding="utf-8") as out:
@@ -307,6 +315,18 @@ def _try_lock(path: Path) -> str | None:
     return None
 
 
+def _refresh(path: Path, held: str) -> str:
+    """The lock's `at` made now, while this holder still has it; the text it now holds."""
+    try:
+        if path.read_text(encoding="utf-8") != held:
+            return held
+        text = _lock_text()
+        _atomic_write(path, text)
+        return text
+    except OSError:
+        return held
+
+
 def _release(path: Path, text: str) -> None:
     try:
         if path.read_text(encoding="utf-8") == text:
@@ -330,6 +350,19 @@ def tick_lock(home: Any, *, wait_s: float = 10.0) -> Iterator[None]:
         time.sleep(0.1)
     try:
         yield
+    finally:
+        _release(path, held)
+
+
+def launch_queued(home: Any) -> str | None:
+    """`jobs.launch_queued` under `<home>/scheduler.lock`, so it and another process's tick never
+    both launch (D6, D13); None, launching nothing, while another live process holds the lock."""
+    path = _home_root(home) / LOCK
+    held = _try_lock(path)
+    if held is None:
+        return None
+    try:
+        return jobs.launch_queued(home)
     finally:
         _release(path, held)
 
@@ -368,15 +401,31 @@ def _archived(run_dir: Path) -> bool:
 
 
 def _check_unfinished(run_dir: Path, job: dict[str, Any]) -> bool:
-    """The search is done and the final check was stopped, or its process died."""
+    """The search is done and its latest session has no verdict: the final check was stopped or
+    its process died, or the session (a continuation, say) ended -- stopped by its window, or
+    its process gone -- with no rounds of the plan left. A final check again gives it one;
+    without it such a campaign would wait for ever (D7)."""
     search = job.get("search") or {}
-    if not search or search.get("aborted"):
+    if job.get("phase") not in ("stopped", "failed") or not search or search.get("aborted"):
         return False
-    if job.get("phase") == "stopped":
-        return bool((job.get("final") or {}).get("stopped"))
-    if job.get("phase") == "failed":
-        return "check" in job or (read_job(run_dir) or {}).get("phase") == "check"
-    return False
+    if (job.get("final") or {}).get("stopped") or "check" in job or (read_job(run_dir) or {}).get("phase") == "check":
+        return True
+    if (job.get("final") or {}).get("decision"):
+        return False
+    try:
+        planned = int((jobs._plan(run_dir, job) or {}).get("generations") or 0)  # noqa: SLF001 - the run's plan, as can_resume reads it
+        done = int(search.get("generations") or 0)
+    except (TypeError, ValueError):
+        return False
+    return planned > 0 and done >= planned
+
+
+def _in_check(run_dir: Path, state: str | None) -> bool:
+    """A run in its final check, or launched for one and not yet saying so (`--check`)."""
+    if state == "check":
+        return True
+    argv = (_read(run_dir / jobs.LAUNCH) or {}).get("argv")
+    return state == "starting" and isinstance(argv, list) and "--check" in argv
 
 
 def _hours(seconds: float) -> str:
@@ -386,8 +435,10 @@ def _hours(seconds: float) -> str:
 
 class _Tick:
     def __init__(self, home: Any, now: datetime, speed: float, real_now: datetime,
-                 calls: dict[str, Callable[..., Any]]) -> None:
+                 calls: dict[str, Callable[..., Any]], lock: Path, held: str) -> None:
         self.home, self.now, self.speed, self.real_now, self.calls = home, now, speed, real_now, calls
+        self.lock, self.held = lock, held
+        """The lock and the text this tick holds it with (`_refresh` renews it before a launch)."""
         self.said: list[str] = []
         self._busy: bool | None = None
 
@@ -405,18 +456,22 @@ class _Tick:
                 when = _moment(campaign.get("armed_at"))
                 armed.append((when.timestamp() if when else float("inf"), root.name, root, campaign))
         armed.sort(key=lambda item: item[:2])
+        launched = False
         for _, _, root, campaign in armed:
             before = json.dumps(campaign, sort_keys=True)
-            launched = self.study(root, campaign)
+            if not launched:  # one launch per tick: the studies after it wait for the next, but are stamped
+                launched = self.study(root, campaign)
             self.save(root, campaign, before)
-            if launched:
-                break  # one launch per tick: the next study waits for it
         return self.said
 
     def save(self, root: Path, campaign: dict[str, Any], before: str) -> None:
+        """Write the campaign when it changed, with `ticked_at` on the window clock (`now`): when
+        it has none, when it is later than `now` (a rehearsal ended or started again), or when
+        `TICK_WRITE_S` have passed on that clock since."""
         ticked = _moment(campaign.get("ticked_at"))
-        if ticked is None or (self.real_now - ticked).total_seconds() >= TICK_WRITE_S:
-            campaign["ticked_at"] = _iso(self.real_now)
+        if (ticked is None or ticked.timestamp() > self.now.timestamp()
+                or self.now.timestamp() - ticked.timestamp() >= TICK_WRITE_S):
+            campaign["ticked_at"] = _iso(self.now)
         if json.dumps(campaign, sort_keys=True) != before:
             _write_campaign(root, campaign)
 
@@ -475,7 +530,7 @@ class _Tick:
 
         span = schedule.span_at(self.now)
         if active:
-            if span is None and state in ("starting", "search"):
+            if span is None and state in ("starting", "search") and not _in_check(run_dir, state):
                 mine = hand is not None and hand.get("run") == run_dir.name and hand.get("session") == session
                 if not mine and not (run_dir / STOP_REQUEST).exists():
                     try:
@@ -499,9 +554,15 @@ class _Tick:
         name, args, kwargs, words, refused = action
         campaign["actions"] += 1
         _write_campaign(root, campaign)  # counted before the call: a launch that crashes the tick still counts
+        self.held = _refresh(self.lock, self.held)  # a slow launcher must not make the lock look stale
         try:
             self.calls[name](*args, **kwargs)
         except (AppError, HarnessError) as exc:
+            if jobs.active_run(self.home) is not None:
+                # Another run took the computer between this tick's look and the launch: not a
+                # failure of this campaign, nor one of its window's launches.
+                campaign["actions"] -= 1
+                return True
             self.say(root, f"{refused}: {exc}")
             self.failed(root, campaign, f"launch:{_iso(self.now)}", str(exc))
             return True
@@ -557,7 +618,8 @@ def tick(home: Any, *, now: datetime, speed: float = 1.0, real_now: datetime | N
          stop: Callable[..., Any] = jobs.stop, recheck: Callable[..., Any] = jobs.resume_final_check) -> list[str]:
     """One look at every armed campaign in the home, the oldest first: one line per thing done,
     `"<slug>: <what>"`. `now` is the clock the windows are read on (the rehearsal clock's, when
-    on), `speed` how much faster it runs than real time; `real_now` the real clock. Returns `[]`
+    on, and the clock `ticked_at` is stamped on), `speed` how much faster it runs than real time;
+    `real_now` the real clock (for the span file, Task 4). Returns `[]`
     at once when another live process is ticking."""
     real_now = real_now if real_now is not None else datetime.now().astimezone()
     now = now if now.tzinfo is not None else now.astimezone()
@@ -565,8 +627,9 @@ def tick(home: Any, *, now: datetime, speed: float = 1.0, real_now: datetime | N
     held = _try_lock(path)
     if held is None:
         return []
+    calls = {"start": start, "continue_run": continue_run, "stop": stop, "recheck": recheck}
+    ticking = _Tick(home, now, float(speed), real_now, calls, path, held)
     try:
-        calls = {"start": start, "continue_run": continue_run, "stop": stop, "recheck": recheck}
-        return _Tick(home, now, float(speed), real_now, calls).run()
+        return ticking.run()
     finally:
-        _release(path, held)
+        _release(path, ticking.held)

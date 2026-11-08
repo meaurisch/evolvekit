@@ -408,10 +408,10 @@ class AppServer:
         line the scheduler says is printed to stdout -- the service's log --
         with the time it happened: `<rehearsal> rehearsal · <real> real · <line>`
         under the rehearsal clock, `<real> · <line>` otherwise."""
-        from evolvekit.app import jobs, scheduler
+        from evolvekit.app import scheduler
 
         try:
-            jobs.launch_queued(self.home)
+            scheduler.launch_queued(self.home)  # `jobs.launch_queued`, under the scheduler's lock
         except Exception:  # noqa: BLE001 - the ticker must outlive a bad run directory
             traceback.print_exc(file=sys.stderr)
         try:

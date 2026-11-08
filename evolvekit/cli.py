@@ -1095,10 +1095,10 @@ def _tick_queue(home) -> None:
     goes on, as the app's ticker does: the next tick tries again. Then the
     scheduler looks at the campaigns, as the app's ticker does, on the
     rehearsal clock while the app that set one runs."""
-    from evolvekit.app import jobs, scheduler
+    from evolvekit.app import scheduler
 
     try:
-        jobs.launch_queued(home)
+        scheduler.launch_queued(home)  # `jobs.launch_queued`, under the scheduler's lock
     except Exception as exc:  # noqa: BLE001 - a fault in another study's launch does not end this wait
         print(f"could not start a queued run: {exc}", file=sys.stderr)
     try:
