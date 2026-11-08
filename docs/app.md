@@ -271,6 +271,12 @@ opens a drawer on the right (full screen on a phone):
   service](#the-app-as-a-service)). *Start* does not start it but says when it
   will (*next window Sat 00:00*); the total time under **Time** is then the
   search time of the whole campaign, spread over as many windows as it takes.
+  The plan bar then says when it would end on the windows (*starts Sat 00:00;
+  about 18 min of search; done around Sat 00:18*), and when the total time is
+  less than one week of the windows gives, *Search through the whole window
+  (48 h)* sets the total time to that week's hours (`schedule_hours`); under a
+  rehearsal clock it names both times, *(48 h on the rehearsal clock, 24 min of
+  real time)*, and sets the real one.
   Other windows are written in `study.yaml`.
 
 A **code study** — one whose template changes the application's source —
@@ -621,7 +627,7 @@ hand), `status` (its `best` is the best so far as `study status` says it:
 rounds the pace so far buys when fewer than planned, `writing` how many of a
 round's changes the AI has written, and `notes` what to hear besides the plan,
 each with its `line` or sentences as the strip shows them), `runs` (every run
-as it is now and the newest, `{runs, latest, poll_s, earlier}`: the open Study page asks
+as it is now and the newest, `{runs, latest, poll_s, earlier, campaign}` (`campaign` the scheduled study's campaign as it is now, else `null`, so the open page follows a campaign that finishes): the open Study page asks
 it again after `poll_s` seconds, 5 while a run is live and 10 when none is, so a
 run started elsewhere, such as a bake-off from the terminal, or a run that
 ended shows without a reload; a run's `branch` is what `study pr` made for it,
@@ -668,7 +674,9 @@ clock is on, so Set up can say a week of windows on both clocks (*Search
 through the whole window (48 h on the rehearsal clock, 24 min of real time)*).
 
 `plan` then has `window`: `{"line", "starts", "done"}`, the plan on the
-windows from the home's clock (a rehearsal's too) — *starts Sat 00:00; about
+windows from the home's clock (a rehearsal's too), spreading the plan's hours —
+or, when the campaign's run is finished and its next window would go on with
+it, the campaign's search time left and a final check — *starts Sat 00:00; about
 18 min of search; done around Sat 00:18* (*starts now* inside a window; *…:
 more than its windows give before its Until (30 Nov)* and no `done` when they
 give less; *its schedule has no window left*) — and its `summary` ends with
@@ -686,7 +694,10 @@ the campaign under 10 minutes of search. The next window's tick continues the
 run, never sooner. `campaign.json` keeps `sessions`: `[{"run", "session",
 "from", "to", "by_hand"}]` on the window clock — `from` the tick's time when
 it launched the session (a person's: the home's clock at the launch), `to`
-the time of the first tick that saw it end (`null` until then).
+the campaign's last tick before the one that saw it end (its `ticked_at`, so a
+span never runs on to a tick long after while the app was off; `null` until
+then). `campaign_state` says an ended session ended at that last tick before
+any tick writes it, so the history never shows *…* for a run that is over.
 
 **The verdict document.** The verdict is computed in one place:
 `build_verdict(root, run)` in `evolvekit/app/verdict.py`. It reads the study
@@ -717,8 +728,8 @@ names:
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
 | `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
-| `how_it_ran` | whenever fewer rounds ran than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …", with the reason from the stop (*the time ran out*, *the search time was used*, *stopped*, *the search stopped early (…)*, *the AI budget was used up*); when every round ran but some combinations repeated one already tried, "Ran all 17 planned rounds (176 combinations, about 204 planned): 29 repeated a combination already tried, so they were not measured again." — the Study page shows it under Details |
-| `why_keep` | only on a `keep` whose held-back cases all moved the goal's way while its range still allows a loss: one sentence after `line` that says why it is still keep, "Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer answer." (up to three cases' figures, else "Every one of the N held-back cases was lower"); never on `use`, `worse` or a keep with no difference, and never a gain. `results` carries it (and its `final`), a finished card's `verdict`, the report and `study verdict` say it after the line |
+| `how_it_ran` | whenever fewer rounds ran than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …", with the reason from the stop (*the time ran out*, *the search time was used*, *stopped*, *the search stopped early (…)*, *the AI budget was used up*); when every round ran but some combinations repeated one already tried, "Ran all 17 planned rounds (176 combinations, about 204 planned): 29 of the combinations tried repeated one already tried and were not measured again." (what it knows, not a claim that it is the whole shortfall) — the Study page shows it under Details |
+| `why_keep` | only on a `keep` whose held-back cases all moved the goal's way while its range still allows a loss: one sentence after `line` that says why it is still keep, "Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer answer." (up to three cases' figures, else "Every one of the N held-back cases was lower"); never on `use`, `worse`, a keep with no difference or a goal with levels (the range there is the first measure's, while another level may be what kept it), and never a gain. `results` carries it (and its `final`, and the text to paste after its *Final check* line), a finished card's `verdict`, the report and `study verdict` say it after the line |
 | `spent` | only on a run with AI help: what its AI spent, from the run's `usage.jsonl`: `{"usd", "cap_usd", "line"}` with the line "AI: $0.87 of $1.00", or `{"requests", "line"}` ("AI: 14 requests") for a provider that counts requests; a fact, not a claim |
 
 The page is plain HTML, CSS and JavaScript with no build step, under

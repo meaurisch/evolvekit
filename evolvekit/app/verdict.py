@@ -499,7 +499,10 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     document["learned_from"] = {"cases": len(study.training), "pct": learned_pct if named else None}
     document["rule"] = RULE_WORDS
     document["by_case"] = _held_rows(result, held)
-    why = why_keep(document["decision"], words, document["by_case"], goal["direction"]) if named and not candidates else ""
+    # Not with goals in order of importance: the range and the rows are the first measure's, while
+    # another level may be what kept it (fix round 1, I1).
+    why = (why_keep(document["decision"], words, document["by_case"], goal["direction"])
+           if named and not candidates and not levels and "levels" not in result else "")
     if why:
         document["why_keep"] = why
     document["changed"] = [{"name": c["name"], "label": c["label"], "from": c["old_text"], "to": c["new_text"]}
@@ -545,9 +548,10 @@ def why_keep(decision: str, words: dict[str, Any], rows: list[dict[str, Any]], d
     allows a loss, says why in one plain sentence: "Every held-back case was lower (3.1 % and 8.2 %),
     but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer
     answer." -- up to three cases' figures, else "Every one of the N held-back cases". Never on use,
-    worse or same, and never a gain: it says why there is none. Empty otherwise."""
+    worse or same, nor with goals in order of importance (`levels`), and never a gain: it says why there
+    is none. Empty otherwise."""
     ci = words.get("ci95")
-    if decision != "keep" or words.get("state") != "unclear" or not ci or not ci[0] < 0:
+    if decision != "keep" or words.get("state") != "unclear" or not ci or not ci[0] < 0 or words.get("levels"):
         return ""
     if len(rows) < 2 or any(row.get("outcome") != "better" for row in rows):
         return ""
@@ -583,8 +587,9 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
     budget was used up.", or "The AI budget was used up in round 4 (…)." when no
     planned round was left out. Every round ran, but `repeated` combinations
     repeated one already tried: "Ran all 17 planned rounds (176 combinations,
-    about 204 planned): 29 repeated a combination already tried, so they were
-    not measured again." Empty when the plan happened, for a bake-off (no
+    about 204 planned); 29 of the combinations tried repeated one already tried
+    and were not measured again." -- what it knows, not a claim that it is the
+    whole shortfall. Empty when the plan happened, for a bake-off (no
     search), and for a run continued with more time (its plan is the
     continuation's)."""
     search = job.get("search") or {}
@@ -606,8 +611,9 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
     if done >= planned:
         if repeated > 0 and isinstance(tried, int) and isinstance(plan.get("combinations"), int) \
                 and tried < plan["combinations"]:
-            return (f"Ran all {planned} planned round{'s' if planned != 1 else ''}{counts}: {repeated} repeated a "
-                    f"combination already tried, so {'they were' if repeated != 1 else 'it was'} not measured again.")
+            return (f"Ran all {planned} planned round{'s' if planned != 1 else ''}{counts}; {repeated} of the "
+                    f"combinations tried repeated one already tried and {'were' if repeated != 1 else 'was'} "
+                    "not measured again.")
         return ""
     if reason.startswith("time limit reached"):
         return f"{rounds}{counts}: the search time was used."

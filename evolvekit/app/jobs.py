@@ -1390,6 +1390,8 @@ def _summary_text(data: dict[str, Any]) -> str:
         f"Search{of}: {data['headline']}",
         f"Final check{of}: {final['line']}",
     ]
+    if final.get("why_keep"):  # why a keep whose held-back cases all improved is still keep (persona p4)
+        lines.append(str(final["why_keep"]))
     side = []
     for k in data.get("kpis") or []:
         if k["name"] == data.get("goal", {}).get("kpi"):

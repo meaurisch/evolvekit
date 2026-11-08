@@ -454,7 +454,10 @@ def plan(req: Request) -> dict[str, Any]:
     if study.schedule is not None and not chosen.blocked:
         # A scheduled study ends on its windows, not "done around 17:34" from now (persona p4, H1).
         clock = scheduler.clock_of(req.home)
-        window = scheduler.plan_window(study.schedule, chosen.hours, now=clock.now(), speed=clock.speed)
+        now = clock.now()
+        # A campaign with a finished run goes on with what is left of its search time (m9).
+        hours = scheduler.campaign_plan_hours(root, study, chosen.hours, chosen.final_check_s, now=now)
+        window = scheduler.plan_window(study.schedule, hours, now=now, speed=clock.speed)
     return {"summary": chosen.summary(when=window["line"] if window else None), "estimated": estimated,
             "warning": warning, "fixes": fixes, "tunables": tunables, **chosen.to_json(),
             **({"window": window} if window else {})}
@@ -722,13 +725,16 @@ def runs_of(req: Request) -> dict[str, Any]:
     """Every run of the study as it is now (`jobs.runs`, no status document read) and the newest:
     what the open Study page asks every few seconds, so it notices a run that started or ended.
     `poll_s` is when to ask again: RUNS_POLL_LIVE_S while a run is queued or live, else RUNS_POLL_IDLE_S.
-    A finished run's line is kept between calls (`jobs.run_line`), so asking costs little."""
-    root, _, _ = req.home.load(req.params["slug"])
+    `campaign` is a scheduled study's `scheduler.campaign_state` (None without a schedule). A finished run's line is kept between calls (`jobs.run_line`), so asking costs little."""
+    root, study, _ = req.home.load(req.params["slug"])
     listed = jobs.runs(root)
     live = any(r.get("phase") in (*jobs.ACTIVE, "queued") for r in listed)
     earlier = jobs.earlier_use(root, listed[-1]) if listed else None  # the header's "An earlier run … says use"
+    # A scheduled study's campaign as it is now (its line, when its runs ran): the open page follows it.
+    campaign = (scheduler.campaign_state(root, study, now=scheduler.clock_of(req.home).now())
+                if study.schedule is not None else None)
     return {"runs": listed, "latest": jobs.latest_run(root), "poll_s": RUNS_POLL_LIVE_S if live else RUNS_POLL_IDLE_S,
-            "earlier": earlier}
+            "earlier": earlier, "campaign": campaign}
 
 
 def tries_of(req: Request) -> dict[str, Any]:

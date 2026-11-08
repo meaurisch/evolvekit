@@ -46,9 +46,9 @@ from evolvekit.stopping import STOP_REQUEST, active_seconds
 __all__ = [
     "ACTIONS_PER_WINDOW", "BY_YOU", "CAMPAIGN", "CLOCK_FILE", "Clock", "FAILED_PAUSE_LINE", "FAILURES_TO_PAUSE", "LOCK",
     "MIN_SESSION_S", "NO_SCHEDULE", "SPAN", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_left_s",
-    "campaign_run", "campaign_state", "clear_clock", "clock_of", "continue_campaign", "launch_queued", "mark_by_hand",
-    "pause", "plan_window", "read_campaign", "schedule_hours", "search_left_s", "session_of", "scheduled_words",
-    "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
+    "campaign_plan_hours", "campaign_run", "campaign_state", "clear_clock", "clock_of", "continue_campaign",
+    "launch_queued", "mark_by_hand", "pause", "plan_window", "read_campaign", "schedule_hours", "search_left_s",
+    "session_of", "scheduled_words", "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
 ]
 
 CAMPAIGN = "campaign.json"
@@ -59,7 +59,8 @@ CAMPAIGN = "campaign.json"
 the runs started after it); `missed`: `{"start", "end"}` of a window no tick saw, kept for the line;
 `sessions`: the campaign's history on the window clock, `[{"run", "session", "from": iso, "to": iso|None,
 "by_hand": bool}]` -- `from` is the tick's `now` when it launched the session (a person's: the home's
-clock at the launch), `to` the `now` of the first tick that saw it ended (None until then); kept
+clock at the launch), `to` the campaign's last tick (`ticked_at`) before the one that saw it ended
+(`_session_end`; None until then); kept
 across a new campaign (each run's own), the last `SESSIONS_KEPT`."""
 SESSIONS_KEPT = 200
 """The most sessions `campaign.json` remembers."""
@@ -441,10 +442,25 @@ def _note_session(campaign: dict[str, Any], run: str, session: int, moment: date
     del sessions[:-SESSIONS_KEPT]
 
 
+def _session_end(campaign: dict[str, Any], entry: dict[str, Any], now: datetime) -> str:
+    """When an ended session is said to end: the campaign's last tick (`ticked_at`, the window clock)
+    when that is earlier than `now` -- the app may have been off since, so a later tick would stretch
+    the span (fix round 1, m7) -- and never before the session's own start."""
+    end = now
+    ticked = _moment(campaign.get("ticked_at"))
+    if ticked is not None and ticked.timestamp() < end.timestamp():
+        end = ticked
+    start = _moment(entry.get("from"))
+    if start is not None and start.timestamp() > end.timestamp():
+        end = start
+    return _iso(end)
+
+
 def _close_sessions(root: Path, campaign: dict[str, Any], now: datetime) -> None:
-    """Every session of `sessions` that has ended gets its `to`: `now`, the first tick that sees it.
-    A session has ended when its run is no longer going, or the run went on to a later session; a
-    queued run's session has not begun (a person's, numbered 0 till it launches as 1)."""
+    """Every session of `sessions` that has ended gets its `to` (`_session_end`: the last tick that
+    saw it, or `now`). A session has ended when its run is no longer going, or the run went on to a
+    later session; a queued run's session has not begun (a person's, numbered 0 till it launches as
+    1). Called before the tick stamps `ticked_at`, and by `campaign_state` on a copy."""
     for entry in campaign["sessions"]:
         if entry.get("to") is not None:
             continue
@@ -457,7 +473,7 @@ def _close_sessions(root: Path, campaign: dict[str, Any], now: datetime) -> None
                 entry["session"] = 1  # the queued session, launched
             if state in jobs.ACTIVE and session_of(run_dir) <= int(entry.get("session") or 0):
                 continue
-        entry["to"] = _iso(now)
+        entry["to"] = _session_end(campaign, entry, now)
 
 
 # ---------------------------------------------------------------------------
@@ -921,7 +937,11 @@ def _history(root: Path, campaign: dict[str, Any] | None, now: datetime) -> dict
     each run's own line, for every run with a session kept (the Past runs drawer's)."""
     if campaign is None:
         return {"history_line": None, "history_by_run": {}}
-    sessions = campaign["sessions"]
+    # A session whose run has ended is said ended (at the campaign's last tick), though no tick has
+    # written it yet: the app may be off (fix round 1, m7). Nothing is written here.
+    shown = {**campaign, "sessions": [dict(s) for s in campaign["sessions"]]}
+    _close_sessions(Path(root), shown, now)
+    sessions = shown["sessions"]
     names = [d.name for d in jobs._run_dirs(Path(root))]  # noqa: SLF001 - the runs, oldest first, as jobs lists them
     after = campaign.get("after")
     own = set(names[names.index(after) + 1:] if after in names else names)
@@ -1224,6 +1244,24 @@ def plan_window(schedule: Schedule, hours: float, *, now: datetime, speed: float
                 "done": None}
     return {"line": f"starts {starts}; {search}; done around {when_words(done, now)}", "starts": _iso(start),
             "done": _iso(done)}
+
+
+def campaign_plan_hours(root: Path, study: Study, hours: float, check_s: float, *, now: datetime) -> float:
+    """The hours a scheduled study's plan line spreads over its windows (fix round 1, m9): the plan's
+    `hours` -- or, when its campaign's latest run is finished (`done`) and the next window would go
+    on with it (the campaign neither complete nor ended, ten minutes or more left), that run's
+    campaign search time left (`campaign_left_s`) and a final check (`check_s`)."""
+    root = Path(root)
+    if study.schedule is None or read_campaign(root) is None:
+        return float(hours)
+    run_dir, job = _latest(root, read_campaign(root))
+    if run_dir is None or job.get("phase") != "done":
+        return float(hours)
+    state = (campaign_state(root, study, now=now) or {}).get("state")
+    left = campaign_left_s(run_dir)
+    if state in ("complete", "ended") or left < MIN_SESSION_S:
+        return float(hours)  # a start begins a new campaign: a new run, the whole plan
+    return (left + max(0.0, float(check_s))) / 3600.0
 
 
 def schedule_hours(schedule: Schedule, *, now: datetime, speed: float = 1.0) -> float:

@@ -899,3 +899,64 @@ def test_a_per_group_run_is_offered_no_compare_and_starts_again_when_stopped():
     strip = _page_function(STUDY_PAGE, "strip")
     assert 'if (s.group && s.phase === "stopped")' in strip and 'act: "restart"' in strip.split('if (s.group && s.phase === "stopped")')[1]
     assert 'var PER_GROUP_STOPPED = "A run per kind of case cannot carry on yet: start the study again.";' in STUDY_PAGE
+
+
+def test_the_study_page_follows_its_campaign_on_each_runs_poll():
+    """Fix round 1: a campaign that finished while the Study page was open said so only after a
+    reload. Each runs poll brings the campaign (its line, when its runs ran); the notice and the
+    strip are drawn again when it changed, even with the runs the same."""
+    out = _node(*(_page_function(STUDY_PAGE, n) for n in ("newerRun", "runsKey", "runsDelay", "watchRuns")), """
+      var drawn = {notices: 0, strip: 0}, els = {"study-notices": {innerHTML: ""}, "strip-slot": {innerHTML: ""}};
+      document.getElementById = function (id) { return els[id] || null; };
+      function isLive() { return false; }
+      function header() { return "head"; }
+      function notices() { drawn.notices += 1; return "notice:" + (st.doc.state.campaign || {}).line; }
+      function statusStrip() { drawn.strip += 1; return "strip:" + ((st.doc.campaign || {}).history_by_run || {}).r1; }
+      function runsBody() { return ""; }
+      function follow() {}
+      var runs = [{id: "r1", kind: "finished", line: "finished · not proven"}];
+      var answer = {runs: runs, poll_s: 10, earlier: null, campaign: {state: "complete", line: "Campaign finished",
+        history_line: "Ran in its windows: Sat 00:04 – Sun 09:27", history_by_run: {r1: "Ran in its windows: Sat 00:04 – Sun 09:27"}}};
+      EK.get = function () { return Promise.resolve(answer); };
+      EK.isCurrent = function () { return true; };
+      var st = {gen: 1, slug: "w", run: "r1", status: {phase: "done"},
+        doc: {runs: runs, state: {campaign: {state: "armed", line: "Campaign · next window Sat 00:00"}},
+              campaign: {state: "armed", line: "Campaign · next window Sat 00:00"}}};
+      watchRuns().then(function () {
+        var first = {notice: els["study-notices"].innerHTML, strip: els["strip-slot"].innerHTML, drawn: Object.assign({}, drawn)};
+        return watchRuns().then(function () {
+          process.stdout.write(JSON.stringify({first: first, again: drawn, campaign: st.doc.campaign.state}));
+        });
+      });""")
+    assert out["first"]["notice"] == "notice:Campaign finished", out
+    assert out["first"]["strip"] == "strip:Ran in its windows: Sat 00:04 – Sun 09:27", out
+    assert out["campaign"] == "complete"
+    assert out["again"] == out["first"]["drawn"], "the same campaign again: nothing drawn again"
+
+
+def test_a_scheduled_continue_never_enables_its_button_again_before_the_redraw():
+    """Fix round 1 (app review, Minor 1): on a scheduled answer the old Continue button stayed live
+    during the refetch, so a second click could add the hours twice."""
+    out = _node(_page_function(STUDY_PAGE, "continueRun"), """
+      var buttons = [{disabled: false, attrs: {}}, {disabled: false, attrs: {}}];
+      buttons.forEach(function (b) { b.setAttribute = function (k, v) { b.attrs[k] = v; }; b.removeAttribute = function (k) { delete b.attrs[k]; }; });
+      EK.$$ = function () { return buttons; };
+      var posted = 0, rerendered = 0, toasts = [];
+      EK.post = function () { posted += 1; return Promise.resolve({scheduled: true, words: "Scheduled 18 min more for the next window (Sat 00:00)"}); };
+      EK.rerender = function () { rerendered += 1; };
+      EK.toast = function (kind, words) { toasts.push(words); };
+      EK.studyPath = function (slug, path) { return path; };
+      function continueHours() { return 0.3; }
+      var st = {slug: "w", run: "r1"};
+      var first = continueRun(false);
+      continueRun(false);  // a second click while the first is out: nothing
+      first.then(function () {
+        continueRun(false);  // and none after the answer, before the redraw
+        process.stdout.write(JSON.stringify({posted: posted, rerendered: rerendered, toasts: toasts, continuing: st.continuing,
+          disabled: buttons.map(function (b) { return b.disabled; })}));
+      });""")
+    assert out == {"posted": 1, "rerendered": 1, "toasts": ["Scheduled 18 min more for the next window (Sat 00:00)"],
+                   "continuing": True, "disabled": [True, True]}, out
+    acts = STUDY_PAGE[STUDY_PAGE.index('"continue": function'):]
+    assert acts.startswith('"continue": function () { continueRun(false); }'), "no promise: the act wrapper never enables it"
+    assert '"continue-now": function () { continueRun(true); }' in STUDY_PAGE

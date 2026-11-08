@@ -86,10 +86,21 @@
       var old = st.doc.runs || [], fresh = d.runs || [];
       var to = newerRun(old, fresh, st.run);
       var said = JSON.stringify((st.doc.state || {}).earlier || null), says = JSON.stringify(d.earlier || null);
+      // The campaign as it is now (its line, when its runs ran): a campaign that finishes while the
+      // page is open says so without a reload (fix round 1).
+      var campWas = JSON.stringify(st.doc.campaign || null), campIs = "campaign" in d ? JSON.stringify(d.campaign || null) : campWas;
       st.doc.runs = fresh;
       if ("earlier" in d) st.doc.state = Object.assign({}, st.doc.state, { earlier: d.earlier || null });
+      if ("campaign" in d) {
+        st.doc.campaign = d.campaign || null;
+        st.doc.state = Object.assign({}, st.doc.state, { campaign: d.campaign || null });
+      }
       if (to) { follow(to); return; }
-      if (runsKey(old) === runsKey(fresh) && said === says) return;
+      if (campIs !== campWas) {
+        var slot = document.getElementById("strip-slot");
+        if (slot && st.status) { var sh = String(statusStrip()); if (sh !== st.lastStrip) { slot.innerHTML = sh; st.lastStrip = sh; } }
+      }
+      if (runsKey(old) === runsKey(fresh) && said === says && campIs === campWas) return;
       var head = document.getElementById("study-head");
       if (head) head.innerHTML = String(header());
       var n = document.getElementById("study-notices");
@@ -731,21 +742,23 @@
   }
   /** More search time for the run: on a study with a schedule the engine keeps it for the next window
       (its answer's `words` are the toast) unless `now`; once at a time, its buttons disabled until the
-      answer, so a double click never adds the hours twice. */
+      answer, so a double click never adds the hours twice. On a scheduled answer they stay disabled
+      (`st.continuing` stays true) through the refetch: the redraw builds a fresh page state. Only an
+      error enables them again (the acts return no promise, so nothing else does). */
   function continueRun(now) {
     if (st.continuing) return;
     var hours = continueHours(), body = { run: st.run, hours: hours };
     if (now) body.now = true;
     st.continuing = true;
-    EK.$$('[data-act="continue"], [data-act="continue-now"]').forEach(function (b) { b.disabled = true; });
+    EK.$$('[data-act="continue"], [data-act="continue-now"]').forEach(function (b) { b.disabled = true; b.setAttribute("aria-busy", "true"); });
     return EK.post(EK.studyPath(st.slug, "/continue"), body).then(function (res) {
-      st.continuing = false;
       if (res.scheduled) { EK.toast("done", res.words); EK.rerender(); return; }
+      st.continuing = false;
       EK.toast("done", "Searching on for " + EK.hours(hours));
       EK.go(EK.studyHref(st.slug, res.run));
     }, function (err) {
       st.continuing = false;
-      EK.$$('[data-act="continue"], [data-act="continue-now"]').forEach(function (b) { b.disabled = false; });
+      EK.$$('[data-act="continue"], [data-act="continue-now"]').forEach(function (b) { b.disabled = false; b.removeAttribute("aria-busy"); });
       EK.fail(err);
     });
   }
@@ -953,8 +966,8 @@
           EK.go(EK.studyHref(st.slug, res.run));
         }).catch(EK.fail);
       },
-      "continue": function () { return continueRun(false); },
-      "continue-now": function () { return continueRun(true); },
+      "continue": function () { continueRun(false); },  // no promise: the act wrapper never enables it again
+      "continue-now": function () { continueRun(true); },
       next: function () {
         EK.post(EK.studyPath(st.slug, "/next" + runQ()), { name: st.doc.study.name + " (next)" }).then(function (doc) { EK.go("#/setup/" + EK.q(doc.slug)); }).catch(EK.fail);
       },

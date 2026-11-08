@@ -387,8 +387,8 @@ def test_combinations_that_repeated_one_already_tried_are_said(tmp_path):
             handle.write(json.dumps({"id": f"d{n}", "operator": "param_cross", "rejected": True,
                                      "reject_reason": "duplicate: structurally identical to x1"}) + "\n")
     assert build_verdict(root, run)["how_it_ran"] == (
-        "Ran all 11 planned rounds (25 combinations, about 132 planned): 3 repeated a combination already "
-        "tried, so they were not measured again.")
+        "Ran all 11 planned rounds (25 combinations, about 132 planned); 3 of the combinations tried repeated "
+        "one already tried and were not measured again."), "what it knows, not the whole shortfall (m6)"
 
 
 def _two_held_back(tmp_path: Path, changes: tuple[float, ...] = (3.1, 8.2), ci: tuple[float, float] = (-26.7, 37.9),
@@ -447,6 +447,9 @@ def test_a_keep_whose_held_back_cases_all_improved_says_why(tmp_path, capsys):
     capsys.readouterr()
     _say_verdict(v)
     assert capsys.readouterr().out.splitlines()[:3] == [v["line"], WHY_KEEP, v["advice"]]
+    text = page["summary_text"].splitlines()  # the text to paste: right after the final check's line (I2)
+    at = text.index(f"Final check: {v['line']}")
+    assert text[at + 1] == WHY_KEEP
 
 
 def test_why_keep_names_three_cases_at_most_and_the_goals_direction(tmp_path):
@@ -654,3 +657,21 @@ def test_a_live_search_carries_its_ai_spend(tmp_path, monkeypatch):
     data["budget"]["ai"] = {"enabled": False}
     copy.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     assert jobs.status(root, run, document_of)["spent"] is None
+
+
+def test_why_keep_is_never_given_when_the_goal_has_levels(tmp_path):
+    """Fix round 1, I1: with goals in order of importance the range and the rows are the first
+    measure's, while another level may be what kept it: no why_keep."""
+    root, run = _two_held_back(tmp_path)
+    path = root / "runs" / run / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    comparison["per_candidate"]["c1"]["levels"] = {
+        "confirmed": False, "verdict": "equal on tour length, worse on longest leg", "deciding": 2,
+        "levels": [{"level": 1, "kpi": "tour_length", "direction": "minimize", "state": "equal", "unit": "percent",
+                    "mean_difference": 5.6, "ci95": [-26.7, 37.9]},
+                   {"level": 2, "kpi": "longest_leg", "direction": "minimize", "state": "worse", "unit": "percent",
+                    "mean_difference": -3.0, "ci95": [-5.0, -1.0]}]}
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+    v = build_verdict(root, run)
+    assert v["decision"] == "keep" and v.get("levels") and "why_keep" not in v
+    assert "why_keep" not in jobs.results(root, run, document_of)["final"]

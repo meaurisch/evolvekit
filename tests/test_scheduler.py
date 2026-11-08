@@ -950,16 +950,18 @@ def _at(text: str) -> str:
 
 def test_the_campaign_keeps_its_sessions_on_the_window_clock(tmp_path):
     """H3: when in the weekend did it run? Each session the tick launches is kept from the tick's
-    `now` (the rehearsal clock's, 120 x) to the `now` of the first tick that sees it ended."""
+    `now` (the rehearsal clock's, 120 x) to the last tick before the one that sees it ended (its
+    `ticked_at`: fix round 1, m7)."""
     home, root = campaign_study(tmp_path)
     calls = {**Recorder().calls_for(), "start": _starts_r1(root)}
     scheduler.tick(home, now=local("2026-11-14 00:04"), speed=120.0, **calls)
     assert scheduler.read_campaign(root)["sessions"] == [
         {"run": "r1", "session": 1, "from": _at("2026-11-14 00:04"), "to": None, "by_hand": False}]
     scheduler.tick(home, now=local("2026-11-14 12:00"), speed=120.0, **calls)
+    scheduler.tick(home, now=local("2026-11-15 09:27"), speed=120.0, **calls)
     assert scheduler.read_campaign(root)["sessions"][0]["to"] is None, "still going"
     write_run(root, "r1", "done", generations=6, planned=6, max_hours=1.0, used_s=3600, final={"decision": "keep"})
-    scheduler.tick(home, now=local("2026-11-15 09:27"), speed=120.0, **calls)
+    scheduler.tick(home, now=local("2026-11-15 09:37"), speed=120.0, **calls)
     campaign = scheduler.read_campaign(root)
     assert campaign["state"] == "complete" and campaign["sessions"][0]["to"] == _at("2026-11-15 09:27")
     state = scheduler.campaign_state(root, load_study(root), now=local("2026-11-16 08:39"))
@@ -1204,5 +1206,52 @@ def test_a_draft_card_names_what_is_missing(tmp_path):
         status, got = call(server, "GET", "/api/home")
         (card,) = got["studies"]
         assert card["missing"]["step"] == 5 and card["missing"]["key"].startswith("goal"), card
+    finally:
+        server.stop()
+
+
+def test_a_session_that_ended_while_the_app_was_off_ends_at_its_last_tick(tmp_path):
+    """Fix round 1, m7: the run ended with no app ticking. Read on Monday, the history says it
+    ended at the campaign's last tick (Sat 12:00), not "…"; and Monday's first tick writes that
+    too, never Monday."""
+    home, root = campaign_study(tmp_path)
+    calls = {**Recorder().calls_for(), "start": _starts_r1(root)}
+    scheduler.tick(home, now=local("2026-11-14 00:04"), **calls)
+    scheduler.tick(home, now=local("2026-11-14 12:00"), **calls)
+    write_run(root, "r1", "done", generations=6, planned=6, max_hours=1.0, used_s=3600, final={"decision": "keep"})
+    before = (root / scheduler.CAMPAIGN).read_text(encoding="utf-8")
+    state = scheduler.campaign_state(root, load_study(root), now=local("2026-11-16 08:39"))
+    assert state["history_line"] == "Ran in its windows: Sat 00:04 – Sat 12:00"
+    assert (root / scheduler.CAMPAIGN).read_text(encoding="utf-8") == before, "a read writes nothing"
+    scheduler.tick(home, now=local("2026-11-16 08:39"), **calls)
+    assert scheduler.read_campaign(root)["sessions"][0]["to"] == _at("2026-11-14 12:00")
+
+
+def test_the_plan_of_a_campaign_with_a_finished_run_spreads_what_is_left(tmp_path):
+    """Fix round 1, m9: once its run is finished, the next window goes on with the campaign's
+    search time left and a final check, not the whole plan again."""
+    home, root = _finished_campaign(tmp_path)
+    study = load_study(root)
+    monday = local("2026-11-16 08:39")
+    assert scheduler.campaign_plan_hours(root, study, 0.3, 37.0, now=monday) == 0.3, \
+        "a complete campaign: a start begins a new run"
+    scheduler.continue_campaign(home, root, "r1", 0.3, now=monday)
+    left = scheduler.campaign_left_s(root / "runs" / "r1")
+    assert scheduler.campaign_plan_hours(root, load_study(root), 0.6, 37.0, now=monday) == \
+        pytest.approx((left + 37.0) / 3600.0)
+
+
+def test_the_runs_route_carries_the_campaign(tmp_path):
+    """Fix round 1: the open Study page asks the runs route every few seconds; it brings the campaign
+    as it is now, so the page follows a campaign that finishes."""
+    from test_app_server import call
+
+    home, root = _finished_campaign(tmp_path)
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        status, body = call(server, "GET", f"/api/studies/{root.name}/runs")
+        assert status == 200 and body["campaign"]["state"] == "complete" and body["campaign"]["line"] == "Campaign finished"
+        assert "history_line" in body["campaign"]
     finally:
         server.stop()
