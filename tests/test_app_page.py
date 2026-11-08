@@ -169,8 +169,7 @@ def test_every_route_the_old_page_used_is_still_reachable():
     """Everything the app could do stays reachable: each API route has a caller in the page."""
     from evolvekit.app import api
 
-    unused = {"/api/harnesses/{}",  # read by tests and tools, never by the page (as before the redesign)
-              "/api/shutdown"}  # `evolvekit app stop`'s, never the page's
+    unused = {"/api/harnesses/{}"}  # read by tests and tools, never by the page (as before the redesign)
     for method, pattern, _ in api.ROUTES:
         literal = re.sub(r"\(\?P<\w+>\[\^/\]\+\)", "{}", pattern.pattern)
         if literal in unused:
@@ -1044,3 +1043,11 @@ def test_a_scheduled_continue_never_enables_its_button_again_before_the_redraw()
     acts = STUDY_PAGE[STUDY_PAGE.index('"continue": function'):]
     assert acts.startswith('"continue": function () { continueRun(false); }'), "no promise: the act wrapper never enables it"
     assert '"continue-now": function () { continueRun(true); }' in STUDY_PAGE
+
+SETTINGS = (STATIC / "js" / "pages" / "settings.js").read_text(encoding="utf-8")
+
+
+def test_settings_offers_stop_the_app():
+    assert '"Stop the app"' in SETTINGS and "/api/shutdown" in SETTINGS
+    assert "Studies that are running carry on." in SETTINGS
+    assert "start evolvekit-app.exe, or run evolvekit app" in SETTINGS

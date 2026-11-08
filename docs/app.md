@@ -24,7 +24,8 @@ bookmark of the bare address, or the page from an earlier launch, shows one
 sentence asking you to), and the page keeps the key for as long as the tab is
 open. Keep the window it runs in open while you work; closing it stops the
 app, not the studies that are running — they carry on, and the app shows
-them again when it is back.
+them again when it is back. The installed app has no window: stop it with **Stop the app** at the end of Settings
+(or `evolvekit app stop`).
 
 | Option | Does |
 |---|---|
