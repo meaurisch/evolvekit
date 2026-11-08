@@ -297,6 +297,40 @@ def test_a_reply_of_two_files_without_git_headers_and_wrong_counts_applies(proje
         tree.remove_all(tmp_path / "run")
 
 
+def test_a_hunk_line_without_its_mark_refuses_the_diff(tmp_path):
+    top = tmp_path / "my repo"
+    (top / "app dir").mkdir(parents=True)
+    (top / "app dir" / "abc.txt").write_bytes(b"a\nb\nc\nd\ne\n")
+    git_init_commit(top)
+    made = tree.materialise(tmp_path / "run", repo=tree.Repo(top / "app dir"), base=head(top), diff="",
+                            candidate_id="u")
+    try:
+        reply = "--- a/abc.txt\n+++ b/abc.txt\n@@ -1,5 +1,5 @@\n a\n-b\n+B\nc\n-d\n+D\n e\n"
+        with pytest.raises(tree.TreeError, match=re.escape("the diff does not apply: a hunk line has no ' ', '+' or "
+                                                           "'-' mark: 'c'")):
+            tree.apply_in(made, reply, directory="app dir")
+        assert (made.path / "abc.txt").read_bytes() == b"a\nb\nc\nd\ne\n", "nothing applied, not half of it"
+        tree.apply_in(made, reply.replace("\nc\n", "\n c\n"), directory="app dir")
+        assert (made.path / "abc.txt").read_bytes() == b"a\nB\nc\nD\ne\n"
+    finally:
+        tree.remove_all(tmp_path / "run")
+
+
+def test_a_folder_named_like_the_repo_folder_stays_relative(tmp_path):
+    top = tmp_path / "my repo"
+    (top / "src" / "src").mkdir(parents=True)
+    (top / "src" / "x.py").write_bytes(b"OUTER = 1\n")
+    (top / "src" / "src" / "x.py").write_bytes(b"INNER = 1\n")
+    git_init_commit(top)
+    made = tree.materialise(tmp_path / "run", repo=tree.Repo(top / "src"), base=head(top), diff="", candidate_id="s")
+    try:
+        tree.apply_in(made, "--- a/src/x.py\n+++ b/src/x.py\n@@ -1 +1 @@\n-INNER = 1\n+INNER = 2\n", directory="src")
+        assert (made.path / "src" / "x.py").read_bytes() == b"INNER = 2\n", "relative to the open folder"
+        assert (made.path / "x.py").read_bytes() == b"OUTER = 1\n"
+    finally:
+        tree.remove_all(tmp_path / "run")
+
+
 # -- limits and faults -------------------------------------------------------
 
 

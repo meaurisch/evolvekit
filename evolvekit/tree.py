@@ -398,6 +398,13 @@ def _with_crlf(diff: str, is_crlf: Callable[[str], bool]) -> str | None:
     return "\n".join(out) if changed else None
 
 
+def _starts_section(lines: list[str], index: int) -> bool:
+    """A hunk header, a `diff --git` line, or a `--- ` line followed by `+++ `."""
+    line = lines[index]
+    return bool(_HUNK.match(line)) or line.startswith("diff --git ") or (
+        line.startswith("--- ") and index + 1 < len(lines) and lines[index + 1].startswith("+++ "))
+
+
 def _recount(diff: str) -> str:
     """The diff with every hunk header's line counts made true, as a model's reply
     needs. A hunk ends at the next hunk or file header (`diff --git`, or a `--- `
@@ -417,10 +424,17 @@ def _recount(diff: str) -> str:
         j = i + 1
         while j < len(lines):
             line = lines[j]
-            if _HUNK.match(line) or line.startswith("diff --git ") or (
-                    line.startswith("--- ") and j + 1 < len(lines) and lines[j + 1].startswith("+++ ")):
+            if _starts_section(lines, j):
                 break
             if line and line[0] not in " +-\\":
+                # The hunk's end, or a context line whose space was lost: when hunk
+                # lines follow before the next header, the diff is refused, so the
+                # changes after it are not dropped as trailing text.
+                k = j + 1
+                while k < len(lines) and not _starts_section(lines, k):
+                    if lines[k][:1] in (" ", "+", "-"):
+                        raise TreeError(f"the diff does not apply: a hunk line has no ' ', '+' or '-' mark: {line[:80]!r}")
+                    k += 1
                 break
             body.append(line)
             j += 1
@@ -455,7 +469,13 @@ def apply_in(made: Tree, diff: str, *, directory: str = "") -> None:
     args = ["apply", "--index", "--whitespace=nowarn", "--unidiff-zero"]
     names = changed_files(diff)
     root = directory.rstrip("/")
-    if root and not (names and all(name.startswith(root + "/") for name in names)):
+    # Toplevel paths only when they say so: every path starts with the folder, the
+    # tree has some of them as written, and none of them under the folder (so
+    # `src/x.py` inside a folder `src` that holds its own `src/` stays relative).
+    toplevel = bool(root and names and all(name.startswith(root + "/") for name in names)
+                    and any((made.worktree / name).exists() for name in names)
+                    and not any((made.worktree / root / name).exists() for name in names))
+    if root and not toplevel:
         args.append(f"--directory={root}")
     else:
         root = ""
