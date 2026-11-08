@@ -231,6 +231,8 @@ class Driver:
         self._provider_failures = 0
         self._provider_halt: str | None = None
         self._dead_ends: list[str] = []
+        self._told: set[str] = set()
+        """The run-log notes said once per run (`_agent_patch`)."""
         self._parent_notes: dict[str, str] = {}
         """One artefact per parent that bred a behavioural twin, spent on that
         parent's next prompt. The parent's children counter has already been
@@ -1405,9 +1407,15 @@ class Driver:
         competing = [c for c in self.archive if _competes(c) and c.fitness is not None]
         worst = min(competing, key=lambda c: (c.fitness, c.id)) if competing else None
         left_usd = self.budget.config.max_usd - self.budget.state.usd
+        provider = self.provider(role)
+        note_for = getattr(provider, "act_cap_note", None)
+        note = note_for() if callable(note_for) else None
+        if note and note not in self._told:  # once per run, not per call
+            self._told.add(note)
+            self.log(f"warning: {note}")
         return agent_patch(
             config=self.config,
-            provider=self.provider(role),
+            provider=provider,
             model_role=role,
             parent=parent,
             parent_result=self.results.get(parent.id),

@@ -1861,7 +1861,8 @@ def _tree_rules(config: Config) -> Config:
     runs that build, under its timeout; without a build it has nothing to run.
     The AI operators on a tree are `diff` and `agent_patch` (decision 37):
     `rewrite`, `crossover`, `big_step` and scheduled big steps are refused, and
-    `agent_patch` (a coding agent editing the tree) is refused without one.
+    `agent_patch` (a coding agent editing the tree) is refused without one,
+    and with a copilot-cli strong model (not verified against a real CLI yet).
     """
     tree = config.problem.tree
     for index, stage in enumerate(config.evaluate.stages):
@@ -1882,6 +1883,13 @@ def _tree_rules(config: Config) -> Config:
                 f"search.operators.{name}: does not work on a source tree (problem.tree); "
                 "a code study's AI operator is diff -- give it this share"
             )
+    if (config.search.operators.get("agent_patch", 0) > 0 and config.models is not None
+            and config.models.strong.provider == "copilot-cli"):
+        # Its `act` argv has never run against a real Copilot CLI, and it has no git deny rules.
+        raise ConfigError(
+            "search.operators.agent_patch: agent_patch with copilot-cli is not verified yet; "
+            "use claude-cli for it, or the diff operator"
+        )
     if config.search.takes_big_steps:
         raise ConfigError(
             "search.big_step_every: big steps do not work on a source tree (problem.tree); set it to 0"

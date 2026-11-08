@@ -10,7 +10,8 @@ Shared by the providers' `act` (design §5.4) and the agent gate script
   variable (the key, the endpoint, the model) and `CLAUDE_CLI_PATH`
   (evolvekit's own) stay too.
 * `agent_env` -- that, without the keys evolvekit keeps for its own
-  providers (`SECRET_NAMES`) except the agent's own sign-in, and with no
+  providers (`SECRET_NAMES`) except the agent's own sign-in, without the git
+  host's tokens (`GIT_HOST_TOKENS`) unless they are that sign-in, and with no
   bytecode written (a `__pycache__` the agent's test run left would be a file
   outside the open files).
 * `run_agent` -- the call, under one wall-clock bound that covers the whole
@@ -29,7 +30,7 @@ from typing import Any, Mapping, Sequence
 
 from evolvekit.providers.base import AgentError
 
-__all__ = ["KEEP", "SESSION_NAMES", "SESSION_PREFIXES", "agent_env", "from_session", "run_agent",
+__all__ = ["GIT_HOST_TOKENS", "KEEP", "SESSION_NAMES", "SESSION_PREFIXES", "agent_env", "from_session", "run_agent",
            "without_session"]
 
 SESSION_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_PREVIEW_")
@@ -38,6 +39,9 @@ KEEP = ("CLAUDE_CODE_GIT_BASH_PATH", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE
         "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
         "CLAUDE_CODE_OAUTH_TOKEN")
 """Sign-in configuration under a session prefix: kept."""
+GIT_HOST_TOKENS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+"""Tokens that would let the agent push or open a pull request: never in its
+environment unless its provider names one in `keep` as its own sign-in."""
 
 
 def from_session(name: str) -> bool:
@@ -60,7 +64,8 @@ def agent_env(source: Mapping[str, str] | None = None, *, keep: Sequence[str] = 
 
     kept = {name.upper() for name in (*KEEP, *keep)}
     env = {k: v for k, v in without_session(source).items()
-           if not SECRET_NAMES.search(k) or k.upper().startswith("ANTHROPIC_") or k.upper() in kept}
+           if (not SECRET_NAMES.search(k) or k.upper().startswith("ANTHROPIC_") or k.upper() in kept)
+           and (k.upper() not in GIT_HOST_TOKENS or k.upper() in kept)}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 

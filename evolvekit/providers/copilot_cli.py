@@ -40,7 +40,9 @@ dollar caps hold; `requests` is 1 per call unless the JSON output reports
 premium requests.
 
 `act` (design §5.4) runs it as a coding agent in a folder, unverified against
-a real Copilot CLI (see `build_act_argv`):
+a real Copilot CLI (see `build_act_argv`). Until it is, no study is given it:
+`agent_patch` is compiled for claude-cli only, and a config that names it with
+copilot-cli is refused (`config._tree_rules`).
 
     copilot [--add-dir <the brief's folder>] -p <short prompt> --allow-tool=write
         --allow-tool=shell --no-ask-user -s [--model=<model>]
@@ -386,7 +388,7 @@ class CopilotCliProvider:
     ) -> AgentResult:
         """One agent run in `cwd`; its whole tree ended on `timeout_s` or on
         `cancel`. One request per call, as `complete` counts it -- a call ended
-        by its time limit or a Stop request too (`AgentError` with
+        by its time limit, a Stop request or a non-zero exit too (`AgentError` with
         `requests=1.0`); `max_usd` has no meaning for a plan that counts requests."""
         del max_usd
         argv = self.build_act_argv(brief, model=model, read_dirs=read_dirs)
@@ -403,8 +405,9 @@ class CopilotCliProvider:
             raise AgentError(str(exc), usd=0.0, requests=1.0, input_tokens=estimate_tokens(brief)) from exc
         except OSError as exc:  # `run_agent` raises OSError when the program cannot start at all
             raise CopilotCliError(MISSING, "missing") from exc
-        if proc.returncode != 0:
-            raise classify_failure(proc.stdout, proc.stderr)
+        if proc.returncode != 0:  # it started and ran: the request was made
+            failure = classify_failure(proc.stdout, proc.stderr)
+            raise AgentError(str(failure), usd=0.0, requests=1.0, input_tokens=estimate_tokens(brief)) from failure
         text = (proc.stdout or "").strip()
         return AgentResult(ok=True, text=text, usd=0.0, requests=1.0, input_tokens=estimate_tokens(brief),
                            output_tokens=estimate_tokens(text))

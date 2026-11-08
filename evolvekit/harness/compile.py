@@ -62,8 +62,11 @@ OPERATORS_CODE = {"diff": 1.0}
 """A code study's search: a diff against the base (decision 37: no rewrite,
 crossover or big step on a tree)."""
 
-ACT_PROVIDERS = ("claude-cli", "copilot-cli")
-"""The providers whose `act` runs a coding agent (`providers.base.supports_act`)."""
+ACT_PROVIDERS = ("claude-cli",)
+"""The providers whose coding agent a code study is given (`agent_patch`).
+copilot-cli has an `act` too (`providers.base.supports_act`), but it is not
+verified against a real Copilot CLI yet: its study searches with `diff` alone,
+and `config._tree_rules` refuses `agent_patch` with it."""
 
 OPERATORS_CODE_AGENT = {"agent_patch": 0.5, "diff": 0.5}
 """A code study whose strong model's provider can act (decision 37): the

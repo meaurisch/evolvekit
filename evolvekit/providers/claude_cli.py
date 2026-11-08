@@ -39,7 +39,10 @@ The folder is a git worktree of the engineer's repository, so `git` there
 reaches the engineer's branches, refs, stash and remotes. `ACT_DISALLOWED`
 denies the git commands that write them (`Bash(git push:*)` and the like);
 that is not airtight -- `git -C . push`, a script that runs git, or an alias
-gets past a prefix rule -- and the brief says not to commit either.
+gets past a prefix rule -- and the brief says not to commit either. The git
+host's tokens (`GH_TOKEN`, `GITHUB_TOKEN` and the enterprise pair,
+`agent_run.GIT_HOST_TOKENS`) are not in the agent's environment: claude does
+not need them to sign in.
 """
 
 from __future__ import annotations
@@ -181,6 +184,13 @@ class ClaudeCliProvider:
                 text = ""
             cache[exe] = frozenset(re.findall(r"--[a-z][a-z0-9-]*", text))
         return cache[exe]
+
+    def act_cap_note(self) -> str | None:
+        """What a run's log says once when this CLI cannot be given a cap per
+        call (its `--help` lists no `--max-budget-usd`); None when it can."""
+        if "--max-budget-usd" in self.act_flags():
+            return None
+        return "this claude has no spending limit per call; the study's budget is checked between calls"
 
     def build_act_argv(
         self, *, model: str, read_dirs: Sequence[Path | str] = (), max_usd: float | None = None

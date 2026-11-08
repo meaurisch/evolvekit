@@ -271,6 +271,26 @@ def test_failed_calls_reach_the_ledger_and_the_log(project, tmp_path):
     assert rows and all(r["rejected"] and "timed out" in r["reject_reason"] for r in rows)
 
 
+def test_a_claude_without_a_call_cap_is_named_once_per_run(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base, generations=2)
+    raw["search"]["operators"] = {"agent_patch": 1.0}
+    lines: list[str] = []
+    seen: dict = {}
+    agent = _claude(seen, help_text="Options:\n  --add-dir <directories...>\n")
+    Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run", providers={"strong": agent},
+           log=lines.append).run()
+    assert "--max-budget-usd" not in seen["argv"]
+    note = "this claude has no spending limit per call; the study's budget is checked between calls"
+    assert sum(note in line for line in lines) == 1, "one line per run, not per call"
+    assert len(list(read_jsonl(tmp_path / "run" / "usage.jsonl"))) >= 2
+    capped: list[str] = []
+    Driver(build_config(raw, base_dir=tmp_path / "x"), run_dir=tmp_path / "run2", providers={"strong": _claude({})},
+           log=capped.append).run()
+    assert not any(note in line for line in capped), "a claude that lists --max-budget-usd is capped per call"
+    tree.remove_all(tmp_path / "run2")
+
+
 # -- files the agent adds outside the open files --------------------------------
 
 
@@ -441,6 +461,36 @@ def test_copilot_act_failures_charge_a_request(tmp_path):
     with pytest.raises(ProviderError, match="not installed") as gone:
         provider.act("b", cwd=tmp_path, model="m", timeout_s=9)
     assert str(gone.value) == MISSING and gone.value.kind == "missing"
+    assert not isinstance(gone.value, AgentError), "it never started: nothing to bill"
+
+
+def test_a_copilot_agent_that_exits_non_zero_is_billed_a_request(tmp_path):
+    def runner(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "Error: something broke\n")
+
+    provider = CopilotCliProvider(runner=runner, executable="copilot", windows=False)
+    provider._resolve = lambda: (["copilot"], False)  # type: ignore[method-assign]
+    with pytest.raises(AgentError, match="something broke") as failed:
+        provider.act("b", cwd=tmp_path, model="m", timeout_s=9)
+    assert (failed.value.requests, failed.value.usd, failed.value.unreported) == (1.0, 0.0, False), \
+        "it started and ran: the request was made"
+
+
+def test_the_claude_agent_gets_no_git_host_token(tmp_path, monkeypatch):
+    """The tokens would let the agent push or open a pull request; claude signs in without them."""
+    names = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    for name in names:
+        monkeypatch.setenv(name, "t")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "o")
+    seen: dict = {}
+    _claude(seen).act("b", cwd=tmp_path, model="m", timeout_s=9)
+    assert not [name for name in seen["env"] if name.upper() in names]
+    assert seen["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "o", "claude's own sign-in stays"
+    from evolvekit.providers.agent_run import GIT_HOST_TOKENS, agent_env
+
+    assert set(GIT_HOST_TOKENS) == set(names)
+    assert not set(names) & set(agent_env({name: "t" for name in names}))
+    assert agent_env({"GH_TOKEN": "t"}, keep=("GH_TOKEN",))["GH_TOKEN"] == "t", "only a provider that names it"
 
 
 def test_copilot_act_refuses_a_shim_and_a_long_prompt(tmp_path):
@@ -526,12 +576,12 @@ def test_operator_mix_includes_agent_patch_for_trees():
     from evolvekit.harness.plan import Plan
     from evolvekit.harness.study import study_from_template
 
-    assert ACT_PROVIDERS == ("claude-cli", "copilot-cli")
+    assert ACT_PROVIDERS == ("claude-cli",), "copilot-cli's agent is off until it is verified against a real CLI"
     harness = load_harness(DEMO)
     study = study_from_template(harness, "faster", "F")
     study.code.repo, study.training, study.budget.ai_enabled = str(SOURCE), ["cases/a.json"], True
     study.application_path = str(SOURCE / "solver.py")
-    for provider, has in (("claude-cli", True), ("copilot-cli", True), ("azure", False)):
+    for provider, has in (("claude-cli", True), ("copilot-cli", False), ("azure", False)):
         models = {r: {"provider": provider, "model": ""} for r in ("small", "strong")}
         ops = compile_study(study, harness, Plan.fixed(), models=models)[0]["search"]["operators"]
         assert ("agent_patch" in ops) is has and ops.get("diff")
@@ -545,3 +595,18 @@ def test_operator_mix_includes_agent_patch_for_trees():
 def test_agent_patch_needs_a_tree(minimal_raw, tmp_path):
     with pytest.raises(ConfigError, match="agent_patch changes a source tree"):
         build_config({**minimal_raw, "search": {"operators": {"agent_patch": 1.0}}}, base_dir=tmp_path)
+
+
+def test_agent_patch_with_copilot_is_refused_until_verified(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base)
+    raw["search"]["operators"] = {"agent_patch": 0.5, "diff": 0.5}
+    raw["models"]["strong"] = {"provider": "copilot-cli", "model": "m"}
+    with pytest.raises(ConfigError, match="agent_patch with copilot-cli is not verified yet; use claude-cli for it, "
+                                          "or the diff operator"):
+        build_config(raw, base_dir=tmp_path)
+    raw["search"]["operators"] = {"diff": 1.0}
+    assert build_config(raw, base_dir=tmp_path).models.strong.provider == "copilot-cli", "diff alone is fine"
+    raw["search"]["operators"] = {"agent_patch": 1.0}
+    raw["models"]["strong"] = {"provider": "claude-cli", "model": "m"}
+    assert build_config(raw, base_dir=tmp_path).search.operators["agent_patch"] == 1.0
