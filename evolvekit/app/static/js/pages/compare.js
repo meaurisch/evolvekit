@@ -58,6 +58,7 @@
       var slug = a.split("/")[0];
       var others = home.studies.filter(function (s) { return s.slug !== slug && (s.kind === "finished" || s.kind === "stopped" || s.kind === "failed" || s.kind === "running"); });
       return EK.get(EK.studyPath(slug)).then(function (doc) {
+        if (!EK.isCurrent(gen)) return;  // left by the hash link while the study was being read
         var runs = (doc.runs || []).filter(function (r) { return r.kind !== "queued" && a !== slug + "/" + r.id; });
         var options = runs.map(function (r) { return html`<option value="${slug + "/" + r.id}">${doc.study.name} · run of ${EK.when(r.started_at)}</option>`; })
           .concat(others.map(function (s) { return html`<option value="${s.slug}">${s.name}</option>`; }));

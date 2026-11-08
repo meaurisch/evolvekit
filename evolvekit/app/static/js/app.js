@@ -133,6 +133,7 @@
     EK.closeMenus();
     EK.onStudyChanged = null;
     EK.hoverEscape = null;
+    document.title = "evolvekit";  // a page that names the tab (the Study page) does so as it draws
     if (EK.closeDrawer) EK.closeDrawer({ keepAssistant: true, quiet: true });
     var name = r.path[0] || "home";
     var page = { "": "home", home: "home", start: "start", setup: "setup", study: "study", compare: "compare", settings: "settings" }[name] || "home";

@@ -568,3 +568,34 @@ def test_the_cases_view_never_says_better_over_search_figures():
     assert "right column: tries ahead of today on that case (not checked)" in study
     card = _page_function(STUDY_PAGE, "cardLines")
     assert "better" not in card and "searchChange(" in card, card
+
+
+APP_JS = (STATIC / "js" / "app.js").read_text(encoding="utf-8")
+
+
+def test_a_compare_picker_that_was_left_does_not_draw_over_the_next_page():
+    """Persona round 4, F3: the Compare picker asks twice (the home, then the study) and checked
+    that its page was still the one on screen after the first answer only. Leaving it by the hash link
+    between the two answers drew the picker over the page that had been routed to."""
+    out = _node(_page_function(COMPARE_PAGE, "picker"), """
+      var pending = {}, current = 1, mounted = 0;
+      EK.get = function (path) { return new Promise(function (resolve) { pending[path.split("?")[0]] = resolve; }); };
+      EK.isCurrent = function (gen) { return gen === current; };
+      EK.mount = function () { mounted++; };
+      EK.companion = {show: function () {}};
+      var done = picker({}, "depot/run-1", 1);
+      pending["/api/home"]({studies: []});
+      Promise.resolve().then(function () { return Promise.resolve(); }).then(function () {
+        current = 2;  // the hash link moved on while the study was still being read
+        pending["/api/studies/depot"]({runs: [], study: {name: "Depot"}});
+        return done;
+      }).then(function () { process.stdout.write(JSON.stringify({mounted: mounted})); });""")
+    assert out == {"mounted": 0}
+
+
+def test_every_page_starts_with_the_plain_title():
+    """Persona round 4, F3: the Study page names the tab ("Done: ... · evolvekit"); the title stayed
+    on the Compare page and Home after the hash link. The router resets it before each page draws."""
+    route = _page_function(APP_JS, "route")
+    assert 'document.title = "evolvekit"' in route
+    assert route.index('document.title = "evolvekit"') < route.index("handler.render("), route
