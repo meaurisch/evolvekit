@@ -45,7 +45,7 @@ from evolvekit.harness.plan import Plan
 from evolvekit.harness.study import Study, parse_within, resolve_kpi
 
 __all__ = [
-    "compile_study", "write_run", "runner_input", "runner_kpi", "base_settings",
+    "compile_study", "write_run", "runner_input", "runner_kpi", "base_settings", "runner_settings",
     "OPERATORS", "OPERATORS_WITH_AI", "OPERATORS_CODE", "OPERATORS_CODE_AGENT", "OPERATORS_NO_SEARCH",
     "ACT_PROVIDERS", "STUDY_RUN", "CONFIG", "UP",
 ]
@@ -91,6 +91,28 @@ def _quoted(path: str) -> str:
 def base_settings(study: Study, harness: Harness, root: Path | None) -> dict[str, Any]:
     """Every setting's value when it is not tuned: fixed, else the input
     settings file's, else the harness's default."""
+    given = _given_settings(study, harness, root)
+    return {name: given[name] if name in given else setting.parameter.coerce(setting.parameter.default)
+            for name, setting in harness.settings.items()}
+
+
+def runner_settings(study: Study, harness: Harness, root: Path | None) -> dict[str, Any]:
+    """The settings `study-run.json` hands the runner (`settings.base`). A
+    settings study hands every one (`base_settings`). A code study hands only
+    the settings the study gives -- fixed in `vary.settings`, or in an input
+    settings file -- and leaves the rest to the program: each combination,
+    and the starting point, runs with its own code's defaults. A harness
+    default passed as a flag would override a default the changed code sets,
+    so the change would never run."""
+    if study.code is None:
+        return base_settings(study, harness, root)
+    given = _given_settings(study, harness, root)
+    return {name: given[name] for name in harness.settings if name in given}
+
+
+def _given_settings(study: Study, harness: Harness, root: Path | None) -> dict[str, Any]:
+    """The setting values the study itself gives: fixed in `vary.settings`,
+    else in an input settings file. No harness default is among them."""
     from_file: dict[str, Any] = {}
     for name, spec in harness.inputs.items():
         if spec.provides != "settings" or name not in study.inputs or root is None:
@@ -109,14 +131,14 @@ def base_settings(study: Study, harness: Harness, root: Path | None) -> dict[str
                 if problem:
                     raise HarnessError(f"inputs.{name}: {key}: {problem}")
                 from_file[key] = harness.settings[key].parameter.coerce(value)
-    base = {}
+    given = {}
     for name, setting in harness.settings.items():
         choice = study.settings.get(name)
         if choice is not None and choice.mode == "fixed":
-            base[name] = setting.parameter.coerce(choice.value)
-        else:
-            base[name] = from_file.get(name, setting.parameter.coerce(setting.parameter.default))
-    return base
+            given[name] = setting.parameter.coerce(choice.value)
+        elif name in from_file:
+            given[name] = from_file[name]
+    return given
 
 
 def _parameters(study: Study, harness: Harness, base: dict[str, Any]) -> dict[str, Any]:
@@ -322,7 +344,7 @@ def compile_study(
     }
     if ai:
         config["models"] = models
-    return config, runner_input(study, harness, base)
+    return config, runner_input(study, harness, runner_settings(study, harness, root))
 
 
 def _tree(study: Study, harness: Harness) -> dict[str, Any]:

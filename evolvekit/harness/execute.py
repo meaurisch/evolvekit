@@ -47,6 +47,7 @@ from evolvekit.harness.compile import (
     compile_study,
     runner_input,
     runner_kpi,
+    runner_settings,
     write_run,
 )
 from evolvekit.harness.manifest import Harness, load_harness
@@ -206,7 +207,8 @@ def preview(root: str | Path) -> dict[str, Any]:
     case = smallest_case(root, study)
     base = base_settings(study, harness, root)
     kept = replace(study, constraints=[])  # the preview measures; it does not judge
-    study_run = runner_input(kept, harness, base, kpis=_preview_kpis(study, harness), guardrails=False, up="..")
+    study_run = runner_input(kept, harness, runner_settings(study, harness, root), kpis=_preview_kpis(study, harness),
+                             guardrails=False, up="..")
     result = _solve_once(
         root, study, harness, root / PREVIEW, case=case, values=_starting_values(study, base),
         study_run=study_run, time_limit=preview_time_limit(study, harness), tables_out=True, up="..",

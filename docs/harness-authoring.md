@@ -236,6 +236,10 @@ code:
 - **`build_timeout_s`** (default 600) bounds one build. A build that fails
   or runs out of time refuses that combination, with the last lines it
   printed as the reason.
+- **Settings in a code study:** only the settings the study fixes are
+  passed; leave the rest to the program. `solve` gets no value for any
+  other setting, so a branch that changes a default is measured with it
+  (see `runner.py` below).
 
 ## Tables: the vocabulary
 
@@ -294,7 +298,14 @@ if __name__ == "__main__":
   can change: the SDK edits those cells and never your native object. Keep
   whatever else you need in `case.native`.
 - `settings` holds every setting — the study's base values with the tuned
-  ones on top — and `time_limit_s` is the study's time per case.
+  ones on top — and `time_limit_s` is the study's time per case. **In a
+  code study, only the settings the study fixes are passed; leave the rest
+  to the program.** A setting the study does not fix is absent from
+  `settings` (pass no flag for it, or let your own defaults stand), so each
+  combination and the starting point run with their own code's defaults —
+  a harness default passed as a flag would override a default the changed
+  code sets, and the change would never run. So `solve` must cope with a
+  setting that is not there; the three shipped runners do.
 - **Keep to the time limit.** A run that has not finished by 1.5 times the
   limit plus 30 seconds is stopped and counts as failed. If the application
   can hang for some settings, run it in a process of its own and stop that

@@ -160,6 +160,25 @@ def test_a_code_study_compiles_to_a_config_that_loads(tmp_path):
         write_run(study, harness, Plan.fixed(), tmp_path, "r2", models=models)
 
 
+def test_a_code_study_hands_the_runner_only_the_settings_it_fixes(tmp_path):
+    """Persona round 1, B1: a harness default passed as a flag (`--init random`) overrode the default a
+    branch changed, so its change never ran. A code study hands the runner only what it fixes; every
+    other setting is left to the program's own code. A settings study still hands every setting."""
+    harness = load_harness(DEMO)
+    study = study_from_template(harness, "faster", "F")
+    study.code.repo, study.training = str(SOURCE), ["cases/a.json"]
+    _, study_run = compile_study(study, harness, Plan.fixed(), bakeoff=True)
+    assert study_run["settings"] == {"base": {}, "tuned": []}
+    study.settings["neighbours"] = SettingChoice(mode="fixed", value=12)
+    _, study_run = compile_study(study, harness, Plan.fixed(), bakeoff=True)
+    assert study_run["settings"] == {"base": {"neighbours": 12}, "tuned": []}
+    tune = study_from_template(harness, "tune", "T")
+    tune.training = ["cases/a.json"]
+    _, study_run = compile_study(tune, harness, Plan.fixed(), root=tmp_path)
+    assert set(study_run["settings"]["base"]) == set(harness.settings), "a settings study: every setting"
+    assert study_run["settings"]["base"]["init"] == "random"
+
+
 def test_faster_template_compiles_once_repo_is_set():
     harness = load_harness(DEMO)          # check_templates already compiled it with a stand-in folder
     assert harness.templates["faster"]["title"] == "Shorter tours by changing the solver"
