@@ -74,7 +74,7 @@ _REFUSED = ("error: this is the app's own folder: run evolvekit-cli.exe from a f
             "(its full path works from anywhere)")
 _HOME_IN_BUNDLE = ("The library home {home} is inside the app's own folder. Move the app's folder somewhere else "
                    "(for example to Downloads or Desktop), or start it with --home <a folder of yours>.")
-_NO_STDIN ="evolvekit-cli.exe cannot read a program from its input; give a file"
+_NO_STDIN = "evolvekit-cli.exe cannot read a program from its input; give a file"
 _PYTHON_USAGE = "[-u] [-B] [-X OPT] [-W OPT] (-m MODULE | -c CODE | --script FILE | FILE.py) [args]"
 _CLI_FLAGS = ("--version", "-h", "--help")
 

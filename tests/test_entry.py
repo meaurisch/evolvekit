@@ -3,6 +3,11 @@ from pathlib import Path
 
 import pytest
 
+# Loaded here, unpatched: a module first imported while a test fakes a bundle
+# would keep its package-data paths (server.PAGE, dashboard.PAGE) in that bundle.
+import evolvekit.app.server  # noqa: F401
+import evolvekit.cli  # noqa: F401
+import evolvekit.dashboard  # noqa: F401
 from evolvekit import cli, resources
 from evolvekit.app import entry, service
 from evolvekit.app.running import write_running
