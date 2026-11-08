@@ -199,3 +199,46 @@ Design §4.4 and §8 for project 2, in
 ### PR
 
 [meaurisch/evolvekit#73](https://github.com/meaurisch/evolvekit/pull/73) — `agent/2-skills` against `master`, stacked on #72, opened 2026-11-07. **PASS** (every task built and reviewed; gate 1864 passed, 4 skipped; gate script 6/6 and 2/2 on the shipped tree; persona A 8/10, B 8/10 at round 3, no blocker).
+
+## Project 3 — Code studies
+
+Branch `agent/3-code` from `agent/2-skills` (9caaa61). Plan:
+[2026-11-07-agent-3-code.md](../plans/2026-11-07-agent-3-code.md), expanded
+to step level on this branch (1800 lines, 13 tasks), then the builder
+check by a fresh reviewer; the choices are in the plan's "Decisions" (D1–D23
+by the planner, 24–40 by the controller). The build runs the bake-off
+milestone first (Tasks 1, 2, 3, 4, 6, 7, 8), then mutation (5, 9), then
+10–13.
+
+### Decisions
+
+The ones a reader should know (all in the plan with their reasons):
+
+- **Code alone in this project.** §5.2 lets a study vary code together with
+  settings, but nothing says how one candidate carries both; `study check`
+  refuses the mix with a sentence. A recorded deviation, for the owner.
+- **The bake-off's diff is the branch's own change** (`git diff
+  base...ref`, from the merge-base), not `base..ref`, so a branch cut from
+  an older base is not measured as reverting the base's newer commits. A
+  recorded deviation from §5.5's wording.
+- **A bake-off chooses, but never says "the best branch"**: the chosen
+  candidate (largest mean among those whose own verdict is `use`) carries
+  the top line, prefixed "Of N branches, `<ref>`: "; with none `use`, the
+  verdict keeps today's; the report says how many branches were compared.
+- **A bake-off branch that touches files outside `open` is refused**, with
+  how to include them.
+- **"One combination at a time" is a passing note** in `harness check`, not
+  a warning, so the check can still end at exit 0.
+- **The shared interpreter is put back** after any build into the
+  engineer's Python; the build cache is in memory only.
+- **`study pr` after `from: working`** branches from `HEAD` with the
+  candidate's diff applied; it does not refuse on a non-`use` verdict (the
+  verdict's line comes first and `--yes` is needed).
+- **An agent call's time is bounded by the study's time left**, and a Stop
+  ends a running call; the brief is a file named in a short prompt.
+
+### Gate
+
+### Persona gate
+
+### PR
