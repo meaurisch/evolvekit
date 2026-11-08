@@ -226,10 +226,29 @@ def test_compare_page_lists_candidates(tmp_path):
     assert "c.line" in view and "c.ref" in view and "EK.answerWords" not in view and "EK.better" not in view
     assert "query.run" in js and "/verdict?run=" in js
     study_js = (STATIC / "js" / "pages" / "study.js").read_text(encoding="utf-8")
-    assert '"Compare branches"' in study_js and '"/bakeoff"' in study_js and "#/compare?run=" in study_js
+    drawer_js = (STATIC / "js" / "drawer.js").read_text(encoding="utf-8")
+    assert '"Compare branches"' in study_js and '"/bakeoff"' in drawer_js and "#/compare?run=" in study_js
 
 
-NUMBERS = ("mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words")
+def test_compare_branches_is_offered_whenever_no_run_is_live():
+    """Ruling 2: on a code study's page for done, stopped and failed (never while a run is live),
+    and on Set up for a code study that has never run; one drawer for both."""
+    study_js = (STATIC / "js" / "pages" / "study.js").read_text(encoding="utf-8")
+    assert 'var BRANCHES_WHEN = ["done", "stopped", "failed"];' in study_js
+    gate = study_js[study_js.index("BRANCHES_WHEN.indexOf(s.phase)") - 40:study_js.index('act: "branches" }')]
+    assert "isCode()" in gate and 's.phase === "done" && isCode()' not in study_js
+    assert "EK.branchesDrawer(st.slug, heldCount())" in study_js
+    setup_js = (STATIC / "js" / "pages" / "setup.js").read_text(encoding="utf-8")
+    never = setup_js[setup_js.index("function neverRunCode"):setup_js.index("function dataSummary")]
+    assert "vary().code" in never and "(st.doc.runs || []).length" in never
+    assert 'neverRunCode() ? EK.button("Compare branches", { kind: "secondary", act: "branches" })' in setup_js
+    assert "branches: function () { EK.branchesDrawer(st.slug," in setup_js
+    drawer_js = (STATIC / "js" / "drawer.js").read_text(encoding="utf-8")
+    shared = drawer_js[drawer_js.index("EK.branchesDrawer = function"):drawer_js.index("// ---", drawer_js.index("EK.branchesDrawer"))]
+    assert 'EK.studyPath(slug, "/bakeoff")' in shared and "EK.studyHref(slug, res.run)" in shared
+
+
+NUMBERS =("mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words")
 
 
 def test_a_bakeoff_with_no_branch_shown_ahead_keeps_todays(tmp_path):
@@ -256,6 +275,7 @@ def test_a_bakeoff_with_no_branch_shown_ahead_keeps_todays(tmp_path):
     report = render_report(verdict)
     assert "Chance of a gain" not in report and "Change in" not in report.split("## Branches compared")[0]
     assert "No branch speaks for the run" in report
+    assert verdict["learned_from"].get("pct") is None, "no figure from the cases learned from, either"
 
 
 @pytest.mark.parametrize("decision", ["use", "keep", "single", "pending", "stopped"])

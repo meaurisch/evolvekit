@@ -62,8 +62,10 @@ def test_study_code_without_repo_is_a_problem():
     study.code.repo, study.code.brief = "cli-solver", ""
     problems = study_problems(study, harness, for_search=False)
     assert "vary.code.repo: give the full path to the source; 'cli-solver' is relative" in problems
-    assert "vary.code.brief: the brief is empty; say in a sentence what the search should improve" in problems
+    assert not any(p.startswith("vary.code.brief") for p in problems), "a bake-off generates nothing: no brief"
     assert not any(p.startswith("budget.ai") for p in problems)
+    assert "vary.code.brief: the brief is empty; say in a sentence what the search should improve" in \
+        study_problems(study, harness), "a search needs one"
 
 
 def test_study_code_problems_name_the_folder_and_the_files(tmp_path):
@@ -195,6 +197,34 @@ def _source_copy(where: Path) -> Path:
     shutil.copytree(SOURCE, where, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     git_init_commit(where)
     return where
+
+
+def test_deleting_a_code_study_removes_its_runs_trees_first(tmp_path, monkeypatch):
+    from evolvekit import tree
+
+    home = Home(tmp_path / "home")
+    source = _source_copy(tmp_path / "my source")
+    slugs = []
+    for name in ("F", "G"):
+        slug = home.create_study("demo-tour", "faster", name)
+        assert home.set_code(slug, str(source))["ok"]
+        run = home.study_root(slug) / "runs" / "r1"  # a run that crashed with a tree held
+        tree.materialise(run, repo=tree.Repo(source), base=head(source), diff="", candidate_id="g001-c0001")
+        slugs.append(slug)
+    final = home.study_root(slugs[0]) / "runs" / "r1" / "confirm" / "final"  # and a final check's
+    tree.materialise(final, repo=tree.Repo(source), base=head(source), diff="", candidate_id="baseline")
+    assert tree_git(source, "worktree", "list", "--porcelain").count("worktree ") == 4
+    home.delete_study(slugs[0])
+    assert tree_git(source, "worktree", "list", "--porcelain").count("worktree ") == 2, "its entries went with it"
+
+    def broken(*_a, **_k):
+        raise tree.TreeError("git fell over")
+
+    monkeypatch.setattr(tree, "remove_all", broken)
+    entry = home.delete_study(slugs[1])
+    assert (home.trash_dir() / entry / "study.yaml").is_file(), "best effort: the delete never fails on it"
+    monkeypatch.undo()
+    tree.remove_all(home.trash_dir() / entry / "runs" / "r1")
 
 
 def test_a_moved_source_re_points_the_program_it_filled_in(tmp_path):

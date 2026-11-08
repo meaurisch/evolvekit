@@ -7,6 +7,7 @@ key is never read into a message: only whether it is set.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -15,6 +16,8 @@ from urllib.parse import urlsplit
 __all__ = ["checks"]
 
 MIN_PYTHON = (3, 11)
+GIT_FLOOR = (2, 30)
+"""The git code studies need; below it the `git` line says so (and stays ok)."""
 _CLI_PROVIDERS = {"claude-cli": ("CLAUDE_CLI_PATH", "claude"), "copilot-cli": ("COPILOT_CLI_PATH", "copilot")}
 
 
@@ -127,7 +130,15 @@ def _git() -> dict:  # git is asked for here only: settings studies never need i
     from evolvekit import tree
 
     found = tree.git_version()
-    return _check(True, "git", f"git {found}" if found else "not found: only code studies need it (git-scm.com)")
+    if not found:
+        return _check(True, "git", "not found: only code studies need it (git-scm.com)")
+    # "2.50.1.windows.1", "2.39.3 (Apple Git-146)": the leading major.minor. Never
+    # a failure (D3): a settings-only machine needs no git, so the message says it.
+    parsed = re.match(r"(\d+)\.(\d+)", found)
+    if parsed and (int(parsed[1]), int(parsed[2])) < GIT_FLOOR:
+        floor = ".".join(str(n) for n in GIT_FLOOR)
+        return _check(True, "git", f"git {found} is older than {floor}, which code studies need (git-scm.com)")
+    return _check(True, "git", f"git {found}")
 
 
 def _guarded(name: str, fix: str, make):

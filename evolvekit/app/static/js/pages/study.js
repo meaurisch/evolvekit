@@ -40,6 +40,8 @@
     resizeTimer = setTimeout(function () { st.lastPlot = ""; drawView(); }, 150);
   }
   function isLive() { var p = st.status.phase; return p === "queued" || p === "starting" || p === "search" || p === "check"; }
+  /** The phases in which no run is live, so "Compare branches" is offered on a code study. */
+  var BRANCHES_WHEN = ["done", "stopped", "failed"];
   function runQ() { return st.run ? "?run=" + EK.q(st.run) : ""; }
 
   /** The run's status, tries and results, asked for together. While the search runs, the results wait. */
@@ -180,9 +182,10 @@
     } else {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Finished", head: verdictHead(f), sub: verdictSub(f), acts: [] });
     }
-    if (s.phase === "done" && isCode()) {
-      // A code study's finished run: given branches can be checked against its starting point.
-      if (isBakeoff()) x.acts.push({ text: "See the branches side by side", kind: "secondary", act: "candidates" });
+    if (isCode() && BRANCHES_WHEN.indexOf(s.phase) >= 0) {
+      // A code study with no run live (done, stopped or failed): given branches can be checked
+      // against its starting point (`jobs.start` refuses while a run is live, so only this gate moves).
+      if (isBakeoff() && s.phase === "done") x.acts.push({ text: "See the branches side by side", kind: "secondary", act: "candidates" });
       x.acts.push({ text: "Compare branches", kind: "secondary", act: "branches" });
     }
     return x;
@@ -704,27 +707,8 @@
       EK.openDrawer({ title: "Combination " + c.n + " · round " + c.round, wide: true, body: body });
     }).catch(EK.fail);
   }
-  /** "Compare branches": branch names, one per line, each checked against the starting point with no search. */
-  function branchesDrawer() {
-    var draft = "", said = "";
-    function body() {
-      return html`<p class="type-small ink-2">Each branch is run against the starting point on the ${EK.plural(heldCount(), "held-back case")}, with no search. Only the open files may differ.</p>
-        <form class="sub-section" data-submit="go">
-          ${EK.textInput({ id: "bake-refs", label: "Branches, one per line", mono: true, multiline: true, rows: 4, value: draft, invalid: said || null,
-            hint: "Names of branches, tags or commits of the source." })}
-          <div class="actions">${EK.button("Compare them", { type: "submit" })}</div></form>`;
-    }
-    EK.openDrawer({ kind: "branches", title: "Compare branches", sub: "Your own branches against the starting point", body: body(),
-      acts: { go: function () {
-        draft = document.getElementById("bake-refs").value;
-        var refs = draft.split(/\r?\n/).map(function (r) { return r.trim(); }).filter(Boolean);
-        EK.post(EK.studyPath(st.slug, "/bakeoff"), { refs: refs }).then(function (res) {
-          EK.closeDrawer();
-          EK.toast("done", res.queued ? "Queued: it starts when the running study finishes" : "Comparing " + EK.plural(refs.length, "branch", "branches"));
-          EK.go(EK.studyHref(st.slug, res.run));
-        }).catch(function (err) { said = err.message; EK.refreshDrawer({ body: body() }); });
-      } } });
-  }
+  /** "Compare branches": the shared drawer (`EK.branchesDrawer`, drawer.js). */
+  function branchesDrawer() { EK.branchesDrawer(st.slug, heldCount()); }
   function runsDrawer() {
     var runs = (st.doc.runs || []).slice().reverse().map(function (r) {
       var mark = r.kind === "finished" ? EK.markOf({ kind: "finished", decision: r.decision, tone: r.tone }) : r.kind === "failed" ? "error" : "open";

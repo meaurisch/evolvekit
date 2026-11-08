@@ -70,6 +70,20 @@ def test_doctor_lists_git_without_failing_when_missing(tmp_path, capsys, monkeyp
                     "message": "not found: only code studies need it (git-scm.com)"}
 
 
+def test_doctor_says_when_git_is_too_old_for_code_studies(tmp_path, capsys, monkeypatch):
+    for version, old in (("2.25.1", True), ("2.29.9.windows.1", True), ("1.9.5", True),
+                         ("2.30.0", False), ("2.50.1.windows.1", False), ("2.39.3 (Apple Git-146)", False),
+                         ("3.0", False), ("unknown", False)):
+        monkeypatch.setattr("evolvekit.tree.git_version", lambda v=version: v)
+        code, out = _doctor(capsys, tmp_path, "--json")
+        line = next(c for c in json.loads(out) if c["name"] == "git")
+        assert line["ok"] is True, "settings studies need no git: the line never fails"
+        if old:
+            assert line["message"] == f"git {version} is older than 2.30, which code studies need (git-scm.com)"
+        else:
+            assert line["message"] == f"git {version}"
+
+
 def _second_harness(home):
     import shutil
 

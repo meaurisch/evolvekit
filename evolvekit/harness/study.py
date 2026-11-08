@@ -605,7 +605,7 @@ def _code_problems(study: Study, harness: Harness, root: Path | None, for_search
         add(f"vary.code.repo: there is nothing at {code.repo} any more; point the study at the source again")
     if harness.code is None:
         add("vary.code: the harness has no code section, so this study cannot change code")
-    if not code.brief:
+    if for_search and not code.brief:  # a bake-off generates nothing, so it needs no brief
         add("vary.code.brief: the brief is empty; say in a sentence what the search should improve")
     if harness.code is not None and code.open:
         from evolvekit.tree import glob_pattern

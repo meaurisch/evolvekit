@@ -422,7 +422,8 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                          "chance": words.get("chance"), "chance_words": words.get("chance_words", "")})
     if levels and named:
         document["levels"] = levels
-    document["learned_from"] = {"cases": len(study.training), "pct": learned_pct}
+    # A bake-off with no branch shown ahead names no branch: no figure of an unnamed one here either.
+    document["learned_from"] = {"cases": len(study.training), "pct": learned_pct if named else None}
     document["rule"] = RULE_WORDS
     # A case's change is the comparison's own: the paired mean over the final check's runs, the
     # statistic the line is made of -- not the change of the means, which can differ by a few tenths.

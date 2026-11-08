@@ -378,6 +378,7 @@ class Home:
         Nothing is deleted at once: `restore_study` brings it back until
         `clean_trash` empties it after `TRASH_DAYS`."""
         root = self.study_root(slug)
+        _remove_trees(root)
         self.trash_dir().mkdir(exist_ok=True)
         base = f"{slug}~{datetime.now().strftime(_STAMP)}"
         entry, number = base, 2
@@ -915,6 +916,30 @@ class Home:
             "inputs": dict(study.inputs),
             "code_proposal": code_proposal(root, harness) if study.code is not None else None,
         }
+
+
+def _remove_trees(root: Path) -> None:
+    """A code study's runs' trees, removed from the engineer's repository before
+    the study is moved (a crashed run, or a tree held open, may have left one):
+    best effort, never a reason for the delete to fail. A settings study never
+    imports `evolvekit.tree`."""
+    try:
+        if load_study(root).code is None:
+            return
+        from evolvekit import tree
+
+        runs = root / "runs"
+        folders = [run for run in sorted(runs.iterdir()) if run.is_dir()] if runs.is_dir() else []
+        for run in list(folders):  # a final check's trees are under confirm/<label>
+            confirm = run / "confirm"
+            folders += [label for label in sorted(confirm.iterdir()) if label.is_dir()] if confirm.is_dir() else []
+    except Exception:  # noqa: BLE001 -- the delete goes ahead; `git worktree prune` clears what is left
+        return
+    for folder in folders:
+        try:
+            tree.remove_all(folder)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def code_proposal(root: Path, harness: Harness) -> str | None:

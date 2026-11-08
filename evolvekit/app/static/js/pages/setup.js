@@ -142,6 +142,9 @@
       sub: files + " · " + (c.brief || "No brief yet: say what the search should improve."),
       state: vary().code && vary().code.repo && c.brief ? "complete" : "missing", action: c.repo ? "Change" : "Say where", act: "code" };
   }
+  /** A code study that has never run: its own branches can be compared before any search (a run's
+      page offers it afterwards). */
+  function neverRunCode() { return !!(st.h.code && vary().code) && !(st.doc.runs || []).length; }
   function dataSummary() {
     var data = vary().data || {}, n = Object.keys(data).length;
     if (!n && !isData()) return null;
@@ -235,7 +238,7 @@
       <div class="summary-rows">${rows.map(EK.summaryRow)}</div>
       <section aria-label="Plan" class="sub-section">${planBlock()}</section>
       ${testRun()}
-      <div class="actions">${EK.button("Start", { act: "start", disabled: !can })}${EK.button("Save for later", { kind: "secondary", act: "later" })}<span class="type-small ink-2">${why}</span></div>
+      <div class="actions">${EK.button("Start", { act: "start", disabled: !can })}${EK.button("Save for later", { kind: "secondary", act: "later" })}${neverRunCode() ? EK.button("Compare branches", { kind: "secondary", act: "branches" }) : ""}<span class="type-small ink-2">${why}</span></div>
       ${more}</div></div>`, acts(main));
   }
 
@@ -274,7 +277,8 @@
           EK.go(EK.studyHref(st.slug));
         }).catch(EK.fail);
       },
-      later: function () { EK.toast("done", "Saved. It waits on Home."); EK.go("#/"); }
+      later: function () { EK.toast("done", "Saved. It waits on Home."); EK.go("#/"); },
+      branches: function () { EK.branchesDrawer(st.slug, ((study().cases || {}).test || []).length); }
     };
   }
 
