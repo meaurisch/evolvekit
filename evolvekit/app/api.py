@@ -621,7 +621,8 @@ def tries_of(req: Request) -> dict[str, Any]:
 
 def try_of(req: Request) -> dict[str, Any]:
     """One combination of a run in full: what it set, every run of it, and what a
-    failed run printed (the last lines of its output) and was started with."""
+    failed run printed (the last lines of its output) and was started with; in a
+    code study its `diff` against the starting point (`None` in any other run)."""
     from evolvekit.status import candidate_detail
 
     root, _, _ = req.home.load(req.params["slug"])
@@ -631,7 +632,8 @@ def try_of(req: Request) -> dict[str, Any]:
         raise AppError(f"there is no combination {req.params['combination']!r} in this run", 404)
     keep = ("id", "generation", "operator", "parent_id", "rejected", "reject_reason", "last_failure", "gated",
             "stages_reached", "kpis", "parameters", "evaluations")
-    return {key: detail.get(key) for key in keep}
+    diff = str(detail.get("block") or "") if tries.tree_run(run_dir) else None
+    return {**{key: detail.get(key) for key in keep}, "diff": diff}
 
 
 def results(req: Request) -> dict[str, Any]:

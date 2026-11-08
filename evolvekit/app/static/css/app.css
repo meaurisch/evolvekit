@@ -327,6 +327,14 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .expert { border-top: 1px solid var(--line-rule); padding-top: 8px; }
 .expert > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; font: 600 15px/1 var(--sans); color: var(--accent-ink); }
 .code { font: 500 13px/1.45 var(--mono); background: var(--surface-panel); border-radius: var(--radius-1); padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+/* A code study's diff: as it is, monospace, scrolling in its own box (never the page) */
+.diff { font: var(--type-data); font-size: 13px; line-height: 1.45; background: var(--surface-panel); border-radius: var(--radius-1); padding: 10px 0; margin: 0;
+  white-space: pre; overflow: auto; max-height: 60vh; max-width: 100%; }
+.diff-body { display: inline-block; min-width: 100%; }
+.diff-body > span { display: block; padding: 0 12px; min-height: 1.45em; }
+.diff-add { background: var(--good-tint); }
+.diff-del { background: var(--critical-tint); }
+.diff-hunk { color: var(--ink-2); }
 .small-table { width: 100%; font: var(--type-small); }
 .small-table th { text-align: left; color: var(--ink-2); font-weight: 600; padding: 4px 8px 4px 0; }
 .small-table td { padding: 4px 8px 4px 0; border-top: 1px solid var(--line-rule); overflow-wrap: anywhere; }

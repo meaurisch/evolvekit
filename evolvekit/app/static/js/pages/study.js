@@ -253,6 +253,38 @@
     var t = st.tries;
     return c.full ? "Full look, " + EK.plural(t.cases.length, "case") : "Quick look, " + EK.plural(t.quick_cases || 0, "case");
   }
+  /** What a code study's combination changes, from its `diff_stat`: "+3 −1 lines in solver.py". */
+  function diffWords(stat) {
+    var files = stat.files || [];
+    if (!stat.added && !stat.removed && !files.length) return "No change: today’s code";
+    var where = files.length === 1 ? " in " + String(files[0]).split("/").pop() : files.length ? " in " + EK.plural(files.length, "file") : "";
+    return "+" + EK.int(stat.added || 0) + " −" + EK.int(stat.removed || 0) + " lines" + where;
+  }
+  /** A combination's diff as it is: monospace in its own scrolling box, added lines on
+      the good tint, removed ones on the critical tint, hunk heads quiet, nothing else
+      marked. Lines are read as `tree._lines` reads them: the hunk head's counts say
+      where a hunk ends, so a removed "-- x" line is not taken for a file head. */
+  function diffView(text) {
+    var left = 0, right = 0, inHunk = false, rows = [];
+    var lines = String(text).replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i], head = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line), mark = line.charAt(0), kind = "";
+      if (head) {
+        left = head[1] == null ? 1 : Number(head[1]); right = head[2] == null ? 1 : Number(head[2]);
+        inHunk = true; kind = "diff-hunk";
+      } else if ((left > 0 || right > 0) && (mark === "+" || mark === "-" || mark === " " || !line)) {
+        if (mark !== "+") left--;
+        if (mark !== "-") right--;
+        kind = mark === "+" ? "diff-add" : mark === "-" ? "diff-del" : "";
+      } else if (inHunk && (mark === "+" || mark === "-") && !/^(---|\+\+\+) /.test(line)) {
+        kind = mark === "+" ? "diff-add" : "diff-del";  // past a short count, still the hunk's
+      } else if (mark !== "\\") {
+        left = right = 0; inHunk = false;
+      }
+      rows.push(kind ? html`<span class="${kind}">${line}</span>` : html`<span>${line}</span>`);
+    }
+    return html`<pre class="diff mono" tabindex="0"><span class="diff-body">${rows}</span></pre>`;
+  }
   function cardLines(p) {
     var c = combo(p.id);
     if (!c) return ["", ""];
@@ -266,7 +298,7 @@
       var meta = paramOf(p.setting) || { type: "" };
       return [head, labelOf(p.setting) + ": " + EK.valueText(meta, c.params[p.setting]), "Today: " + EK.valueText(meta, meta.default)];
     }
-    return [head, c.failed || c.pct == null ? "Did not finish" : EK.better(c.pct), lookWords(c)];
+    return [head, c.failed || c.pct == null ? "Did not finish" : EK.better(c.pct), c.diff_stat ? diffWords(c.diff_stat) : lookWords(c)];
   }
 
   function viewWidth() {
@@ -654,9 +686,10 @@
       var failed = (d.evaluations || []).filter(function (e) { return String(e.ok) === "false" || e.ok === false; });
       var parent = d.parent_id && combo(d.parent_id);
       var body = html`<p class="type-body strong">${c.failed || c.pct == null ? "Did not finish" : EK.capital(EK.change(chipFigure(c).pct != null ? chipFigure(c).pct : c.pct, chipFigure(c).direction)) + " on the cases it learned from, not checked"}</p>
-        <p class="type-small ink-2">${lookWords(c)}${parent ? " · comes from combination " + (parent.base ? "0, today’s settings" : parent.n) : ""}</p>
+        <p class="type-small ink-2">${lookWords(c)}${parent ? " · comes from combination " + (parent.base ? (c.diff_stat ? "0, today’s code" : "0, today’s settings") : parent.n) : ""}</p>
         <div class="sub-section"><h3 class="type-heading">What it changed</h3>
-          ${params.length ? html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Today</th><th>This one</th></tr></thead><tbody>
+          ${c.diff_stat ? html`<p class="type-small ink-2">${diffWords(c.diff_stat)}</p>` : ""}
+          ${d.diff ? diffView(d.diff) : d.diff === "" ? "" : params.length ? html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Today</th><th>This one</th></tr></thead><tbody>
             ${params.map(function (p) { return html`<tr><td>${labelOf(p.name)}</td><td>${EK.valueText(p, p.default)}</td><td class="new">${EK.valueText(p, p.value)}</td></tr>`; })}</tbody></table></div>`
             : html`<p class="type-small ink-2">Nothing: these are today’s settings.</p>`}</div>
         <div class="sub-section"><h3 class="type-heading">Case by case</h3><div class="cases-wrap"><table class="changed-table"><tbody>
