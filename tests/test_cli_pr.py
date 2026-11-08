@@ -84,7 +84,7 @@ def test_export_diff_writes_patch(tmp_path, capsys):
     assert "+VALUE = 3" in patch.read_text(encoding="utf-8") and b"\r\n" not in patch.read_bytes()
     assert git(repo, "apply", "--check", str(patch)) == "", "it applies to the starting point"
     assert main(["study", "export", slug, "--diff", "--json", "--home", str(home)]) == 0
-    assert json.loads(capsys.readouterr().out) == {"patch": str(patch)}
+    assert json.loads(capsys.readouterr().out) == {"ok": True, "patch": str(patch)}
     assert main(["study", "export", slug, "--home", str(home)]) == 2
     assert "name what to export: --diff (the best combination's change as a patch)" in capsys.readouterr().err
 
@@ -112,7 +112,12 @@ def test_pr_without_yes_only_prints(tmp_path, capsys, monkeypatch):
     assert out.splitlines()[0].startswith("the verdict: "), "decision 29: the verdict's line first"
     assert "push: no remote, the branch stays here" in out
     assert "evolvekit/" not in git(repo, "branch", "--list"), "no branch either"
-    assert (home / "studies" / slug / "runs" / "r1" / "pr.md").read_text(encoding="utf-8").startswith("# ")
+    body = (home / "studies" / slug / "runs" / "r1" / "pr.md").read_text(encoding="utf-8")
+    assert body.startswith("# ")
+    # Review ruling: a PR is read on another computer -- no local path (it carries the account's name).
+    root = home / "studies" / slug
+    assert str(home) not in body and str(root.resolve()) not in body and str(tmp_path) not in body
+    assert "\n## Files\n" in body
     assert git(repo, "status", "--porcelain") == ""
 
 
@@ -138,6 +143,32 @@ def test_pr_creates_branch_from_commit(tmp_path, capsys, monkeypatch):
     assert "trees" not in git(repo, "worktree", "list"), "the PR's tree is gone"
     assert main(["study", "pr", slug, "--yes", "--home", str(home)]) == 1, "the branch exists already"
     assert f"the branch {branch} exists already" in capsys.readouterr().err
+    # Review item 4: with --json, a failure is a document on stdout too.
+    assert main(["study", "pr", slug, "--yes", "--json", "--home", str(home)]) == 1
+    said = capsys.readouterr()
+    answer = json.loads(said.out)
+    assert answer["ok"] is False and answer["state"] == "none" and answer["branch"] == branch
+    assert "exists already" in answer["error"] and "exists already" in said.err
+
+
+def test_pr_honours_the_engineers_hooks(tmp_path, capsys):
+    """Decision D15, review item 2: the PR's commit runs the repository's own hooks; a hook that
+    refuses it leaves no branch and no tree, and says so."""
+    home, slug, repo = finished_code_run(tmp_path)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'no commits today' >&2\nexit 1\n", encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+    git(repo, "config", "core.hooksPath", str(hooks))  # wherever the machine's own hooks are
+    assert main(["study", "pr", slug, "--yes", "--home", str(home)]) == 1
+    err = capsys.readouterr().err
+    assert "was not made: the commit was refused by the repository's hook" in err and "no commits today" in err
+    assert "evolvekit/" not in git(repo, "branch", "--list"), "no branch is left"
+    assert "trees" not in git(repo, "worktree", "list") and git(repo, "status", "--porcelain") == ""
+    assert main(["study", "pr", slug, "--yes", "--json", "--home", str(home)]) == 1
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["ok"] is False and answer["state"] == "none" and answer["commit"] is None
 
 
 def test_pr_without_a_github_remote_says_where_the_branch_is(tmp_path, capsys, monkeypatch):

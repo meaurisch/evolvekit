@@ -332,19 +332,44 @@ def diff_between(repo: Repo, base: str, ref: str) -> str:
     return _git(repo.toplevel, "diff", *_DIFF, f"{old}...{new}")
 
 
-def applies(repo: Repo, base: str, diff: str) -> bool:
-    """Whether `diff` applies on `base`, as `materialise` would apply it: checked
+def applies(repo: Repo, base: str, diff: str, *, directory: str = "") -> bool:
+    """Whether `diff` applies on `base` exactly as `apply_in` would apply it there (the
+    same recount, path handling and CRLF retry, `_prepare` and `_attempts`): checked
     against a temporary index, so no tree is made and the engineer's index is not written."""
     if not diff.strip():
         return True
+    commit = resolve_commit(repo, base)
+    top = repo.toplevel
+
+    def exists(rel: str) -> bool:
+        try:
+            _git(top, "cat-file", "-e", f"{commit}:{rel}")
+        except TreeError as exc:
+            if str(exc) == _MISSING:
+                raise
+            return False
+        return True
+
+    def is_crlf(rel: str) -> bool:
+        if not exists(rel):
+            return False
+        data = _git(top, "cat-file", "blob", f"{commit}:{rel}")
+        crlf = data.count("\r\n")
+        return crlf > 0 and crlf * 2 > data.count("\n")
+
+    prepared, extra, root = _prepare(diff, directory, exists)
     with tempfile.TemporaryDirectory(prefix="evolvekit-apply-") as scratch:
         env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
-        patch = Path(scratch) / "change.patch"
-        patch.write_text(diff if diff.endswith("\n") else diff + "\n", encoding="utf-8",
-                         errors="surrogateescape", newline="\n")
-        _git(repo.toplevel, "read-tree", resolve_commit(repo, base), env=env)
+        _git(top, "read-tree", commit, env=env)
+
+        def attempt(text: str) -> None:
+            patch = Path(scratch) / "change.patch"
+            patch.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8",
+                             errors="surrogateescape", newline="\n")
+            _git(top, "apply", "--cached", "--check", *extra, str(patch), env=env)
+
         try:
-            _git(repo.toplevel, "apply", "--cached", "--check", "--whitespace=nowarn", "--recount", str(patch), env=env)
+            _attempts(prepared, root, attempt, is_crlf)
         except TreeError as exc:
             if str(exc) == _MISSING:
                 raise
@@ -463,32 +488,46 @@ def apply_in(made: Tree, diff: str, *, directory: str = "") -> None:
     `\\r` on the hunk lines of every file that is mostly CRLF (never with
     `--ignore-whitespace`). Raises `TreeError("the diff does not apply: …")`.
     """
-    # Counted here, not by `--recount`: git's recount takes the next file's
-    # `--- a/x` for a removed line when a diff has no `diff --git` headers.
-    diff = _recount(diff)
-    args = ["apply", "--index", "--whitespace=nowarn", "--unidiff-zero"]
-    names = changed_files(diff)
-    root = directory.rstrip("/")
-    # Toplevel paths only when they say so: every path starts with the folder, the
-    # tree has some of them as written, and none of them under the folder (so
-    # `src/x.py` inside a folder `src` that holds its own `src/` stays relative).
-    toplevel = bool(root and names and all(name.startswith(root + "/") for name in names)
-                    and any((made.worktree / name).exists() for name in names)
-                    and not any((made.worktree / root / name).exists() for name in names))
-    if root and not toplevel:
-        args.append(f"--directory={root}")
-    else:
-        root = ""
-    if not _sides_prefixed(diff):
-        args.append("-p0")
+    prepared, extra, root = _prepare(diff, directory, lambda rel: (made.worktree / rel).exists())
 
     def attempt(text: str) -> None:
         with tempfile.TemporaryDirectory(prefix="evolvekit-reply-") as scratch:
             patch = Path(scratch) / "reply.patch"
             patch.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8",
                              errors="surrogateescape", newline="\n")
-            _git(made.worktree, *args, str(patch))
+            _git(made.worktree, "apply", "--index", *extra, str(patch))
 
+    _attempts(prepared, root, attempt, lambda rel: _mostly_crlf(made.worktree / rel))
+
+
+def _prepare(diff: str, directory: str, exists: Callable[[str], bool]) -> tuple[str, list[str], str]:
+    """What `apply_in` and `applies` both apply: the diff recounted, the `git apply`
+    options after the mode (`--index` or `--cached --check`), and the folder its paths
+    are relative to ("" for the toplevel). `exists(path)`: a toplevel path is in the base."""
+    # Counted here, not by `--recount`: git's recount takes the next file's
+    # `--- a/x` for a removed line when a diff has no `diff --git` headers.
+    diff = _recount(diff)
+    args = ["--whitespace=nowarn", "--unidiff-zero"]
+    names = changed_files(diff)
+    root = directory.rstrip("/")
+    # Toplevel paths only when they say so: every path starts with the folder, the
+    # tree has some of them as written, and none of them under the folder (so
+    # `src/x.py` inside a folder `src` that holds its own `src/` stays relative).
+    toplevel = bool(root and names and all(name.startswith(root + "/") for name in names)
+                    and any(exists(name) for name in names)
+                    and not any(exists(f"{root}/{name}") for name in names))
+    if root and not toplevel:
+        args.append(f"--directory={root}")
+    else:
+        root = ""
+    if not _sides_prefixed(diff):
+        args.append("-p0")
+    return diff, args, root
+
+
+def _attempts(diff: str, root: str, attempt: Callable[[str], None], is_crlf: Callable[[str], bool]) -> None:
+    """`attempt(diff)`, then once more with `\\r` on the hunk lines of every file that
+    `is_crlf` (a toplevel path) says is mostly CRLF; `TreeError("the diff does not apply: …")`."""
     try:
         attempt(diff)
         return
@@ -496,7 +535,7 @@ def apply_in(made: Tree, diff: str, *, directory: str = "") -> None:
         if str(exc) == _MISSING:
             raise
         first = exc
-    crlf = _with_crlf(diff, lambda name: _mostly_crlf(made.worktree / (f"{root}/{name}" if root else name)))
+    crlf = _with_crlf(diff, lambda name: is_crlf(f"{root}/{name}" if root else name))
     if crlf is not None:
         try:
             attempt(crlf)

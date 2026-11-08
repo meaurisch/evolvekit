@@ -28,7 +28,7 @@ import yaml
 
 from evolvekit.harness import HarnessError
 
-__all__ = ["NotCodeStudy", "PrPlan", "create_pr", "describe", "export_diff", "open_pr", "plan_pr", "push_branch"]
+__all__ = ["NotCodeStudy", "PrFailed", "PrPlan", "create_pr", "describe", "export_diff", "open_pr", "plan_pr", "push_branch"]
 
 PATCH = "best.patch"
 BODY = "pr.md"
@@ -182,12 +182,14 @@ def _remote(toplevel: Path) -> tuple[str | None, str | None]:
 
 
 def _body(run: _Run, document: dict[str, Any], ref: str | None, base: str, from_head: bool) -> str:
-    """The report as `study report --markdown` writes it, with a header that says what the PR is."""
+    """The report as `study report --markdown` writes it, with a header that says what the PR is.
+    It names files relative to the study folder only (`root=None`): a PR is read on another
+    computer, and the folder's absolute path carries the account's name."""
     from evolvekit.app import jobs
     from evolvekit.app.report import render_report
     from evolvekit.status import build_status
 
-    report = render_report(document, jobs.results(run.root, run.run, build_status), root=run.root)
+    report = render_report(document, jobs.results(run.root, run.run, build_status), root=None)
     where = f"HEAD ({base[:12]})" if from_head else base[:12]
     if ref is not None:
         header = (f"This PR holds the branch `{ref}` as the bake-off {run.run} of the evolvekit study "
@@ -301,40 +303,68 @@ def _branch_exists(toplevel: Path, branch: str) -> bool:
     return True
 
 
+class PrFailed(HarnessError):
+    """`open_pr` stopped part way: `state` says how far it got -- "none" (nothing was
+    made), "branch" (the branch is made here, not pushed) or "pushed" (no PR) -- and
+    `branch`/`commit` what was made."""
+
+    def __init__(self, message: str, *, state: str, branch: str, commit: str | None = None):
+        super().__init__(message)
+        self.state, self.branch, self.commit = state, branch, commit
+
+
+_IDENT = ("Please tell me who you are", "unable to auto-detect email address", "empty ident name")
+
+
+def _refused(exc: Exception) -> str:
+    """Why `git commit` refused the PR's commit, in a sentence: the engineer's hooks,
+    signing and identity apply to it (decision D15)."""
+    said = str(exc)
+    if any(mark in said for mark in _IDENT):
+        return f"git does not know who you are: set user.name and user.email ({said})"
+    if "gpg" in said.lower() or "sign" in said.lower():
+        return f"the commit could not be signed: {said}"
+    return f"the commit was refused by the repository's hook: {said}"
+
+
 def open_pr(plan: PrPlan) -> dict[str, Any]:
-    """Make the branch, push it, open the PR: `{"branch", "commit", "pushed", "url", "note"}`."""
+    """Make the branch, push it, open the PR: `{"branch", "commit", "pushed", "url", "note"}`.
+    Raises `PrFailed` with how far it got."""
     from evolvekit import tree
 
-    top = plan.toplevel
-    if _branch_exists(top, plan.branch):
-        raise HarnessError(f"the branch {plan.branch} exists already; delete it or start a new run")
+    top, branch = plan.toplevel, plan.branch
+    if _branch_exists(top, branch):
+        raise PrFailed(f"the branch {branch} exists already; delete it or start a new run", state="none", branch=branch)
     try:
         made = tree.materialise(plan.run_dir, repo=tree.Repo(plan.repo_path), base=plan.base_commit, diff="",
                                 candidate_id=PR_TREE)
         tree.apply_in(made, plan.block)
-        # The engineer's identity, hooks and signing (no `identity=True`, no --no-verify): decision D15.
-        tree.git(made.worktree, "commit", "-q", "-m", f"{plan.title}\n\n{plan.line}".rstrip())
+        try:
+            # The engineer's identity, hooks and signing (no `identity=True`, no --no-verify): decision D15.
+            tree.git(made.worktree, "commit", "-q", "-m", f"{plan.title}\n\n{plan.line}".rstrip())
+        except tree.TreeError as exc:
+            raise PrFailed(f"the branch {branch} was not made: {_refused(exc)}", state="none", branch=branch) from None
         commit = tree.git(made.worktree, "rev-parse", "HEAD").strip()
-        tree.git(top, "branch", plan.branch, commit)
+        tree.git(top, "branch", branch, commit)
     except tree.TreeError as exc:
-        raise HarnessError(f"the branch {plan.branch} was not made: {exc}") from None
+        raise PrFailed(f"the branch {branch} was not made: {exc}", state="none", branch=branch) from None
     finally:
         tree.remove(plan.run_dir, PR_TREE)
-    done: dict[str, Any] = {"branch": plan.branch, "commit": commit, "pushed": False, "url": None, "note": ""}
+    done: dict[str, Any] = {"branch": branch, "commit": commit, "pushed": False, "url": None, "note": ""}
     if plan.remote:
         try:
-            push_branch(top, plan.remote, plan.branch)
+            push_branch(top, plan.remote, branch)
         except (HarnessError, tree.TreeError) as exc:
-            raise HarnessError(f"the branch {plan.branch} is made here ({commit[:12]}), but pushing it to "
-                               f"{plan.remote} failed: {exc}") from None
+            raise PrFailed(f"the branch {branch} is made here ({commit[:12]}), but pushing it to "
+                           f"{plan.remote} failed: {exc}", state="branch", branch=branch, commit=commit) from None
         done["pushed"] = True
     if plan.gh:
         try:
-            done["url"] = create_pr(top, base=plan.base_branch, branch=plan.branch, title=plan.title,
+            done["url"] = create_pr(top, base=plan.base_branch, branch=branch, title=plan.title,
                                     body_path=plan.body_path, draft=plan.draft)
         except HarnessError as exc:
-            raise HarnessError(f"the branch {plan.branch} is pushed to {plan.remote}, but gh pr create failed: {exc}; "
-                               f"the body is at {plan.body_path}") from None
+            raise PrFailed(f"the branch {branch} is pushed to {plan.remote}, but gh pr create failed: {exc}; "
+                           f"the body is at {plan.body_path}", state="pushed", branch=branch, commit=commit) from None
     elif plan.why_not == "no remote":
         done["note"] = (f"no remote: the branch {plan.branch} stays in {top}; push it and open the PR from it; "
                         f"the body is at {plan.body_path}")

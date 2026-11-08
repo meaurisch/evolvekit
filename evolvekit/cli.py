@@ -1228,6 +1228,13 @@ def _change_command(command: str, args: argparse.Namespace) -> int:
     if command == "export" and not args.diff:
         print("name what to export: --diff (the best combination's change as a patch)", file=sys.stderr)
         return 2
+    def failed(exc: HarnessError, code: int, extra: dict | None = None) -> int:
+        """The sentence on stderr; with `--json` also `{"ok": false, "error", "state"}` on stdout."""
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(exc), "state": getattr(exc, "state", "none"), **(extra or {})}))
+        print(exc, file=sys.stderr)
+        return code
+
     root = _home(args).study_root(args.slug)
     try:
         if command == "export":
@@ -1235,14 +1242,13 @@ def _change_command(command: str, args: argparse.Namespace) -> int:
         else:
             plan = pr.plan_pr(root, args.run, base=args.base, draft=args.draft)
     except HarnessError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+        return failed(exc, 2)
     if command == "export":
-        print(json.dumps({"patch": str(patch)}) if args.json else patch)
+        print(json.dumps({"ok": True, "patch": str(patch)}) if args.json else patch)
         return 0
     if not args.yes:
         if args.json:
-            print(json.dumps({**plan.to_json(), "done": False}))
+            print(json.dumps({"ok": True, **plan.to_json(), "done": False}))
             return 0
         for line in pr.describe(plan):
             print(line)
@@ -1255,10 +1261,9 @@ def _change_command(command: str, args: argparse.Namespace) -> int:
     try:
         done = pr.open_pr(plan)
     except HarnessError as exc:
-        print(exc, file=sys.stderr)
-        return 1
+        return failed(exc, 1, {"branch": getattr(exc, "branch", plan.branch), "commit": getattr(exc, "commit", None)})
     if args.json:
-        print(json.dumps({**plan.to_json(), **done, "done": True}))
+        print(json.dumps({"ok": True, **plan.to_json(), **done, "done": True}))
         return 0
     print(f"made the branch {done['branch']} at {done['commit'][:12]}")
     print(f"pushed it to {plan.remote}" if done["pushed"] else "not pushed: there is no remote")

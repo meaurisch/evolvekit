@@ -351,3 +351,39 @@ def test_git_version_and_missing_git(monkeypatch):
     assert tree.git_version() is None
     with pytest.raises(tree.TreeError, match="git is not installed"):
         tree.Repo(Path.cwd())
+
+
+ZERO_CONTEXT = """diff --git a/app dir/solver.py b/app dir/solver.py
+--- a/app dir/solver.py
++++ b/app dir/solver.py
+@@ -2 +2 @@
+-VALUE = 5
++VALUE = 3
+"""
+
+
+def test_applies_refuses_exactly_what_apply_in_refuses(repo, tmp_path):
+    """Review of Task 10: `applies` (study pr's check, decision 35) and `apply_in` (the apply)
+    share their preparation, so a hunk without context lines passes both, and one that
+    does not match fails both."""
+    located, base = tree.Repo(repo / "app dir"), head(repo)
+    assert tree.applies(located, base, ZERO_CONTEXT)
+    made = tree.materialise(tmp_path / "run dir", repo=located, base=base, diff="", candidate_id="z")
+    try:
+        tree.apply_in(made, ZERO_CONTEXT)
+        assert "VALUE = 3" in (made.path / "solver.py").read_text(encoding="utf-8")
+    finally:
+        tree.remove(tmp_path / "run dir", "z")
+    wrong = ZERO_CONTEXT.replace("-VALUE = 5", "-VALUE = 7")
+    assert not tree.applies(located, base, wrong)
+    made = tree.materialise(tmp_path / "run dir", repo=located, base=base, diff="", candidate_id="w")
+    try:
+        with pytest.raises(tree.TreeError, match="the diff does not apply"):
+            tree.apply_in(made, wrong)
+    finally:
+        tree.remove(tmp_path / "run dir", "w")
+    # Paths relative to the repo's folder, as apply_in takes them with `directory`.
+    relative = ZERO_CONTEXT.replace("app dir/", "")
+    assert tree.applies(located, base, relative, directory=located.prefix)
+    assert not tree.applies(located, base, relative), "from the toplevel, solver.py is not there"
+    assert git(repo, "status", "--porcelain") == ""
