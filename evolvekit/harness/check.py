@@ -366,8 +366,19 @@ def _from_checkout(harness: Harness, app: str, made: Any, scratch: Path, where: 
         return checks + [_fail("code.samples", f"code.samples: {cases[0].name} does not solve from a clean checkout: "
                                f"{runner.said(done)}",
                                f"run runner.py solve by hand on the sample with --app {yours} and fix what it says")]
-    return checks + [_pass("code.samples", f"the samples solve from a clean checkout of {where} "
-                           f"(tried on {cases[0].name})")]
+    checks.append(_pass("code.samples", f"the samples solve from a clean checkout of {where} "
+                        f"(tried on {cases[0].name})"))
+    # A code study passes the program only the settings it fixes (none, for a study that fixes none):
+    # one solve with no settings at all shows whether solve() copes with a setting that is absent.
+    bare = _study_run(harness)
+    bare["settings"] = {"base": {}, "tuned": []}
+    done, _ = runner.solve(cases[0], bare, {}, "code-bare", limit)
+    if done.returncode != 0:
+        checks.append(_fail("code.settings", "code.settings: in a code study only the settings a study fixes are passed: "
+                            "solve must cope with a setting that is absent",
+                            f"read each setting with a fallback in solve() (settings.get(name, default)); it said: "
+                            f"{runner.said(done)}"))
+    return checks
 
 
 def _tables(harness: Harness, columns_file: Path, where: str) -> list[Check]:

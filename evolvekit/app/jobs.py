@@ -1587,7 +1587,7 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         planned = facts["rounds"]["planned"]
         where = ""
         if state == "check":
-            where = " · final check"
+            where = " · comparing branches" if bakeoff_refs_of(run_dir, job) else " · final check"
         elif isinstance(last, int):
             current = max(1, last + 1)
             current = min(current, planned) if planned else current

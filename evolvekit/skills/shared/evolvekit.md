@@ -92,7 +92,7 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `rule` | the fixed rule in words |
 | `by_case` | one row per held-back case, with `name`, `start`, `best`, `change_pct`, `outcome` |
 | `changed` | the settings and data changes of the best combination: from, to |
-| `candidates` | only on a `study bakeoff` run: one entry per branch in the order given (`ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, or `same: true` and no figures when every run of the branch gave exactly today's result); the run's own `line` names the chosen branch as one of N, or says none is shown to beat the starting point |
+| `candidates` | only on a `study bakeoff` run: one entry per branch in the order given (`ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, or `same: true` and no figures when every run of the branch gave exactly today's result); the run's own `line` names the chosen branch as one of N, or says none is shown to beat the starting point, or -- when no run of any branch differed -- says so; a branch at the starting commit says it is today's code |
 | `files` | the exports that exist in `runs/<id>/downloads/` |
 | `started_at`, `finished_at`, `elapsed_s` | when and how long |
 | `rounds`, `combinations` | how much the search tried |

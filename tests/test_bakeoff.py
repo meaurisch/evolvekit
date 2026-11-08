@@ -9,6 +9,7 @@ a branch or a ref in the evolvekit checkout."""
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -408,3 +409,113 @@ def test_outside_files_are_named_relative_to_the_source_folder(tmp_path):
     study, harness = load_study(folder), load_harness(folder / "harness")
     with pytest.raises(AppError, match=r"readme changes files outside the open files: README\.md; widen"):
         jobs.check_refs(folder, study, harness, ["readme"])
+
+
+def _all_identical(run_dir: Path) -> None:
+    path = run_dir / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    for result in comparison["per_candidate"].values():
+        result["identical"] = True
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+
+
+NO_DIFFERENCE_N = ("No difference in any run: every run of each of the 2 branches gave exactly today's result, so the "
+                   "study may not exercise their changes (a fixed setting can override changed code).")
+
+
+def test_a_bakeoff_where_no_run_differed_says_so_in_its_headline(tmp_path, monkeypatch):
+    """Persona round 1, C1: every branch `same` -> the headline is the no-difference line, not "None of the N
+    branches is shown to beat"; with only some `same` the headline stays."""
+    monkeypatch.setattr(jobs, "_what", lambda _study: "code change")  # the fixture is a settings study
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    finished_run(run_dir, decision="keep", mean=0.4)
+    _as_bakeoff(run_dir, {"c1": "keep", "c2": "keep"})
+    _all_identical(run_dir)
+    verdict = build_verdict(root, RUN)
+    assert [c.get("same") for c in verdict["candidates"]] == [True, True]
+    assert verdict["decision"] == "keep" and verdict["line"] == NO_DIFFERENCE_N
+    assert "None of the" not in render_report(verdict)
+    one = tmp_path / "one"
+    root1, _ = study_with_runs(one)
+    run1 = root1 / "runs" / RUN
+    finished_run(run1, decision="keep", mean=0.4)
+    _as_bakeoff(run1, {"c1": "keep"}, only="c1")
+    _all_identical(run1)
+    v1 = build_verdict(root1, RUN)
+    assert v1["line"] == v1["candidates"][0]["line"] and v1["line"].startswith("No difference in any run: every run of this change")
+    some = tmp_path / "some"
+    root2, _ = study_with_runs(some)
+    run2 = root2 / "runs" / RUN
+    finished_run(run2, decision="keep", mean=0.4)
+    _as_bakeoff(run2, {"c1": "keep", "c2": "keep"})
+    path = run2 / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    comparison["per_candidate"]["c2"]["identical"] = True
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+    v2 = build_verdict(root2, RUN)
+    assert v2["line"] == "None of the 2 branches is shown to beat the starting point."
+    assert [c.get("same") for c in v2["candidates"]] == [True, None]
+
+
+TODAYS = "This branch is today's code (the same commit as the starting point): there is nothing to compare."
+
+
+def test_a_branch_at_the_starting_commit_is_todays_code(tmp_path):
+    """Persona round 1, C2: a branch whose commit is the base commit says so, with no figures and no hint."""
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    finished_run(run_dir, decision="keep", mean=0.4)
+    _as_bakeoff(run_dir, {"c1": "keep", "c2": "keep"})
+    rows = list(read_jsonl(run_dir / "runs.jsonl"))
+    rows[0]["commit"] = "b" * 40  # the starting point is c2's commit: the branch `same` is the base
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    _all_identical(run_dir)
+    verdict = build_verdict(root, RUN)
+    today = next(c for c in verdict["candidates"] if c["ref"] == "same")
+    assert today["line"] == TODAYS and today["decision"] == "keep" and "mean_pct" not in today
+    other = next(c for c in verdict["candidates"] if c["ref"] == "restart")
+    assert "fixed setting" not in today["line"] and other["line"].startswith("No difference in any run")
+    assert verdict["line"] == "None of the 2 branches is shown to beat the starting point."
+
+
+def test_study_status_says_each_branch_once(tmp_path, capsys):
+    """Persona round 1, C3."""
+    root, home = study_with_runs(tmp_path)
+    finished_run(root / "runs" / RUN, decision="keep", mean=0.4)
+    _as_bakeoff(root / "runs" / RUN, {"c1": "keep", "c2": "keep"})
+    assert main(["study", "status", root.name, "--home", str(home.root)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert sum(1 for line in lines if line.startswith("  same:")) == 1, lines
+    assert sum(1 for line in lines if line.startswith("  restart:")) == 1, lines
+
+    one = tmp_path / "one"
+    root1, home1 = study_with_runs(one)
+    finished_run(root1 / "runs" / RUN)
+    _as_bakeoff(root1 / "runs" / RUN, only="c1")  # one branch, chosen: the headline is its line
+    assert main(["study", "status", root1.name, "--home", str(home1.root)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert any("restart:" in line for line in out) and not any(line.startswith("  restart:") for line in out), out
+    root2, home2 = study_with_runs(tmp_path / "two")
+    finished_run(root2 / "runs" / RUN, decision="keep", mean=0.4)
+    _as_bakeoff(root2 / "runs" / RUN, {"c1": "keep"}, only="c1")
+    _all_identical(root2 / "runs" / RUN)
+    assert main(["study", "status", root2.name, "--home", str(home2.root)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert sum(1 for line in out if "No difference in any run" in line) == 1, out
+
+
+def test_a_running_bakeoff_is_comparing_branches(tmp_path):
+    """Persona round 1, C4."""
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    finished_run(run_dir, decision="keep", mean=0.4)
+    _as_bakeoff(run_dir, {"c1": "keep", "c2": "keep"})
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job.update({"phase": "check", "pid": os.getpid(), "started_at": jobs._now().isoformat(timespec="seconds")})
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    line = jobs.run_line(root, None, run_dir)["line"]
+    assert line.startswith("running · comparing branches") and "final check" not in line, line
+    del job["bakeoff"]
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    assert jobs.run_line(root, None, run_dir)["line"].startswith("running · final check")

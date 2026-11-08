@@ -1158,8 +1158,12 @@ def _say_verdict(document: dict) -> None:
     bake-off each branch's own line by its ref; then how much of the plan
     ran when the run ran less of it than planned."""
     print(document["line"])
+    headline = str(document["line"])
     for candidate in document.get("candidates") or []:
-        print(f"  {candidate.get('ref')}: {candidate.get('line', '')}")
+        words = str(candidate.get("line", ""))
+        if words and (words in headline or words[:1].lower() + words[1:] in headline):
+            continue  # the headline already says this branch's line (a bake-off of one branch)
+        print(f"  {candidate.get('ref')}: {words}")
     if document.get("advice"):
         print(document["advice"])
     if document.get("how_it_ran"):

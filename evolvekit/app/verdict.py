@@ -127,6 +127,9 @@ _NOT_REACHED = {
 }
 
 
+TODAYS_CODE_LINE = "This branch is today's code (the same commit as the starting point): there is nothing to compare."
+
+
 def no_difference_line(what: str) -> str:
     """The line of a change every paired run of which gave exactly today's
     result: no chance or range, and why the study may not exercise it --
@@ -456,11 +459,12 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     if decision in ("skipped", "none"):
         document["reason"] = str(final.get("skipped") or "")
     document["line"], document["advice"] = words.get("line", ""), words.get("advice", "")
-    candidates = (_candidates(job, comparison, goal, jobs._what(study), baseline)
+    seed_row = next((r for r in jobs._rows(run_dir) if r.get("operator") == "human-seed"), None)
+    candidates = (_candidates(job, comparison, goal, jobs._what(study), baseline, str((seed_row or {}).get("commit") or ""))
                   if job.get("bakeoff") else None)
     named = True
     if candidates:
-        decision, named = _bakeoff_headline(document, job, candidates)
+        decision, named = _bakeoff_headline(document, job, candidates, jobs._what(study))
     candidate = final.get("candidate") or next(iter((comparison or {}).get("per_candidate") or {}), None)
     result = ((comparison or {}).get("per_candidate") or {}).get(candidate) or {}
     levels = _levels(study, harness, result["levels"]) if isinstance(result.get("levels"), dict) else []
@@ -531,7 +535,7 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
 
 
 def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str,
-                baseline: str) -> list[dict[str, Any]]:
+                baseline: str, base_commit: str = "") -> list[dict[str, Any]]:
     """A bake-off's branches in the order they were given, each with its own
     decision and line against the starting point: `_final_words` as if the
     final check had checked that one alone."""
@@ -548,7 +552,10 @@ def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: di
         decision = _decision_word(words, own)
         row: dict[str, Any] = {"ref": entry.get("ref"), "commit": entry.get("commit"), "decision": decision,
                                "line": words.get("line", "")}
-        if words.get("state") == "same":
+        if base_commit and entry.get("commit") == base_commit:
+            # The branch is the starting point itself (e.g. `main` when the study starts from HEAD = main).
+            row.update({"decision": "keep", "same": True, "today": True, "line": TODAYS_CODE_LINE})
+        elif words.get("state") == "same":
             row["same"] = True  # every run gave exactly today's result: no figures
         elif decision not in _NO_ANSWER:
             row.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"),
@@ -558,7 +565,7 @@ def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: di
 
 
 def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
-                      candidates: list[dict[str, Any]]) -> tuple[str, bool]:
+                      candidates: list[dict[str, Any]], what: str = "code change") -> tuple[str, bool]:
     """Decision 32: a bake-off's own decision and line are those of the branch
     it chose (the largest mean among those whose own decision is `use`), said
     as one of N ("Of 2 branches, <ref>: ..."; "<ref>: ..." for one branch);
@@ -586,6 +593,12 @@ def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
         document["decision"] = "keep"
         document["line"] = (f"None of the {branches} is shown to beat the starting point." if count != 1
                             else f"{candidates[0]['ref']} is not shown to beat the starting point.")
+        if all(c.get("same") for c in candidates) and (count == 1 or not any(c.get("today") for c in candidates)):
+            # No run of any branch differed from today's: the headline says that, not "not shown to beat".
+            document["line"] = (candidates[0]["line"] if count == 1 else
+                                f"No difference in any run: every run of each of the {count} branches gave exactly today's "
+                                "result, so the study may not exercise their changes "
+                                f"({_NOT_REACHED.get(what, 'the changes may not reach the program')}).")
         if chosen is not None and chosen.get("same") and not all(c.get("same") for c in candidates):
             # The chosen branch changed nothing in any run, the others did: its advice is not the run's.
             document["advice"] = "Keep today's code for now: the gain is not proven."

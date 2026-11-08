@@ -40,12 +40,18 @@ def _harness(tmp_path: Path, **code) -> Path:
     return target
 
 
-def _toy(tmp_path: Path, code: dict) -> Path:
-    """The python toy harness with a `code:` section."""
+def _toy(tmp_path: Path, code: dict, *, strict: bool = False) -> Path:
+    """The python toy harness with a `code:` section. Its runner reads each setting with a fallback (a code
+    study passes only the settings it fixes) unless `strict`: then it indexes them, as the toy's own does."""
     target = tmp_path / "toy"
     if target.exists():
         shutil.rmtree(target)
-    return write_toy_harness(target, manifest={**MANIFEST, "code": code})
+    write_toy_harness(target, manifest={**MANIFEST, "code": code})
+    if not strict:
+        runner = target / "runner.py"
+        runner.write_text(runner.read_text(encoding="utf-8").replace('settings["threshold"]', 'settings.get("threshold", 3.0)')
+                          .replace('settings["factor"]', 'settings.get("factor", 1.0)'), encoding="utf-8")
+    return target
 
 
 def _worktrees() -> list[str]:
@@ -302,3 +308,22 @@ def test_the_demo_harness_check_has_its_code_lines():
     assert ids[ids.index("code.repo"):ids.index("code.repo") + 3] == ["code.repo", "code.open", "code.samples"]
     assert ids.index("code.repo") > max(i for i, c in enumerate(ids) if c.startswith("drift"))
     assert exit_code(checks) == 0
+
+
+def test_check_solve_must_cope_with_an_absent_setting(tmp_path):
+    """Persona round 1, C5: a code study passes only the settings it fixes, so a runner that indexes
+    settings["threshold"] fails there; the toy's own runner does exactly that."""
+    harness = load_harness(_toy(tmp_path, {"label": "s", "repo": str(CLI_SOLVER), "open": ["solver.py"],
+                                           "build": '{python} -c "pass"'}, strict=True))
+    checks = _code_checks(harness, sys.executable, tmp_path / "scratch")
+    failed = [c for c in checks if not c.ok]
+    assert [c.id for c in failed] == ["code.settings"] and failed[0].severity == "failure"
+    assert failed[0].message == ("code.settings: in a code study only the settings a study fixes are passed: "
+                                 "solve must cope with a setting that is absent")
+    assert "threshold" in failed[0].fix
+    assert exit_code(checks) == 2
+    runner = (tmp_path / "toy" / "runner.py")
+    runner.write_text(runner.read_text(encoding="utf-8").replace('settings["threshold"]', 'settings.get("threshold", 3.0)')
+                      .replace('settings["factor"]', 'settings.get("factor", 1.0)'), encoding="utf-8")
+    checks = _code_checks(load_harness(tmp_path / "toy"), sys.executable, tmp_path / "scratch")
+    assert all(c.ok for c in checks), checks
