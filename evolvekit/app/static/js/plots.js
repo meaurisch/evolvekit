@@ -204,6 +204,13 @@
   EK.casesView = function (d, o) {
     var W = o.W, phone = !!o.phone, rowH = phone ? 30 : 34, l = phone ? 64 : 200, r = phone ? 54 : 120, top = 34;
     var cases = d.cases, n = cases.length, H = top + n * rowH + 26;
+    // Each case's group, a pill before its name (`EK.casesBadges`): the rows move right to make room.
+    // On a phone the plot has no width to spare: no badges when every row is of one group (a per-group
+    // run shows one group's cases, and its chips say which).
+    var badgeW = phone ? 48 : 78, kinds = EK.caseGroups(d), shownKinds = {};
+    cases.forEach(function (cs) { var g = kinds[EK.caseKey(cs)]; if (g) shownKinds[g] = 1; });
+    var badged = Object.keys(shownKinds).length > (phone ? 1 : 0);
+    if (badged) l += badgeW + 8;
     var res = EK.caseResults(d), A = -6, B = 6;
     // As drawn: worse than -6 % is pinned to the left edge; the ahead side grows with the best result, up to +20 %.
     Object.keys(res).forEach(function (k) { if (res[k].full) B = Math.max(B, Math.min(20, Math.ceil(res[k].pct))); });
@@ -230,6 +237,7 @@
       tallies[cs] = [k2, full.length];
       out.push('<text x="' + (W - r + 16) + '" y="' + f(Y(i) + 4) + '" style="fill:var(--ink-1);font:600 12px var(--mono)">' + (full.length ? k2 + " of " + full.length : "–") + "</text>");
     });
+    if (badged) out.push(EK.casesBadges(d, { cases: cases, Y: Y, x: 4, w: badgeW, phone: phone }));
     Object.keys(res).forEach(function (k) {
       var p = res[k], i = cases.indexOf(p.cs);
       if (i < 0) return;

@@ -949,6 +949,10 @@ def start_campaign(home: Any, root: Path, *, now: datetime, at_once: bool, start
     schedule = study.schedule
     if schedule is None:
         raise AppError("the study has no schedule: start it as usual", 409)
+    if study.per_group:  # D37: a campaign runs one search, so it is refused before it is armed
+        from evolvekit.harness.study import PER_GROUP_SCHEDULE
+
+        raise AppError(PER_GROUP_SCHEDULE, 409)
     if schedule.past_until(now):
         raise AppError("its schedule has no window left: set a later Until in When it runs (or in study.yaml) "
                        "to run it again", 409)

@@ -13,7 +13,7 @@
   function render(main, slug, query, gen) {
     st = { slug: slug, gen: gen, run: query.run || "", view: ["tries", "cases", "settings", "code"].indexOf(query.view) >= 0 ? query.view : "tries",
       chosen: null, chosenSet: false, doc: null, h: null, status: null, results: null, tries: null, hover: null, lastStrip: "", lastPlot: "", phase: null,
-      showAllSettings: false, openRuns: query.runs === "1" };
+      showAllSettings: false, openRuns: query.runs === "1", group: query.group || "" };
     // Everything at once: the study, its harness and the run (status, tries, results) in one round.
     return Promise.all([EK.get(EK.studyPath(slug)), EK.get(EK.studyPath(slug, "/harness")), load(true).catch(function () { return "no run"; })]).then(function (r) {
       if (!EK.isCurrent(gen)) return;
@@ -48,7 +48,18 @@
   function isLive() { var p = st.status.phase; return p === "queued" || p === "starting" || p === "search" || p === "check"; }
   /** The phases in which no run is live, so "Compare branches" is offered on a code study. */
   var BRANCHES_WHEN = ["done", "stopped", "failed"];
-  function runQ() { return st.run ? "?run=" + EK.q(st.run) : ""; }
+  /** `?run=` of the run shown and, on a per-group run, `&group=` of the group picked (its chips). */
+  function runQ() {
+    var q = [];
+    if (st.run) q.push("run=" + EK.q(st.run));
+    if (st.group) q.push("group=" + EK.q(st.group));
+    return q.length ? "?" + q.join("&") : "";
+  }
+  /** `&group=` for a link that already says `?run=`: the group picked, on a per-group run. */
+  function groupQ() { return st.group ? "&group=" + EK.q(st.group) : ""; }
+  /** A per-group run's own words (the results' `per_group`): the group shown, the run's decision,
+      line and advice, and each group's line; null for any other run. */
+  function perGroup() { return (st.results && st.results.per_group) || null; }
   /** The three views: a code study's third is Code (what each combination changed), else Settings. */
   function viewKeys() { return ["tries", "cases", isCode() ? "code" : "settings"]; }
 
@@ -137,7 +148,11 @@
   function isCode() { return !!(st.doc.study.vary || {}).code; }
   function isBakeoff() { return !!(st.status && st.status.bakeoff_refs && st.status.bakeoff_refs.length); }
   function branchCount() { return EK.plural(st.status.bakeoff_refs.length, "branch", "branches"); }
-  function heldCount() { return ((st.doc.study.cases || {}).test || []).length; }
+  function heldCount() {
+    var g = st.status && st.status.group;  // a per-group run: the group shown holds back its own cases
+    if (g && g.cases) return g.cases.test;
+    return ((st.doc.study.cases || {}).test || []).length;
+  }
   function roundWord() {
     var r = st.status.rounds || {}, now = Math.min((r.done || 0) + 1, r.planned || 99);
     return r.planned ? "round " + now + " of " + r.planned : "round " + now;
@@ -208,6 +223,12 @@
         tag: b2 ? "Not checked yet" : "", sub: s.can_check ? "Check it, or carry on searching." : s.can_resume ? "Carry on searching when you like." : "Tries up to the stop are kept.",
         caption: EK.capital(roundWord()) + (s.time && s.time.used ? " · stopped at " + s.time.used : ""), stoppedAt: true,
         acts: [s.can_check ? { text: "Run the final check", act: "check" } : null, s.can_resume ? { text: "Carry on", kind: s.can_check ? "secondary" : "primary", act: "resume" } : null].filter(Boolean) });
+    } else if (perGroup() && s.phase === "done") {
+      // A run per kind of case: the run's own line and advice; each group's verdict is listed below.
+      var pg = perGroup();
+      Object.assign(x, { tone: pg.decision === "use" ? "accent" : "panel", mark: EK.markOf({ kind: "finished", decision: pg.decision }), kickerTone: "",
+        kicker: "Per kind of case · " + EK.plural(pg.groups.length, "group"), head: pg.line || "No answer yet", sub: pg.advice || "",
+        right: "", rule: true, acts: [{ text: "Copy", kind: "secondary", act: "copy-summary", label: "Copy a summary" }] });
     } else if (d === "use") {
       Object.assign(x, { tone: "accent", mark: "use", kickerTone: "", kicker: "Use it · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
         sub: verdictSub(f), right: "range",
@@ -276,7 +297,7 @@
     return "Found " + (ago < 1 ? Math.max(1, Math.round(ago * 60)) + " min" : EK.hours(ago)) + " ago, on the " + EK.plural(t.cases.length, "study case") + ".";
   }
   function settingsText() {
-    return fetch(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run)), { headers: { "X-Evolvekit-Token": EK._token } })
+    return fetch(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run) + groupQ()), { headers: { "X-Evolvekit-Token": EK._token } })
       .then(function (r) { if (!r.ok) throw new Error("The settings file could not be read"); return r.text(); });
   }
   function goalOf() { return (st.results && st.results.goal) || (st.status && st.status.goal) || null; }
@@ -417,7 +438,7 @@
       return html`${say ? html`<p class="type-body view-say">${say}</p>` : ""}${EK.raw(p.svg)}${EK.triesLegend(t, { family: family })}`;
     }
     if (st.view === "cases") {
-      var cv = EK.casesView(t, { W: W, phone: phone, chosen: st.chosen });
+      var cv = EK.casesView(Object.assign({}, t, caseGroupRows()), { W: W, phone: phone, chosen: st.chosen });
       plotPoints = [{ el: "cases", points: cv.points }];
       var weakest = null;
       Object.keys(cv.tallies).forEach(function (cs) { var v = cv.tallies[cs]; if (v[1] >= 6 && (!weakest || v[0] / v[1] < weakest[1])) weakest = [cs, v[0] / v[1], v]; });
@@ -443,6 +464,38 @@
     return html`<p class="type-small ink-2">${EK.plural(params.length, "setting")} tuned, the ones that moved the result most first. The band: values in tries over 1 % better.</p>
       <div class="settings-grid">${panels}</div>
       ${params.length > 6 && !st.showAllSettings ? html`<p>${EK.link("Show all " + params.length, { act: "all-settings" })}</p>` : ""}`;
+  }
+  /** What the Cases view's badges read (`EK.casesBadges`): a per-group run's cases with their
+      groups as the run grouped them, else the study's case rows (the group of groups.json). */
+  function caseGroupRows() {
+    var pg = perGroup();
+    return { by_case: pg ? pg.case_groups || pg.by_case || [] : [], case_rows: (st.doc && st.doc.cases) || [] };
+  }
+  /** A per-group run: one chip per group, to show that group's tries, cases and settings (`?group=`). */
+  function groupChips() {
+    var g = st.status && st.status.group;
+    if (!g || !(g.order || []).length) return "";
+    var shown = st.group || g.name;
+    return html`<div class="actions group-chips" role="group" aria-label="Kind of case">${g.order.map(function (name) {
+      var on = name === shown;
+      return EK.button(name + (name === g.current && isLive() ? " · running" : ""), { kind: on ? "primary" : "secondary", size: "s", act: "group", arg: name,
+        label: "Show the kind of case " + name + (on ? " (shown)" : "") });
+    })}</div>`;
+  }
+  /** A per-group run's verdict, group by group: each group's mark, name, cases and its own line,
+      verbatim (the verdict document's); the run's own line is the strip's. */
+  function groupVerdicts() {
+    var pg = perGroup();
+    if (!pg || !(pg.groups || []).length) return "";
+    return html`<section class="section" aria-labelledby="kinds-title"><h2 id="kinds-title">Per kind of case</h2>
+      <ul class="group-verdicts">${pg.groups.map(function (g) {
+        var mark = EK.markOf({ kind: g.decision === "pending" || g.decision === "stopped" ? "running" : "finished", decision: g.decision });
+        var cases = g.cases || {};
+        return html`<li>${EK.verdictMark(mark, 28)}<div><p class="type-body"><strong>${g.name}</strong>
+          <span class="ink-2"> · ${EK.plural(cases.training || 0, "case")} to learn from, ${cases.test || 0} held back</span></p>
+          <p class="type-small">${EK.figures(g.line || "")}</p></div></li>`;
+      })}</ul>
+      ${(pg.rule || []).length && st.status.phase === "done" ? html`<div class="sub-section"><h3>Which cases get which settings</h3>${pg.rule.map(function (line) { return html`<p class="type-small">${line}</p>`; })}</div>` : ""}</section>`;
   }
   /** A code study's third view: what each combination changed in the source, the best first, then
       the newest. No figures here: they stay in Tries, on one base, so two views never disagree. */
@@ -610,10 +663,11 @@
     if (!r || st.status.phase !== "done") return "";
     var d = decisionOf();
     var dl = (r.downloads || []).map(function (x) {
-      return EK.link(x.label, { href: EK.withToken(EK.studyPath(st.slug, "/download/" + EK.q(x.name) + "?run=" + EK.q(st.run))), download: true, icon: EK.gl("file", 18) });
+      return EK.link(x.label, { href: EK.withToken(EK.studyPath(st.slug, "/download/" + EK.q(x.name) + "?run=" + EK.q(st.run) + groupQ())), download: true, icon: EK.gl("file", 18) });
     });
     var keepIt = d !== "use", code = isCode();
     var title = code ? (keepIt ? "Code to keep" : "The code change to use") : (keepIt ? "Settings to keep" : "Settings to use");
+    if (perGroup()) title += " · " + perGroup().group;  // a per-group run: the group shown, by its own verdict
     return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">${title}</h2>
       ${keepIt ? html`<p class="type-body strong">Nothing to change: ${EK.keepWords({ what: whatOf() }).replace(/^Keep /, "keep ")}${(r.context || {}).compared_with ? " (" + r.context.compared_with + ")" : ""}.</p>
         <p class="type-small ink-2">${code && isBakeoff() ? "Keep today’s code: no branch is shown to beat it."
@@ -623,13 +677,14 @@
       <div class="actions">${keepIt && hasExport("settings_json") ? EK.button("Show today’s settings", { act: "show-today" }) : ""}
         ${hasExport("settings_json") ? EK.button(keepIt ? "Settings found, not recommended" : "Show the settings file", { kind: "secondary", act: "show-settings" }) : ""}
         ${EK.button("Copy a summary", { kind: "secondary", act: "copy-summary" })}
-        ${EK.link("Open the report", { href: EK.withToken(EK.studyPath(st.slug, "/download/report?run=" + EK.q(st.run) + "&view=1")), target: "_blank" })}</div>
+        ${EK.link("Open the report", { href: EK.withToken(EK.studyPath(st.slug, "/download/report?run=" + EK.q(st.run) + groupQ() + "&view=1")), target: "_blank" })}</div>
       <div class="link-row">${dl}${EK.link("Save the study as zip", { href: EK.withToken(EK.studyPath(st.slug, "/download/study")), download: true })}</div></section>`;
   }
   function nextSteps() {
     var s = st.status, out = [];
     if (s.can_continue) out.push(EK.button("Continue for " + EK.hours((st.doc.study.budget || {}).hours || 1) + " more", { kind: "secondary", act: "continue" }));
-    if (s.phase === "done" || s.phase === "stopped") out.push(EK.button("Start a new study from this", { kind: "secondary", act: "next" }));
+    // A per-group run has one result per group, so no one result to start from (`s.group`).
+    if ((s.phase === "done" || s.phase === "stopped") && !s.group) out.push(EK.button("Start a new study from this", { kind: "secondary", act: "next" }));
     out.push(EK.link("Compare with…", { href: "#/compare?a=" + EK.q(st.slug + "/" + st.run) }));
     return html`<section class="section" aria-labelledby="next-title"><h2 id="next-title">What next</h2><div class="actions">${out}</div></section>`;
   }
@@ -745,8 +800,8 @@
     var phone = EK.isPhone();
     var counts = tabCounts(st.tries);
     EK.mount(main, html`<div class="page"><div class="page-inner"><div id="study-head">${header()}</div><div id="study-notices">${notices()}</div>
-      <div id="strip-slot">${statusStrip()}</div>
-      <div class="sub-section"><div class="view-head">${EK.viewTabs(st.view, phone ? null : counts, viewKeys())}<div id="chip-slot" class="actions" style="padding:6px 0">${chipHtml()}</div></div>
+      <div id="strip-slot">${statusStrip()}</div>${groupVerdicts()}
+      <div class="sub-section">${groupChips()}<div class="view-head">${EK.viewTabs(st.view, phone ? null : counts, viewKeys())}<div id="chip-slot" class="actions" style="padding:6px 0">${chipHtml()}</div></div>
         <div class="view-panel" id="view-panel" role="tabpanel" aria-labelledby="tab-${st.view}"></div></div>
       ${handOver()}${nextSteps()}${details()}</div></div>`, acts(main));
     st.lastStrip = String(statusStrip());
@@ -783,7 +838,7 @@
         document.getElementById("view-panel").setAttribute("aria-labelledby", "tab-" + st.view);
         st.lastPlot = "";
         drawView();
-        history.replaceState(null, "", location.pathname + location.search + "#/study/" + EK.q(st.slug) + "?run=" + EK.q(st.run) + "&view=" + st.view);
+        history.replaceState(null, "", location.pathname + location.search + "#/study/" + EK.q(st.slug) + "?run=" + EK.q(st.run) + "&view=" + st.view + groupQ());
       },
       tabkey: function (el, ev) {
         var order = viewKeys(), i = order.indexOf(st.view);
@@ -792,6 +847,13 @@
         var next = order[(i + (ev.key === "ArrowRight" ? 1 : 2)) % 3];
         var btn = EK.$('.tab[data-arg="' + next + '"]', main);
         btn.focus(); btn.click();
+      },
+      group: function (el) {
+        // Another kind of case: its tries, cases, settings and own verdict; the run's line stays.
+        st.group = el.getAttribute("data-arg");
+        st.chosen = null; st.chosenSet = false; st.paramOrder = null; st.lastPlot = "";
+        history.replaceState(null, "", location.pathname + location.search + "#/study/" + EK.q(st.slug) + "?run=" + EK.q(st.run) + "&view=" + st.view + groupQ());
+        load(true).then(function () { if (EK.isCurrent(st.gen)) { EK._moveFocus = false; draw(main); } }).catch(EK.fail);
       },
       choose: function (el) { choose(el.getAttribute("data-arg")); },
       unchoose: function () { unchoose(); var t = EK.$(".tab.is-on", main); if (t) t.focus(); },
@@ -836,7 +898,7 @@
       next: function () {
         EK.post(EK.studyPath(st.slug, "/next" + runQ()), { name: st.doc.study.name + " (next)" }).then(function (doc) { EK.go("#/setup/" + EK.q(doc.slug)); }).catch(EK.fail);
       },
-      "save-settings": function () { location.href = EK.withToken(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run))); EK.toast("done", "Settings file saved"); },
+      "save-settings": function () { location.href = EK.withToken(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run) + groupQ())); EK.toast("done", "Settings file saved"); },
       "copy-summary": function () {
         var text = (st.results && st.results.summary_text) || "";
         EK.copy(text).then(function (ok) { EK.toast(ok ? "done" : "error", ok ? "Summary copied" : "Could not copy"); });
@@ -860,7 +922,7 @@
           EK.openDrawer({ title: keepIt ? "Settings the search found" : "The settings file", sub: keepIt ? "Not recommended: not proven on held-back cases" : "Use these in the application", wide: true,
             body: html`<pre class="code">${text}</pre><div class="actions">${EK.button("Copy", { kind: "secondary", act: "copy" })}${EK.button("Save it", { act: "save" })}</div>`,
             acts: { copy: function () { EK.copy(text).then(function (ok) { EK.toast(ok ? "done" : "error", ok ? "Copied" : "Could not copy"); }); },
-              save: function () { location.href = EK.withToken(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run))); } } });
+              save: function () { location.href = EK.withToken(EK.studyPath(st.slug, "/download/settings_json?run=" + EK.q(st.run) + groupQ())); } } });
         }).catch(EK.fail);
       },
       why: function () {

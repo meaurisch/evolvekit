@@ -1675,6 +1675,38 @@ session keeps the computer from sleeping until its window ends, and through a
 final check that runs past it; a session started by hand does not.
 `keep_awake: false` under `schedule:` turns that off.
 
+**Settings per kind of case.** When the cases are of different kinds —
+small depots and large ones, say — one setting for all of them may suit
+none. `per_group: true` in `study.yaml` learns settings for each kind:
+
+```yaml
+per_group: true
+```
+
+The groups are those of `study groups` (`groups.json`; a start groups the
+cases itself when `groups.json` is missing or no longer matches them), or
+the tags given in the app's Cases list. The run searches once per group, one
+group after another, each in a complete run folder of its own,
+`runs/<id>/groups/<name>/`, under the study's time and AI cap split by the
+groups' cases (a group with half of the cases, those to learn from and the
+held-back ones, gets half of the hours and half of the cap); each group has
+its own final check, on its own held-back cases. The verdict's rule: *use*
+only when every group checked on two or more held-back cases says use; with
+no such group, `single`; else `keep`, naming the first group that does not
+(`Per kind of case: not every group is shown to beat today's settings
+(large: keep).`). `study verdict` prints each group's own line under it, and
+the report has a *Per kind of case* section. A finished run writes two files
+into `runs/<id>/downloads/`: `settings_by_group.json`, each group's cases,
+decision and settings — those the search found only where the group's own
+decision is use, today's elsewhere — and `rule.md`, which cases get which
+settings: for groups by features a one-split rule (`If the number of rows in
+stops is above 51, use the settings of group 2; otherwise those of group
+1.`), for groups by tags one line per tag (`For cases tagged large, use
+today's settings (large: not shown to beat today's).`). A per-group run
+cannot yet be continued, resumed or checked again (start the study again
+instead), and `per_group` cannot be combined with a `schedule` or a code
+study.
+
 The AI spend stays within its cap, give or take one call. Every claude call,
 a reply or a coding agent's run, is told what is left (`--max-budget-usd`, when
 the installed claude lists it in its `--help`); other providers and embedding

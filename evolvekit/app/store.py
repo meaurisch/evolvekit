@@ -78,11 +78,11 @@ ARCHIVED = ".archived"
 """The marker file of an archived study: a fact about the library, not a field of the study."""
 STUDY_PARTS = ("study.yaml", "harness", "cases", "inputs")
 """What a study is made of, as against what it produced: `runs/`, `preview/`, `assistant.jsonl`."""
-STEP_KEYS = ("template", "step", "schedule", "warm")
+STEP_KEYS = ("template", "step", "schedule", "warm", "per_group")
 RUN_GOING = "a run is going: tag or group the cases after it ends"
 """`set_tag` and `study groups` while a run of the study is going (or queued)."""
 """Parts `save_step` accepts though the study's `study.yaml` may not have them yet."""
-OPTIONAL_KEYS = ("schedule", "warm")
+OPTIONAL_KEYS = ("schedule", "warm", "per_group")
 """Parts `save_step` takes out when given `None`."""
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")

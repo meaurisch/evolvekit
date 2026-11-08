@@ -50,7 +50,7 @@ __all__ = [
     "compile_study", "write_run", "runner_input", "runner_kpi", "base_settings", "runner_settings", "study_operators",
     "ai_cap_usd",
     "OPERATORS", "OPERATORS_WITH_AI", "OPERATORS_CODE", "OPERATORS_CODE_AGENT", "OPERATORS_NO_SEARCH",
-    "ACT_PROVIDERS", "STUDY_RUN", "CONFIG", "UP",
+    "ACT_PROVIDERS", "STUDY_RUN", "CONFIG", "UP", "GROUP_UP", "GROUPS",
 ]
 
 STUDY_RUN = "study-run.json"
@@ -81,6 +81,10 @@ OPERATORS_NO_SEARCH = {"param_lhs": 1.0}
 config still loads without models (decision D13). The operator is never invoked."""
 
 UP = "../.."
+GROUP_UP = "../../../.."
+"""From a group's folder of a per-group run (`runs/<id>/groups/<slug>/`) to its study's."""
+GROUPS = "groups"
+"""`runs/<id>/groups/`: the group folders of a per-group run."""
 
 
 def ai_cap_usd(study: Study) -> float:
@@ -249,6 +253,7 @@ def compile_study(
     models: dict[str, Any] | None = None,
     bakeoff: bool = False,
     priors: dict[str, dict] | None = None,
+    up: str = UP,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """`(evolvekit.yaml as a dict, study-run.json as a dict)` for a run of
     `study` in `<root>/runs/<id>/`. `models` is the engine's `models` section
@@ -256,7 +261,9 @@ def compile_study(
     (`vary.code`) compiles to `problem.tree`, its base as the study says it
     (`write_run` pins it); `bakeoff` compiles one that generates nothing.
     `priors` (`memory.priors_for`, a warm-started study's) become
-    `problem.parameters[name].prior` for the tuned settings they fit."""
+    `problem.parameters[name].prior` for the tuned settings they fit. `up` is
+    the way from the run's directory to the study's: `UP`, or four levels for a
+    group's folder of a per-group run (`write_run(group=)`)."""
     if plan.blocked:
         raise HarnessError(f"plan: {plan.blocked}")
     code = study.code
@@ -280,7 +287,7 @@ def compile_study(
     time_limit = float(study.limits.time_per_case_s)
 
     def command(limit: float) -> str:
-        runner = f"{UP}/harness/runner.py"
+        runner = f"{up}/harness/runner.py"
         values = "" if code is not None else " --values {params_json}"  # a tree has no tuned values
         tail = (
             f"solve --case {{instance}} --seed {{seed}}{values} --study {STUDY_RUN}"
@@ -294,7 +301,7 @@ def compile_study(
     def timeout(limit: float) -> float:
         return round(limit * 1.5 + 30, 1) if harness.time_limit.accepts else limit
 
-    cases = [f"{UP}/{case}" for case in study.training]
+    cases = [f"{up}/{case}" for case in study.training]
     normalize = "none"
     if single and study.kpis[study.goal[0].kpi].kind == "harness" and harness.kpis[study.goal[0].kpi].positive:
         normalize = "baseline"  # a positive KPI: every case counts equally, as a percentage of the start
@@ -317,7 +324,7 @@ def compile_study(
         stages.append({
             "id": "screen", **shared,
             "command": command(plan.screen_time_limit_s),
-            "instances": [f"{UP}/{case}" for case in screened],
+            "instances": [f"{up}/{case}" for case in screened],
             "timeout": timeout(plan.screen_time_limit_s),
             "promote": {"top_k_per_generation": 2},
         })
@@ -378,7 +385,7 @@ def compile_study(
     }
     if ai:
         config["models"] = models
-    return config, runner_input(study, harness, runner_settings(study, harness, root))
+    return config, runner_input(study, harness, runner_settings(study, harness, root), up=up)
 
 
 def _tree(study: Study, harness: Harness) -> dict[str, Any]:
@@ -458,6 +465,7 @@ def write_run(
     models: dict[str, Any] | None = None,
     bakeoff: bool = False,
     log: Callable[[str], None] | None = None,
+    group: str | None = None,
 ) -> Path:
     """Compile `study` into `<root>/runs/<run_id>/` and return that directory.
     The run keeps a copy of `study.yaml` as it was when it started, so what
@@ -468,7 +476,12 @@ def write_run(
     warm-started study in a library home gets its priors (`memory.priors_for`)
     here too, so the weights count the studies finished before this run; when
     the other studies cannot be read, `study-run.json` says `"priors": "not
-    applied: <why>"` and `log` (stderr when None) says it in a line."""
+    applied: <why>"` and `log` (stderr when None) says it in a line.
+
+    With `group` (a per-group run, design §6.4), the folder is
+    `<root>/runs/<run_id>/groups/<slug_of(group)>/`, every path is compiled
+    four levels up (`GROUP_UP`), and its `study.yaml` is `study` itself, that
+    group's cases, not a copy of the study folder's."""
     if study.code is not None:  # the bake-off writes runs without study_problems' search check
         repo = study.code.repo
         if not repo:
@@ -488,7 +501,9 @@ def write_run(
                                        slug=root.name)
         except (HarnessError, OSError, ValueError) as exc:  # other studies that cannot be read: the run goes on without
             priors, not_applied = None, f"not applied: {exc}"
-    config, study_run = compile_study(study, harness, plan, root=root, models=models, bakeoff=bakeoff, priors=priors)
+    up = UP if group is None else GROUP_UP
+    config, study_run = compile_study(study, harness, plan, root=root, models=models, bakeoff=bakeoff, priors=priors,
+                                      up=up)
     if not_applied:
         study_run["priors"] = not_applied
         (log or (lambda line: print(line, file=sys.stderr, flush=True)))(
@@ -506,11 +521,20 @@ def write_run(
         except tree.TreeError as exc:
             raise HarnessError(f"vary.code.from: {exc}") from None
     run_dir = root / "runs" / run_id
+    source = f"{up}/study.yaml"
+    if group is not None:
+        from evolvekit.harness.groups import slug_of
+        from evolvekit.harness.study import save_study
+
+        run_dir = run_dir / GROUPS / slug_of(group)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        save_study(study, run_dir)  # the group's own cases: what its run says about itself
+        source = f"study.yaml (the cases of {group})"
     run_dir.mkdir(parents=True, exist_ok=True)
-    if (root / "study.yaml").is_file():
+    if group is None and (root / "study.yaml").is_file():
         shutil.copyfile(root / "study.yaml", run_dir / "study.yaml")
     (run_dir / CONFIG).write_text(
-        "# Compiled from ../../study.yaml by evolvekit. Runnable as it is:\n"
+        f"# Compiled from {source} by evolvekit. Runnable as it is:\n"
         f"#   python -m evolvekit run --config {CONFIG} --run-dir .\n"
         + yaml.safe_dump(config, sort_keys=False, allow_unicode=True, width=110),
         encoding="utf-8", newline="\n",

@@ -45,7 +45,8 @@ from evolvekit.ledger import _atomic_write
 
 __all__ = [
     "SolveFailed", "GROUPS", "KS", "MIN_TRAINING", "RESTARTS", "TAGS", "TAG_MAX",
-    "case_tables", "compute", "features_of", "kmeans", "read_groups", "read_tag", "silhouette", "slug_of",
+    "case_tables", "compute", "features_of", "kmeans", "read_groups", "read_tag", "rule_lines", "rule_stump", "silhouette",
+    "slug_of",
     "standardise", "write_tag",
 ]
 
@@ -480,3 +481,108 @@ def read_groups(root: Path, study: Study) -> dict[str, Any] | None:
     if doc.get("stamps") != _stamps(root, cases):
         return None
     return doc
+
+
+# ---------------------------------------------------------------------------
+# the rule: which cases get which group's settings
+# ---------------------------------------------------------------------------
+
+
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def rule_stump(features: dict[str, dict[str, float]], labels: dict[str, str]) -> dict[str, Any] | None:
+    """The one-split rule over the cases of `labels` (the cases to learn from,
+    each with its group): for two groups the feature and threshold (the
+    midpoint of neighbouring values) that misplace the fewest cases, for three
+    one feature and two thresholds; ties go to the widest gap (for three, the
+    narrower of its two), then the feature's name.
+    `{"feature", "thresholds", "sides": [group names, low to high], "misplaced"}`;
+    None when no feature separates the cases at all. Raises ValueError for
+    other than two or three groups."""
+    import itertools
+
+    names = list(dict.fromkeys(labels.values()))
+    k = len(names)
+    if k not in (2, 3):
+        raise ValueError(f"a one-split rule tells two or three groups apart, not {k}")
+    cases = [case for case in labels if case in features]
+    best: tuple[tuple[int, float, str], dict[str, Any]] | None = None
+    for feature in sorted({name for case in cases for name in features[case]}):
+        values = [(float(features[case][feature]), labels[case]) for case in cases if _finite(features[case].get(feature))]
+        if len(values) != len(cases):
+            continue  # a feature some case lacks tells nothing about that case
+        values.sort(key=lambda pair: pair[0])
+        n = len(values)
+        cuts = [i for i in range(1, n) if values[i][0] > values[i - 1][0]]  # split before index i
+        if len(cuts) < k - 1:
+            continue
+        before = {g: [0] * (n + 1) for g in names}
+        for i, (_, label) in enumerate(values):
+            for g in names:
+                before[g][i + 1] = before[g][i] + (label == g)
+        for sides in itertools.permutations(names):
+            for chosen in itertools.combinations(cuts, k - 1):
+                bounds = [0, *chosen, n]
+                right = sum(before[g][bounds[j + 1]] - before[g][bounds[j]] for j, g in enumerate(sides))
+                gap = min(values[i][0] - values[i - 1][0] for i in chosen)
+                key = (n - right, -gap, feature)
+                if best is None or key < best[0]:
+                    best = (key, {"feature": feature,
+                                  "thresholds": [(values[i - 1][0] + values[i][0]) / 2 for i in chosen],
+                                  "sides": list(sides), "misplaced": n - right})
+    return best[1] if best is not None else None
+
+
+def _value(number: float) -> str:
+    """A threshold as people write it: 60, 59.5, 0.0123."""
+    text = f"{round(float(number), 4):f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def rule_lines(doc: dict[str, Any], decisions: dict[str, str]) -> list[str]:
+    """`rule.md`'s sentences: which cases get which group's settings, from
+    `groups.json` (`doc`) -- by features a one-split rule (`rule_stump`) over
+    the cases to learn from, by tags one line per tag. A group whose own
+    decision (`decisions`) is not `use` names today's settings instead, and
+    why: the rule claims nothing the groups' own verdicts do not say."""
+    named = doc.get("groups") or {}
+
+    def why(name: str) -> str:
+        if decisions.get(name) == "single":
+            return f"({name}: not proven, one held-back case)"
+        if decisions.get(name) in ("pending", "stopped", "", None):
+            return f"({name}: no answer yet)"
+        return f"({name}: not shown to beat today's)"
+
+    def use(name: str) -> str:
+        return f"use the settings of {name}" if decisions.get(name) == "use" else f"use today's settings {why(name)}"
+
+    def those(name: str) -> str:
+        return f"those of {name}" if decisions.get(name) == "use" else f"today's settings {why(name)}"
+
+    method = doc.get("method")
+    if method == "tags":
+        untagged = slug_of("untagged")
+        return [f"For cases {'with no tag' if slug_of(name) == untagged else 'tagged ' + name}, {use(name)}."
+                for name in named]
+    if method == "one" or len(named) == 1:
+        return [f"For every case, {use(name)}." for name in named]
+    labels = {case: name for name, part in named.items() for case in part.get("training") or []}
+    features = {case: values for case, values in (doc.get("features") or {}).items() if case in labels}
+    stump = rule_stump(features, labels) if len(named) in (2, 3) else None
+    if stump is None:  # more groups than one split tells apart: each group by its cases
+        return [f"For the cases {', '.join(Path(c).stem for c in (part.get('training') or []) + (part.get('test') or []))}, "
+                f"{use(name)}." for name, part in named.items()]
+    words = (doc.get("describe") or {}).get(stump["feature"]) or stump["feature"].replace("_", " ")
+    sides, cuts = stump["sides"], [_value(t) for t in stump["thresholds"]]
+    if len(sides) == 2:
+        lines = [f"If {words} is above {cuts[0]}, {use(sides[1])}; otherwise {those(sides[0])}."]
+    else:
+        lines = [f"If {words} is at most {cuts[0]}, {use(sides[0])}; if it is above {cuts[1]}, {those(sides[2])}; "
+                 f"otherwise {those(sides[1])}."]
+    if stump["misplaced"]:
+        lines.append(f"The rule puts {stump['misplaced']} of the {len(labels)} cases to learn from in another group "
+                     "than its own.")
+    return lines

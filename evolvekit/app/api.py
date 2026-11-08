@@ -653,9 +653,23 @@ def continue_run(req: Request) -> dict[str, Any]:
     return scheduler.by_hand(req.home, root, lambda: jobs.continue_run(req.home, root, run, body.get("hours")))
 
 
+def _group(req: Request) -> str | None:
+    """`?group=`: the group of a per-group run to read (its name); None for the run's own choice."""
+    return req.query.get("group") or None
+
+
+def _run_folder(req: Request, root: Path) -> tuple[str, Path]:
+    """`(run, folder)` of `?run=`: the run's folder, or for a per-group run the
+    folder of `?group=` (else the current group while it runs, else the first)."""
+    run = _run(req, root)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the run's folder, judged by name
+    picked = jobs._group_folder(run_dir, jobs.phase(run_dir), _group(req))  # noqa: SLF001
+    return run, picked[1] if picked is not None else run_dir
+
+
 def status(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
-    return jobs.status(root, _run(req, root), req.server.status_document)
+    return jobs.status(root, _run(req, root), req.server.status_document, group=_group(req))
 
 
 RUNS_POLL_LIVE_S, RUNS_POLL_IDLE_S = 5, 10
@@ -678,8 +692,7 @@ def runs_of(req: Request) -> dict[str, Any]:
 def tries_of(req: Request) -> dict[str, Any]:
     """Every try of a run, for the Study page's Tries, Cases and Settings views (`tries.digest`)."""
     root, _, _ = req.home.load(req.params["slug"])
-    run = _run(req, root)
-    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the run's folder, judged by name
+    run, run_dir = _run_folder(req, root)  # a per-group run: one group's tries (`?group=`)
     return {"run": run, **tries.digest(run_dir)}
 
 
@@ -690,7 +703,7 @@ def try_of(req: Request) -> dict[str, Any]:
     from evolvekit.status import candidate_detail
 
     root, _, _ = req.home.load(req.params["slug"])
-    run_dir = jobs._run_dir(root, _run(req, root))  # noqa: SLF001 - the run's folder, judged by name
+    _, run_dir = _run_folder(req, root)  # a per-group run: one group's combination (`?group=`)
     detail = candidate_detail(run_dir, req.params["combination"])
     if not detail:
         raise AppError(f"there is no combination {req.params['combination']!r} in this run", 404)
@@ -702,7 +715,7 @@ def try_of(req: Request) -> dict[str, Any]:
 
 def results(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
-    return jobs.results(root, _run(req, root), req.server.status_document)
+    return jobs.results(root, _run(req, root), req.server.status_document, group=_group(req))
 
 
 def download(req: Request) -> FileResponse:
@@ -711,7 +724,8 @@ def download(req: Request) -> FileResponse:
     export = req.params["export"]
     if export == "study":  # the study itself, as one zip: no run needed
         return FileResponse(req.home.export_study(slug), "application/zip", f"{slug}.zip")
-    body, content_type, filename = jobs.download(root, _run(req, root), export, req.server.status_document)
+    body, content_type, filename = jobs.download(root, _run(req, root), export, req.server.status_document,
+                                                 group=_group(req))
     # The report opens in the browser with ?view=1; everything else is a file to save.
     inline = export == "report" and req.query.get("view") == "1"
     return FileResponse(body, content_type, None if inline else filename)

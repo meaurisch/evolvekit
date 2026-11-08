@@ -282,6 +282,37 @@
       <span><svg width="10" height="14" aria-hidden="true"><rect x="0" y="0" width="10" height="14" style="fill:var(--ink-1)"/></svg>held back</span>${o.sized ? html`<span>taller: larger case</span>` : ""}</div>`;
   };
 
+  /** A case's key among the views: its file name without folder or extension (the Tries digest
+      names a case `c0-20`, the study's case rows `c0-20.json`, a run `cases/c0-20.json`). */
+  function caseKey(n) { return String(n).replace(/\\/g, "/").split("/").pop().replace(/\.[A-Za-z0-9]+$/, ""); }
+  EK.caseKey = caseKey;
+  /** The group of each case, by `caseKey`: from `d.by_case` (rows with `name` and `group`: a
+      per-group run's), else `d.case_rows` (the study's case rows, whose `group` is groups.json's). */
+  EK.caseGroups = function (d) {
+    var out = {}, base = caseKey;
+    ((d && d.by_case) || []).forEach(function (r) { if (r && r.name && r.group) out[base(r.name)] = String(r.group); });
+    ((d && d.case_rows) || []).forEach(function (r) { if (r && r.name && r.group && !(base(r.name) in out)) out[base(r.name)] = String(r.group); });
+    return out;
+  };
+  /** CasesBadges: the part of casesView that draws each case's group, a small pill before its row.
+      o: {cases (the rows' names, in order), Y (a row's middle), x (the pill's left), w (its width), phone}.
+      Without `o`, one pill per case that has a group, stacked: what the badges say. Empty without groups. */
+  EK.casesBadges = function (d, o) {
+    var groups = EK.caseGroups(d), names = Object.keys(groups);
+    if (!names.length) return "";
+    o = o || {};
+    var cases = o.cases || names, phone = !!o.phone, w = o.w || (phone ? 48 : 78), x = o.x || 4;
+    var Y = o.Y || function (i) { return 12 + i * 22; }, most = phone ? 6 : 11, out = [];
+    cases.forEach(function (cs, i) {
+      var g = groups[caseKey(cs)];
+      if (!g) return;
+      var text = g.length > most ? g.slice(0, most - 1) + "…" : g, y = Y(i);
+      out.push('<g class="case-badge"><rect x="' + x + '" y="' + (y - 9).toFixed(1) + '" width="' + w + '" height="18" rx="9" style="fill:var(--surface-wash);stroke:var(--line-edge)" stroke-width="1"/>' +
+        '<text x="' + (x + w / 2) + '" y="' + (y + 4).toFixed(1) + '" text-anchor="middle" style="fill:var(--ink-2);font:600 ' + (phone ? 10 : 11) + 'px var(--sans)">' + EK.esc(text) + "<title>" + EK.esc("Kind of case: " + g) + "</title></text></g>");
+    });
+    return out.join("");
+  };
+
   /** KindChoice: a radio group drawn as cards. options: [{value, title, sub, disabled}] */
   EK.kindChoice = function (name, legend, options, selected, change, tight) {
     var out = options.map(function (op) {

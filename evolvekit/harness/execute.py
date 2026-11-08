@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -42,6 +44,8 @@ from evolvekit.evaluate.process import read_tail, run_bounded
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import (
     CONFIG,
+    GROUP_UP,
+    GROUPS,
     STUDY_RUN,
     UP,
     base_settings,
@@ -68,6 +72,11 @@ __all__ = [
     "Job",
     "continue_study",
     "final_check",
+    "group_dirs",
+    "is_per_group",
+    "run_per_group",
+    "split_budget",
+    "write_group_exports",
     "plan_for",
     "preview",
     "read_job",
@@ -347,7 +356,7 @@ def run_study(
     study = load_study(root)
     run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = root / "runs" / run_id
-    if (run_dir / STOP_REQUEST).is_file():
+    if (run_dir / STOP_REQUEST).is_file() and not study.per_group:
         # Stopped while starting: before the preview, the compile and the seed.
         # The file stays: it is the run's record, and whoever starts a run on
         # this directory again removes it first.
@@ -355,6 +364,8 @@ def run_study(
         job.finish("stopped", search={"stop_reason": "stopped on request before the search began",
                                       "generations": 0, "aborted": False})
         return job.state
+    if study.per_group:  # one search per kind of case (design §6.4)
+        return run_per_group(root, run_id, models=models, log=log)
     harness = study_harness(root)
     require_valid(study, harness, root=root)
     plan = plan_for(study, harness, measured(root), models=models)
@@ -378,6 +389,244 @@ def run_study(
         job.finish("failed", error=f"{type(exc).__name__}: {exc}")
         raise
     return job.state
+
+
+# ---------------------------------------------------------------------------
+# settings per kind of case (design §6.4)
+# ---------------------------------------------------------------------------
+
+PER_GROUP_ALONE = ("a run per kind of case cannot be resumed, continued or checked again yet "
+                   "(each group would need its own rules); start the study again")
+"""Decision D37: what `resume_study`, `continue_study` and `final_check` say of a per-group run."""
+_GROUP_DIR = re.compile(r"^groups/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _floor4(value: float) -> float:
+    """`value` floored to four decimals (a hair of float noise is not taken for a step down)."""
+    return round(math.floor(value * 10000 + 1e-9) / 10000, 4)
+
+
+def split_budget(study: Study, groups: dict[str, dict]) -> dict[str, tuple[float, float]]:
+    """`(hours, usd)` of each group (decision D39): the study's `budget.hours`
+    and its AI cap in proportion to the group's cases, the cases to learn from
+    and the held-back ones, each floored to four decimals so that the sums
+    never exceed the study's. The AI cap is the one a run of the whole study
+    would have (`compile.ai_cap_usd`) when AI helps, else `budget.ai.max_usd`."""
+    from evolvekit.harness.compile import ai_cap_usd
+
+    sizes = {name: len(part.get("training") or []) + len(part.get("test") or []) for name, part in groups.items()}
+    total = sum(sizes.values())
+    hours = float(study.budget.hours)
+    usd = ai_cap_usd(study) if study.budget.ai_enabled else max(0.0, float(study.budget.ai_max_usd))
+    if not total:
+        return {name: (0.0, 0.0) for name in groups}
+    return {name: (_floor4(hours * size / total), _floor4(usd * size / total)) for name, size in sizes.items()}
+
+
+def group_dirs(run_dir: str | Path) -> dict[str, Path]:
+    """Every group folder of a per-group run, by group name in the run's
+    order, whether its search has begun or not: `job.json`'s
+    `per_group.dirs`, else the folders under `groups/`. Empty for any other run."""
+    run_dir = Path(run_dir)
+    named = ((read_job(run_dir) or {}).get("per_group") or {})
+    dirs = named.get("dirs") if isinstance(named.get("dirs"), dict) else None
+    if dirs is not None:
+        order = [n for n in named.get("order") or [] if n in dirs] + [n for n in dirs if n not in (named.get("order") or [])]
+        return {str(name): run_dir.joinpath(*str(dirs[name]).split("/")) for name in order
+                if isinstance(dirs[name], str) and _GROUP_DIR.match(dirs[name])}
+    folder = run_dir / GROUPS
+    if not folder.is_dir():
+        return {}
+    return {p.name: p for p in sorted(folder.iterdir()) if p.is_dir()}
+
+
+def is_per_group(run_dir: str | Path, job: dict[str, Any] | None = None) -> bool:
+    """Whether the run is a per-group run: its `job.json` says `per_group`, or it has group folders."""
+    job = read_job(run_dir) if job is None else job
+    return bool((job or {}).get("per_group")) or (Path(run_dir) / GROUPS).is_dir()
+
+
+def _refuse_per_group(run_dir: Path, run_id: str, state: dict[str, Any] | None) -> None:
+    if is_per_group(run_dir, state or {}):
+        raise HarnessError(f"runs/{run_id}: {PER_GROUP_ALONE}")
+
+
+class _GroupJob(Job):
+    """A group folder's `job.json` in a per-group run: its phase `search` or
+    `check` is the run's phase too, so whoever reads the run folder sees
+    which part of the current group is going."""
+
+    def __init__(self, run_dir: Path, parent: Job, **fields: Any) -> None:
+        self.parent = parent
+        super().__init__(run_dir, **fields)
+
+    def update(self, **fields: Any) -> None:
+        super().update(**fields)
+        phase = fields.get("phase")
+        if phase in ("search", "check") and self.parent.state.get("phase") != phase:
+            self.parent.update(phase=phase)
+
+
+def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | None = None,
+                  log: Callable[[str], None] = print) -> dict[str, Any]:
+    """A study with `per_group: true` (`run_study` hands over): the groups of
+    `groups.json` while it is current, else computed now (`groups.compute`);
+    one preview's timing; then each group in turn, in the order of
+    `groups.json`: its plan for its share of the hours (`split_budget`, and its
+    share of the AI cap), its own complete run folder `runs/<id>/groups/<slug>/`
+    (`write_run(group=)`) with its own `job.json`, the search, and the final
+    check on its own held-back cases. The run folder's `job.json` names the
+    order, the current group and each folder (`per_group`) and every group's
+    plan; its phase is the current group's (`search`, `check`), `done` when
+    every group is done (then `settings_by_group.json` and `rule.md`,
+    `write_group_exports`), `stopped` when one stopped -- the groups after it do
+    not run -- else `failed`. Returns the run folder's final `job.json`."""
+    from evolvekit.harness import groups as kinds
+    from evolvekit.search.driver import Driver
+
+    root = Path(root)
+    study = load_study(root)
+    run_dir = root / "runs" / run_id
+    if (run_dir / STOP_REQUEST).is_file():  # stopped while starting, as `run_study` says it
+        job = Job(run_dir, run_id=run_id, study=study.name, plan={}, per_group={"order": [], "current": None, "dirs": {}})
+        job.finish("stopped", search={"stop_reason": "stopped on request before the search began",
+                                      "generations": 0, "aborted": False})
+        return job.state
+    harness = study_harness(root)
+    require_valid(study, harness, root=root)
+    doc = kinds.read_groups(root, study)
+    if doc is None:
+        log("per kind of case: groups.json is missing or out of date, so the cases are grouped now")
+        doc = kinds.compute(root)
+    order = list(doc["groups"])
+    log(f"per kind of case: {len(order)} group{'s' if len(order) != 1 else ''} by {doc.get('method')}: "
+        + ", ".join(order))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / "study.yaml", run_dir / "study.yaml")  # the run's own study: the whole of it
+    _atomic_write(run_dir / kinds.GROUPS, json.dumps(doc, indent=2) + "\n")  # the groups as the run used them
+    timing = measured(root)
+    split = split_budget(study, doc["groups"])
+    studies: dict[str, Study] = {}
+    plans: dict[str, Plan] = {}
+    for name in order:
+        part = doc["groups"][name]
+        hours, usd = split[name]
+        own = replace(study, training=list(part["training"]), test=list(part["test"]), per_group=False,
+                      budget=replace(study.budget, hours=hours, ai_max_usd=usd))
+        plans[name] = plan_for(own, harness, timing, hours=hours, models=models)
+        if plans[name].blocked:
+            raise HarnessError(f"per kind of case: {name}: its share of the time ({hours:g} h) is too little: "
+                               f"{plans[name].blocked}")
+        studies[name] = own
+    dirs = {name: f"{GROUPS}/{kinds.slug_of(name)}" for name in order}
+    job = Job(run_dir, run_id=run_id, study=study.name,
+              per_group={"order": order, "current": order[0] if order else None, "dirs": dirs},
+              plan={"hours": study.budget.hours, "groups": {name: plans[name].to_json() for name in order}})
+    group_job: Job | None = None
+    try:
+        for index, name in enumerate(order, start=1):
+            if (run_dir / STOP_REQUEST).is_file():
+                job.finish("stopped")
+                return job.state
+            job.update(phase="search", per_group={**job.state["per_group"], "current": name})
+            log(f"per kind of case: group {index} of {len(order)} ({name}): {len(studies[name].training)} case(s) "
+                f"to learn from, {len(studies[name].test)} held back, {split[name][0]:g} h")
+            folder = write_run(studies[name], harness, plans[name], root, run_id, models=models, log=log, group=name)
+            if (run_dir / STOP_REQUEST).is_file():  # a stop written while the folder was made
+                (folder / STOP_REQUEST).write_text("stop\n", encoding="utf-8")
+            group_job = _GroupJob(folder, job, run_id=run_id, study=study.name, group=name,
+                                  plan=plans[name].to_json())
+            config = load_config(folder / CONFIG)
+            summary = Driver(config, run_dir=folder, log=log).run()
+            group_job.update(search={
+                "stop_reason": summary.stop_reason, "generations": summary.generations,
+                "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
+            })
+            if summary.aborted:
+                group_job.finish("failed", error=summary.stop_reason)
+                job.finish("failed", error=f"{name}: {summary.stop_reason}")
+                return job.state
+            if summary.stop_reason == "stopped on request":
+                group_job.finish("stopped")
+                job.finish("stopped")
+                return job.state
+            _final_check(studies[name], plans[name], config, folder, group_job, log, up=GROUP_UP)
+            ended = group_job.state.get("phase")
+            group_job = None
+            if ended == "stopped":  # the check was stopped: the groups after it do not run
+                job.finish("stopped")
+                return job.state
+            if ended != "done":
+                job.finish("failed", error=f"{name}: the final check did not finish")
+                return job.state
+    except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
+        if group_job is not None:
+            group_job.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        job.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    try:
+        from evolvekit.app.verdict import build_verdict
+
+        write_group_exports(root, run_dir, build_verdict(root, run_id))
+    except Exception as exc:  # noqa: BLE001 - the files are a convenience, the verdict is the result
+        log(f"per kind of case: settings_by_group.json and rule.md could not be written: {exc}")
+    job.finish("done")
+    return job.state
+
+
+SETTINGS_BY_GROUP = "settings_by_group.json"
+RULE_MD = "rule.md"
+
+
+def _run_groups(root: Path, run_dir: Path) -> dict[str, Any]:
+    """The groups a per-group run used: its own copy of `groups.json`, else the study's."""
+    from evolvekit.harness.groups import GROUPS as GROUPS_JSON
+
+    for path in (run_dir / GROUPS_JSON, root / GROUPS_JSON):
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(loaded, dict):
+            return loaded
+    return {}
+
+
+def write_group_exports(root: str | Path, run_dir: str | Path, document: dict[str, Any]) -> list[Path]:
+    """A per-group run's two files in `runs/<id>/downloads/`, from its verdict
+    `document`: `settings_by_group.json` -- `{"method", "groups": {name:
+    {"cases", "decision", "settings", "from"}}}`, a group's settings the best's
+    (`"from": "found"`) only when that group's own decision is `use`, else
+    today's (`"today"`, `compile.base_settings`) -- and `rule.md`, which cases
+    get which (`groups.rule_lines`). Returns the files written."""
+    from evolvekit.app.verdict import _best_of
+    from evolvekit.harness import groups as kinds
+
+    root, run_dir = Path(root), Path(run_dir)
+    study, harness = run_study_of(root, run_dir), study_harness(root)
+    today = base_settings(study, harness, root)
+    doc = _run_groups(root, run_dir)
+    dirs = group_dirs(run_dir)
+    decisions = {name: str(own.get("decision") or "") for name, own in (document.get("groups") or {}).items()}
+    out: dict[str, Any] = {"method": doc.get("method"), "groups": {}}
+    for name, decision in decisions.items():
+        part = (doc.get("groups") or {}).get(name) or {}
+        cases = list(part.get("training") or []) + list(part.get("test") or [])
+        settings, source = dict(today), "today"
+        folder = dirs.get(name)
+        if decision == "use" and folder is not None:
+            best = _best_of(read_job(folder) or {}, list(read_jsonl(folder / "runs.jsonl")))
+            if best is not None:
+                settings, source = {**today, **(best.get("params") or {})}, "found"
+        out["groups"][name] = {"cases": cases, "decision": decision, "settings": settings, "from": source}
+    lines = document.get("rule_lines") or kinds.rule_lines(doc, decisions)
+    folder = run_dir / DOWNLOADS
+    folder.mkdir(parents=True, exist_ok=True)
+    settings_path, rule_path = folder / SETTINGS_BY_GROUP, folder / RULE_MD
+    _atomic_write(settings_path, json.dumps(out, indent=2) + "\n")
+    _atomic_write(rule_path, "# Which cases get which settings\n\n" + "\n\n".join(lines)
+                  + f"\n\nEach group's settings are in {SETTINGS_BY_GROUP}.\n")
+    return [settings_path, rule_path]
 
 
 BAKEOFF = "bakeoff.json"
@@ -513,6 +762,7 @@ def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
     root = Path(root)
     run_dir = root / "runs" / run_id
     state = read_job(run_dir)
+    _refuse_per_group(run_dir, run_id, state)
     if state and state.get("bakeoff"):  # a bake-off checks every branch again, not the search's best
         return run_bakeoff(root, run_id, seeds=seeds, log=log)
     if not state or not state.get("search"):
@@ -574,6 +824,7 @@ def resume_study(
     root = Path(root)
     run_dir = root / "runs" / run_id
     state = read_job(run_dir) or {}
+    _refuse_per_group(run_dir, run_id, state)
     # Not the phase in `job.json`: a run that died still says `search` there;
     # whether its process lives is for whoever starts the resume to judge.
     if not (run_dir / CONFIG).is_file() or not (run_dir / "runs.jsonl").is_file():
@@ -640,6 +891,7 @@ def continue_study(
     root = Path(root)
     run_dir = root / "runs" / run_id
     state = read_job(run_dir) or {}
+    _refuse_per_group(run_dir, run_id, state)
     search = state.get("search") or {}
     # `failed` or `search`: a session (a continuation, say) whose process died after the search
     # of its plan was on record -- the app launches one only when no process has the run.
@@ -735,17 +987,18 @@ def _decision(result: dict[str, Any]) -> str:
 
 def _extend_check(
     study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,
-    stop: threading.Event, time_left_s: Callable[[], float], confirm: Callable[..., Any] = confirm,
+    stop: threading.Event, time_left_s: Callable[[], float], confirm: Callable[..., Any] = confirm, up: str = UP,
 ) -> tuple[Any, int]:
     """The final check with `plan.check_seeds` runs per case, then one more
     run per case at a time while the answer is still open (`keep`), seeds
     remain, the time left pays for another and nothing asked for a stop.
     `confirm` keeps the runs it did, so every call names the whole seed list
     and only the new seed is run. Returns the last comparison and its runs
-    per case; `job.json` says how many it is on (`check.seeds`)."""
+    per case; `job.json` says how many it is on (`check.seeds`). `up` is the
+    way from the run's folder to the study's (`GROUP_UP` for a group's folder)."""
     m = len(study.test)
     seed_cost_s = math.ceil(2 * m / max(1, plan.workers)) * float(plan.run_s)
-    instances = [f"{UP}/{case}" for case in study.test]
+    instances = [f"{up}/{case}" for case in study.test]
     seeds = max(1, min(int(plan.check_seeds), len(CHECK_SEEDS)))
     while True:
         job.update(check={"seeds": seeds})
@@ -845,28 +1098,34 @@ def write_exports(root: str | Path, run_dir: str | Path, values: dict[str, Any] 
     return written
 
 
-def _write_exports(run_dir: Path, log: Callable[[str], None]) -> None:
+def _write_exports(run_dir: Path, log: Callable[[str], None], up: str = UP) -> None:
     """The exports of the run's best, so a finished run always has its files;
-    the answer stands without them when the runner cannot write one."""
+    the answer stands without them when the runner cannot write one. The study
+    folder is `up` from the run's folder."""
+    root = run_dir
+    for _ in up.split("/"):
+        root = root.parent
     try:
-        write_exports(run_dir.parent.parent, run_dir)
+        write_exports(root, run_dir)
     except Exception as exc:  # noqa: BLE001 - an export is a convenience, the verdict is the result
         log(f"final check: the exports could not be written: {exc}")
 
 
 def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,
-                 extend: bool = True) -> None:
+                 extend: bool = True, up: str = UP) -> None:
     """The best against the starting point on the held-back cases; with
-    `extend`, more runs per case while time remains and the answer is open."""
+    `extend`, more runs per case while time remains and the answer is open.
+    `up` is the way from the run's folder to the study's (`GROUP_UP` for a
+    group's folder of a per-group run)."""
     if not study.test:
-        _write_exports(run_dir, log)
+        _write_exports(run_dir, log, up)
         job.finish("done", final={"skipped": "no cases were held back, so there is no final check"})
         return
     rows = list(read_jsonl(run_dir / "runs.jsonl"))
     best = rank(rows, 1)
     if not best or best[0].get("operator") == "human-seed":
         if best:
-            _write_exports(run_dir, log)
+            _write_exports(run_dir, log, up)
         job.finish("done", final={"skipped": "the starting point stayed the best: there is nothing to check"})
         return
     job.update(phase="check")
@@ -875,7 +1134,7 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     try:
         comparison, seeds = _extend_check(
             study, plan, config, run_dir, job, log, stop=stop.event,
-            time_left_s=_time_left(job, plan) if extend else (lambda: 0.0),
+            time_left_s=_time_left(job, plan) if extend else (lambda: 0.0), up=up,
         )
     except ConfirmStopped:
         job.finish("stopped", final={"stopped": True})
@@ -884,6 +1143,6 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
         stop.close()
     (cid, result), = comparison.per_candidate.items()
     decision = _decision(result)
-    _write_exports(run_dir, log)
+    _write_exports(run_dir, log, up)
     job.finish("done", final={"candidate": cid, "confirmed": decision == "use", "decision": decision,
                               "seeds": seeds, "comparison": "confirm/final/comparison.json"})

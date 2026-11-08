@@ -693,3 +693,21 @@ def test_the_cases_drawer_edits_a_tag():
     assert "c.group" in drawer and "c.tag" in drawer, "the tag in its field, the group of groups.json beside it"
     failed = drawer[drawer.index(".catch(function (err)"):]
     assert "el.value = kept && kept.tag" in failed and "EK.fail(err)" in failed, "a refused tag puts the old one back"
+
+
+def test_cases_view_badges():
+    out = _node("""var t = {by_case: [{name: "a.json", group: "small"}, {name: "b.json", group: "large"}]};
+      process.stdout.write(JSON.stringify(String(EK.casesBadges(t))));""")   # the part of casesView that draws them
+    assert "small" in out and "large" in out
+
+
+def test_study_page_lists_each_groups_verdict():
+    view = _page_function(STUDY_PAGE, "groupVerdicts")
+    assert "Per kind of case" in view and "EK.markOf" in view and ".line" in view
+
+
+def test_study_page_picks_a_group():
+    chips = _page_function(STUDY_PAGE, "groupChips")
+    assert 'act: "group"' in chips
+    assert "group=" in _page_function(STUDY_PAGE, "runQ"), "status, tries and results of the group picked"
+    assert "EK.casesBadges" in (STATIC / "js" / "plots.js").read_text(encoding="utf-8")

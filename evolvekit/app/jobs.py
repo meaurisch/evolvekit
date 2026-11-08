@@ -42,11 +42,18 @@ from evolvekit.harness.compile import CONFIG, STUDY_RUN
 from evolvekit.harness.execute import (
     BAKEOFF,
     JOB,
+    PER_GROUP_ALONE,
+    RULE_MD,
+    SETTINGS_BY_GROUP,
+    _run_groups,
     ExportFailed,
     export_path,
+    group_dirs,
+    is_per_group,
     read_job,
     run_study_of,
     write_exports,
+    write_group_exports,
 )
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS, plan_notes
 from evolvekit.harness.manifest import Harness, load_harness
@@ -465,7 +472,10 @@ def can_resume(run_dir: Path, job: dict[str, Any]) -> bool:
     """Whether a run can go on where it stopped: it ended (stopped, or its
     process died) with a search on record that has rounds of its plan left.
     A run that never searched, or searched to the end, starts again instead;
-    a check that stopped is `resume_final_check`'s."""
+    a check that stopped is `resume_final_check`'s. A per-group run is never
+    resumed: it starts again (decision D37)."""
+    if is_per_group(run_dir, job):
+        return False
     if (job.get("phase") not in ("failed", "stopped") or not (run_dir / "runs.jsonl").is_file()
             or job.get("bakeoff")):  # a bake-off has no search: its check is checked again instead
         return False
@@ -480,8 +490,9 @@ def can_continue(run_dir: Path, job: dict[str, Any]) -> bool:
     directory that still holds the compiled study and the runs. A run that
     failed outside its final check with every round of its plan done (a
     continuation whose process died, say) goes on too: its search is on
-    record, and going on keeps the archive and the history one run."""
-    if job.get("bakeoff"):  # a bake-off has no search to go on with
+    record, and going on keeps the archive and the history one run. A
+    per-group run never goes on (decision D37)."""
+    if job.get("bakeoff") or is_per_group(run_dir, job):  # a bake-off has no search to go on with
         return False
     search = job.get("search") or {}
     if not search or search.get("aborted") or search.get("generations") is None:
@@ -502,6 +513,8 @@ def continue_run(home: Any, root: Path, run: str, hours: float | None = None) ->
     run_dir = _run_dir(root, run)
     if running(root):
         raise AppError("the study is already running", 409)
+    if is_per_group(run_dir):
+        raise AppError(PER_GROUP_ALONE, 409)
     if not can_continue(run_dir, phase(run_dir)):
         raise AppError("this run did not finish its search, so it cannot be given more time", 409)
     if hours is None:
@@ -723,6 +736,11 @@ def stop(root: Path, run: str) -> dict[str, Any]:
     if state not in ACTIVE:
         raise AppError("the run is not running", 409)
     (run_dir / STOP_REQUEST).write_text("stop\n", encoding="utf-8")
+    # A per-group run (D38): each group's search and check watch their own folder; a group not
+    # begun yet never begins, as the run reads the request in its own folder before each group.
+    for folder in group_dirs(run_dir).values():
+        if folder.is_dir():
+            (folder / STOP_REQUEST).write_text("stop\n", encoding="utf-8")
     return {"stopping": True, "run": run}
 
 
@@ -731,6 +749,8 @@ def resume_final_check(home: Any, root: Path, run: str, seeds: int | None = None
     if running(root):
         raise AppError("the study is running", 409)
     job = phase(run_dir)
+    if is_per_group(run_dir, job):
+        raise AppError(PER_GROUP_ALONE, 409)
     if not job.get("search") or (job.get("search") or {}).get("aborted"):
         raise AppError("the search of this run did not finish, so there is nothing to check", 409)
     if not run_study_of(root, run_dir).test:
@@ -930,14 +950,81 @@ def _session_left(root: Path, run_dir: Path, job: dict[str, Any], started: datet
     return left, finish.astimezone().strftime("%H:%M") if finish is not None else None
 
 
-def status(root: Path, run: str, document_of: DocumentOf, *, now: datetime | None = None) -> dict[str, Any]:
+def _group_folder(run_dir: Path, job: dict[str, Any], group: str | None) -> tuple[str, Path] | None:
+    """A per-group run's group to read, `(name, folder)`: `group` (a 404 when
+    the run has none of that name), else the current group while the run is
+    live, else the first. None for any other run, or before any group was named."""
+    if not is_per_group(run_dir, job):
+        return None
+    dirs = group_dirs(run_dir)
+    if group is not None:
+        if group not in dirs:
+            raise AppError(f"there is no group {group!r} in this run", 404)
+        return group, dirs[group]
+    current = (job.get("per_group") or {}).get("current")
+    if job.get("phase") in ACTIVE and current in dirs:
+        return current, dirs[current]
+    first = next(iter(dirs), None)
+    return (first, dirs[first]) if first is not None else None
+
+
+def _group_words(run_dir: Path, job: dict[str, Any], picked: tuple[str, Path] | None) -> dict[str, Any]:
+    """`{"name", "index", "count", "order", "current"}` of the group read from a per-group run."""
+    order = list(group_dirs(run_dir))
+    name = picked[0] if picked else None
+    return {"name": name, "index": order.index(name) + 1 if name in order else None, "count": len(order),
+            "order": order, "current": (job.get("per_group") or {}).get("current")}
+
+
+_PER_GROUP_SENTENCES = {
+    "starting": "Starting.",
+    "search": "Searching for better settings, one kind of case at a time.",
+    "check": "Checking the best of a kind of case on the cases its search never saw.",
+    "done": "Finished.",
+    "stopped": "Stopped.",
+}
+
+
+def status(root: Path, run: str, document_of: DocumentOf, *, now: datetime | None = None,
+           group: str | None = None) -> dict[str, Any]:
     """Where a run is, in the words the Running screen uses. The run's own
     study (the copy it keeps) says what it learns from and holds back.
     `now` is the window clock a campaign session's time left is read on
-    (default: the home's, `scheduler.clock_of`)."""
+    (default: the home's, `scheduler.clock_of`). A per-group run is read
+    from one group's folder (`group`, else the current one while it runs,
+    else the first: `_group_folder`), with the run's own phase, a `group`
+    (`_group_words`), and no check again, resume or continuation (D37)."""
     run_dir = _run_dir(root, run)
-    study, harness = run_study_of(root, run_dir), load_harness(root / "harness")
     job = phase(run_dir)
+    if not is_per_group(run_dir, job):
+        return _status_at(root, run, run_dir, job, document_of, now=now)
+    picked = _group_folder(run_dir, job, group)
+    folder = picked[1] if picked is not None and (picked[1] / JOB).is_file() else run_dir
+    own = phase(folder) if folder != run_dir else job
+    out = _status_at(root, run, folder, own, document_of, now=now)
+    words = _group_words(run_dir, job, picked)
+    state = job.get("phase")
+    if own.get("phase") != state or folder == run_dir:
+        out["sentence"] = (_PER_GROUP_SENTENCES.get(str(state))
+                           or ("It failed: " + str(job.get("error") or "no reason recorded") + "." if state == "failed"
+                               else out["sentence"]))
+    if state in ACTIVE and words["name"] and words["name"] == words["current"]:
+        out["sentence"] = f"{out['sentence']} Group {words['index']} of {words['count']} ({words['name']})."
+    try:
+        pinned = run_study_of(root, folder)
+        cases = {"training": len(pinned.training), "test": len(pinned.test)}
+    except HarnessError:
+        cases = None
+    out.update({"phase": state, "error": job.get("error"), "group": {**words, "phase": own.get("phase"), "cases": cases},
+                "can_check": False, "can_resume": False, "can_continue": False})
+    return out
+
+
+def _status_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], document_of: DocumentOf, *,
+               now: datetime | None = None) -> dict[str, Any]:
+    """`status` of the run read from `run_dir` -- the run's folder, or one
+    group's folder of a per-group run -- in the phase `job` says."""
+    study, harness = run_study_of(root, run_dir), load_harness(root / "harness")
     plan = _plan(run_dir, job)
     document = document_of(run_dir) if (run_dir / "events.jsonl").exists() else {}
     health, progress = document.get("health") or {}, document.get("progress") or {}
@@ -1306,12 +1393,53 @@ def _summary_text(data: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
+PER_GROUP_DOWNLOADS = (
+    {"name": "settings_by_group", "label": f"Settings per kind of case ({SETTINGS_BY_GROUP})"},
+    {"name": "rule", "label": f"Which cases get which settings ({RULE_MD})"},
+)
+"""The two files of a finished per-group run, beside its group's own downloads."""
+
+
+def results(root: Path, run: str, document_of: DocumentOf, group: str | None = None) -> dict[str, Any]:
     """The results of a run, as the study it was started with describes them:
-    its goal, cases and choices, not today's edited ones."""
+    its goal, cases and choices, not today's edited ones. A per-group run's
+    are one group's (`group`, else the current one while it runs, else the
+    first: `_group_folder`), with `per_group`: the group shown, the run's
+    order, its own decision, line, advice and rule, and each group's name,
+    cases, decision and line (the verdict document's)."""
     run_dir = _run_dir(root, run)
-    study, harness = run_study_of(root, run_dir), load_harness(root / "harness")
     job = phase(run_dir)
+    if not is_per_group(run_dir, job):
+        return _results_at(root, run, run_dir, job, document_of)
+    picked = _group_folder(run_dir, job, group)
+    if picked is None or not (picked[1] / JOB).is_file():
+        raise AppError("no group of this run has begun its search yet", 409)
+    data = _results_at(root, run, picked[1], phase(picked[1]), document_of)
+    document = verdict_doc.build_verdict(root, run)
+    data["phase"] = job.get("phase")
+    data["final"]["recheck"] = None  # a per-group run is not checked again (D37)
+    data["can_continue"] = False
+    if job.get("phase") == "done":
+        data["downloads"] = [*PER_GROUP_DOWNLOADS, *data["downloads"]]
+    data["per_group"] = {
+        "group": picked[0], "order": list(document.get("groups") or {}), "decision": document.get("decision"),
+        "line": document.get("line"), "advice": document.get("advice"), "rule": document.get("rule_lines") or [],
+        "groups": [{"name": name, "decision": own.get("decision"), "line": own.get("line"),
+                    "cases": {"training": (own.get("learned_from") or {}).get("cases"),
+                              "test": (own.get("held_back") or {}).get("cases")}}
+                   for name, own in (document.get("groups") or {}).items()],
+        "by_case": document.get("by_case") or [],
+        # Every case of the run with its group, as the run grouped them: the Cases view's badges.
+        "case_groups": [{"name": case, "group": name} for name, part in (_run_groups(root, run_dir).get("groups") or {}).items()
+                        for case in [*(part.get("training") or []), *(part.get("test") or [])]],
+    }
+    return data
+
+
+def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], document_of: DocumentOf) -> dict[str, Any]:
+    """`results` of the run read from `run_dir` -- the run's folder, or one
+    group's folder of a per-group run -- in the phase `job` says."""
+    study, harness = run_study_of(root, run_dir), load_harness(root / "harness")
     plan = _plan(run_dir, job)
     document = document_of(run_dir) if (run_dir / "events.jsonl").exists() else {}
     goal = _goal(study, harness)
@@ -1455,18 +1583,41 @@ def _export(root: Path, run_dir: Path, name: str, values: dict[str, Any], case: 
     return out.read_bytes()
 
 
-def download(root: Path, run: str, export: str, document_of: DocumentOf) -> tuple[bytes, str, str]:
-    """`(bytes, content type, file name)` of a download."""
+def download(root: Path, run: str, export: str, document_of: DocumentOf,
+             group: str | None = None) -> tuple[bytes, str, str]:
+    """`(bytes, content type, file name)` of a download. A per-group run's
+    `settings_by_group` and `rule` are the run's own (written now when they
+    are missing); its other downloads are one group's (`group`, as `results`
+    reads it)."""
     run_dir = _run_dir(root, run)
     slug = root.name
     harness = load_harness(root / "harness")
+    job = phase(run_dir)
+    per_group = {d["name"] for d in PER_GROUP_DOWNLOADS}
+    if is_per_group(run_dir, job):
+        if export in per_group:
+            if job.get("phase") != "done":
+                raise AppError("the run has not finished every group yet", 409)
+            name = SETTINGS_BY_GROUP if export == "settings_by_group" else RULE_MD
+            path = run_dir / "downloads" / name
+            if not path.is_file():
+                write_group_exports(root, run_dir, verdict_doc.build_verdict(root, run))
+            kind = "application/json" if export == "settings_by_group" else "text/markdown; charset=utf-8"
+            return path.read_bytes(), kind, f"{slug}-{name.replace('_', '-')}"
+        picked = _group_folder(run_dir, job, group)
+        if picked is None:
+            raise AppError("the run has no result to download yet", 409)
+        run_dir = picked[1]
+    elif export in per_group:
+        raise AppError(f"{export}: only a run per kind of case has it", 404)
     if export == "report":
-        data = results(root, run, document_of)
+        data = results(root, run, document_of, group)
         # The file the result is used through, in the report: the first
         # export that is one file (not the per-case requests).
         attached = None
         if not data["is_seed"]:
-            primary = next((d["name"] for d in data["downloads"] if d["name"] not in ("report", "requests")), None)
+            primary = next((d["name"] for d in data["downloads"]
+                            if d["name"] not in ("report", "requests", *per_group)), None)
             if primary:
                 try:
                     attached = (harness.exports[primary].label, _export(root, run_dir, primary, _best_values(run_dir, document_of)).decode("utf-8", "replace"))
@@ -1812,14 +1963,15 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
     """`_run_line`; a finished run's card without a status document is read once and then kept while
     the files it is made of stay as they are (`_finished_key`): the runs route asks for it every few seconds."""
     job = phase(run_dir)
+    line_of = _per_group_line if is_per_group(run_dir, job) else _run_line
     if document_of is not None or job.get("phase") != "done":
-        return _run_line(root, study, run_dir, document_of, job, now=now)
+        return line_of(root, study, run_dir, document_of, job, now=now)
     key = _finished_key(run_dir, job)
     with _FINISHED_LOCK:
         kept = _FINISHED_CARDS.get(key)
     if kept is not None:
         return json.loads(json.dumps(kept))  # a copy: no caller changes the kept card
-    card = _run_line(root, study, run_dir, None, job)
+    card = line_of(root, study, run_dir, None, job)
     with _FINISHED_LOCK:
         if len(_FINISHED_CARDS) >= _FINISHED_MAX:
             _FINISHED_CARDS.clear()
@@ -1948,6 +2100,52 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
             "error": str(job.get("error") or "")}
 
 
+_PER_GROUP_CARD = {
+    "use": ("finished · probably better, per kind of case", None),
+    "keep": ("finished · not every kind of case is shown to beat today's", "warn"),
+    "single": ("finished · not proven on the held-back cases", "warn"),
+}
+
+
+def _per_group_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None,
+                    job: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    """`_run_line` of a per-group run: while it runs, the current group's
+    card (read from its folder) with `· group 2 of 3 (<name>)` after
+    "running"; finished, the run's own decision and words (the verdict
+    document's); queued, stopped or failed, the run folder's own card."""
+    state = job.get("phase")
+    picked = _group_folder(run_dir, job, None)
+    words = _group_words(run_dir, job, picked)
+    if state in ACTIVE:
+        folder = picked[1] if picked is not None and (picked[1] / JOB).is_file() else run_dir
+        card = _run_line(root, study, folder, document_of, phase(folder) if folder != run_dir else job, now=now)
+        card.update({"kind": "running", "run": run_dir.name, "phase": state, "group": words})
+        if card.get("line", "").startswith("running") and words["name"] == words["current"] and words["index"]:
+            card["line"] = card["line"].replace("running", f"running · group {words['index']} of {words['count']} "
+                                                           f"({words['name']})", 1)
+        return card
+    if state != "done":
+        return {**_run_line(root, study, run_dir, document_of, job, now=now), "group": words}
+    try:
+        document = verdict_doc.build_verdict(root, run_dir.name)
+    except Exception:  # noqa: BLE001 - a card must render even for a damaged run
+        document = {}
+    decision = str(document.get("decision") or "pending")
+    line, tone = _PER_GROUP_CARD.get(decision, ("finished · not every kind of case has its answer", "warn"))
+    try:
+        pinned = run_study_of(root, run_dir)
+        goal = _goal(pinned, load_harness(root / "harness"))
+    except Exception:  # noqa: BLE001 - a card must render even for a damaged study
+        pinned, goal = study, {"says": "the goal", "direction": "lower"}
+    card = {"kind": "finished", "run": run_dir.name, "line": line, "phase": state, "what": _kind_of(pinned),
+            "goal": {"says": goal.get("says"), "label": goal.get("label"), "direction": goal.get("direction")},
+            "rounds": {"done": 0, "planned": 0}, "decision": decision, "mean": None, "ci95": None, "chance": None,
+            "n": int((document.get("held_back") or {}).get("cases") or 0), "group": words}
+    if tone:
+        card["tone"] = tone
+    return _with_verdict(root, run_dir, document_of, card)
+
+
 def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, card: dict[str, Any]) -> dict[str, Any]:
     """A finished card with the verdict's own words beside it (design 3.4): `verdict` holds the
     document's `decision`, `line` and `advice`, and `says`, the decision in the state line's words
@@ -1971,6 +2169,10 @@ def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, car
     if document.get("candidates"):
         # A bake-off: each branch's own line, by its ref.
         verdict["candidates"] = [{"ref": c.get("ref"), "line": c.get("line", "")} for c in document["candidates"]]
+    if document.get("groups"):
+        # A per-group run: each group's own decision and line, by its name.
+        verdict["groups"] = [{"name": name, "decision": own.get("decision"), "line": own.get("line", "")}
+                             for name, own in document["groups"].items()]
     return {**card, "verdict": verdict}
 
 

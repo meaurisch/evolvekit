@@ -739,6 +739,8 @@ def build_verdict(root: Path, run: str | None = None) -> dict[str, Any]:
     from evolvekit.harness.execute import run_study_of
     from evolvekit.harness.manifest import load_harness
 
+    from evolvekit.harness.execute import is_per_group
+
     root = Path(root)
     run = run or jobs.latest_run(root)
     if run is None:
@@ -746,6 +748,16 @@ def build_verdict(root: Path, run: str | None = None) -> dict[str, Any]:
     run_dir = jobs._run_dir(root, run)
     study, harness = run_study_of(root, run_dir), load_harness(root / "harness")
     job = jobs.phase(run_dir)
+    if is_per_group(run_dir, job):
+        return _per_group_verdict(root, run_dir, study, harness, job)
+    return _verdict_at(root, run_dir, study, harness, job)
+
+
+def _verdict_at(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str, Any]) -> dict[str, Any]:
+    """The verdict document of the run in `run_dir` -- a run folder, or one
+    group's folder of a per-group run -- with its pinned `study` and `job`."""
+    from evolvekit.app import jobs
+
     goal = jobs._goal(study, harness)
     rows = jobs._rows(run_dir)
     seed, best = jobs._seed_and_best(run_dir, {}, rows)[0], _best_of(job, rows)
@@ -758,3 +770,116 @@ def build_verdict(root: Path, run: str | None = None) -> dict[str, Any]:
     return _document(root, run_dir, study, harness, job, words, comparison, held,
                      _changed(root, study, harness, seed, best), _run_facts(run_dir, job), _learned_pct(seed, best, goal),
                      baseline=baseline, check_runs=check_runs)
+
+
+# ---------------------------------------------------------------------------
+# a run per kind of case
+# ---------------------------------------------------------------------------
+
+PER_GROUP_RULE = (RULE_WORDS + " Per kind of case, each group's settings are used only when every group checked on "
+                  "two or more held-back cases says use.")
+"""The top-level rule of a per-group run (design §6.4), after each group's own."""
+PER_GROUP_WORDS = {
+    "use": ("Per kind of case: each group checked on two or more held-back cases is probably better.",
+            "Use each group's settings: settings_by_group.json has them, rule.md says which cases get which."),
+    "single": ("Per kind of case: no group has two or more held-back cases, so none is proven.",
+               "Keep today's settings: a group needs two or more held-back cases to tell; a study that holds back "
+               "more cases of each kind can."),
+    "keep": ("Per kind of case: not every group is shown to beat today's settings ({name}: {decision}).",
+             "Keep today's settings, or use only the groups whose own line says use."),
+    "pending": ("Per kind of case: the final check of {name} has not finished.",
+                "Keep today's settings for now: not every group has its answer yet."),
+    "stopped": ("Per kind of case: the final check of {name} has not finished.",
+                "Keep today's settings for now: the run stopped before every group had its answer."),
+}
+
+
+def _group_held(doc: dict[str, Any]) -> int:
+    return int((doc.get("held_back") or {}).get("cases") or 0)
+
+
+def per_group_decision(order: list[str], docs: dict[str, dict[str, Any]], phase: Any = None) -> tuple[str, str, str]:
+    """`(decision, line, advice)` of a per-group run from its groups' own
+    documents (`docs`, in the run's `order`): a group with no answer yet
+    (`pending`, `stopped`) says the run has none; else `use` only when every
+    group checked on two or more held-back cases says `use` (and there is
+    one); `single` when no group has two; else `keep`, naming the first group
+    that does not say `use`. The verdict is the only claim: these words say
+    only what the groups' own verdicts say."""
+    waiting = next((name for name in order if docs[name].get("decision") in ("pending", "stopped")), None)
+    if waiting is not None:
+        decision = "stopped" if phase == "stopped" else str(docs[waiting]["decision"])
+        name, said = waiting, decision
+    else:
+        checked = [name for name in order if _group_held(docs[name]) >= 2]
+        against = next((name for name in checked if docs[name].get("decision") != "use"), None)
+        decision = "single" if not checked else "keep" if against is not None else "use"
+        name, said = against or "", str(docs[against]["decision"]) if against else ""
+    line, advice = PER_GROUP_WORDS[decision]
+    return decision, line.format(name=name, decision=said), advice
+
+
+def _not_begun(root: Path, run_dir: Path, name: str, part: dict[str, Any], measure: dict[str, Any]) -> dict[str, Any]:
+    """The document of a group whose search has not begun: no answer yet."""
+    return {"schema": SCHEMA, "study": root.name, "run": run_dir.name, "group": name, "phase": None, "decision": "pending",
+            "line": "Its search has not begun.", "advice": "", "measure": measure,
+            "held_back": {"cases": len(part.get("test") or []), "runs_per_case": None},
+            "learned_from": {"cases": len(part.get("training") or []), "pct": None}, "rule": RULE_WORDS,
+            "by_case": [], "changed": [], "files": []}
+
+
+def _per_group_verdict(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str, Any]) -> dict[str, Any]:
+    """The verdict document of a per-group run: each group's own document
+    (`_verdict_at` on its folder and pinned study) under `groups`, and the
+    run's decision and words from them (`per_group_decision`), its held-back
+    cases (all of them), every group's held-back rows (`by_case`, each with
+    its `group`), the rule's sentences (`rule_lines`, as `rule.md` says them),
+    the run's files and times and, with AI, what every group spent together.
+    No figures of its own: each group's are its own."""
+    from evolvekit.app import jobs
+    from evolvekit.harness.compile import ai_cap_usd
+    from evolvekit.harness.execute import _run_groups, group_dirs, run_study_of
+    from evolvekit.harness.groups import rule_lines
+
+    run = run_dir.name
+    grouped = _run_groups(root, run_dir)
+    dirs = group_dirs(run_dir)
+    order = list(dirs) or list(grouped.get("groups") or {})
+    goal = jobs._goal(study, harness)
+    measure = _measure_of(study, harness, goal["kpi"], goal["direction"])
+    docs: dict[str, dict[str, Any]] = {}
+    for name in order:
+        folder = dirs.get(name)
+        part = (grouped.get("groups") or {}).get(name) or {}
+        if folder is None or not (folder / "job.json").is_file():
+            docs[name] = _not_begun(root, run_dir, name, part, measure)
+            continue
+        state = jobs.phase(folder)
+        own = _verdict_at(root, folder, run_study_of(root, folder), harness, state)
+        own["run"], own["group"] = run, name
+        if state.get("phase") in jobs.ACTIVE:  # no answer yet: the group's line says what it is doing
+            own["line"] = "Its final check is going." if state.get("phase") == "check" else "Its search is going."
+            own["advice"] = ""
+        docs[name] = own
+    decision, line, advice = per_group_decision(order, docs, job.get("phase"))
+    runs_per_case = {(d.get("held_back") or {}).get("runs_per_case") for d in docs.values()} - {None}
+    document: dict[str, Any] = {
+        "schema": SCHEMA, "study": root.name, "run": run, "phase": job.get("phase"), "decision": decision,
+        "line": line, "advice": advice,
+        "measure": next((d["measure"] for d in docs.values() if d.get("measure")), measure),
+        "held_back": {"cases": len(study.test), "runs_per_case": runs_per_case.pop() if len(runs_per_case) == 1 else None},
+        "rule": PER_GROUP_RULE, "groups": docs,
+        "rule_lines": rule_lines(grouped, {name: str(d.get("decision") or "") for name, d in docs.items()}) if grouped else [],
+        "by_case": [{**row, "group": name} for name, d in docs.items() for row in d.get("by_case") or []],
+        "files": _files(root, run_dir),
+        "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
+    }
+    if getattr(study.budget, "ai_enabled", False):
+        spent = [d["spent"] for d in docs.values() if d.get("spent")]
+        if any("requests" in s for s in spent):
+            requests = sum(float(s.get("requests") or 0) for s in spent)
+            document["spent"] = {"requests": requests, "line": f"AI: {requests:g} request{'s' if requests != 1 else ''}"}
+        else:
+            usd, cap = sum(float(s.get("usd") or 0.0) for s in spent), ai_cap_usd(study)
+            document["spent"] = {"usd": usd, "cap_usd": cap, "line": f"AI: ${usd:.2f} of ${cap:.2f}"}
+    return _clean(document)

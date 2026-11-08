@@ -141,6 +141,17 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     if verdict.get("rule"):
         out += ["", f"The rule: {verdict['rule']}"]
 
+    kinds = verdict.get("groups") or {}
+    if kinds:
+        # A run per kind of case: each group's own verdict line, then which cases get which settings.
+        out += ["", "## Per kind of case", ""]
+        for name, own in kinds.items():
+            held = (own.get("held_back") or {}).get("cases")
+            count = f" ({held} held-back case{'s' if held != 1 else ''})" if isinstance(held, int) else ""
+            out.append(f"- {name}{count}: {own.get('line') or ''}")
+        if verdict.get("rule_lines"):
+            out += ["", "Which cases get which settings:", ""] + [f"- {line}" for line in verdict["rule_lines"]]
+
     candidates = verdict.get("candidates")
     if candidates:
         # A bake-off: each branch against the starting point, in its own verdict's words.
@@ -163,9 +174,11 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         # runs' changes -- the verdict's own figure -- so it need not be the change of the two means.
         runs = (verdict.get("held_back") or {}).get("runs_per_case")
         of = f" (mean of {runs} run{'s' if runs != 1 else ''})" if runs else " (mean)"
-        out += _table(["Case", f"Start{of}", f"Best{of}",
+        kind = ["Kind of case"] if kinds else []  # a per-group run: each row against its own group's best
+        out += _table([*kind, "Case", f"Start{of}", f"Best{of}",
                        f"Change in {measure.get('label') or 'the measure'} (mean of the paired runs)", "Outcome"],
-                      [[r["name"], _number(r.get("start")), _number(r.get("best")), _change(r.get("change_pct"), direction),
+                      [[*([r.get("group") or ""] if kinds else []), r["name"], _number(r.get("start")),
+                        _number(r.get("best")), _change(r.get("change_pct"), direction),
                         _OUTCOME.get(r.get("outcome"), r.get("outcome") or "")] for r in rows])
     elif candidates and (verdict.get("held_back") or {}).get("runs_per_case"):
         # A bake-off with no branch shown ahead: each branch's figures are its own row above.
@@ -181,6 +194,9 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         out += _table([kind, "From", "To"], [[c["label"], c["from"], c["to"]] for c in changed])
     elif candidates and verdict.get("decision") == "keep":
         out.append("Today's code stays; each branch's change is its own commit, named above.")
+    elif kinds:
+        out.append("Each kind of case has its own: settings_by_group.json holds each group's settings, today's where "
+                   "the group's own line does not say use.")
     else:
         out.append("Nothing changed.")
 

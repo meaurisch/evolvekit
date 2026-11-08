@@ -53,6 +53,9 @@ __all__ = [
 ]
 
 STUDY_FORMAT = 1
+PER_GROUP_CODE = "per_group: tunes settings per kind of case; a code study changes one source for every case"
+PER_GROUP_SCHEDULE = "per_group: a campaign runs one search; leave out schedule, or per_group, for now"
+PER_GROUP_TUNE = "per_group: tune at least one setting"
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -74,6 +77,14 @@ def _number(value: Any, path: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise HarnessError(f"{path}: expected a number, got {value!r}")
     return float(value)
+
+
+def _flag(value: Any, path: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise HarnessError(f"{path}: true or false, got {value!r}")
+    return value
 
 
 def _name(value: Any, path: str) -> str:
@@ -405,6 +416,8 @@ class Study:
     """When the study may run, in local wall-clock time; `None` for a study that runs when started."""
     warm: Warm | None = None
     """Where `study new --warm` took its starting values from; `None` for a plain start."""
+    per_group: bool = False
+    """`per_group: true`: one search and one final check per group of cases (design §6.4)."""
 
     # -- reading and writing -----------------------------------------------
 
@@ -414,7 +427,7 @@ class Study:
         _known(
             data,
             {"study", "name", "harness", "template", "application", "cases", "inputs", "vary", "constraints",
-             "kpis", "goal", "guardrails", "limits", "budget", "plan", "step", "schedule", "warm"},
+             "kpis", "goal", "guardrails", "limits", "budget", "plan", "step", "schedule", "warm", "per_group"},
             "<study>",
         )
         if data.get("study") != STUDY_FORMAT:
@@ -489,6 +502,7 @@ class Study:
             step=int(_number(data.get("step", 1), "step")),
             schedule=Schedule.parse(data["schedule"]) if data.get("schedule") is not None else None,
             warm=Warm.parse(data["warm"]) if data.get("warm") is not None else None,
+            per_group=_flag(data.get("per_group", False), "per_group"),
         )
 
     def to_yaml(self) -> dict[str, Any]:
@@ -523,6 +537,7 @@ class Study:
             "step": self.step,
             **({"schedule": self.schedule.to_yaml()} if self.schedule is not None else {}),
             **({"warm": self.warm.to_yaml()} if self.warm is not None else {}),
+            **({"per_group": True} if self.per_group else {}),
         }
 
     # -- what the study tunes ------------------------------------------------
@@ -852,6 +867,14 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None, 
         add("limits.runs_per_case: the application takes no seed, so a second run of a case repeats the first")
     if not study.budget.hours > 0:
         add("budget.hours: more than 0")
+    if study.per_group:
+        # D37: one search per kind of case, alone for now.
+        if study.code is not None:
+            add(PER_GROUP_CODE)
+        elif not study.tuned_settings():
+            add(PER_GROUP_TUNE)
+        if study.schedule is not None:
+            add(PER_GROUP_SCHEDULE)
     if study.budget.ai_max_usd < 0:
         add("budget.ai.max_usd: 0 or more")
     return problems

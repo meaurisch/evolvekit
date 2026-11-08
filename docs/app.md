@@ -294,6 +294,29 @@ from the command line: `study export SLUG --diff` writes it as a patch, and
 `study pr SLUG` makes a branch and a pull request of it (only with `--yes`;
 see the README's [Code studies](../README.md#code-studies)).
 
+A run per kind of case (`per_group: true`, see the README's *Settings per
+kind of case*) has one search and one final check per group. Its strip says
+the run's own verdict line and advice (*Per kind of case: not every group is
+shown to beat today's settings (large: keep).*); under it, **Per kind of
+case** lists each group — its verdict mark, its name, its cases to learn
+from and held back, and its own verdict line, word for word — and then
+*Which cases get which settings*, the sentences of `rule.md`. Over the three
+views, one chip per group picks which group's tries, cases and settings they
+show (`?group=` on the status, tries and results; while the run goes, the
+group it is on, marked *running*, else the first); *Settings to use* or
+*to keep* is then that group's, by its own verdict, and the downloads add
+`settings_by_group.json` and `rule.md`. While the run goes, its card on Home
+and in *Past runs* says which group it is on (*running · group 2 of 3
+(large) · round 1 of 4 · 9 min left*). Such a run offers no *Continue*,
+*Carry on* or *Check with more runs*: it cannot yet go on, and starts again
+instead.
+
+The Cases view shows each case's group as a small badge before its name:
+for a run per kind of case, the group the run gave it; for any other run,
+the case's group in `groups.json` (from `study groups` or the tags), when
+there is one. On a phone, where the plot has no width to spare, the badges
+show only when the rows are of more than one group.
+
 Every figure for a combination is written as the report writes it: one
 decimal and the measure's own direction, never *better* — the chosen
 combination's chip reads *Combination 2 · 7.5 % lower on the cases it
@@ -489,7 +512,15 @@ and `earlier` the newest earlier run that said use when the latest does not),
 Study page's three views: `evolvekit/app/tries.py`; in a code study each
 carries `diff_stat`, and `tries/{combination}` its `diff`), `download/{export}`
 (`download/report?view=1` opens the report in the browser; `download/study`
-is the study as a zip) and `next`; and each run's dashboard at
+is the study as a zip) and `next`. On a run per kind of case, `status`,
+`tries`, `tries/{combination}`, `results` and `download/{export}` take
+`?group=<name>` and read that group's folder (without it, the group the run
+is on while it goes, else the first; a 404 for a group the run does not
+have); `status` then has a `group` (`name`, `index`, `count`, `order`,
+`current`, its own `phase`), `results` a `per_group` (the group shown, the
+run's `decision`, `line`, `advice` and `rule`, each group's `name`,
+`decision`, `line` and `cases`, and `case_groups`), and
+`download/settings_by_group` and `download/rule` are the run's two files; and each run's dashboard at
 `/studies/{name}/runs/{run}/dashboard/`. Managing studies: `DELETE
 /api/studies/{name}` moves one to the trash (409 while it runs or waits) and
 `POST /api/trash/{entry}/restore` brings it back; `POST
@@ -526,6 +557,7 @@ names:
 | `by_case` | one row per held-back case: `name`, `start`, `best`, `change_pct`, `outcome` (`better`, `worse`, `same`, `failed`) |
 | `changed` | the settings and data changes of the best combination: `name`, `label`, `from`, `to` |
 | `candidates` | only on a bake-off's run (`study bakeoff`): one entry per branch in the order given, `ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance` — each against the starting point by the same rule; `same: true` and no figures on a branch whose every run gave exactly today's result; `by_case`, the branch's held-back rows in the keys of `by_case` (none on a branch at the starting commit) |
+| `groups` | only on a run per kind of case (`per_group: true`): `{name: document}`, each group's own verdict document built from its folder `runs/<id>/groups/<slug>/` (with `group`; a group whose search has not begun is `pending`). The run's own document then has no figures, `levels`, `learned_from` or `changed` of its own: its `decision` is `pending` or `stopped` while a group has no answer, `use` only when every group checked on two or more held-back cases says use, `single` when no group has two, else `keep`; `held_back` counts every group's cases, `by_case` holds every group's rows, each with its `group`, `rule` adds the top-level rule, `rule_lines` are the sentences of `rule.md`, and `spent` (with AI) is every group's together |
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
 | `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
