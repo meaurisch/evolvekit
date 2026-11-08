@@ -36,6 +36,7 @@ starts climbing again.
 python tasks.py test          # the offline tests except the slow ones
 python tasks.py lint          # ruff, mistake-only rules (F, E9)
 python tasks.py check         # lint, then every test; the CI gate
+python tasks.py dist          # Windows: the app's zip and pyvrp-1.0.0.zip beside it (packaging/README.md)
 
 python -m evolvekit init my-problem/                     # scaffold a config
 python -m evolvekit preflight --config examples/binpacking/evolvekit.yaml

@@ -1,9 +1,10 @@
-import ast, shutil, sys
+import ast, json, os, shutil, sys
 from pathlib import Path
 
 import evolvekit
 from evolvekit import resources
-from evolvekit.harness.library import find_harnesses
+from evolvekit.cli import main
+from evolvekit.harness.library import default_home, find_harnesses, install_harness, pack_harness
 
 PACKAGE = Path(evolvekit.__file__).resolve().parent
 CHECKOUT = PACKAGE.parent
@@ -164,3 +165,26 @@ def test_doctor_says_python_is_bundled_when_frozen(tmp_path, monkeypatch):
     fake_bundle(monkeypatch, tmp_path / "evolvekit app")
     line = doctor._python()
     assert line["ok"] and line["message"].startswith("bundled (Python ")
+
+def test_frozen_paths_with_spaces_and_unicode(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "work" / "demo-tour"
+    shutil.copytree(CHECKOUT / "harnesses" / "demo-tour", source, ignore=shutil.ignore_patterns("__pycache__"))
+    for name in ("runner.py", "harness.yaml"):                    # packed from a CRLF checkout (core.autocrlf=true)
+        path = source / name
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    (tmp_path / "Downloads ë").mkdir()
+    zipped = pack_harness(source, tmp_path / "Downloads ë")
+    bundle = fake_bundle(monkeypatch, tmp_path / "Zoë Intern" / "Apps" / "evolvekit app", harnesses=("prompt-tune",))
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    home = default_home()
+    assert os.path.samefile(home.parent, profile)
+    installed = install_harness(zipped, home)
+    assert installed.root == home / "harnesses" / "demo-tour-1.1.0"
+    entries = {e.harness.id: e for e in find_harnesses(home)}
+    assert not entries["demo-tour"].built_in and entries["prompt-tune"].built_in
+    assert bundle in entries["prompt-tune"].path.parents
+    assert main(["study", "new", "Zoë's depot", "--harness", "demo-tour", "--template", "tune", "--json"]) == 0
+    slug = json.loads(capsys.readouterr().out)["slug"]
+    runner = home / "studies" / slug / "harness" / "runner.py"
+    assert runner.is_file()
+    assert resources.python_script_argv(runner) == [str(bundle / resources.CLI_EXE), "--script", str(runner)]

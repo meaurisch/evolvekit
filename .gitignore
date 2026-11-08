@@ -10,3 +10,6 @@ runs/
 # The 3,000-order PyVRP instances are a megabyte each and the generator is
 # deterministic; regenerate them with examples/pyvrp/make_instance.py.
 examples/pyvrp/instance-3000-*.json
+# python tasks.py dist: the app folder, its zip and the PyVRP zip; PyInstaller work files.
+/dist/
+/build/
