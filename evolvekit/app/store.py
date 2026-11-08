@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import threading
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -76,6 +76,10 @@ ARCHIVED = ".archived"
 """The marker file of an archived study: a fact about the library, not a field of the study."""
 STUDY_PARTS = ("study.yaml", "harness", "cases", "inputs")
 """What a study is made of, as against what it produced: `runs/`, `preview/`, `assistant.jsonl`."""
+STEP_KEYS = ("template", "step", "schedule")
+"""Parts `save_step` accepts though the study's `study.yaml` may not have them yet."""
+OPTIONAL_KEYS = ("schedule",)
+"""Parts `save_step` takes out when given `None`."""
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 _TRASH_ENTRY = re.compile(r"^(?P<slug>[a-z0-9][a-z0-9-]{0,79})~(?P<stamp>\d{8}-\d{6})(?:-\d+)?$")
@@ -345,15 +349,20 @@ class Home:
     def save_step(self, slug: str, changes: dict[str, Any]) -> None:
         """Merge `changes` -- top-level parts of `study.yaml` -- into the study
         and save it. The shape is checked; what is missing is not (that is
-        what the problems list says, step by step)."""
+        what the problems list says, step by step). A key the study may lack
+        (`STEP_KEYS`) is accepted when it has none yet; `None` for an
+        optional one (`schedule`) takes it out."""
         root, study, _ = self.load(slug)
         document = study.to_yaml()
         protected = {"study", "harness"}
         for key, value in (changes or {}).items():
             if key in protected:
                 raise AppError(f"{key}: a study keeps its harness; start a new study for another one")
-            if key not in document and key not in ("template", "step"):
+            if key not in document and key not in STEP_KEYS:
                 raise AppError(f"{key}: not part of a study")
+            if value is None and key in OPTIONAL_KEYS:
+                document.pop(key, None)  # `{"schedule": null}`: the study runs as soon as it is started
+                continue
             document[key] = value
         try:
             updated = Study.parse(document)
@@ -904,7 +913,7 @@ class Home:
         cases = self.cases(slug)
         return {
             "slug": slug,
-            "study": study.to_yaml(),
+            "study": _as_json(study.to_yaml()),
             "problems": problems,
             "steps": [
                 {"number": i + 1, "title": title, "problems": sum(1 for p in problems if p["step"] == i + 1)}
@@ -916,6 +925,17 @@ class Home:
             "inputs": dict(study.inputs),
             "code_proposal": code_proposal(root, harness) if study.code is not None else None,
         }
+
+
+def _as_json(value: Any) -> Any:
+    """`study.to_yaml()` as JSON carries it: a date (`schedule.until`) as `"2026-12-31"`."""
+    if isinstance(value, dict):
+        return {k: _as_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_as_json(v) for v in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
 
 
 def _remove_trees(root: Path) -> None:

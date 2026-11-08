@@ -24,6 +24,9 @@ from evolvekit.stopping import STOP_REQUEST
 
 from campaign_helpers import Recorder, campaign_study, local, write_run
 
+LAUNCHERS = ("start", "continue_run", "recheck")
+"""What `start_campaign` launches with (it never stops a run)."""
+
 
 def test_starts_at_window_start(tmp_path):
     home, root = campaign_study(tmp_path)
@@ -501,3 +504,169 @@ def test_a_final_check_that_is_starting_is_not_stopped(tmp_path):
         rec = Recorder()
         scheduler.tick(home, now=local("2026-11-16 00:01"), **rec.calls_for())
         assert rec.calls == expected, flag
+
+
+# ---------------------------------------------------------------------------
+# Task 3: the campaign's state, start now, a person's stop
+# ---------------------------------------------------------------------------
+
+
+def test_campaign_lines(tmp_path):
+    home, root = campaign_study(tmp_path)
+    study = load_study(root)
+    assert scheduler.campaign_state(root, study, now=local("2026-11-13 18:00"))["line"] == "Campaign · next window Sat 00:00"
+    assert scheduler.campaign_state(root, study, now=local("2026-11-14 10:00"))["line"] == "Campaign · this window ends Sun 23:59"
+    scheduler.pause(root, reason="stopped by you")
+    assert scheduler.campaign_state(root, study, now=local("2026-11-14 10:00"))["line"] == "Campaign · paused: stopped by you"
+    (root / scheduler.CAMPAIGN).unlink()
+    assert scheduler.campaign_state(root, study, now=local("2026-11-13 18:00"))["line"] == \
+        "Campaign · not started: its first window would be Sat 00:00"
+
+
+def test_campaign_state_says_next_edge_and_none_without_a_schedule(tmp_path):
+    home, root = campaign_study(tmp_path)
+    state = scheduler.campaign_state(root, load_study(root), now=local("2026-11-13 18:00"))
+    assert state["state"] == "armed" and state["edge"] == "start" and state["tone"] is None and state["missed"] is None
+    assert state["next"] == local("2026-11-14 00:00").isoformat()
+    inside = scheduler.campaign_state(root, load_study(root), now=local("2026-11-14 10:00"))
+    assert inside["edge"] == "end" and inside["next"] == local("2026-11-15 23:59").isoformat()
+    study = load_study(root)
+    study.schedule = None
+    save_study(study, root)
+    assert scheduler.campaign_state(root, load_study(root), now=local("2026-11-14 10:00")) is None
+
+
+def test_missed_window_is_said(tmp_path):
+    home, root = campaign_study(tmp_path, windows=({"days": ["sat"], "from": "00:00", "to": "06:00"},
+                                                   {"days": ["mon"], "from": "01:00", "to": "06:00"}))
+    scheduler.tick(home, now=local("2026-11-13 20:00"), **Recorder().calls_for())   # the last tick: Friday
+    state = scheduler.campaign_state(root, load_study(root), now=local("2026-11-15 12:00"))
+    assert state["line"] == "Campaign · the window of Sat 00:00 was missed: the app was not running · next window Mon 01:00"
+    assert state["tone"] == "warn" and state["missed"] == local("2026-11-14 00:00").isoformat()
+    write_run(root, "r1", "search", alive=True)
+    scheduler.tick(home, now=local("2026-11-14 03:00"), **Recorder().calls_for())   # a tick inside the window
+    assert scheduler.campaign_state(root, load_study(root), now=local("2026-11-15 12:00"))["missed"] is None
+
+
+def test_campaign_finished_line(tmp_path):
+    home, root = campaign_study(tmp_path)
+    study = load_study(root)
+    scheduler.pause(root, reason=scheduler.COMPLETE, state="complete")
+    state = scheduler.campaign_state(root, study, now=local("2026-11-14 10:00"))
+    assert state["line"] == "Campaign finished" and state["state"] == "complete" and state["tone"] is None
+    failed = scheduler.FAILED_PAUSE_LINE.format(error="the run could not be started: no Python")
+    scheduler.pause(root, reason=failed)
+    state = scheduler.campaign_state(root, study, now=local("2026-11-14 10:00"))
+    assert state["line"] == failed and state["state"] == "paused" and state["tone"] == "warn"
+
+
+def test_an_ended_campaign_says_its_last_day(tmp_path):
+    home, root = campaign_study(tmp_path)
+    study = load_study(root)
+    study.schedule = replace(study.schedule, until=date(2026, 12, 31))
+    save_study(study, root)
+    scheduler.pause(root, reason=scheduler.ENDED, state="ended")
+    assert scheduler.campaign_state(root, load_study(root), now=local("2027-01-04 10:00"))["line"] == "Campaign · ended on 31 Dec"
+
+
+def test_campaign_done(tmp_path):
+    home, root = campaign_study(tmp_path)
+    study = load_study(root)
+    now = local("2026-11-16 08:00")
+    assert not scheduler.campaign_done(root, study, now=now), "armed, nothing run yet"
+    write_run(root, "r1", "done", generations=6, planned=6, used_s=3600 - 60, final={"decision": "use"})
+    assert scheduler.campaign_done(root, study, now=now), "the search time is used and the run is done: complete"
+    write_run(root, "r1", "search", alive=True)
+    scheduler.pause(root, reason="stopped by you")
+    assert not scheduler.campaign_done(root, study, now=now), "paused, but its run is still active"
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    assert scheduler.campaign_done(root, study, now=now)
+
+
+def test_a_stopped_run_with_a_verdict_and_no_time_left_completes_the_campaign(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=6, planned=6, used_s=3600 - 120, final={"decision": "keep"})
+    assert scheduler.campaign_done(root, load_study(root), now=local("2026-11-14 10:00"))
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
+    assert rec.calls == [] and scheduler.read_campaign(root)["state"] == "complete", "never left armed for ever"
+
+
+def test_start_now_overrides(tmp_path):
+    home, root = campaign_study(tmp_path)
+    (root / scheduler.CAMPAIGN).unlink()
+    rec = Recorder()
+    answer = scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=True, **rec.calls_for(only=("start",)))
+    assert rec.calls == [("start", (home, root), {})] and scheduler.read_campaign(root)["by_hand"]["run"] == answer["run"]
+    assert scheduler.read_campaign(root)["state"] == "armed" and answer["campaign"]["state"] == "armed"
+
+
+def test_start_now_does_what_the_window_would(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    rec = Recorder()
+    scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=True, **rec.calls_for(LAUNCHERS))
+    assert rec.calls == [("start", (home, root), {"resume": "r1"})]
+    write_run(root, "r1", "done", generations=6, planned=6, used_s=1800, final={"decision": "keep"}, launch=2)
+    rec = Recorder()
+    scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=True, **rec.calls_for(LAUNCHERS))
+    assert rec.calls == [("continue_run", (home, root, "r1"), {"hours": pytest.approx(0.5)})], \
+        "the campaign's search time left, whatever the window"
+    assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 2}
+    write_run(root, "r1", "done", generations=6, planned=6, used_s=3600 - 60, final={"decision": "keep"}, launch=3)
+    with pytest.raises(AppError, match="no search time left"):
+        scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=True, **Recorder().calls_for(LAUNCHERS))
+
+
+def test_start_scheduled_only_arms(tmp_path):
+    home, root = campaign_study(tmp_path)
+    (root / scheduler.CAMPAIGN).unlink()
+    rec = Recorder()
+    answer = scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=False, **rec.calls_for(LAUNCHERS))
+    assert rec.calls == [] and answer["scheduled"] is True
+    assert answer["campaign"]["line"] == "Campaign · next window Sat 00:00"
+    assert scheduler.read_campaign(root)["state"] == "armed"
+
+
+def test_a_persons_stop_pauses_the_campaign(tmp_path):
+    home, root = campaign_study(tmp_path)
+    assert scheduler.stop_by_person(home, root, None) == {"paused": True, "stopping": False}
+    assert scheduler.read_campaign(root)["state"] == "paused" and scheduler.read_campaign(root)["reason"] == "stopped by you"
+    write_run(root, "r1", "search", alive=True)
+    scheduler.arm(root, now=local("2026-11-14 10:00"))
+    answer = scheduler.stop_by_person(home, root, "r1")
+    assert answer == {"paused": True, "stopping": True, "run": "r1"} and (root / "runs" / "r1" / STOP_REQUEST).exists()
+    assert scheduler.read_campaign(root)["state"] == "paused"
+
+
+def test_a_persons_resume_continue_and_check_again_are_by_hand(tmp_path, monkeypatch):
+    from test_app_server import call
+
+    home, root = campaign_study(tmp_path)
+    slug = root.name
+    monkeypatch.setattr(scheduler, "tick", lambda *a, **k: [])  # no window launches anything here
+    monkeypatch.setattr(jobs, "_spawn", lambda env, argv, root, run_dir: 2 ** 22 + 7)  # launched: a pid gone at once
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        write_run(root, "r1", "stopped", generations=2, planned=6, launch=1)
+        status, answer = call(server, "POST", f"/api/studies/{slug}/start", {"resume": "r1"})
+        assert status == 200, answer
+        assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 2}
+        write_run(root, "r1", "done", generations=6, planned=6, used_s=600, final={"decision": "keep"}, launch=2)
+        status, answer = call(server, "POST", f"/api/studies/{slug}/continue", {"run": "r1", "hours": 1})
+        assert status == 200, answer
+        assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 3}
+        write_run(root, "r1", "stopped", generations=6, planned=6, used_s=600, final={"stopped": True}, launch=3)
+        status, answer = call(server, "POST", f"/api/studies/{slug}/final-check?run=r1", {})
+        assert status == 200, answer
+        assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 4}
+        # On a study whose campaign is not armed, campaign.json is not touched.
+        scheduler.pause(root, reason="stopped by you")
+        before = (root / scheduler.CAMPAIGN).read_text(encoding="utf-8")
+        write_run(root, "r1", "stopped", generations=2, planned=6, launch=4)
+        status, answer = call(server, "POST", f"/api/studies/{slug}/start", {"resume": "r1"})
+        assert status == 200, answer
+        assert (root / scheduler.CAMPAIGN).read_text(encoding="utf-8") == before
+    finally:
+        server.stop()

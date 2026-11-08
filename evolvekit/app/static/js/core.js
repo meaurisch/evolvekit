@@ -136,6 +136,8 @@
   EK.del = function (path) { return EK.api("DELETE", path); };
   EK.q = encodeURIComponent;
   EK.studyPath = function (slug, rest) { return "/api/studies/" + encodeURIComponent(slug) + (rest || ""); };
+  /** The Study page of a study (and a run of it): "#/study/<slug>?run=<id>". */
+  EK.studyHref = function (slug, run) { return "#/study/" + EK.q(slug) + (run ? "?run=" + EK.q(run) : ""); };
 
   // ------------------------------------------------------------------ timers: every one ends with its page
   var timers = [];

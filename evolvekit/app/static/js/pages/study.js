@@ -708,6 +708,9 @@
   function runStartedAt() { var r = (st.doc.runs || []).filter(function (x) { return x.id === st.run; })[0]; return r ? r.started_at : ""; }
   function notices() {
     var s = st.status, out = [];
+    // A study with a schedule: its campaign's line under the header (the next window, a pause, a missed window).
+    var camp = (st.doc.state || {}).campaign;
+    if (camp && camp.line) out.push(EK.notice(camp.tone === "warn" ? "warning" : "info", camp.line));
     if (s.phase === "search" && /again/.test(s.sentence || "")) out.push(EK.notice("info", "Continued where it stopped, after a restart."));
     if (s.busy_line && isLive()) out.push(EK.notice("warning", "Your computer is busy. Tries may run slower.", { text: "Is it still fair?", act: "busy" }));
     // Before and while the run: what to hear besides the plan (too few held-back cases for a firm answer).
@@ -812,7 +815,11 @@
       restart: function () {
         // A bake-off starts again as itself: the same branches, never a search.
         var again = isBakeoff() ? EK.post(EK.studyPath(st.slug, "/bakeoff"), { refs: st.status.bakeoff_refs }) : EK.post(EK.studyPath(st.slug, "/start"));
-        again.then(function (res) { EK.go(EK.studyHref(st.slug, res.run)); }).catch(EK.fail);
+        again.then(function (res) {
+          // A study with a schedule is scheduled, not started: its next window starts it (D3).
+          if (res.scheduled) { EK.toast("done", "Scheduled: " + String((res.campaign || {}).line || "").replace(/^Campaign · /, "")); EK.go("#/"); return; }
+          EK.go(EK.studyHref(st.slug, res.run));
+        }).catch(EK.fail);
       },
       "continue": function () {
         var hours = (st.doc.study.budget || {}).hours || 1;

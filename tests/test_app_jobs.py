@@ -509,3 +509,62 @@ def test_a_run_gets_the_api_keys_only_when_ai_help_is_on(tmp_path, monkeypatch):
     assert "OPENROUTER_API_KEY" not in seen[0] and "OTHER_SECRET" not in seen[0]
     assert seen[1]["OPENROUTER_API_KEY"] == "sk-or-test" and "OTHER_SECRET" not in seen[1]
     assert seen[0]["PYTHONIOENCODING"] == "utf-8" and "PATH" in seen[0]
+
+
+# ---------------------------------------------------------------------------
+# campaigns: the home card between windows, the time left of a resumed session
+# ---------------------------------------------------------------------------
+
+
+def test_home_card_campaign_line(tmp_path):
+    from campaign_helpers import campaign_study, local, write_run
+
+    from evolvekit.app import scheduler
+    from evolvekit.harness.study import load_study
+
+    home, root = campaign_study(tmp_path)
+    state = jobs.state_line(root, load_study(root), now=local("2026-11-13 18:00"))
+    assert state["kind"] == "campaign" and state["line"] == "campaign · next window Sat 00:00"
+    assert state["campaign"]["next"] == local("2026-11-14 00:00").isoformat()
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    scheduler.arm(root, now=local("2026-11-13 18:00"))
+    campaign = json.loads((root / scheduler.CAMPAIGN).read_text(encoding="utf-8"))
+    campaign["stopped_by_window"] = "r1"
+    (root / scheduler.CAMPAIGN).write_text(json.dumps(campaign), encoding="utf-8")
+    assert jobs.state_line(root, load_study(root), now=local("2026-11-16 08:00"))["kind"] == "campaign", \
+        "a window's stop is not 'stopped' on Home"
+
+
+def test_a_campaign_card_keeps_other_kinds_with_its_line(tmp_path):
+    from campaign_helpers import campaign_study, local, write_run
+
+    from evolvekit.app import scheduler
+    from evolvekit.harness.study import load_study
+
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    state = jobs.state_line(root, load_study(root), now=local("2026-11-13 18:00"))
+    assert state["kind"] == "stopped", "not stopped by a window: the card says stopped"
+    assert state["campaign"]["line"] == "Campaign · next window Sat 00:00"
+    (root / scheduler.CAMPAIGN).unlink()
+    shutil.rmtree(root / "runs")
+    state = jobs.state_line(root, load_study(root), now=local("2026-11-13 18:00"))
+    assert state["kind"] == "draft" and state["campaign"]["state"] == "draft", "a schedule alone starts nothing"
+
+
+def test_a_resumed_campaign_session_says_its_own_time_left(tmp_path):
+    from campaign_helpers import campaign_study, local, write_run
+
+    from evolvekit.harness.study import load_study
+
+    home, root = campaign_study(tmp_path, windows=({"days": ["sat"], "from": "00:00", "to": "06:00"},))
+    run_dir = write_run(root, "r1", "search", alive=True, max_hours=1.0, used_s=1800)
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job.update(started_at="2026-11-07T00:00:00+01:00", resumed_at=local("2026-11-14 05:50").isoformat())
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    status = jobs.status(root, "r1", lambda d: {}, now=local("2026-11-14 05:50"))
+    assert status["time"]["left_s"] == pytest.approx(600, abs=5), "the window's 10 min, not 0 from a week-old start"
+    card = jobs.state_line(root, load_study(root), now=local("2026-11-14 05:50"))
+    assert card["kind"] == "running" and card["left_s"] == pytest.approx(600, abs=5) and "10 min left" in card["line"]
+    outside = jobs.status(root, "r1", lambda d: {}, now=local("2026-11-14 08:00"))
+    assert outside["time"]["left_s"] == pytest.approx(1800, abs=5), "outside a window: the search time left"

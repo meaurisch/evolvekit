@@ -69,7 +69,9 @@
     var d = data;
     {
       var live = d.studies.some(function (s) { return s.kind === "running" || s.kind === "queued"; });
-      if (live) EK.every(10000, function () {
+      // Between windows the next window's words must not go stale (D20): every 30 s while a campaign is armed.
+      var armed = d.studies.some(function (s) { return s.kind === "campaign" || (s.campaign && s.campaign.state === "armed"); });
+      if (live || armed) EK.every(live ? 10000 : 30000, function () {
         EK.get("/api/home").then(function (n) {
           if (!EK.isCurrent(gen)) return;
           data = remembered = n;

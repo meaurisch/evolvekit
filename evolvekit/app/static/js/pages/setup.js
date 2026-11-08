@@ -133,6 +133,26 @@
     var tomorrow = done && done.toDateString() !== new Date().toDateString();
     return { kicker: "Time", value: value, sub: done ? "Done around " + done.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) + (tomorrow ? " tomorrow." : ".") : "", act: "time" };
   }
+  // ------------------------------------------------------------------ When it runs (D19)
+  /** The preset whose windows a schedule has ("weekends"), "own" for windows written by hand, null for none. */
+  function presetOf(schedule) {
+    if (!schedule) return null;
+    var presets = st.doc.schedule_presets || {}, windows = JSON.stringify(schedule.windows || []);
+    for (var id in presets) if (JSON.stringify(presets[id].schedule.windows) === windows) return id;
+    return "own";
+  }
+  /** "31 Dec" for "2026-12-31". */
+  function untilWords(until) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(until || ""));
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    return m ? Number(m[3]) + " " + months[Number(m[2]) - 1] : String(until || "");
+  }
+  function whenSummary() {
+    var s = study().schedule, presets = st.doc.schedule_presets || {};
+    if (!s) return { kicker: "When it runs", value: "As soon as you start it", sub: "Or only at night, or at weekends.", action: "Change", act: "when" };
+    var id = presetOf(s), label = presets[id] ? presets[id].label : "In the windows written in study.yaml";
+    return { kicker: "When it runs", value: label + (s.until ? ", until " + untilWords(s.until) : ""), sub: "It runs only inside these hours, and only while the app is running then.", action: "Change", act: "when" };
+  }
   function codeSummary() {
     var h = st.h.code, c = vary().code;
     if (!h || !c) return null;
@@ -222,7 +242,7 @@
       : st.plan && st.plan.warning ? "Ready, but the plan is thin" : "Ready to start?";
     var why = missing ? problems[0].text : blocked ? "Fix the plan first." : failed ? "Fix the test run first." : t.state === "running" ? "Start works while the test runs." : "";
     var can = !missing && !blocked && !failed;
-    var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary()].filter(Boolean);
+    var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary()].concat([whenSummary()]).filter(Boolean);
     var c = study().cases || {}, rules = (study().constraints || []).length, measures = Object.keys(study().kpis || {}).length;
     var lim = study().limits || {}, ai = ((study().budget || {}).ai || {}).enabled;
     var more = html`<div class="more-row">
@@ -242,7 +262,7 @@
       <div class="summary-rows">${rows.map(EK.summaryRow)}</div>
       <section aria-label="Plan" class="sub-section">${planBlock()}</section>
       ${testRun()}
-      <div class="actions">${EK.button("Start", { act: "start", disabled: !can })}${EK.button("Save for later", { kind: "secondary", act: "later" })}${neverRunCode() ? EK.button("Compare branches", { kind: "secondary", act: "branches" }) : ""}<span class="type-small ink-2">${why}</span></div>
+      <div class="actions">${EK.button(study().schedule ? "Schedule it" : "Start", { act: "start", disabled: !can })}${EK.button("Save for later", { kind: "secondary", act: "later" })}${neverRunCode() ? EK.button("Compare branches", { kind: "secondary", act: "branches" }) : ""}<span class="type-small ink-2">${why}</span></div>
       ${more}</div></div>`, acts(main));
   }
 
@@ -253,6 +273,7 @@
       code: function () { codeDrawer(main); },
       goal: function () { goalPicker(main); },
       time: function (el) { timeDrawer(main, el && el.getAttribute("data-arg")); },
+      when: function () { whenDrawer(main); },
       rules: function () { rulesDrawer(main); },
       measures: function () { measuresDrawer(main); },
       data: function () { dataDrawer(main); },
@@ -277,6 +298,12 @@
       },
       start: function () {
         EK.post(EK.studyPath(st.slug, "/start")).then(function (res) {
+          if (res.scheduled) {
+            // A study with a schedule waits for its first window (D3): "Scheduled: next window Sat 00:00".
+            EK.toast("done", "Scheduled: " + String((res.campaign || {}).line || "").replace(/^Campaign · /, ""));
+            EK.go("#/");
+            return;
+          }
           EK.toast("done", res.queued ? "Queued: it starts by itself" : "Started");
           EK.go(EK.studyHref(st.slug));
         }).catch(EK.fail);
@@ -647,6 +674,34 @@
       st.settings = s;
       if (EK.drawerKind() === "time") { EK.refreshDrawer({ body: body() }); if (focus === "ai") { var el = document.getElementById("t-ai"); if (el) el.focus(); } }
     }).catch(function () { /* AI help stays as it is */ });
+  }
+
+  // ------------------------------------------------------------------ When it runs
+  function whenDrawer(main) {
+    var presets = st.doc.schedule_presets || {};
+    function body() {
+      var s = study().schedule, on = s ? presetOf(s) : "now";
+      var options = [{ id: "now", label: "As soon as I start it" }].concat(Object.keys(presets).map(function (id) { return { id: id, label: presets[id].label }; }));
+      if (on === "own") options.push({ id: "own", label: "The windows written in study.yaml" });
+      return html`<form class="sub-section" data-submit="save-when">
+        <fieldset class="field"><legend class="field-label">When it runs</legend>
+          ${options.map(function (o) { return html`<label class="check-line"><input type="radio" name="when-preset" value="${o.id}"${EK.attrs({ checked: o.id === on })}> ${o.label}</label>`; })}</fieldset>
+        <div class="field"><label class="field-label" for="when-until">Until (optional)</label>
+          <input class="input" type="date" id="when-until" value="${(s && s.until) || ""}" style="width:200px"></div>
+        <p class="type-small ink-2">It runs only inside these hours, and only while the app is running then.</p>
+        <div class="actions">${EK.button("Save", { type: "submit" })}${EK.button("Cancel", { kind: "quiet", act: "drawer-close" })}</div></form>`;
+    }
+    var dacts = {
+      "save-when": function () {
+        var picked = (document.querySelector('input[name="when-preset"]:checked') || {}).value || "now";
+        var until = document.getElementById("when-until").value;
+        var s = study().schedule, windows = picked === "own" ? (s || {}).windows : presets[picked] && presets[picked].schedule.windows;
+        var change = picked === "now" || !windows ? { schedule: null }
+          : { schedule: Object.assign({ windows: windows }, until ? { until: until } : {}) };
+        return save(change, main).then(function () { EK.closeDrawer(); EK.toast("done", "Saved"); });
+      }
+    };
+    EK.openDrawer({ kind: "when", title: "When it runs", sub: "Whenever you start it, or only in some hours", body: body(), acts: dacts, backLabel: "Back to Set up" });
   }
 
   // ------------------------------------------------------------------ Rules

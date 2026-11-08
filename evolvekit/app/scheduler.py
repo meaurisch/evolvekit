@@ -37,17 +37,17 @@ from evolvekit.app.running import read_running
 from evolvekit.events import read_events
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import read_job
-from evolvekit.harness.schedule import DAY_WORDS, MONTH_WORDS
-from evolvekit.harness.study import load_study
+from evolvekit.harness.schedule import DAY_WORDS, MONTH_WORDS, Schedule, when_words
+from evolvekit.harness.study import Study, load_study
 from evolvekit.ledger import _atomic_write, read_jsonl
 from evolvekit.lock import pid_alive
 from evolvekit.stopping import STOP_REQUEST, active_seconds
 
 __all__ = [
-    "ACTIONS_PER_WINDOW", "CAMPAIGN", "CLOCK_FILE", "Clock", "FAILED_PAUSE_LINE", "FAILURES_TO_PAUSE", "LOCK",
-    "MIN_SESSION_S", "SPAN_FILE", "TICK_WRITE_S", "arm", "clear_clock", "clock_of", "launch_queued", "mark_by_hand",
-    "pause",
-    "read_campaign", "search_left_s", "session_of", "tick", "tick_lock", "write_clock",
+    "ACTIONS_PER_WINDOW", "BY_YOU", "CAMPAIGN", "CLOCK_FILE", "Clock", "FAILED_PAUSE_LINE", "FAILURES_TO_PAUSE", "LOCK",
+    "MIN_SESSION_S", "SPAN_FILE", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_state", "clear_clock",
+    "clock_of", "launch_queued", "mark_by_hand", "pause", "read_campaign", "search_left_s", "session_of",
+    "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
 ]
 
 CAMPAIGN = "campaign.json"
@@ -77,6 +77,8 @@ FAILED_PAUSE_LINE = "The campaign is paused: its last three sessions failed ({er
 NO_SCHEDULE = "the study has no schedule any more"
 COMPLETE = "the campaign's search time is used"
 ENDED = "its schedule has no window left"
+BY_YOU = "stopped by you"
+"""The reason of a pause a person asked for (`stop_by_person`, D4)."""
 
 
 def _home_root(home: Any) -> Path:
@@ -530,10 +532,11 @@ class _Tick:
                 else:
                     campaign["failed_sessions"] = []
 
-        if state == "done" and (search_left_s(run_dir) < MIN_SESSION_S or not jobs.can_continue(run_dir, job)):
+        judged = _judged(run_dir, job, schedule, self.now)
+        if judged == "complete":
             self.end(root, campaign, "complete", COMPLETE, f"the campaign is complete: {COMPLETE}")
             return False
-        if not active and state != "queued" and schedule.past_until(self.now):
+        if judged == "ended":
             self.end(root, campaign, "ended", ENDED, f"the campaign has ended: {ENDED}")
             return False
 
@@ -600,31 +603,56 @@ class _Tick:
     def _action(self, root: Path, run_dir: Path | None, job: dict[str, Any],
                 span: tuple[datetime, datetime]) -> tuple[str, tuple[Any, ...], dict[str, Any], str, str] | None:
         """What the window does with the study's latest run: `(call, args, kwargs, words, refused)`."""
-        home, state = self.home, job.get("phase")
-        if run_dir is None or state == "unknown" or (state in ("stopped", "failed") and not _archived(run_dir)):
-            return "start", (home, root), {}, "started a run", "could not start a run"
-        run = run_dir.name
-        # A final check that began ended its search: it is checked again, even when the search
-        # stopped on its time before the plan's last round (`can_resume` would search on).
-        if _check_unfinished(run_dir, job):
-            return ("recheck", (home, root, run), {}, f"started the final check of run {run} again",
-                    f"could not start the final check of run {run} again")
-        if jobs.can_resume(run_dir, job):
-            return "start", (home, root), {"resume": run}, f"resumed run {run}", f"could not resume run {run}"
-        # No verdict and no rounds left: it goes on while there is search time, else checked again.
-        if _no_verdict(run_dir, job) and (search_left_s(run_dir) < MIN_SESSION_S
-                                          or not jobs.can_continue(run_dir, job)):
-            return ("recheck", (home, root, run), {}, f"started the final check of run {run} again",
-                    f"could not start the final check of run {run} again")
-        if jobs.can_continue(run_dir, job):
-            left = search_left_s(run_dir)
-            window_s = (span[1].timestamp() - self.now.timestamp()) / self.speed
-            seconds = min(window_s, left, jobs.MAX_CONTINUE_HOURS * 3600.0)
-            if seconds < MIN_SESSION_S:
-                return None
-            return ("continue_run", (home, root, run), {"hours": seconds / 3600.0},
-                    f"gave run {run} {_hours(seconds)} more search time", f"could not give run {run} more time")
-        return None
+        window_s = (span[1].timestamp() - self.now.timestamp()) / self.speed
+        return _next_action(self.home, root, run_dir, job, window_s)
+
+
+def _judged(run_dir: Path | None, job: dict[str, Any], schedule: Schedule, now: datetime) -> str | None:
+    """`"complete"`, `"ended"` or None: what the campaign is, whatever the window, by its latest run
+    (D49). Complete: the run is done -- or stopped with a verdict -- and the campaign's search time
+    left is under `MIN_SESSION_S` (or a done run cannot go on); ended: past `until`, no run active."""
+    state = job.get("phase")
+    if run_dir is not None and state == "done" and (search_left_s(run_dir) < MIN_SESSION_S
+                                                    or not jobs.can_continue(run_dir, job)):
+        return "complete"
+    if (run_dir is not None and state == "stopped" and (job.get("final") or {}).get("decision")
+            and search_left_s(run_dir) < MIN_SESSION_S):
+        return "complete"  # a verdict, and no time to search on: armed, it would wait for ever
+    if state not in jobs.ACTIVE and state != "queued" and schedule.past_until(now):
+        return "ended"
+    return None
+
+
+def _next_action(home: Any, root: Path, run_dir: Path | None, job: dict[str, Any],
+                 window_s: float | None) -> tuple[str, tuple[Any, ...], dict[str, Any], str, str] | None:
+    """What a window does with the study's latest run: `(call, args, kwargs, words, refused)`, or
+    None. A continuation gets the smaller of `window_s` (real seconds of the window left; None: no
+    window bounds it, as for `--now`) and the campaign's search time left (D5)."""
+    state = job.get("phase")
+    if run_dir is None or state == "unknown" or (state in ("stopped", "failed") and not _archived(run_dir)):
+        return "start", (home, root), {}, "started a run", "could not start a run"
+    run = run_dir.name
+    # A final check that began ended its search: it is checked again, even when the search
+    # stopped on its time before the plan's last round (`can_resume` would search on).
+    if _check_unfinished(run_dir, job):
+        return ("recheck", (home, root, run), {}, f"started the final check of run {run} again",
+                f"could not start the final check of run {run} again")
+    if jobs.can_resume(run_dir, job):
+        return "start", (home, root), {"resume": run}, f"resumed run {run}", f"could not resume run {run}"
+    # No verdict and no rounds left: it goes on while there is search time, else checked again.
+    if _no_verdict(run_dir, job) and (search_left_s(run_dir) < MIN_SESSION_S
+                                      or not jobs.can_continue(run_dir, job)):
+        return ("recheck", (home, root, run), {}, f"started the final check of run {run} again",
+                f"could not start the final check of run {run} again")
+    if jobs.can_continue(run_dir, job):
+        seconds = min(search_left_s(run_dir), jobs.MAX_CONTINUE_HOURS * 3600.0)
+        if window_s is not None:
+            seconds = min(seconds, window_s)
+        if seconds < MIN_SESSION_S:
+            return None
+        return ("continue_run", (home, root, run), {"hours": seconds / 3600.0},
+                f"gave run {run} {_hours(seconds)} more search time", f"could not give run {run} more time")
+    return None
 
 
 def tick(home: Any, *, now: datetime, speed: float = 1.0, real_now: datetime | None = None,
@@ -647,3 +675,189 @@ def tick(home: Any, *, now: datetime, speed: float = 1.0, real_now: datetime | N
         return ticking.run()
     finally:
         _release(path, ticking.held)
+
+
+# ---------------------------------------------------------------------------
+# the campaign in words, a person's start and stop
+# ---------------------------------------------------------------------------
+
+
+def _latest(root: Path) -> tuple[Path | None, dict[str, Any]]:
+    """The study's latest run folder and its phase (`{}` when it has none)."""
+    dirs = jobs._run_dirs(Path(root))  # noqa: SLF001 - the runs, oldest first, as jobs lists them
+    run_dir = dirs[-1] if dirs else None
+    return run_dir, (jobs.phase(run_dir) if run_dir is not None else {})
+
+
+def _missed(schedule: Schedule, campaign: dict[str, Any], now: datetime) -> datetime | None:
+    """The start of the latest span that began after the campaign was armed and after its last tick
+    (`ticked_at`, on the window clock), and ended before `now`: no tick saw it, so the app (or
+    `study wait`) was not running then."""
+    marks = [m for m in (_moment(campaign.get("armed_at")), _moment(campaign.get("ticked_at"))) if m is not None]
+    if not marks:
+        return None
+    since = max(marks, key=lambda m: m.timestamp())
+    found: datetime | None = None
+    for around in (since, now):
+        for start, end in schedule.spans(around):
+            if since.timestamp() < start.timestamp() and end.timestamp() <= now.timestamp():
+                if found is None or start.timestamp() > found.timestamp():
+                    found = start
+    return found
+
+
+def campaign_state(root: Path, study: Study, *, now: datetime) -> dict[str, Any] | None:
+    """The study's campaign in the words Home, the Study page and `study status` say: None without a
+    schedule, else `{"state": "draft"|"armed"|"paused"|"complete"|"ended", "next": iso|None, "edge":
+    "start"|"end"|None, "line", "tone": "warn"|None, "missed": iso|None}`. `next` is the next edge
+    of the windows (`edge` says which). An armed campaign whose latest run makes it complete or
+    ended is said so at once (D49), before the next tick writes it."""
+    schedule = study.schedule
+    if schedule is None:
+        return None
+    now = now if now.tzinfo is not None else now.astimezone()
+    found = schedule.next_edge(now)
+    edge_at, edge = found if found is not None else (None, None)
+    out: dict[str, Any] = {"state": "armed", "next": _iso(edge_at) if edge_at is not None else None, "edge": edge,
+                           "line": "", "tone": None, "missed": None}
+    when = when_words(edge_at, now) if edge_at is not None else ""
+    campaign = read_campaign(root)
+    if campaign is None:
+        line = ("Campaign · not started: its first window would be " + when if edge == "start"
+                else "Campaign · not started: its window is open now, until " + when if edge == "end"
+                else f"Campaign · not started: {ENDED}")
+        return {**out, "state": "draft", "line": line}
+    state = campaign.get("state")
+    if state == "armed":
+        run_dir, job = _latest(root)
+        state = _judged(run_dir, job, schedule, now) or "armed"
+    if state in ("complete", "ended", "paused"):
+        out.update(state=state, next=None, edge=None)
+    if state == "complete":
+        return {**out, "line": "Campaign finished"}
+    if state == "ended":
+        until = schedule.until
+        return {**out, "line": f"Campaign · ended on {until.day} {MONTH_WORDS[until.month - 1]}" if until
+                else "Campaign · ended"}
+    if state == "paused":
+        reason = str(campaign.get("reason") or BY_YOU)
+        # A pause for failures is a whole sentence (FAILED_PAUSE_LINE): shown as it is.
+        line = reason if reason.startswith("The campaign is paused") else f"Campaign · paused: {reason}"
+        return {**out, "line": line, "tone": "warn"}
+    tail = (f"next window {when}" if edge == "start" else f"this window ends {when}" if edge == "end" else ENDED)
+    missed = _missed(schedule, campaign, now)
+    if missed is not None:
+        return {**out, "missed": _iso(missed), "tone": "warn",
+                "line": f"Campaign · the window of {when_words(missed, now)} was missed: the app was not running · {tail}"}
+    return {**out, "line": f"Campaign · {tail}"}
+
+
+def campaign_done(root: Path, study: Study, *, now: datetime) -> bool:
+    """Whether a campaign has its answer: complete or ended (judged as every tick judges them), or
+    paused -- and no run of the study is active or queued. A window's stop is not an end."""
+    state = campaign_state(root, study, now=now)
+    if state is None or state["state"] not in ("complete", "ended", "paused"):
+        return False
+    phase = _latest(root)[1].get("phase")
+    return phase not in jobs.ACTIVE and phase != "queued"
+
+
+def window_left_s(root: Path, run_dir: Path, *, now: datetime | None = None) -> float | None:
+    """Real seconds until the window of the run's session ends, when that end will stop it: the
+    study's campaign is armed, the run is its latest, the session is not one by hand, and the window
+    clock (`clock_of` the home, or `now`) is inside a span. None when no window bounds it."""
+    root, run_dir = Path(root), Path(run_dir)
+    campaign = read_campaign(root)
+    if campaign is None or campaign.get("state") != "armed":
+        return None
+    try:
+        study = load_study(root)
+    except (HarnessError, OSError, ValueError):
+        return None
+    dirs = jobs._run_dirs(root)  # noqa: SLF001 - the runs, oldest first, as jobs lists them
+    if study.schedule is None or not dirs or dirs[-1].name != run_dir.name:
+        return None
+    hand, session = campaign.get("by_hand"), session_of(run_dir)
+    if isinstance(hand, dict) and hand.get("run") == run_dir.name and (
+            hand.get("session") == session or (hand.get("session") == 0 and session == 1)):
+        return None  # a person's session: no window's end stops it (D47)
+    clock = clock_of(root.parent.parent)
+    now = now if now is not None else clock.now()
+    span = study.schedule.span_at(now)
+    if span is None:
+        return None
+    return max(0.0, (span[1].timestamp() - now.timestamp()) / clock.speed)
+
+
+def by_hand(home: Any, root: Path, launch: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """A session a person launches (a resume, a continuation, a final check again): `launch()`
+    inside `tick_lock`, then `mark_by_hand` when the study's campaign is armed (D4, D47), so no tick
+    sees the session before it is theirs. `launch`'s answer."""
+    with tick_lock(home):
+        answer = launch()
+        run = answer.get("run") if isinstance(answer, dict) else None
+        if run:
+            mark_by_hand(home, Path(root).name, str(run))
+    return answer
+
+
+def start_campaign(home: Any, root: Path, *, now: datetime, at_once: bool, start: Callable[..., Any] | None = None,
+                   continue_run: Callable[..., Any] | None = None,
+                   recheck: Callable[..., Any] | None = None) -> dict[str, Any]:
+    """A person starts a scheduled study (D3). `at_once=False`: the campaign is armed, and its
+    windows start the sessions: `{"scheduled": True, "campaign": campaign_state(...)}`. `at_once`
+    (`--now`): what a tick would do inside a window -- start, resume, check again or continue
+    with the campaign's search time left -- whatever the window, and the campaign armed with that
+    session by hand (D4, D47), the launch and the mark inside `tick_lock`: the launch's answer and
+    `"campaign"`. `start`, `continue_run` and `recheck` default to `jobs`' own."""
+    root = Path(root)
+    study = load_study(root)
+    if study.schedule is None:
+        raise AppError("the study has no schedule: start it as usual", 409)
+    if not at_once:
+        with tick_lock(home):
+            arm(root, now=now)
+        return {"scheduled": True, "campaign": campaign_state(root, study, now=now)}
+    calls = {"start": start or jobs.start, "continue_run": continue_run or jobs.continue_run,
+             "recheck": recheck or jobs.resume_final_check}
+    with tick_lock(home):
+        run_dir, job = _latest(root)
+        if job.get("phase") in jobs.ACTIVE or job.get("phase") == "queued":
+            raise AppError("the study is already running", 409)
+        action = _next_action(home, root, run_dir, job, None)
+        if action is None:
+            raise AppError("the campaign has no search time left: give the study more hours to search on", 409)
+        name, args, kwargs, _, _ = action
+        path = root / CAMPAIGN
+        try:
+            before: str | None = path.read_text(encoding="utf-8")
+        except OSError:
+            before = None
+        arm(root, now=now)
+        try:
+            answer = calls[name](*args, **kwargs)
+        except BaseException:
+            # Nothing was launched: the campaign is as it was.
+            if before is None:
+                path.unlink(missing_ok=True)
+            else:
+                _atomic_write(path, before)
+            raise
+        run = answer.get("run") or (run_dir.name if run_dir is not None else None)
+        if run:
+            mark_by_hand(home, root.name, str(run))
+    return {**answer, "campaign": campaign_state(root, study, now=now)}
+
+
+def stop_by_person(home: Any, root: Path, run: str | None) -> dict[str, Any]:
+    """A person's stop (D4): the campaign is paused ("stopped by you"), and the run is asked to
+    stop (or taken out of the queue) when it is active or queued: `{"paused": True, **jobs.stop}`,
+    else `{"paused": True, "stopping": False}`. Under `tick_lock`, so no tick launches between."""
+    root = Path(root)
+    with tick_lock(home):
+        pause(root, reason=BY_YOU)
+        if run:
+            state = jobs.phase(jobs._run_dir(root, run)).get("phase")  # noqa: SLF001 - the one check of a run's name
+            if state in jobs.ACTIVE or state == "queued":
+                return {"paused": True, **jobs.stop(root, run)}
+    return {"paused": True, "stopping": False}

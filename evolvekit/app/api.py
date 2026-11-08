@@ -13,13 +13,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from evolvekit.app import AppError, assistant, compare, jobs, tries, work
+from evolvekit.app import AppError, assistant, compare, jobs, scheduler, tries, work
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import plan_for, read_preview
 from evolvekit.harness.manifest import Harness
 from evolvekit.harness.plan import plan_notes
+from evolvekit.harness.schedule import PRESETS
 from evolvekit.harness.study import SettingChoice, save_study
 
 __all__ = ["ROUTES", "describe_harness"]
@@ -193,6 +194,9 @@ def _document(req: Request, slug: str) -> dict[str, Any]:
     document["test_run"] = work.test_run_state(root, req.server)
     document["runs"] = jobs.runs(root)
     document["state"] = jobs.state_line(root, study, req.server.status_document)
+    # The campaign's words (None without a schedule) and the windows Set up offers (D19).
+    document["campaign"] = document["state"].get("campaign")
+    document["schedule_presets"] = PRESETS
     document["notes"] = plan_notes(len(study.test))  # too few held-back cases for a firm answer, before any run
     return document
 
@@ -562,12 +566,21 @@ def _run(req: Request, root: Path) -> str:
 
 
 def start(req: Request) -> dict[str, Any]:
-    """A new run; with a body `{"resume": "<run>"}`, that run again from where it stopped."""
-    root, _, _ = req.home.load(req.params["slug"])
-    resume = req.json().get("resume")
+    """A new run; with a body `{"resume": "<run>"}`, that run again from where it stopped. A study
+    with a schedule is armed instead (its windows start the sessions, D3), or with `{"now": true}`
+    started at once as a session by hand (`scheduler.start_campaign`)."""
+    root, study, _ = req.home.load(req.params["slug"])
+    body = req.json()
+    resume, now = body.get("resume"), body.get("now", False)
     if resume is not None and not isinstance(resume, str):
         raise AppError("resume: the name of a run")
-    return jobs.start(req.home, root, resume=resume)
+    if not isinstance(now, bool):
+        raise AppError("now: true or false")
+    if resume is not None:
+        return scheduler.by_hand(req.home, root, lambda: jobs.start(req.home, root, resume=resume))
+    if study.schedule is not None:
+        return scheduler.start_campaign(req.home, root, now=scheduler.clock_of(req.home).now(), at_once=now)
+    return jobs.start(req.home, root)
 
 
 def bakeoff(req: Request) -> dict[str, Any]:
@@ -589,14 +602,19 @@ def verdict(req: Request) -> dict[str, Any]:
 
 
 def stop(req: Request) -> dict[str, Any]:
+    """Stop the run; on an armed campaign, a person's stop also pauses it (D4)."""
     root, _, _ = req.home.load(req.params["slug"])
+    if (scheduler.read_campaign(root) or {}).get("state") == "armed":
+        return scheduler.stop_by_person(req.home, root, req.query.get("run") or jobs.latest_run(root))
     return jobs.stop(root, _run(req, root))
 
 
 def final_check(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
     seeds = req.json().get("seeds")
-    return jobs.resume_final_check(req.home, root, _run(req, root), int(seeds) if seeds is not None else None)
+    run = _run(req, root)
+    return scheduler.by_hand(req.home, root, lambda: jobs.resume_final_check(
+        req.home, root, run, int(seeds) if seeds is not None else None))
 
 
 def continue_run(req: Request) -> dict[str, Any]:
@@ -607,7 +625,7 @@ def continue_run(req: Request) -> dict[str, Any]:
     run = body.get("run") or _run(req, root)
     if not isinstance(run, str):
         raise AppError("run: the name of a run")
-    return jobs.continue_run(req.home, root, run, body.get("hours"))
+    return scheduler.by_hand(req.home, root, lambda: jobs.continue_run(req.home, root, run, body.get("hours")))
 
 
 def status(req: Request) -> dict[str, Any]:

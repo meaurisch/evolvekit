@@ -107,6 +107,19 @@
       c.head = v.line || EK.capital(v.says);
       c.sub = v.advice || "";
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
+    } else if (s.kind === "campaign") {
+      // Between windows (D20): the campaign's own words; no claim, the run is not checked yet.
+      var camp = s.campaign || {};
+      c.kicker = camp.line || "Campaign";
+      if (camp.tone === "warn") c.kickerTone = "warning";
+      c.head = s.first ? "Waits for its first window" : "Between windows";
+      c.sub = r.planned ? (r.done || 0) + " of " + r.planned + " rounds done · not checked yet" : "";
+      if (s.first) {
+        c.pepper = "egg";
+        c.href = "#/setup/" + EK.q(s.slug);
+      } else if (r.planned) {
+        c.timeline = { rounds: r.planned, done: r.done || 0, stoppedAt: (r.done || 0) + 1 };
+      }
     } else if (s.kind === "stopped") {
       c.kicker = s.check_stopped ? "Final check stopped" : "Stopped" + (r.done ? " · round " + (r.done + 1) : "");
       c.head = s.check_stopped ? "No answer yet" : s.best_says ? "Best so far: " + s.best_says : "Stopped by you";
@@ -125,6 +138,9 @@
       c.sub = s.line || "";
       c.pepper = null;
     }
+    // A study with a schedule: its campaign's line ends the sub-line ("… · Campaign · next window Sat 00:00"),
+    // beside the card's own words -- a finished run's verdict stays the head (D49).
+    if (s.campaign && s.campaign.line && s.kind !== "campaign") c.sub = (c.sub ? c.sub + " · " : "") + s.campaign.line;
     // A later run must not hide an earlier use: "An earlier run (<id>) says use: <its verdict line>".
     if (s.earlier && s.earlier.says) c.note = s.earlier.says;
     if (s.archived) c.kicker = "Archived · " + c.kicker.charAt(0).toLowerCase() + c.kicker.slice(1);

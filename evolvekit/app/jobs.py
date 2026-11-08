@@ -37,7 +37,7 @@ from evolvekit.app.verdict import (  # noqa: F401 - the words live in verdict.py
 )
 from evolvekit.confirm import BASELINE
 from evolvekit.evaluate.process import scrubbed_environment
-from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
+from evolvekit.events import HEARTBEAT_INTERVAL_S, read_events, read_heartbeat
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import CONFIG, STUDY_RUN
 from evolvekit.harness.execute import (
@@ -54,7 +54,7 @@ from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
 from evolvekit.ledger import _atomic_write, read_jsonl
 from evolvekit.lock import pid_alive, pid_started_at
-from evolvekit.stopping import STOP_REQUEST
+from evolvekit.stopping import STOP_REQUEST, active_seconds
 
 __all__ = ["active_run", "branch_of", "can_continue", "can_resume", "continue_run", "download", "earlier_use",
            "latest_run", "launch_queued",
@@ -896,9 +896,46 @@ def _closest(run_dir: Path, finished: bool = False, rows: list[dict[str, Any]] |
             else f" {len(tried)} tried{so_far}; the closest matched it.")
 
 
-def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
+def _resumed_search(job: dict[str, Any]) -> bool:
+    """A live search session after a resume (not a continuation with its own hours): its time is the
+    search time left across the run's sessions, as the engine counts it."""
+    return job.get("phase") in ("starting", "search") and bool(job.get("resumed_at")) and not _continued(job)
+
+
+def _session_left(root: Path, run_dir: Path, job: dict[str, Any], started: datetime | None, hours: float, *,
+                  timed: bool = True, now: datetime | None = None) -> tuple[float | None, str | None]:
+    """The seconds of the live session's time left, and the clock time (`"%H:%M"`) it ends.
+    From the session's start and its hours (a continuation: from the continuation and the hours
+    added); after a resume, the search time left across the run's sessions
+    (`scheduler.search_left_s`, as the engine's clock counts it), never from the run's first start;
+    a campaign session's at most its window's end (`scheduler.window_left_s`, real seconds on the
+    window clock `now`), and then it ends at the earlier of the two. `timed=False`: the hours do not
+    end the session (rounds set by hand), so only a window does."""
+    from evolvekit.app import scheduler
+
+    real = _now()
+    left: float | None = None
+    finish = started + timedelta(hours=hours) if started and hours else None
+    if timed and started and hours:
+        left = max(0.0, hours * 3600 - (real - started).total_seconds())
+    if job.get("phase") in ("starting", "search"):
+        if timed and _resumed_search(job):
+            left = scheduler.search_left_s(run_dir)
+            finish = real + timedelta(seconds=left)
+        try:
+            cap = scheduler.window_left_s(root, run_dir, now=now)
+        except Exception:  # noqa: BLE001 - the time left is words; a damaged campaign never breaks a card
+            cap = None
+        if cap is not None and (left is None or cap < left):
+            left, finish = cap, real + timedelta(seconds=cap)
+    return left, finish.astimezone().strftime("%H:%M") if finish is not None else None
+
+
+def status(root: Path, run: str, document_of: DocumentOf, *, now: datetime | None = None) -> dict[str, Any]:
     """Where a run is, in the words the Running screen uses. The run's own
-    study (the copy it keeps) says what it learns from and holds back."""
+    study (the copy it keeps) says what it learns from and holds back.
+    `now` is the window clock a campaign session's time left is read on
+    (default: the home's, `scheduler.clock_of`)."""
     run_dir = _run_dir(root, run)
     study, harness = run_study_of(root, run_dir), load_harness(root / "harness")
     job = phase(run_dir)
@@ -911,8 +948,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     finished = job.get("phase") in ("done", "stopped", "failed")
     ended = _moment(job.get("finished_at") or job.get("updated_at")) if finished else None
     used = ((ended or _now()) - started).total_seconds() if started else None
-    left = None if used is None or finished else max(0.0, hours * 3600 - used)
-    finish_at = (started + timedelta(hours=hours)).astimezone().strftime("%H:%M") if started and not finished else None
+    if _resumed_search(job):
+        used = active_seconds(read_events(run_dir))  # the search time of every session, not a week since the start
+    left, finish_at = (None, None) if finished or used is None else _session_left(root, run_dir, job, started, hours, now=now)
 
     generation = (health.get("generation") or {})
     done_rounds = generation.get("last_finished")
@@ -1573,7 +1611,36 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 # ---------------------------------------------------------------------------
 
 
-def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) -> dict[str, Any]:
+def state_line(root: Path, study: Study, document_of: DocumentOf | None = None, *,
+               now: datetime | None = None) -> dict[str, Any]:
+    """`_state_line`, and a study with a schedule's `campaign` (`scheduler.campaign_state`, on the
+    window clock `now`: default the home's, `scheduler.clock_of`). Between windows -- the campaign
+    armed and its latest run not active, absent or stopped by a window's end -- the card is a
+    `campaign` card: `line` the campaign's words, its first word in lower case (D20)."""
+    from evolvekit.app import scheduler
+
+    root = Path(root)
+    if study.schedule is not None and now is None:
+        now = scheduler.clock_of(root.parent.parent).now()
+    card = _state_line(root, study, document_of, now=now)
+    campaign = scheduler.campaign_state(root, study, now=now) if study.schedule is not None else None
+    if campaign is None:
+        return card
+    card["campaign"] = campaign
+    if campaign["state"] == "armed" and card.get("kind") in ("draft", "stopped"):
+        stored = scheduler.read_campaign(root) or {}
+        between = card["kind"] == "draft" or (card.get("run") and stored.get("stopped_by_window") == card["run"])
+        if between:
+            line = campaign["line"][:1].lower() + campaign["line"][1:]
+            if card["kind"] == "draft":
+                return {"kind": "campaign", "line": line, "first": True, "step": card.get("step"), "what": card.get("what"),
+                        "campaign": campaign}
+            return {**card, "kind": "campaign", "line": line}
+    return card
+
+
+def _state_line(root: Path, study: Study, document_of: DocumentOf | None = None, *,
+                now: datetime | None = None) -> dict[str, Any]:
     """The home card's state in a few words: "draft · step 4 of 7", "running ·
     round 2 of 6 · 1 h 10 min left · 3.2 % lower real cost so far, not checked yet" (the round only with
     `document_of`; no time left when the rounds were set by hand), "finished · probably better: 3.1 %
@@ -1585,7 +1652,7 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
     if not dirs:
         return {"kind": "draft", "line": f"draft · step {max(1, min(study.step, 7))} of 7",
                 "step": max(1, min(study.step, 7)), "what": _kind_of(study)}
-    card = run_line(root, study, dirs[-1], document_of)
+    card = run_line(root, study, dirs[-1], document_of, now=now)
     earlier = earlier_use(root, card)  # a later run must not hide an earlier use
     if earlier is not None:
         card["earlier"] = earlier
@@ -1741,12 +1808,13 @@ def _finished_key(run_dir: Path, job: dict[str, Any]) -> tuple[Any, ...]:
             _stamp(run_dir / "study.yaml"), _stamp(run_dir / PR_RECORD))
 
 
-def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None) -> dict[str, Any]:
+def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None, *,
+             now: datetime | None = None) -> dict[str, Any]:
     """`_run_line`; a finished run's card without a status document is read once and then kept while
     the files it is made of stay as they are (`_finished_key`): the runs route asks for it every few seconds."""
     job = phase(run_dir)
     if document_of is not None or job.get("phase") != "done":
-        return _run_line(root, study, run_dir, document_of, job)
+        return _run_line(root, study, run_dir, document_of, job, now=now)
     key = _finished_key(run_dir, job)
     with _FINISHED_LOCK:
         kept = _FINISHED_CARDS.get(key)
@@ -1761,7 +1829,7 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
 
 
 def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None,
-              job: dict[str, Any]) -> dict[str, Any]:
+              job: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     """One run's state in the card's few words (`state_line`): `kind`, `run`,
     `line`, and a `tone` where the news is bad or open. The run is described
     by the study it was started with; `study` (today's) is the fallback for a
@@ -1808,10 +1876,10 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
     if state in ACTIVE:
         started, hours = _window(job, run_dir, float(plan.get("hours")
                                                       or (study.budget.hours if study is not None else 0)))
-        left = max(0.0, hours * 3600 - (_now() - started).total_seconds()) if started and hours else None
-        if _rounds_by_hand(plan, study) and not _continued(job):
-            # The rounds stop a manual plan, not the hours: the hours' "time left" would be wrong.
-            left = None
+        # The rounds stop a manual plan, not the hours: the hours' "time left" would be wrong (a
+        # campaign's window still ends it).
+        left, finish_at = _session_left(root, run_dir, job, started, hours, now=now,
+                                        timed=not (_rounds_by_hand(plan, study) and not _continued(job)))
         planned = facts["rounds"]["planned"]
         where = ""
         if state == "check":
@@ -1831,7 +1899,7 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
                 # Not "better": nothing claims that before the final check does.
                 line += f" · {_best_says(pct, goal)} so far, not checked yet"
         facts.update({"left_s": left, "hours": hours, "continued": _continued(job) or bool(job.get("resumed_at")),
-                      "finish_at": (started + timedelta(hours=hours)).astimezone().strftime("%H:%M") if started and hours else None})
+                      "finish_at": finish_at})
         if state == "check":
             facts["check"] = _check_progress(run_dir, job, plan, study)
         ahead = pace(((document.get("progress") or {}).get("series") or []), plan, job)

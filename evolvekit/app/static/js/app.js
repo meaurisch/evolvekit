@@ -41,7 +41,6 @@
     if (location.hash === hash) route();
     else location.hash = hash;
   };
-  EK.studyHref = function (slug, run) { return "#/study/" + EK.q(slug) + (run ? "?run=" + EK.q(run) : ""); };
   EK.currentStudy = function () { try { return sessionStorage.getItem(LAST_STUDY) || ""; } catch (e) { return ""; } };
   EK.rememberStudy = function (slug) { try { sessionStorage.setItem(LAST_STUDY, slug); } catch (e) { /* not kept */ } };
 

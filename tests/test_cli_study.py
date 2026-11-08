@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,6 +11,8 @@ import pytest
 
 from evolvekit.cli import main
 from evolvekit.stopping import STOP_REQUEST
+
+from campaign_helpers import campaign_study, local, write_run
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1017,3 +1020,133 @@ def test_study_check_and_compile_say_a_thin_final_check_before_the_run(tmp_path,
     capsys.readouterr()
     assert main(["study", "check", "depot-b", "--home", str(tmp_path)]) == 0
     assert "note:" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# campaigns: study start on a schedule, --now, stop, wait, status
+# ---------------------------------------------------------------------------
+
+
+def _friday_evening(monkeypatch):
+    """The clock reads Friday 13 November 2026, 18:00, for every command."""
+    from evolvekit.app import scheduler
+
+    monkeypatch.setattr(scheduler, "clock_of", lambda home: scheduler.Clock(start=local("2026-11-13 18:00"), origin=time.time()))
+
+
+def test_start_scheduled_prints_next_window(tmp_path, capsys, monkeypatch):
+    from evolvekit.app import jobs, scheduler
+
+    _friday_evening(monkeypatch)
+    home, root = campaign_study(tmp_path); (root / scheduler.CAMPAIGN).unlink()
+    started = []
+    monkeypatch.setattr(jobs, "start", lambda *a, **k: started.append(a) or {"run": "x"})
+    assert main(["study", "start", root.name, "--home", str(home.root)]) == 0
+    out, err = capsys.readouterr()
+    assert out.splitlines()[0] == "scheduled: next window Sat 00:00 (the app, or evolvekit study wait, starts it then)"
+    assert "evolvekit app install-startup" in err and started == []
+    assert scheduler.read_campaign(root)["state"] == "armed"
+    assert main(["study", "start", root.name, "--home", str(home.root), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out.splitlines()[0]) == {"scheduled": True, "next": local("2026-11-14 00:00").isoformat()}
+
+
+def test_start_now_starts_at_once(tmp_path, capsys, monkeypatch):
+    from evolvekit.app import jobs, scheduler
+
+    _friday_evening(monkeypatch)
+    home, root = campaign_study(tmp_path); (root / scheduler.CAMPAIGN).unlink()
+    started = []
+    monkeypatch.setattr(jobs, "start", lambda *a, **k: started.append((a, k)) or {"run": "x"})
+    assert main(["study", "start", root.name, "--now", "--home", str(home.root)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "started run x"
+    assert len(started) == 1 and started[0][1] == {}
+    campaign = scheduler.read_campaign(root)
+    assert campaign["state"] == "armed" and campaign["by_hand"] == {"run": "x", "session": 0}
+
+
+def test_stop_pauses_the_campaign(tmp_path, capsys):
+    from evolvekit.app import scheduler
+
+    home, root = campaign_study(tmp_path)
+    assert main(["study", "stop", root.name, "--home", str(home.root)]) == 0
+    assert capsys.readouterr().out.strip() == "paused the campaign (no run was running); evolvekit study start resumes it"
+    assert scheduler.read_campaign(root)["state"] == "paused"
+
+
+def test_stop_pauses_the_campaign_and_stops_its_run(tmp_path, capsys):
+    from evolvekit.app import scheduler
+
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "search", alive=True)
+    assert main(["study", "stop", root.name, "--home", str(home.root)]) == 0
+    assert capsys.readouterr().out.strip() == (f"paused the campaign and asked run r1 to stop (evolvekit study wait "
+                                               f"{root.name} returns when it has); evolvekit study start resumes it")
+    assert scheduler.read_campaign(root)["state"] == "paused" and (root / "runs" / "r1" / STOP_REQUEST).exists()
+
+
+def test_status_on_a_campaign_says_its_line(tmp_path, capsys, monkeypatch):
+    _friday_evening(monkeypatch)
+    home, root = campaign_study(tmp_path)
+    assert main(["study", "status", root.name, "--home", str(home.root)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "campaign · next window Sat 00:00"
+    assert main(["study", "status", root.name, "--home", str(home.root), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["campaign"]["line"] == "Campaign · next window Sat 00:00"
+
+
+def test_wait_on_a_campaign_waits_through_window_stops(tmp_path, capsys, monkeypatch):
+    from evolvekit import cli
+    from evolvekit.app import jobs, scheduler, verdict
+
+    _friday_evening(monkeypatch)
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    # A window's stop, the next window's search, then done: the campaign is done only then.
+    steps = [("stopped", False, "Campaign · next window Sat 00:00"), ("stopped", False, "Campaign · next window Sat 00:00"),
+             ("search", False, "Campaign · this window ends Sun 23:59"), ("done", True, "Campaign finished")]
+    at = {"i": 0}
+
+    def step():
+        return steps[min(at["i"], len(steps) - 1)]
+
+    def done(root, study, *, now):
+        answer = step()[1]
+        at["i"] += 1
+        return answer
+
+    monkeypatch.setattr(cli, "_tick_queue", lambda home: None)
+    monkeypatch.setattr(scheduler, "campaign_done", done)
+    monkeypatch.setattr(scheduler, "campaign_state", lambda root, study, *, now: {"state": "armed", "line": steps[at["i"] - 1][2]})
+    monkeypatch.setattr(jobs, "phase", lambda run_dir: {"phase": steps[min(at["i"], len(steps)) - 1][0]})
+    monkeypatch.setattr(verdict, "build_verdict", lambda root, run: {"line": "Not proven on the held-back cases.", "advice": ""})
+    monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
+    capsys.readouterr()
+    assert main(["study", "wait", root.name, "--timeout", "5", "--home", str(home.root)]) == 0
+    out, err = capsys.readouterr()
+    assert out.splitlines()[0] == "Not proven on the held-back cases."
+    said = [line for line in err.splitlines() if line.startswith("Campaign")]
+    assert said == ["Campaign · next window Sat 00:00", "Campaign · this window ends Sun 23:59"], err
+
+
+def test_wait_on_a_paused_campaign_without_a_finished_run_exits_1(tmp_path, capsys, monkeypatch):
+    from evolvekit import cli
+    from evolvekit.app import scheduler
+
+    _friday_evening(monkeypatch)
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    monkeypatch.setattr(cli, "_tick_queue", lambda home: scheduler.pause(root, reason="stopped by you"))
+    monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
+    capsys.readouterr()
+    assert main(["study", "wait", root.name, "--timeout", "5", "--home", str(home.root)]) == 1
+    assert capsys.readouterr().out.strip() == "Campaign · paused: stopped by you"
+
+
+def test_wait_on_a_campaign_times_out_with_4(tmp_path, capsys, monkeypatch):
+    from evolvekit import cli
+
+    _friday_evening(monkeypatch)
+    home, root = campaign_study(tmp_path)
+    monkeypatch.setattr(cli, "_tick_queue", lambda home: None)
+    monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
+    assert main(["study", "wait", root.name, "--timeout", "0.1", "--home", str(home.root)]) == 4, "no run needed"
+    assert "Campaign · next window Sat 00:00" in capsys.readouterr().err

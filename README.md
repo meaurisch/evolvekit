@@ -1626,6 +1626,30 @@ with AI help what its AI spent (`AI: $0.87 of $1.00`, from the run's
 report's *How it ran* says the same. Nothing else; `--json` prints the whole
 verdict document (see [docs/app.md](docs/app.md#for-developers)).
 
+**Run it in windows.** A study may run only at certain hours, in local
+wall-clock time — at night, at weekends:
+
+```yaml
+schedule:
+  windows:
+    - {days: [mon, tue, wed, thu, fri], from: "01:00", to: "06:00"}
+    - {days: [sat, sun], from: "00:00", to: "23:59"}
+  until: 2026-12-31     # optional
+```
+
+`budget.hours` is then the whole campaign's search time, spread over as many
+windows as it takes: each window resumes the same run where the last one
+stopped, or gives a run that finished its plan more search time, and the
+final check runs when the plan is done. `study start depot-a` waits for the
+first window (`scheduled: next window Sat 00:00 (the app, or evolvekit study
+wait, starts it then)`); `--now` starts at once, and that session is not
+stopped at a window's end. `study stop` pauses the campaign (`study start`
+resumes it). The windows are kept only while the app runs then — `evolvekit
+app --service`, or a terminal with `study wait depot-a`, which waits until
+the campaign has its answer, not for the first window's stop. `study status`
+says the campaign's line (`campaign · next window Sat 00:00`); the app's Set
+up offers the same windows under *When it runs*.
+
 The AI spend stays within its cap, give or take one call. Every claude call,
 a reply or a coding agent's run, is told what is left (`--max-budget-usd`, when
 the installed claude lists it in its `--help`); other providers and embedding
@@ -1657,12 +1681,12 @@ Every command:
 | `study list [--json]` | every study in the library home: its name, harness and the state line its card shows (`draft · step 3 of 7`, `running · round 2 of 6`, …) |
 | `study cases SLUG --add FILE... [--hold-back N] [--json]` | copies cases into the study, refuses the files the harness cannot read, and holds `N` back for the final check |
 | `study check SLUG` | what is still missing; exit 2 while anything is |
-| `study start SLUG [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running |
+| `study start SLUG [--now] [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running; a study with a `schedule` is scheduled instead (`scheduled: next window Sat 00:00`, `--json` `{"scheduled": true, "next"}`), and `--now` starts it at once, as a session no window's end stops |
 | `study bakeoff SLUG --ref REF [--ref REF ...] [--wait [--timeout S]] [--json]` | a code study: each branch against the starting point on the held-back cases, with no search; exit 2 when a branch or the study is refused |
-| `study stop SLUG [--json]` | asks the running run to stop, or takes a queued one out of the line |
+| `study stop SLUG [--json]` | asks the running run to stop, or takes a queued one out of the line; on a scheduled study it also pauses the campaign (`study start` resumes it) |
 | `study status SLUG [--run ID] [--json]` | the state line; `--json` the document the app's Running screen reads |
 | `study watch SLUG [--every S] [--json]` | the status every `S` seconds (default 5) until the run ends; starts a queued run |
-| `study wait SLUG [--timeout S] [--json]` | returns when the run has ended: exit 0 with the verdict when it is done, 1 when it stopped or failed, 4 on timeout; starts a queued run |
+| `study wait SLUG [--timeout S] [--json]` | returns when the run has ended: exit 0 with the verdict when it is done, 1 when it stopped or failed, 4 on timeout; starts a queued run. On a scheduled study, when the campaign has its answer: 0 with the verdict, 1 when it paused or ended without a finished run |
 | `study verdict SLUG [--run ID] [--json]` | the verdict and what to do about it; `--json` the verdict document |
 | `study report SLUG [--run ID] [--markdown \| --json]` | the report: Markdown for people, else the verdict document |
 | `study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`, and its path; exit 2 for a settings study, or when the starting point stayed the best |
@@ -1717,6 +1741,7 @@ What `study.yaml` can say:
 | `goal.levels` | one KPI; or up to four in order of importance, each but the last with `equal_within` (`"1 %"` or a number), as in [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels); or one weighted KPI |
 | `guardrails` | `{kpi, max}` or `{kpi, min}`: a candidate that breaks one is out of the running, as a [gate](#gates-conditions-every-candidate-has-to-meet-evaluategates) |
 | `inputs` | the extra files a harness asks for, such as PyVRP's `solver_settings` to start from |
+| `schedule` | `{windows: [{days, from, to}], until}`: the hours the study may run in, local wall-clock time; `budget.hours` is then the whole campaign's search time ([run it in windows](#a-study-from-the-command-line)) |
 
 **The comparability trap.** A data change that alters what the solver *sees*
 — costs, weights, penalties — also alters every KPI computed from what it

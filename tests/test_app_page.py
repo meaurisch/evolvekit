@@ -599,3 +599,60 @@ def test_every_page_starts_with_the_plain_title():
     route = _page_function(APP_JS, "route")
     assert 'document.title = "evolvekit"' in route
     assert route.index('document.title = "evolvekit"') < route.index("handler.render("), route
+
+
+# ---------------------------------------------------------------------------
+# campaigns: Home between windows, When it runs in Set up, the Study page's notice
+# ---------------------------------------------------------------------------
+
+HOME_PAGE = (STATIC / "js" / "pages" / "home.js").read_text(encoding="utf-8")
+
+
+def test_home_polls_while_a_campaign_is_armed():
+    poll = _page_function(HOME_PAGE, "poll")
+    assert 's.kind === "campaign"' in poll and "30000" in poll
+
+
+def test_a_finished_campaign_card_keeps_the_verdict():
+    out = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "t", name: "T", kind: "finished", decision: "use",
+        line: "finished · probably better: 3.1 % lower tour length", campaign: {line: "Campaign · next window Sat 00:00"}})));""")
+    assert out["sub"].endswith("Campaign · next window Sat 00:00") and "Campaign" not in out["head"]
+
+
+def test_the_campaign_card_speaks_the_campaigns_words():
+    out = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "t", name: "T", kind: "campaign",
+        line: "campaign · next window Sat 00:00", campaign: {line: "Campaign · next window Sat 00:00"}, rounds: {done: 2, planned: 6}})));""")
+    assert out["kicker"] == "Campaign · next window Sat 00:00" and out["head"] == "Between windows"
+    assert out["sub"] == "2 of 6 rounds done · not checked yet"
+
+
+def test_a_campaign_before_its_first_window_waits_for_it():
+    out = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "t", name: "T", kind: "campaign", first: true,
+        line: "campaign · the window of Sat 00:00 was missed: the app was not running · next window Mon 01:00",
+        campaign: {line: "Campaign · the window of Sat 00:00 was missed: the app was not running · next window Mon 01:00", tone: "warn"}})));""")
+    assert out["head"] == "Waits for its first window" and out["kickerTone"] == "warning" and out["pepper"] == "egg"
+
+
+def test_setup_offers_when_it_runs():
+    drawer = _page_function(SETUP_PAGE, "whenDrawer")
+    assert "schedule_presets" in drawer and '{ schedule: null }' in drawer
+    assert "Schedule it" in _page_function(SETUP_PAGE, "draw")
+
+
+def test_setup_says_when_it_runs():
+    summary = "\n".join(_page_function(SETUP_PAGE, name) for name in ("presetOf", "untilWords", "whenSummary"))
+    out = _node(summary, """
+      var st = {doc: {study: {}, schedule_presets: {weekends: {label: "Weekends, all day",
+        schedule: {windows: [{days: ["sat", "sun"], from: "00:00", to: "23:59"}]}}}}};
+      function study() { return st.doc.study; }
+      var none = whenSummary();
+      st.doc.study.schedule = {windows: [{days: ["sat", "sun"], from: "00:00", to: "23:59"}], until: "2026-12-31"};
+      process.stdout.write(JSON.stringify({none: none, weekends: whenSummary()}));""")
+    assert out["none"]["value"] == "As soon as you start it"
+    assert out["weekends"]["value"] == "Weekends, all day, until 31 Dec"
+    assert "only while the app is running then" in out["weekends"]["sub"]
+
+
+def test_the_study_page_says_the_campaign():
+    notices = _page_function(STUDY_PAGE, "notices")
+    assert "campaign" in notices and "camp.line" in notices
