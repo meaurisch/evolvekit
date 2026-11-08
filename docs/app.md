@@ -245,7 +245,7 @@ Below the strip three linked views:
   legend says so: it can differ by a few tenths from the strip's figure,
   which compares the plain averages as the verdict does.
 - **Cases** — a row per study case, a dot per try, and how many tries beat
-  today on it.
+  today on it (*ahead of today*, never *better*: these are not checked).
 - **Settings** — one panel per tuned setting: the value tried across, the
   result up, today's value dashed and the band of values that did well; the
   settings that moved the result most come first.

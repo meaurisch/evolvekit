@@ -556,3 +556,15 @@ def test_the_tries_plots_axis_says_its_points_are_not_checked():
     tries = plots[plots.index("EK.triesPlot = function"):plots.index("EK.triesLegend = function")]
     assert TRIES_AXIS in tries, "the axis label, as it is (not upper-cased)"
     assert "better" not in tries.lower(), "never 'better' over unchecked points, the axis and its aria label included"
+
+
+def test_the_cases_view_never_says_better_over_search_figures():
+    """Persona round 3, E5: the Cases view and the try cards said "better" over points no final check had seen."""
+    plots = (STATIC / "js" / "plots.js").read_text(encoding="utf-8")
+    cases = plots[plots.index("EK.casesView = function"):plots.index("function valueText")]
+    assert "better" not in cases.lower(), "the Cases plot's labels and aria text"
+    study = STUDY_PAGE
+    assert "ahead of today in ${weakest[2][0]} of ${weakest[2][1]} full looks (not checked)" in study
+    assert "right column: tries ahead of today on that case (not checked)" in study
+    card = _page_function(STUDY_PAGE, "cardLines")
+    assert "better" not in card and "searchChange(" in card, card

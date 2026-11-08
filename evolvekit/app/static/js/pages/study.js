@@ -374,6 +374,11 @@
     }
     return html`<pre class="diff mono" tabindex="0"><span class="diff-body">${rows}</span></pre>`;
   }
+  /** A search figure in the goal's own direction word ("4.8 % lower"), never "better": only the final check says that. */
+  function searchChange(v) {
+    if (v == null || !isFinite(v)) return "did not finish";
+    return EK.change(v, (goalOf() || {}).direction) + " (not checked)";
+  }
   function cardLines(p) {
     var c = combo(p.id);
     if (!c) return ["", ""];
@@ -381,13 +386,13 @@
     if (p.cs) {
       var per = (c.cases[st.tries.full_stage] || {})[p.cs];
       if (per == null) { var stages = Object.keys(c.cases); for (var i = stages.length - 1; i >= 0; i--) if (c.cases[stages[i]][p.cs] != null) { per = c.cases[stages[i]][p.cs]; break; } }
-      return [head, EK.shortCase(p.cs) + ": " + EK.better(per), lookWords(c)];
+      return [head, EK.shortCase(p.cs) + ": " + searchChange(per), lookWords(c)];
     }
     if (p.setting) {
       var meta = paramOf(p.setting) || { type: "" };
       return [head, labelOf(p.setting) + ": " + EK.valueText(meta, c.params[p.setting]), "Today: " + EK.valueText(meta, meta.default)];
     }
-    return [head, c.failed || c.pct == null ? "Did not finish" : EK.better(c.pct), c.diff_stat ? diffWords(c.diff_stat) : lookWords(c)];
+    return [head, c.failed || c.pct == null ? "Did not finish" : searchChange(c.pct), c.diff_stat ? diffWords(c.diff_stat) : lookWords(c)];
   }
 
   function viewWidth() {
@@ -419,8 +424,8 @@
       return html`<div class="cases-wrap">${EK.raw(cv.svg)}</div>
         <div class="plot-legend"><span><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="3.2" style="fill:var(--ink-1)"/></svg>full look</span>
         <span><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="3" style="fill:var(--surface-page);stroke:var(--line-edge)" stroke-width="1.3"/></svg>quick look</span>
-        <span>right column: tries better than today on that case</span></div>
-        ${weakest ? html`<p class="type-small ink-2">Hardest case: ${EK.shortCase(weakest[0])}, better in ${weakest[2][0]} of ${weakest[2][1]} full looks.</p>` : ""}`;
+        <span>right column: tries ahead of today on that case (not checked)</span></div>
+        ${weakest ? html`<p class="type-small ink-2">Hardest case: ${EK.shortCase(weakest[0])}, ahead of today in ${weakest[2][0]} of ${weakest[2][1]} full looks (not checked).</p>` : ""}`;
     }
     if (st.view === "code") { plotPoints = []; return codeView(t); }
     if (!st.paramOrder || st.paramOrder.length !== (t.parameters || []).length) {

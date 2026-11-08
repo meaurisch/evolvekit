@@ -205,16 +205,16 @@
     var W = o.W, phone = !!o.phone, rowH = phone ? 30 : 34, l = phone ? 64 : 200, r = phone ? 54 : 120, top = 34;
     var cases = d.cases, n = cases.length, H = top + n * rowH + 26;
     var res = EK.caseResults(d), A = -6, B = 6;
-    // As drawn: worse than -6 % is pinned to the left edge; the better side grows with the best result, up to +20 %.
+    // As drawn: worse than -6 % is pinned to the left edge; the ahead side grows with the best result, up to +20 %.
     Object.keys(res).forEach(function (k) { if (res[k].full) B = Math.max(B, Math.min(20, Math.ceil(res[k].pct))); });
     function X(v) { return l + (Math.max(A, Math.min(B, v)) - A) / (B - A) * (W - l - r); }
     function Y(i) { return top + i * rowH + rowH / 2; }
     var out = [], points = [];
     out.push('<line x1="' + f(X(0)) + '" y1="' + (top - 6) + '" x2="' + f(X(0)) + '" y2="' + (top + n * rowH) + '" style="stroke:var(--ink-1)" stroke-width="1.5"/>' +
       '<text x="' + f(X(0)) + '" y="' + (top - 12) + '" text-anchor="middle" style="fill:var(--ink-1);font:700 10px var(--sans);letter-spacing:.12em">TODAY</text>' +
-      '<text x="' + l + '" y="' + (top - 12) + '" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">← WORSE</text>' +
-      '<text x="' + (W - r) + '" y="' + (top - 12) + '" text-anchor="end" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">BETTER →</text>' +
-      (phone ? "" : '<text x="' + (W - r + 16) + '" y="' + (top - 12) + '" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">BETTER IN</text>'));
+      '<text x="' + l + '" y="' + (top - 12) + '" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">← BEHIND</text>' +
+      '<text x="' + (W - r) + '" y="' + (top - 12) + '" text-anchor="end" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">AHEAD →</text>' +
+      (phone ? "" : '<text x="' + (W - r + 16) + '" y="' + (top - 12) + '" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">AHEAD IN</text>'));
     var step = B - A > 24 ? 5 : 2;
     for (var v = Math.ceil(A / step) * step; v <= B; v += step) {
       if (v === 0) continue;
@@ -246,7 +246,7 @@
         pts.forEach(function (q) { out.push('<circle cx="' + f(q[0]) + '" cy="' + f(q[1]) + '" r="5" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.5"/>'); });
       }
     }
-    var aria = "One row per study case; each dot is one try on that case, left worse, right better than today. Use the arrow keys to go from try to try.";
+    var aria = "One row per study case; each dot is one try on that case, left behind today, right ahead of it (not checked). Use the arrow keys to go from try to try.";
     return { svg: '<svg class="plot" viewBox="0 0 ' + W + " " + H + '" width="100%" role="img" tabindex="0" aria-label="' + esc(aria) + '" data-plot="cases">' + out.join("") + "</svg>", points: points, tallies: tallies };
   };
 
