@@ -304,8 +304,15 @@ def warm_start(home: Any, harness: Harness, study: Study, *,
     lines to say. Each tuned setting starts from that study's winner when the value lies in this
     study's range; with a template that tunes `recommended` and at least `RERANK_AFTER` finished
     settings studies, the tuned set is the `len(harness.recommended)` settings that went most with
-    the measure (when any importance is known at all: without one there is nothing to rank by). `harness` is the version the new study is made with. `document_of` reads a run's
-    status document (`build_status`, kept per finished run, when None)."""
+    the measure (when any importance is known at all: without one there is nothing to rank by).
+    A study that tunes no setting is left as it is. `harness` is the version the new study is
+    made with. `document_of` reads a run's status document (`build_status`, kept per finished
+    run, when None)."""
+    template = harness.templates.get(study.template) or {}
+    vary = template.get("vary") if isinstance(template, dict) else None
+    recommended = isinstance(vary, dict) and vary.get("settings") == "recommended" and bool(harness.recommended)
+    if not study.tuned_settings() and not recommended:
+        return study, ["this template tunes no setting, so there is nothing to warm-start"]
     finished = finished_studies(home, harness.id)
     used = [f for f in _settings_studies(finished) if f.decision == "use"]
     if not used:
@@ -315,11 +322,9 @@ def warm_start(home: Any, harness: Harness, study: Study, *,
     study = copy.deepcopy(study)
     ranked: list[str] = []
     tail: list[str] = []
-    template = harness.templates.get(study.template) or {}
-    vary = template.get("vary") if isinstance(template, dict) else None
     measured = len(_settings_studies(finished))
     known = any(entry.get("importance") is not None for name, entry in facts.items() if name in harness.settings)
-    if isinstance(vary, dict) and vary.get("settings") == "recommended" and measured >= RERANK_AFTER and known:
+    if recommended and measured >= RERANK_AFTER and known:
         ranked = _ranked(harness, facts)
         tuned = ranked[:len(harness.recommended)]
         kept = {n: c for n, c in study.settings.items() if n not in tuned and c.mode != "tune"}
@@ -364,11 +369,13 @@ def _study_harness(home: Any, study: Study, finished: list[Finished]) -> Harness
     return current_harness(home, study.harness_id, finished)
 
 
-def priors_for(home: Any, study: Study, *, document_of: Callable[[Path], dict] | None = None) -> dict[str, dict]:
+def priors_for(home: Any, study: Study, *, slug: str | None = None,
+               document_of: Callable[[Path], dict] | None = None) -> dict[str, dict]:
     """`{name: {"value", "weight"}}` for each setting `study` tunes that a `use` study won: the
-    latest winner, at weight `0.5 ** k`, `k` being 1 + the finished studies on the harness after
-    the winner's (the new study is the first since). Dropped below `MIN_PRIOR_WEIGHT`, and when
-    the value is outside the study's range."""
+    latest winner, at weight `0.5 ** k`, `k` being 1 + the other finished studies on the harness
+    after the winner's (the new study is the first since, counted once: `slug`, the study's own
+    folder name, is never counted again when it is run again). Dropped below `MIN_PRIOR_WEIGHT`,
+    and when the value is outside the study's range."""
     finished = finished_studies(home, study.harness_id)
     facts = learned(home, study.harness_id, document_of=document_of)["settings"]
     harness = _study_harness(home, study, finished)
@@ -384,7 +391,7 @@ def priors_for(home: Any, study: Study, *, document_of: Callable[[Path], dict] |
         won = at.get(winner["study"])
         if won is None:
             continue
-        weight = 0.5 ** (1 + sum(1 for f in finished if f.finished_at > won and f.slug != winner["study"]))
+        weight = 0.5 ** (1 + sum(1 for f in finished if f.finished_at > won and f.slug not in (winner["study"], slug)))
         if weight < MIN_PRIOR_WEIGHT or not _fits(setting.parameter, study.settings[name], winner["value"]):
             continue
         priors[name] = {"value": setting.parameter.coerce(winner["value"]), "weight": weight}

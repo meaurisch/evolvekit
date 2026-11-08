@@ -1525,18 +1525,22 @@ the library home.
 
 `--warm` starts the study from what the home's finished studies on this
 harness learned: each tuned setting starts from the latest `use` study's
-winning value (when it lies in the study's range), the search draws a share
-of its combinations around those values (a prior of weight one half, which
-halves again with every study finished since that winner and is dropped once
-four have), and
-with a `recommended` template and three finished settings studies the tuned
-settings are the ones that went most with the measure in them. It says so
+winning value (when it lies in the study's range); and with a `recommended`
+template and three finished settings studies the tuned settings are the ones
+that went most with the measure in them. Each run of the study then draws a
+share of its combinations around each tuned setting's latest `use` winner,
+worked out when the run starts (usually the same values; a setting the
+latest `use` study did not tune follows an older one): a prior of weight one
+half, which halves again with every other study finished since that winner
+and is dropped once four have. It never stops the search from trying any
+value in range. `study new` says what it did
 on stderr: `warm start from Depot spring (use): neighbours 12, restart_after
-13000`, and `study.yaml` records it as `warm: {from, run, at}`. The warm
+13000`, and `study.yaml` records it as `warm: {from, run, at, ranked}`. The warm
 start changes the starting point the final check compares with: the result
 is judged against the winner's values, not the settings in use before, so it
 suits a planner who uses the winner today. With no `use` study it is a plain
-start, and it says that; `--warm` needs the library home, not `--dir`.
+start, and it says that (as it does for a template that tunes no setting);
+`--warm` needs the library home, not `--dir`.
 
 **Say where the application is.** From the terminal a relative path works
 and is recorded as the full path (the app's API still wants the full path).
@@ -1768,6 +1772,7 @@ What `study.yaml` can say:
 | `guardrails` | `{kpi, max}` or `{kpi, min}`: a candidate that breaks one is out of the running, as a [gate](#gates-conditions-every-candidate-has-to-meet-evaluategates) |
 | `inputs` | the extra files a harness asks for, such as PyVRP's `solver_settings` to start from |
 | `schedule` | `{windows: [{days, from, to}], until, keep_awake}`: the hours the study may run in, local wall-clock time; `budget.hours` is then the whole campaign's search time; `keep_awake: false`: a scheduled session lets the computer sleep ([run it in windows](#a-study-from-the-command-line)) |
+| `warm` | `{from, run, at, ranked}`: written by `study new --warm`: the finished study (and its run, finished `at`) whose winner is the starting point; `ranked`, only when the tuned settings were chosen by importance, the settings in the order they went with the measure |
 
 **The comparability trap.** A data change that alters what the solver *sees*
 — costs, weights, penalties — also alters every KPI computed from what it

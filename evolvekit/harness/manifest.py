@@ -344,6 +344,9 @@ class Setting:
     def parse(name: Any, raw: Any) -> "Setting":
         path = f"settings.{name}"
         data = _mapping(raw, path)
+        if "prior" in data:  # a study's compile writes one (`study new --warm`); a harness declares none
+            raise HarnessError(f"{path}: unknown key(s) ['prior']; a harness declares no prior: `study new --warm` "
+                               "gives a study one from what finished studies learned")
         try:
             parameter = Parameter.parse(name, {k: v for k, v in data.items() if k not in SETTING_META}, path)
         except SpaceError as exc:

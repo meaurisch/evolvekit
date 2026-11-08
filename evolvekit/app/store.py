@@ -345,6 +345,9 @@ class Home:
         except HarnessError as exc:
             shutil.rmtree(root, ignore_errors=True)
             raise AppError(str(exc)) from None
+        except BaseException:  # a warm start that fails leaves no half-made study behind
+            shutil.rmtree(root, ignore_errors=True)
+            raise
         return slug
 
     def load(self, slug: str) -> tuple[Path, Study, Harness]:

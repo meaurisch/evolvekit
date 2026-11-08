@@ -358,7 +358,7 @@ def run_study(
     harness = study_harness(root)
     require_valid(study, harness, root=root)
     plan = plan_for(study, harness, measured(root), models=models)
-    write_run(study, harness, plan, root, run_id, models=models)  # compiles into `run_dir`
+    write_run(study, harness, plan, root, run_id, models=models, log=log)  # compiles into `run_dir`
     job = Job(run_dir, run_id=run_id, study=study.name, plan=plan.to_json())
     try:
         config = load_config(run_dir / CONFIG)

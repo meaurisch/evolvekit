@@ -7,15 +7,16 @@ import shutil
 
 import pytest
 import yaml
+from test_app_results import finished_run
 from test_memory import finished
 
 from evolvekit.app.store import Home
 from evolvekit.candidate import Candidate
 from evolvekit.cli import main
-from evolvekit.harness import memory
+from evolvekit.harness import HarnessError, memory
 from evolvekit.harness.compile import compile_study, write_run
 from evolvekit.harness.library import BUILT_IN
-from evolvekit.harness.manifest import load_harness
+from evolvekit.harness.manifest import Setting, load_harness
 from evolvekit.harness.plan import Plan
 from evolvekit.harness.study import SettingChoice, Study, load_study, save_study
 from evolvekit.search.operators import param_lhs_typed
@@ -198,11 +199,34 @@ def test_prior_draws_are_seeded():
             assert first.meta["params"]["init"] == "nearest", "a choice is drawn as the value itself"
 
 
+NO_PRIOR = ParameterSpace.parse({
+    "n": {"type": "int", "low": 2, "high": 30, "default": 8},
+    "r": {"type": "int", "low": 100, "high": 50000, "default": 2000, "log": True},
+    "a": {"type": "float", "low": 0.0, "high": 0.05, "default": 0.0},
+    "init": {"type": "choice", "choices": ["random", "nearest"], "default": "random"},
+    "or_opt": {"type": "bool", "default": False},
+})
+BEFORE_PRIORS = {  # what `param_lhs_typed` drew at 430a6e4, before priors existed
+    0: {"n": 10, "r": 1736, "a": 0.00608193, "init": "random", "or_opt": True},
+    1: {"n": 23, "r": 4925, "a": 0.0167434, "init": "random", "or_opt": True},
+    7: {"n": 14, "r": 20176, "a": 0.0461724, "init": "random", "or_opt": False},
+    42: {"n": 7, "r": 110, "a": 0.0429623, "init": "nearest", "or_opt": True},
+}
+
+
 def test_no_prior_draws_as_before():
-    plain = ParameterSpace.parse({"n": {"type": "int", "low": 2, "high": 30, "default": 8}})
-    for seed in range(20):
-        result = param_lhs_typed(plain, seed_candidate(plain), seed=seed)
-        assert "prior" not in result.meta
+    for seed, values in BEFORE_PRIORS.items():
+        result = param_lhs_typed(NO_PRIOR, seed_candidate(NO_PRIOR), seed=seed)
+        assert result.meta == {"params": values}, seed
+
+
+def test_a_prior_at_a_range_end_is_reflected_not_piled_on_the_end():
+    space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5,
+                                        "prior": {"value": 0.0, "weight": 0.5}}})
+    near = [r.meta["params"]["x"] for r in (param_lhs_typed(space, seed_candidate(space), seed=s) for s in range(400))
+            if "x" in r.meta.get("prior", [])]
+    assert len(near) > 100 and all(0.0 <= v <= 0.1 + 1e-9 for v in near)
+    assert sum(v == 0.0 for v in near) <= 2, "clamping would put about half of them on 0.0"
 
 
 def test_prior_is_not_part_of_the_cache_key():
@@ -215,7 +239,8 @@ def test_prior_is_not_part_of_the_cache_key():
 @pytest.mark.parametrize("prior, words", [
     ({"value": 40, "weight": 0.5}, "above its maximum"),
     ({"value": 12, "weight": 0}, "weight"),
-    ({"value": 12, "weight": 1.5}, "weight"),
+    ({"value": 12, "weight": 1.5}, "prior.weight: below 1, so every value in range can still be drawn"),
+    ({"value": 12, "weight": 1}, "prior.weight: below 1, so every value in range can still be drawn"),
     ({"value": 12}, "weight"),
     (12, "value"),
 ])
@@ -241,3 +266,88 @@ def test_compile_writes_prior_only_for_warm_studies(tmp_path, monkeypatch):
     study.warm = None
     run_dir = write_run(study, harness, Plan.fixed(), root, "r2")
     assert "prior" not in (run_dir / "evolvekit.yaml").read_text(encoding="utf-8")
+
+
+def test_a_warm_studys_second_run_keeps_its_weight(tmp_path, monkeypatch):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "Spring", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
+    monkeypatch.setattr(memory, "build_status", docs.get)
+    study = warm_study(home, docs)
+    root = home.study_root("winter")
+    harness = load_harness(root / "harness")
+    write_run(study, harness, Plan.fixed(), root, "r1")
+    finished_run(root / "runs" / "r1", decision="keep", started="2026-10-05T00:00:00+00:00")
+    assert [f.slug for f in memory.finished_studies(home, "demo-tour")] == ["spring", "winter"]
+    run_dir = write_run(study, harness, Plan.fixed(), root, "r2")
+    config = yaml.safe_load((run_dir / "evolvekit.yaml").read_text(encoding="utf-8"))
+    assert config["problem"]["parameters"]["neighbours"]["prior"] == {"value": 12, "weight": 0.5}, \
+        "its own first run is not a study since the winner: the new study is counted once"
+
+
+def test_priors_that_cannot_be_read_are_said_not_swallowed(tmp_path, monkeypatch):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "Spring", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
+    study = warm_study(home, docs)
+    root = home.study_root("winter")
+    harness = load_harness(root / "harness")
+
+    def locked(*_a, **_k):
+        raise OSError("a run folder is locked")
+
+    monkeypatch.setattr(memory, "priors_for", locked)
+    said: list[str] = []
+    run_dir = write_run(study, harness, Plan.fixed(), root, "r1", log=said.append)
+    assert json.loads((run_dir / "study-run.json").read_text(encoding="utf-8"))["priors"] == \
+        "not applied: a run folder is locked"
+    assert said == ["the warm start's prior is not applied: a run folder is locked; "
+                    "the search draws over the whole range alone"]
+    assert "prior" not in yaml.safe_load((run_dir / "evolvekit.yaml").read_text(encoding="utf-8"))["problem"]["parameters"]["neighbours"]
+
+    def broken(*_a, **_k):
+        raise KeyError("winners")
+
+    monkeypatch.setattr(memory, "priors_for", broken)
+    with pytest.raises(KeyError):
+        write_run(study, harness, Plan.fixed(), root, "r2")
+
+
+def test_a_harness_declares_no_prior():
+    with pytest.raises(HarnessError, match=r"settings\.neighbours: unknown key\(s\) \['prior'\]"):
+        Setting.parse("neighbours", {"type": "int", "low": 2, "high": 30, "default": 8,
+                                     "prior": {"value": 12, "weight": 0.5}})
+
+
+def test_warm_with_a_template_that_tunes_nothing(tmp_path, capsys, monkeypatch):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "Spring", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
+    monkeypatch.setattr(memory, "build_status", docs.get)
+    assert main(["study", "new", "Weights", "--harness", "demo-tour", "--template", "stop-weights", "--warm",
+                 "--home", str(home.root)]) == 0
+    assert load_study(home.study_root("weights")).warm is None
+    assert "this template tunes no setting, so there is nothing to warm-start" in capsys.readouterr().err
+
+
+def test_a_failed_warm_start_leaves_no_study_behind(tmp_path, monkeypatch):
+    home = Home(tmp_path / "my home")
+
+    def locked(*_a, **_k):
+        raise OSError("a run folder is locked")
+
+    monkeypatch.setattr(memory, "warm_start", locked)
+    with pytest.raises(OSError):
+        home.create_study("demo-tour", "tune", "Winter", warm=True)
+    assert not (home.studies_dir / "winter").exists()
+
+
+def test_next_study_drops_the_warm_start(tmp_path, monkeypatch):
+    from evolvekit import status
+    from evolvekit.app import jobs
+
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "Spring", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
+    warm_study(home, docs)
+    root = home.study_root("winter")
+    finished_run(root / "runs" / "r1", decision="keep", started="2026-10-05T00:00:00+00:00")
+    monkeypatch.setattr(status, "build_status", lambda _run_dir: {"progress": {"best": {"id": "c1"}}})
+    slug = jobs.next_study(home, root, "r1", "Winter again")
+    assert load_study(home.study_root(slug)).warm is None

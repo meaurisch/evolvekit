@@ -34,8 +34,9 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -456,6 +457,7 @@ def write_run(
     *,
     models: dict[str, Any] | None = None,
     bakeoff: bool = False,
+    log: Callable[[str], None] | None = None,
 ) -> Path:
     """Compile `study` into `<root>/runs/<run_id>/` and return that directory.
     The run keeps a copy of `study.yaml` as it was when it started, so what
@@ -464,14 +466,16 @@ def write_run(
     commit (a ref as it is now; `working` as a snapshot of the working tree),
     so the run means the same tree whenever its config is loaded again. A
     warm-started study in a library home gets its priors (`memory.priors_for`)
-    here too, so the weights count the studies finished before this run."""
+    here too, so the weights count the studies finished before this run; when
+    the other studies cannot be read, `study-run.json` says `"priors": "not
+    applied: <why>"` and `log` (stderr when None) says it in a line."""
     if study.code is not None:  # the bake-off writes runs without study_problems' search check
         repo = study.code.repo
         if not repo:
             raise HarnessError("vary.code.repo: give the full path to the source; the study names none")
         if not (PurePosixPath(repo).is_absolute() or PureWindowsPath(repo).is_absolute()):
             raise HarnessError(f"vary.code.repo: give the full path to the source; {repo!r} is relative")
-    priors = None
+    priors, not_applied = None, ""
     if study.warm is not None and study.code is None and root.parent.name == "studies":
         # A warm-started study in a library home: a prior around each winner, weighed by the
         # studies finished since (computed now, so a run started later counts them too).
@@ -480,10 +484,15 @@ def write_run(
         from evolvekit.harness import memory
 
         try:
-            priors = memory.priors_for(SimpleNamespace(root=root.parent.parent, studies_dir=root.parent), study)
-        except Exception:  # noqa: BLE001 - a library that cannot be read gives no prior, never a run that cannot start
-            priors = None
+            priors = memory.priors_for(SimpleNamespace(root=root.parent.parent, studies_dir=root.parent), study,
+                                       slug=root.name)
+        except (HarnessError, OSError, ValueError) as exc:  # other studies that cannot be read: the run goes on without
+            priors, not_applied = None, f"not applied: {exc}"
     config, study_run = compile_study(study, harness, plan, root=root, models=models, bakeoff=bakeoff, priors=priors)
+    if not_applied:
+        study_run["priors"] = not_applied
+        (log or (lambda line: print(line, file=sys.stderr, flush=True)))(
+            f"the warm start's prior is {not_applied}; the search draws over the whole range alone")
     spec = config["problem"].get("tree")
     if spec is not None:
         from evolvekit import tree  # only a code study needs git

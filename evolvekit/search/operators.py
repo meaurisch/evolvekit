@@ -357,11 +357,18 @@ def _with_priors(space: ParameterSpace, variants: list[dict], rng: random.Random
 
 
 def _near(parameter: Parameter, value, rng: random.Random):
-    """A value within `PRIOR_BAND` of `value` on the parameter's own scale."""
+    """A value within `PRIOR_BAND` of `value` on the parameter's own scale. A
+    draw past an end of the range is reflected back inside, not clamped onto
+    the end, so a prior at an end does not pile half its draws on one point."""
     if not parameter.numeric:
         return value
     centre = parameter.to_unit(value)
-    drawn = parameter.from_unit(centre + rng.uniform(-PRIOR_BAND, PRIOR_BAND))
+    unit = centre + rng.uniform(-PRIOR_BAND, PRIOR_BAND)
+    if unit < 0.0:
+        unit = -unit
+    elif unit > 1.0:
+        unit = 2.0 - unit
+    drawn = parameter.from_unit(unit)  # still clamps, for the last rounding
     if parameter.type == "int" and abs(parameter.to_unit(drawn) - centre) > PRIOR_BAND:
         drawn += 1 if drawn < value else -1  # rounded out of the band: the whole number next to it, inside
     return drawn

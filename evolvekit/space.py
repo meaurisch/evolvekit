@@ -210,14 +210,16 @@ class Parameter:
 
     def _prior(self, raw: Any, path: str) -> tuple[Any, float]:
         if not isinstance(raw, Mapping) or set(raw) != {"value", "weight"}:
-            raise SpaceError(f"{path}: expected {{value: ..., weight: ...}} with a weight above 0 and at most 1, got {raw!r}")
+            raise SpaceError(f"{path}: expected {{value: ..., weight: ...}} with a weight above 0 and below 1, got {raw!r}")
         value = _yaml_number(raw["value"], self.type) if self.numeric else raw["value"]
         problem = self.problem_with(value)
         if problem:
             raise SpaceError(f"{path}.value: {problem}")
         weight = _yaml_number(raw["weight"], "float")
-        if not _is_number(weight) or not 0 < weight <= 1:
-            raise SpaceError(f"{path}.weight: a share of the draws, above 0 and at most 1, got {raw['weight']!r}")
+        if not _is_number(weight) or not weight > 0:
+            raise SpaceError(f"{path}.weight: a share of the draws, above 0 and below 1, got {raw['weight']!r}")
+        if weight >= 1:
+            raise SpaceError(f"{path}.weight: below 1, so every value in range can still be drawn")
         return self.coerce(value), float(weight)
 
     def _check_declaration(self, raw: Mapping[str, Any], path: str) -> None:
