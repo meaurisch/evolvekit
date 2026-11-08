@@ -4,7 +4,7 @@
 >
 > **Before executing:** this plan is at task level. Re-read `evolvekit/app/jobs.py`, `server.py`, `evolvekit/harness/study.py`, `compile.py`, the sampler (`param_lhs`) and the app's Home and Cases pages as they are after project 3 landed, expand every task to step level with superpowers:writing-plans (keep the tasks, files, interfaces and test names below), and run the builder check on the result.
 >
-> Expanded to step level on 2026-11-08 against agent/3-code (021f834). The builder check runs on this version. Tasks run in order 1–10; Tasks 5–7 (memory) and 8–9 (groups) do not depend on Tasks 1–4 and may be reviewed apart. Where a step names a body, the tests are the contract and the body is a sketch.
+> Expanded to step level on 2026-11-08 against agent/3-code (021f834). The builder check ran on 1de36ae; the controller's rulings R1–R6 on it and on the two open questions are folded in as D46–D52. Tasks run in order 1–10; Tasks 5–7 (memory) and 8–9 (groups) do not depend on Tasks 1–4 and may be reviewed apart. Where a step names a body, the tests are the contract and the body is a sketch.
 
 **Goal:** a study can run in nightly and weekend windows and keep its archive; what earlier studies learned about an application warm-starts the next; cases can be grouped and tuned per group with an exported rule.
 
@@ -54,8 +54,9 @@ Carried from project 3's persona gate (real-world failures the tests had missed)
 |---|---|
 | `evolvekit/harness/schedule.py` | new: parse and validate `schedule`; window spans in local wall-clock; `in_window`, `span_at`, `next_edge`, `past_until`; the presets; the day words |
 | `evolvekit/app/scheduler.py` | new: the `Clock` (real or rehearsal), `campaign.json` (arm, pause, read), the tick that starts, resumes, re-checks, continues and stops runs, the campaign's state and words, a person's start and stop |
-| `evolvekit/app/server.py` | `AppServer.tick_once` (queue, then scheduler); the ticker calls it |
-| `evolvekit/app/service.py` | new: the service's rotating log; the startup task (Windows XML, launchd plist, systemd unit); install and uninstall |
+| `evolvekit/app/server.py` | `AppServer.tick_once` (queue, then scheduler, each line logged with both times); the ticker calls it; `POST /api/shutdown` |
+| `evolvekit/app/service.py` | new: the service's rotating log; the startup task (Windows XML, launchd plist, systemd unit); install and uninstall; `app stop` |
+| `evolvekit/app/awake.py`, `evolvekit/app/job.py` | new: a run keeps the computer awake while its campaign span file says so (Windows; a no-op elsewhere) |
 | `evolvekit/app/detach.py` | `python_for_runs()`: never `pythonw.exe` for a run |
 | `evolvekit/app/jobs.py` | `state_line(campaign)`; time left of a resumed session; per-group runs (status, stop, resume rules); `_launch` through `python_for_runs` |
 | `evolvekit/cli.py` | `study start --now`, campaign `stop`/`wait`/`status`, `app --service`, `app --clock/--clock-speed`, `app install-startup`, `app uninstall-startup`, `study new --warm`, `study groups`; `study open` starts the service |
@@ -207,34 +208,38 @@ git commit -m "schedule: windows in study.yaml, local wall-clock, straddling mid
 
 **Files:**
 - Create: `evolvekit/app/scheduler.py`, `tests/campaign_helpers.py`, `tests/test_scheduler.py`
-- Modify: `evolvekit/app/server.py` (`AppServer.tick_once()`; `_tick` loops over it), `evolvekit/cli.py` (`_tick_queue` also ticks the scheduler)
+- Modify: `evolvekit/app/server.py` (`AppServer.tick_once()`; `_tick` loops over it), `evolvekit/cli.py` (`_tick_queue` also ticks the scheduler), `evolvekit/app/jobs.py` (`launch.json` counts its launches: `"launch": n`)
 
 **Interfaces:**
 - Consumes: Task 1's `Schedule.span_at`, `past_until`; `jobs.start`, `jobs.continue_run`, `jobs.stop`, `jobs.resume_final_check`, `jobs.can_resume`, `jobs.can_continue`, `jobs.phase`, `jobs.active_run`, `jobs._run_dirs`, `jobs.ACTIVE`, `jobs.MAX_CONTINUE_HOURS`; `execute.run_study_of`; `stopping.active_seconds`, `events.read_events`; `running.read_running`.
 - Produces (`evolvekit/app/scheduler.py`; later tasks import these):
-  - `CAMPAIGN = "campaign.json"` (in the study folder): `{"state": "armed"|"paused"|"complete"|"ended", "armed_at": iso, "reason": str|None, "by_hand": run|None, "stopped_by_window": run|None, "window": iso|None, "actions": int, "failures": int, "ticked_at": iso|None}`.
+  - `CAMPAIGN = "campaign.json"` (in the study folder): `{"state": "armed"|"paused"|"complete"|"ended", "armed_at": iso, "reason": str|None, "by_hand": {"run": id, "session": n}|None, "stopped_by_window": run|None, "window": iso|None, "actions": int, "failed_sessions": ["<run>:<session>"], "ticked_at": iso|None}`. A **session** is one launch of a run: `jobs._record_launch` writes `"launch": n` into `launch.json`, one more than the launch it replaces (`_launch` keeps the previous text), so `<run>:<n>` names a session.
   - Constants `MIN_SESSION_S = 600.0`, `ACTIONS_PER_WINDOW = 3`, `FAILURES_TO_PAUSE = 3`, `TICK_WRITE_S = 60.0`, `LOCK = "scheduler.lock"` (in the home), `CLOCK_FILE = "clock.json"` (in the home).
   - `@dataclass(frozen=True) class Clock: start: datetime | None = None; speed: float = 1.0; origin: float = 0.0` with `now() -> datetime` (aware, local; `start + (time.time() - origin) * speed` when simulated), `simulated -> bool`, `words() -> str` (`"rehearsal clock: Sat 14 Nov 01:10, 60 × real time"`; `""` for the real clock).
   - `write_clock(home_root: Path, start: datetime, speed: float) -> Path`; `clear_clock(home_root: Path) -> None`; `clock_of(home) -> Clock` — `clock.json` while the app whose pid it names (`read_running`) still runs, else the real clock.
-  - `read_campaign(root: Path) -> dict | None`; `arm(root: Path, *, now: datetime, by_hand: str | None = None) -> dict`; `pause(root: Path, *, reason: str, state: str = "paused") -> None`.
+  - `read_campaign(root: Path) -> dict | None`; `arm(root: Path, *, now: datetime) -> dict` (state `armed`, `failed_sessions` emptied); `pause(root: Path, *, reason: str, state: str = "paused") -> None`.
+  - `session_of(run_dir: Path) -> int` — `launch.json`'s `launch` (0 when none).
+  - `tick_lock(home, *, wait_s: float = 10.0)` — a context manager over `<home>/scheduler.lock`; the tick takes it without waiting, a person's launch waits for it.
+  - `mark_by_hand(home, slug: str, run_id: str) -> None` — called right after a person's launch on a study whose campaign is armed, inside `tick_lock` (so no tick sees the session first): `by_hand = {"run": run_id, "session": session_of(run_dir)}`, and the run's `campaign-span.json` (Task 4) removed, since a session by hand keeps nothing awake. A no-op when the campaign is not armed.
+  - `FAILED_PAUSE_LINE = "The campaign is paused: its last three sessions failed ({error}). Start it again when the cause is fixed."`
   - `search_left_s(run_dir: Path) -> float` — `plan.json`'s `max_hours * 3600` less `active_seconds(read_events(run_dir))`, at least 0.
-  - `tick(home, *, now: datetime, speed: float = 1.0, start=jobs.start, continue_run=jobs.continue_run, stop=jobs.stop, recheck=jobs.resume_final_check) -> list[str]` — one line per thing it did, `"<slug>: <what>"`.
-  - `AppServer.tick_once() -> None` (server.py): `jobs.launch_queued(home)`, then `scheduler.tick(home, now=clock.now(), speed=clock.speed)` with `clock = scheduler.clock_of(home)`; each in its own `try`, a fault printed to stderr with the traceback.
-- `tests/campaign_helpers.py` produces: `local(text: str) -> datetime` (`"2026-11-14 00:00:05"` as the computer's wall-clock time, aware, through `astimezone()`); `WEEKEND`; `campaign_study(tmp_path, name="Tours", windows=(WEEKEND,), *, armed_at="2026-11-13T09:00:00+01:00") -> tuple[Home, Path]` (a demo-tour study in `Home(tmp_path / "my home")` -- the same home on every call -- from the `tune` template with the samples and one held back, the schedule saved and the campaign armed at `armed_at`); `write_run(root, run_id, phase, *, generations=2, planned=6, max_hours=1.0, used_s=0.0, final=None, check=False, error=None, alive=False) -> Path` (job.json, plan.json, runs.jsonl, events.jsonl with two events `used_s` apart; `alive=True` writes this process's pid and a fresh `launch.json`, so `jobs.phase` reads it as live); `Recorder(start_raises: Exception | None = None)` (callables `start`, `continue_run`, `stop`, `recheck` that append `(name, args, kwargs)` to `calls` and return what `jobs` would -- `{"run": "x"}`, `{"stopping": True}` -- or raise `start_raises`; `calls_for(only=None) -> dict` gives them as `tick`'s keyword arguments; `names() -> list[str]`).
+  - `tick(home, *, now: datetime, speed: float = 1.0, real_now: datetime | None = None, start=jobs.start, continue_run=jobs.continue_run, stop=jobs.stop, recheck=jobs.resume_final_check) -> list[str]` — one line per thing it did, `"<slug>: <what>"`; `real_now` (default the real clock, aware) is for Task 4's span file.
+  - `AppServer.tick_once() -> None` (server.py): `jobs.launch_queued(home)`, then `scheduler.tick(home, now=clock.now(), speed=clock.speed)` with `clock = scheduler.clock_of(home)`; each in its own `try`, a fault printed to stderr with the traceback; every line the tick returns printed to stdout (the service's log, Task 4) as `"<rehearsal time> rehearsal · <real time> real · <line>"` under the rehearsal clock and `"<real time> · <line>"` otherwise, both ISO to the second with their offsets.
+- `tests/campaign_helpers.py` produces: `local(text: str) -> datetime` (`"2026-11-14 00:00:05"` as the computer's wall-clock time, aware, through `astimezone()`); `WEEKEND`; `campaign_study(tmp_path, name="Tours", windows=(WEEKEND,), *, armed_at="2026-11-13T09:00:00+01:00") -> tuple[Home, Path]` (a demo-tour study in `Home(tmp_path / "my home")` -- the same home on every call -- from the `tune` template with the samples and one held back, the schedule saved and the campaign armed at `armed_at`); `write_run(root, run_id, phase, *, generations=2, planned=6, max_hours=1.0, used_s=0.0, final=None, check=False, error=None, alive=False, launch=1, archived=True) -> Path` (job.json, plan.json, runs.jsonl — the seed only when `archived=False` — and events.jsonl with two events `used_s` apart; `launch.json` with `"launch": launch`; `alive=True` writes this process's pid and a fresh launch time, so `jobs.phase` reads it as live; called again on the same id it rewrites the run); `Recorder(start_raises: Exception | None = None)` (callables `start`, `continue_run`, `stop`, `recheck` that append `(name, args, kwargs)` to `calls` and return what `jobs` would -- `{"run": "x"}`, `{"stopping": True}` -- or raise `start_raises`; `calls_for(only=None) -> dict` gives them as `tick`'s keyword arguments; `names() -> list[str]`).
 
 The tick, for every study in the home whose campaign is `armed`, oldest `armed_at` first (the queue rule):
 
 | State of the latest run | Inside a span | Outside every span |
 |---|---|---|
-| active (`starting`, `search`) | nothing | `stop` — unless it is the campaign's `by_hand` run or already has a stop request; records `stopped_by_window` |
+| active (`starting`, `search`) | nothing | `stop` — unless this session is the campaign's `by_hand` session (that run *and* that session number) or the run already has a stop request; records `stopped_by_window` |
 | active (`check`) | nothing | nothing (spec §6.1) |
-| none, or ended before its search began | `start(home, root)` | nothing |
-| `jobs.can_resume` | `start(home, root, resume=run)` | nothing |
+| none; or ended (stopped or failed) before its first round finished, nothing archived | `start(home, root)` — a new run; the old one stays listed as it ended | nothing |
+| `jobs.can_resume` (stopped, or failed, with rounds of its plan left) | `start(home, root, resume=run)` — the same run, so its sessions stay one history | nothing |
 | search done, final check stopped or died (`final.stopped`, or `failed` with `check` in the job) | `recheck(home, root, run)` | nothing |
-| `jobs.can_continue` | `continue_run(home, root, run, hours=h)` with `h = min((span_end - now) / speed, search_left_s, MAX_CONTINUE_HOURS * 3600) / 3600`, only when that is ≥ `MIN_SESSION_S`; when `search_left_s < MIN_SESSION_S` the campaign is `complete` | nothing |
-| `failed` with an error not from a dead process | counts a failure; at `FAILURES_TO_PAUSE` the campaign is paused with the error | nothing |
+| `jobs.can_continue`, `search_left_s` ≥ `MIN_SESSION_S` | `continue_run(home, root, run, hours=h)` with `h = min((span_end - now) / speed, search_left_s, MAX_CONTINUE_HOURS * 3600) / 3600`, only when that is ≥ `MIN_SESSION_S` (a new final check follows it: intended, D49) | nothing |
+| `done`, `search_left_s` < `MIN_SESSION_S` | the campaign is `complete` | the campaign is `complete` |
 
-Around every row: a study whose `schedule` is gone is paused ("the study has no schedule any more"); past `until` with no active run → `ended`; nothing is launched while any run in the home is active (`jobs.active_run`); at most `ACTIONS_PER_WINDOW` launches per span (`window` = the span's start; `actions` resets when it changes); after one launch the tick returns (one at a time). `AppError` from a call is logged as a line and counted as a failure. The whole tick runs under `<home>/scheduler.lock` created with `open(..., "x")` (`{"pid", "at"}`; a lock whose pid is dead or older than 60 s is taken over); when another live process holds it, the tick returns `[]`. `ticked_at` is written at most every `TICK_WRITE_S`.
+Around every row, on every tick, inside a span or not: a study whose `schedule` is gone is paused ("the study has no schedule any more"); past `until` with no active run → `ended`; `complete` as the table says; a `by_hand` session that has ended (its run not active, or a later session number in `launch.json`) is cleared. **Failures are counted once per session:** when the tick first sees the latest run's session ended `failed`, it appends `<run>:<session>` to `failed_sessions` (an `AppError` from a launch call appends `launch:<the tick's time>`, with the error); a session that ends `done` or `stopped` empties the list; at `FAILURES_TO_PAUSE` entries the campaign is paused with `FAILED_PAUSE_LINE` and the last error. Nothing is launched while any run in the home is active (`jobs.active_run`); at most `ACTIONS_PER_WINDOW` launches per span (`window` = the span's start; `actions` resets when it changes); after one launch the tick returns (one at a time). The whole tick runs under `<home>/scheduler.lock` created with `open(..., "x")` (`{"pid", "at"}`; a lock whose pid is dead or older than 60 s is taken over); when another live process holds it, the tick returns `[]`. `ticked_at` is written at most every `TICK_WRITE_S`.
 
 - [ ] **Step 1: Write the failing tests** (`tests/test_scheduler.py`; times in the computer's zone through `datetime(...).astimezone()`; the campaign is `WEEKEND` unless said)
 
@@ -300,11 +305,26 @@ def test_never_stops_final_check(tmp_path):
 
 def test_a_session_started_by_hand_is_not_stopped(tmp_path):
     home, root = campaign_study(tmp_path)
-    write_run(root, "r1", "search", alive=True)
-    scheduler.arm(root, now=local("2026-11-16 00:00"), by_hand="r1")
+    write_run(root, "r1", "search", alive=True, launch=3)
+    with scheduler.tick_lock(home):
+        scheduler.mark_by_hand(home, root.name, "r1")
+    assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 3}
     rec = Recorder()
     scheduler.tick(home, now=local("2026-11-16 00:01"), **rec.calls_for())
     assert rec.calls == []
+
+def test_the_next_scheduled_session_of_that_run_is_stopped(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=2, planned=6, launch=3)
+    campaign = scheduler.read_campaign(root)
+    (root / scheduler.CAMPAIGN).write_text(json.dumps({**campaign, "by_hand": {"run": "r1", "session": 3}}), encoding="utf-8")
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
+    assert rec.calls == [("start", (home, root), {"resume": "r1"})]
+    assert scheduler.read_campaign(root)["by_hand"] is None, "the session by hand has ended: cleared"
+    write_run(root, "r1", "search", alive=True, launch=4)
+    scheduler.tick(home, now=local("2026-11-16 00:01"), **rec.calls_for())
+    assert rec.calls[-1] == ("stop", (root, "r1"), {}), "a later session of the same run keeps the windows"
 
 def test_wakes_inside_window_starts_late(tmp_path):
     home, root = campaign_study(tmp_path)
@@ -366,7 +386,58 @@ def test_failing_campaign_pauses_after_three_failures(tmp_path):
         scheduler.tick(home, now=local(f"2026-11-14 {hour}"), **rec.calls_for())
     assert rec.names() == ["start"] * 3
     campaign = scheduler.read_campaign(root)
-    assert campaign["state"] == "paused" and "hold back at least one case" in campaign["reason"]
+    assert campaign["state"] == "paused" and campaign["reason"] == scheduler.FAILED_PAUSE_LINE.format(
+        error="the study is not ready yet: cases.test: hold back at least one case")
+
+def test_a_failed_session_resumes_the_same_run(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "failed", generations=2, planned=6, error="ValueError: the solver crashed", launch=1)
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
+    assert rec.calls == [("start", (home, root), {"resume": "r1"})]
+
+def test_a_run_that_failed_before_its_first_round_is_started_anew(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "failed", generations=0, planned=6, archived=False, error="ValueError: no seed", launch=1)
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
+    assert rec.calls == [("start", (home, root), {})]
+    assert [r["id"] for r in jobs.runs(root)] == ["r1"], "the failed run stays listed (the new one appears when it launches)"
+
+def test_a_failure_is_counted_once(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "failed", generations=2, planned=6, error="ValueError: the solver crashed", launch=1)
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-16 00:10"), **rec.calls_for())    # outside: nothing launched
+    scheduler.tick(home, now=local("2026-11-16 00:11"), **rec.calls_for())
+    assert scheduler.read_campaign(root)["failed_sessions"] == ["r1:1"]
+
+def test_a_clean_session_resets_the_failures(tmp_path):
+    home, root = campaign_study(tmp_path)
+    campaign = scheduler.read_campaign(root)
+    (root / scheduler.CAMPAIGN).write_text(json.dumps({**campaign, "failed_sessions": ["r1:1", "r1:2"]}), encoding="utf-8")
+    write_run(root, "r1", "stopped", generations=3, planned=6, launch=3)
+    scheduler.tick(home, now=local("2026-11-16 00:10"), **Recorder().calls_for())
+    assert scheduler.read_campaign(root)["failed_sessions"] == []
+
+def test_complete_is_judged_outside_a_window(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "done", generations=6, planned=6, max_hours=1.0, used_s=3600 - 60, final={"decision": "use"})
+    scheduler.tick(home, now=local("2026-11-16 08:00"), **Recorder().calls_for())     # Monday: the check ended after Sunday
+    assert scheduler.read_campaign(root)["state"] == "complete"
+
+def test_tick_once_logs_each_line_with_both_times(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(jobs, "launch_queued", lambda home: None)
+    monkeypatch.setattr(scheduler, "tick", lambda home, **kw: ["tours: started a run (window Sat 00:00 – Sun 23:59)"])
+    server = AppServer(tmp_path / "my home", port=0)
+    try:
+        scheduler.write_clock(server.home.root, local("2026-11-14 00:00"), 120.0)
+        server.tick_once()
+    finally:
+        server.stop()
+    line = capsys.readouterr().out.strip()
+    assert re.fullmatch(r"2026-11-14T00:00:\d\d[+-]\d\d:\d\d rehearsal · \d{4}-\d\d-\d\dT[\d:]{8}[+-]\d\d:\d\d real · "
+                        r"tours: started a run \(window Sat 00:00 – Sun 23:59\)", line), line
 
 def test_actions_per_window_are_capped(tmp_path):
     home, root = campaign_study(tmp_path)
@@ -408,7 +479,7 @@ def test_wait_and_watch_tick_the_scheduler(tmp_path, monkeypatch):
 Run: `.venv/Scripts/python.exe -m pytest tests/test_scheduler.py -q`
 Expected: FAIL — `ImportError: cannot import name 'scheduler'`.
 
-- [ ] **Step 3: Write `tests/campaign_helpers.py`, then `evolvekit/app/scheduler.py` as the table and the paragraph under it say**; `AppServer.tick_once` and `_tick` (`while not self._stopping.wait(TICK_S): self.tick_once()`); `cli._tick_queue` calls `scheduler.tick(home, now=clock.now(), speed=clock.speed)` after `launch_queued`, a fault said in one line on stderr as the queue's is. `scheduler.py` imports `jobs` at module level; `jobs` imports `scheduler` only inside functions (Task 3).
+- [ ] **Step 3: Write `tests/campaign_helpers.py`, then the launch counter in `jobs._record_launch` (`"launch"`: the previous launch's number plus one, read from the text `_launch` keeps; 1 for a claimed queued run), then `evolvekit/app/scheduler.py` as the table and the paragraph under it say**; `AppServer.tick_once` and `_tick` (`while not self._stopping.wait(TICK_S): self.tick_once()`); `cli._tick_queue` calls `scheduler.tick(home, now=clock.now(), speed=clock.speed)` after `launch_queued`, a fault said in one line on stderr as the queue's is. `scheduler.py` imports `jobs` at module level; `jobs` imports `scheduler` only inside functions (Task 3).
 
 - [ ] **Step 4: Run them to see them pass**, and the neighbours
 
@@ -437,14 +508,15 @@ git commit -m "scheduler: the ticker starts, resumes, re-checks, continues and s
     - draft: `"Campaign · not started: its first window would be Sat 00:00"`
     - armed, outside: `"Campaign · next window Sat 00:00"`; inside: `"Campaign · this window ends Sun 23:59"`
     - armed, a whole span since `armed_at` passed with no tick in it (`ticked_at` before its start, now after its end): `"Campaign · the window of Sat 00:00 was missed: the app was not running · next window Mon 01:00"`, tone `warn`
-    - paused: `"Campaign · paused: <reason>"` (tone `warn`); complete: `"Campaign · done: its search time is spent"`; ended: `"Campaign · ended on 31 Dec"`
-  - `scheduler.campaign_done(root, study, *, now) -> bool` — the campaign is `complete` or `ended`, or paused, and no run is active.
-  - `scheduler.start_campaign(home, root, *, now: datetime, at_once: bool, start=jobs.start, continue_run=jobs.continue_run, recheck=jobs.resume_final_check) -> dict` — `at_once=False`: `arm` → `{"scheduled": True, "campaign": campaign_state(...)}`; `at_once=True`: does what the tick would do inside a window (start, resume, recheck or continue with the campaign's search time left), ignoring the window, and arms with `by_hand` = that run → `jobs.start`'s answer plus `"campaign"`.
+    - paused: `"Campaign · paused: <reason>"` (`"Campaign · paused: stopped by you"` after a person's stop), tone `warn` — except a pause for failures, whose reason is `FAILED_PAUSE_LINE` with its error and is shown as it is; complete: `"Campaign finished"`; ended: `"Campaign · ended on 31 Dec"`
+  - `scheduler.campaign_done(root, study, *, now) -> bool` — the campaign is `complete` or `ended`, or paused, and no run is active (`complete` and `ended` are judged on every tick, so a final check that ends on Monday ends the wait then).
+  - `scheduler.start_campaign(home, root, *, now: datetime, at_once: bool, start=jobs.start, continue_run=jobs.continue_run, recheck=jobs.resume_final_check) -> dict` — `at_once=False`: `arm` → `{"scheduled": True, "campaign": campaign_state(...)}`; `at_once=True`: does what the tick would do inside a window (start, resume, recheck or continue with the campaign's search time left), ignoring the window, and arms, and marks the session by hand (`mark_by_hand`, the launch and the mark inside `tick_lock`) → `jobs.start`'s answer plus `"campaign"`.
   - `scheduler.stop_by_person(home, root, run: str | None) -> dict` — `pause(root, reason="stopped by you")`, then `jobs.stop` when the run is active or queued → `{"paused": True, **jobs.stop(...)}` or `{"paused": True, "stopping": False}`.
   - `jobs.state_line(root, study, document_of=None, *, now: datetime | None = None)` (`now` defaults to the home's clock, `scheduler.clock_of` of `root.parent.parent`) — `campaign` key whenever `campaign_state` is not `None`; card `kind: "campaign"` with `line` `"campaign · next window Sat 00:00"` (the state line's words, lower-case first word) when the campaign is armed and the latest run is not active and is absent or was stopped by the window (`stopped_by_window`).
   - Time left (`jobs.status`'s `left_s`/`finish_at` and the running card's words): a session after a resume or a continuation counts the search time left (`search_left_s`, as the engine's clock across sessions does), never from the run's first `started_at`; a campaign session's left is also at most its span's end (real seconds, by the clock's speed); `finish_at` then says the earlier of the two.
   - The study document (`api._document`) gains `campaign` (`campaign_state`) and `schedule_presets` (`schedule.PRESETS`); `study.schedule` is in `study`.
-  - `POST /api/studies/{slug}/start` with a schedule: `{"now": true}` optional → `start_campaign`; `POST /stop` on an armed campaign → `stop_by_person`.
+  - `POST /api/studies/{slug}/start` with a schedule: `{"now": true}` optional → `start_campaign`; `POST /stop` on an armed campaign → `stop_by_person`. The existing routes that launch a session of an existing run — `POST /start` with `{"resume": run}`, `POST /continue`, `POST /final-check` — do it inside `scheduler.tick_lock(home)` and then call `scheduler.mark_by_hand(home, slug, run)` when the study's campaign is armed; so does every CLI command that launches one (today `study start --now`).
+  - Home and the Study page on an armed campaign whose latest run is `done` show that run's verdict as they do now, with the campaign's line beside it (the card's sub-line; the Study page's notice): a `done` run with search time left is continued in the next window and checked again, so the verdict read on Monday may be followed by a newer one (D49).
   - `study start SLUG [--now] [--wait] [--json]`; a scheduled study without `--now` prints `scheduled: next window Sat 00:00 (the app, or evolvekit study wait, starts it then)`, `--json` `{"scheduled": true, "next": iso}`; then, when no app runs for the home, a second line on stderr: `note: windows are kept while the app runs: evolvekit app --service, or evolvekit app install-startup to start it at logon`.
   - `study wait` on a study with an armed campaign waits until `campaign_done` (a window's stop is not an end; it says the campaign line on stderr when it changes); exit 0 when the latest run is `done`, 1 when the campaign paused or ended without one, 4 on timeout. It needs no run to exist yet.
 
@@ -477,8 +549,15 @@ def test_start_now_overrides(tmp_path):
     (root / scheduler.CAMPAIGN).unlink()
     rec = Recorder()
     answer = scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=True, **rec.calls_for(only=("start",)))
-    assert rec.calls == [("start", (home, root), {})] and scheduler.read_campaign(root)["by_hand"] == answer["run"]
+    assert rec.calls == [("start", (home, root), {})] and scheduler.read_campaign(root)["by_hand"]["run"] == answer["run"]
+
+def test_a_persons_resume_continue_and_check_again_are_by_hand(tmp_path):
+    # through the API (call from test_app_server, jobs' launchers patched to write launch.json with launch + 1):
+    # POST /start {"resume": "r1"}, POST /continue {"run": "r1", "hours": 1}, POST /final-check on an armed campaign
+    # each leave by_hand == {"run": "r1", "session": <the new launch>}; on an unarmed study campaign.json is untouched
 ```
+
+  In `tests/test_scheduler.py`, also `test_campaign_finished_line`: a `complete` campaign's `campaign_state` line is `"Campaign finished"`, and one paused by failures reads `FAILED_PAUSE_LINE` with its error.
 
   In `tests/test_cli_study.py` (the CLI through `main` and `capsys`, the clock patched with `monkeypatch.setattr(scheduler, "clock_of", lambda home: scheduler.Clock(start=local("2026-11-13 18:00"), origin=time.time()))`):
 
@@ -544,6 +623,11 @@ def test_home_polls_while_a_campaign_is_armed():
     poll = _page_function(HOME_PAGE, "poll")
     assert 's.kind === "campaign"' in poll and "30000" in poll
 
+def test_a_finished_campaign_card_keeps_the_verdict():
+    out = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "t", name: "T", kind: "finished", decision: "use",
+        line: "finished · probably better: 3.1 % lower tour length", campaign: {line: "Campaign · next window Sat 00:00"}})));""")
+    assert out["sub"].endswith("Campaign · next window Sat 00:00") and "Campaign" not in out["head"]
+
 def test_the_campaign_card_speaks_the_campaigns_words():
     out = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "t", name: "T", kind: "campaign",
         line: "campaign · next window Sat 00:00", campaign: {line: "Campaign · next window Sat 00:00"}, rounds: {done: 2, planned: 6}})));""")
@@ -561,7 +645,7 @@ def test_setup_offers_when_it_runs():
 Run: `.venv/Scripts/python.exe -m pytest tests/test_scheduler.py tests/test_cli_study.py tests/test_app_jobs.py tests/test_app_store.py tests/test_app_page.py -q -m "not slow"`
 Expected: FAIL — `campaign_state` and the `--now` flag do not exist.
 
-- [ ] **Step 3: Implement** the interfaces above. `jobs.status` gains `now: datetime | None = None` (for the test). The page: `EK.cardOf` `campaign` → kicker `s.campaign.line`, head `"Between windows"` (no run yet: `"Waits for its first window"`), sub `"N of M rounds done · not checked yet"` when rounds are known, tone from `s.campaign.tone`; Home's `poll` polls every 30 s while any study's kind is `campaign` (10 s while one is running or queued, as now); Set up's *Limits and budget* summary gains a line *When it runs* (`whenSummary`: "As soon as you start it", or the preset's label and "until 31 Dec"), its drawer `whenDrawer` offers the presets as a radio list plus "As soon as I start it" and an optional *Until* date, saved with `save({ schedule: … })` or `save({ schedule: null })`, and the sentence "It runs only inside these hours, and only while the app is running then." The start act on a scheduled study says `Scheduled: next window Sat 00:00` and goes Home; the Review step's start button reads "Schedule it" when the study has a schedule. The Study page shows `doc.state.campaign.line` as a notice under the header (tone from the state).
+- [ ] **Step 3: Implement** the interfaces above. `jobs.status` gains `now: datetime | None = None` (for the test). The page: `EK.cardOf` `campaign` → kicker `s.campaign.line`, head `"Between windows"` (no run yet: `"Waits for its first window"`), sub `"N of M rounds done · not checked yet"` when rounds are known, tone from `s.campaign.tone`; any other card of a study with `s.campaign` keeps its own head and ends its sub-line with ` · ` and `s.campaign.line`; Home's `poll` polls every 30 s while any study's kind is `campaign` (10 s while one is running or queued, as now); Set up's *Limits and budget* summary gains a line *When it runs* (`whenSummary`: "As soon as you start it", or the preset's label and "until 31 Dec"), its drawer `whenDrawer` offers the presets as a radio list plus "As soon as I start it" and an optional *Until* date, saved with `save({ schedule: … })` or `save({ schedule: null })`, and the sentence "It runs only inside these hours, and only while the app is running then." The start act on a scheduled study says `Scheduled: next window Sat 00:00` and goes Home; the Review step's start button reads "Schedule it" when the study has a schedule. The Study page shows `doc.state.campaign.line` as a notice under the header (tone from the state).
 
 - [ ] **Step 4: Run them to see them pass**
 
@@ -581,8 +665,10 @@ git commit -m "campaigns: study start --now, the campaign line on Home, When it 
 ### Task 4: The app as a service
 
 **Files:**
-- Create: `evolvekit/app/service.py`, `tests/test_app_service.py`
-- Modify: `evolvekit/cli.py` (`p_app`: positional `action` in `{install-startup, uninstall-startup}`, `--service`, `--clock ISO`, `--clock-speed N`; `cmd_app`; `_study_open` starts `app --service`), `evolvekit/app/detach.py` (`python_for_runs`), `evolvekit/app/jobs.py` (`_launch`'s argv[0]), `evolvekit/app/api.py` (`home` gains `clock`), `pages/home.js` (the rehearsal clock notice), `README.md` (the `app` rows), `docs/app.md` (*Starting it*: the option table)
+- Create: `evolvekit/app/service.py`, `evolvekit/app/awake.py`, `tests/test_app_service.py`, `tests/test_awake.py`
+- Modify: `evolvekit/cli.py` (`p_app`: positional `action` in `{install-startup, uninstall-startup, stop}`, `--service`, `--clock ISO`, `--clock-speed N`; `cmd_app`; `_study_open` starts `app --service`), `evolvekit/app/detach.py` (`python_for_runs`), `evolvekit/app/jobs.py` (`_launch`'s argv[0]), `evolvekit/app/api.py` (`home` gains `clock`; `POST /api/shutdown`), `evolvekit/app/server.py` (`AppServer.request_shutdown`), `evolvekit/app/scheduler.py` (the span file; a stale `clock.json` removed), `evolvekit/harness/schedule.py` (`keep_awake`), `evolvekit/app/job.py` (keeps the computer awake), `pages/home.js` (the rehearsal clock notice), `README.md` (the `app` rows; `keep_awake`), `docs/app.md` (*Starting it*: the option table)
+- Test: `tests/test_scheduler.py` (the span file), `tests/test_schedule.py` (`keep_awake`), `tests/test_app_page.py`
+- Not done here: no test or step runs the real `schtasks` on this machine (it is persistent system configuration the owner has not approved; D51). Unit tests patch `subprocess`; the PR body says `install-startup` is unverified on a real Windows logon.
 
 **Interfaces:**
 - Consumes: Task 2 (`write_clock`, `clear_clock`, `clock_of`, `Clock.words`); `running.read_running`; `AppServer`.
@@ -602,6 +688,12 @@ git commit -m "campaigns: study start --now, the campaign line on Home, When it 
     - `--service`: `start_logging`, no browser, no prints, no console reads; `AppServer` writes `app.json`; logs the address, the home and `Clock.words()`; serves until the process ends; `clear_clock` and `server.stop()` in `finally`.
     - `--clock ISO` (a naive time is local) with `--clock-speed N` (1 to 3600, default 1) writes `clock.json` for this app; `--clock-speed` without `--clock` exits 2; the browser form prints the clock's words as its third line.
   - `GET /api/home` gains `clock: {"line": Clock.words()}` while the clock is simulated; Home shows it as a warning notice above the cards.
+  - **Stopping the service:** `evolvekit app stop [--home H]` reads `app.json`; with no app running it prints `no app is running for this library` and exits 0; else it sends `POST /api/shutdown` with the launch's key and the app's own `Origin`, waits up to 10 s for the pid to go, prints `stopped the app` (exit 0) or `the app did not stop within 10 s (pid N)` (exit 1). `POST /api/shutdown` (token-guarded like every route) answers `{"stopping": true}` and calls `AppServer.request_shutdown()`, which runs `self._server.shutdown` on a thread of its own (never in the handler's, which would wait on itself), so `serve_forever` returns and `cmd_app`'s `finally` runs: `clear_clock` and `server.stop()` (which removes `app.json`).
+  - A `clock.json` whose writing app's pid is gone is ignored and removed by `clock_of` (so by the next app or tick).
+  - **Keep-awake (R1):** `Schedule.keep_awake: bool = True` — YAML `keep_awake: false` turns it off; any other value is `schedule.keep_awake: true or false`; `to_yaml` writes it only when false; the presets keep the default; Set up's *When it runs* does not show it.
+    - `scheduler.SPAN = "campaign-span.json"`: when the tick starts, resumes, continues or re-checks a session and the study's `keep_awake` is on, it writes `<run>/campaign-span.json` `{"until_real": iso}` with `until_real = real_now + (span_end - now) / speed` (for a new run, once `start` has returned its id; for the others, before the launch; only into a run folder that exists); with `keep_awake` off it removes the file. A session by hand gets none (`mark_by_hand` removes it).
+    - `awake.POLL_S = 30.0`; `awake.wanted(run_dir: Path, *, real_now: datetime) -> bool` — the span file exists and `real_now < until_real`, or it exists and the run's `job.json` phase is `check` (the final check is never stopped, so it must not sleep either); `awake.set_state(on: bool) -> None` — Windows: `ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` on, `ES_CONTINUOUS` off; elsewhere nothing; `awake.keeping_awake(run_dir, *, set_state=set_state, poll_s=POLL_S)` — a context manager that runs one daemon thread which calls `set_state` (the same thread every time: `ES_CONTINUOUS` holds only while the thread that set it lives) whenever `wanted` changes, and `set_state(False)` when the block ends.
+    - `job.py`'s `main` runs every kind of session inside `awake.keeping_awake(run_dir)`, so the request ends with the run.
   - `study open` starts `[python_for_runs(), "-m", "evolvekit", "app", "--home", <home>, "--service"]` with its launcher output in `<home>/app-start.log` (the service writes `app.log` itself, and rotation cannot rename a file another handle holds on Windows).
 
 - [ ] **Step 1: Write the failing tests** (`tests/test_app_service.py`; `HOME = tmp_path / "my home"`)
@@ -678,6 +770,86 @@ def test_clock_flag_writes_and_the_home_reads_it(tmp_path):
 
 def test_study_open_starts_the_service(tmp_path, monkeypatch):   # spawn_detached patched: argv ends with "--service",
     ...                                                           # log is <home>/app-start.log
+
+def test_app_stop_shuts_the_service_down(tmp_path):
+    home = tmp_path / "my home"
+    proc = subprocess.Popen([sys.executable, "-m", "evolvekit", "app", "--service", "--home", str(home), "--port", "0",
+                             "--clock", "2026-11-13T17:30", "--clock-speed", "120"], stdin=subprocess.DEVNULL)
+    try:
+        _until(lambda: read_running(home), timeout=30)
+        assert (home / "clock.json").is_file()
+        assert main(["app", "stop", "--home", str(home)]) == 0
+        assert proc.wait(timeout=15) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert not (home / "app.json").exists() and not (home / "clock.json").exists()
+
+def test_shutdown_needs_the_key(tmp_path):
+    server = AppServer(tmp_path / "my home", port=0); server.start()
+    try:
+        assert call(server, "POST", "/api/shutdown", token=None)[0] == 403
+    finally:
+        server.stop()
+
+def test_app_stop_with_no_app(tmp_path, capsys):
+    assert main(["app", "stop", "--home", str(tmp_path / "my home")]) == 0
+    assert capsys.readouterr().out.strip() == "no app is running for this library"
+
+def test_a_stale_clock_is_removed(tmp_path):
+    home = Home(tmp_path / "my home")
+    scheduler.write_clock(home.root, local("2026-11-13 17:30"), 60.0)
+    write_running(home.root, pid=2 ** 22 + 7, port=1, url="u")      # a pid that is gone
+    assert not scheduler.clock_of(home).simulated and not (home.root / "clock.json").exists()
+```
+
+  In `tests/test_schedule.py`: `test_keep_awake_parses` — absent → `True`, `keep_awake: false` → `False` and written back as `keep_awake: false`, `True` not written, `keep_awake: "no"` → `HarnessError` `schedule.keep_awake: true or false`.
+
+  In `tests/test_scheduler.py` (the tick's side of R1):
+
+```python
+def test_tick_writes_the_span_file(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    real = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
+    scheduler.tick(home, now=local("2026-11-15 23:29"), speed=60.0, real_now=real, **Recorder().calls_for())
+    span = json.loads((root / "runs" / "r1" / scheduler.SPAN).read_text(encoding="utf-8"))
+    assert datetime.fromisoformat(span["until_real"]) == real + timedelta(minutes=30) / 60, "30 rehearsal minutes at 60 x"
+
+def test_no_span_file_without_keep_awake(tmp_path):   # keep_awake: false -> a resume writes no file and removes an old one
+
+def test_a_session_by_hand_has_no_span_file(tmp_path):
+    # a span file from the last scheduled session exists; mark_by_hand(home, slug, "r1") removes it
+```
+
+  In `tests/test_awake.py`:
+
+```python
+def test_keep_awake_follows_the_span_file(tmp_path):
+    states = []
+    run_dir = tmp_path / "run"; run_dir.mkdir()
+    (run_dir / "job.json").write_text(json.dumps({"phase": "search"}), encoding="utf-8")
+    soon = datetime.now(timezone.utc) + timedelta(seconds=1)
+    (run_dir / scheduler.SPAN).write_text(json.dumps({"until_real": soon.isoformat()}), encoding="utf-8")
+    with awake.keeping_awake(run_dir, set_state=states.append, poll_s=0.05):
+        _until(lambda: states == [True], timeout=5)
+        _until(lambda: states == [True, False], timeout=5)                # the span ended mid-search
+        (run_dir / "job.json").write_text(json.dumps({"phase": "check"}), encoding="utf-8")
+        _until(lambda: states == [True, False, True], timeout=5)          # a final check past the span stays awake
+    assert states == [True, False, True, False], "released when the run ends"
+
+def test_no_span_file_keeps_nothing_awake(tmp_path):   # no file: set_state never called with True
+
+def test_set_state_is_a_no_op_off_windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    awake.set_state(True); awake.set_state(False)                         # no ctypes.windll touched
+
+@pytest.mark.skipif(sys.platform != "win32", reason="SetThreadExecutionState is Windows")
+def test_set_state_calls_set_thread_execution_state(monkeypatch):
+    seen = []
+    monkeypatch.setattr(awake, "_kernel32", lambda: SimpleNamespace(SetThreadExecutionState=lambda flags: seen.append(flags) or 1))
+    awake.set_state(True); awake.set_state(False)
+    assert seen == [0x80000000 | 0x00000001, 0x80000000]
 ```
 
   In `tests/test_app_page.py`: `test_home_shows_the_rehearsal_clock` — Home's `draw` renders `data.clock.line` in a warning notice when present.
@@ -687,20 +859,20 @@ def test_study_open_starts_the_service(tmp_path, monkeypatch):   # spawn_detache
 Run: `.venv/Scripts/python.exe -m pytest tests/test_app_service.py tests/test_app_page.py -q`
 Expected: FAIL — `evolvekit.app.service` does not exist.
 
-- [ ] **Step 3: Implement** `service.py`, `detach.python_for_runs`, `jobs._launch`'s interpreter, `cmd_app`'s three forms and the flags, `_study_open`, the `clock` key and Home's notice.
+- [ ] **Step 3: Implement** `service.py`, `detach.python_for_runs`, `jobs._launch`'s interpreter, `cmd_app`'s forms (browser, `--service`, `stop`, `install-startup`, `uninstall-startup`) and the flags, `POST /api/shutdown` and `request_shutdown`, the stale clock's removal, `_study_open`, the `clock` key and Home's notice; then keep-awake: `keep_awake` on `Schedule`, the span file in the tick, `awake.py` (reach `kernel32` through a small `_kernel32()` so the Windows test can patch it), and `job.py`'s `with awake.keeping_awake(run_dir):`.
 
 - [ ] **Step 4: Run them to see them pass**, and the neighbours
 
-Run: `.venv/Scripts/python.exe -m pytest tests/test_app_service.py tests/test_app_page.py tests/test_app_server.py tests/test_cli_study.py -q -m "not slow"`
+Run: `.venv/Scripts/python.exe -m pytest tests/test_app_service.py tests/test_awake.py tests/test_schedule.py tests/test_scheduler.py tests/test_app_page.py tests/test_app_server.py tests/test_cli_study.py -q -m "not slow"`
 Expected: PASS.
 
-- [ ] **Step 5: Docs** — README command table (the app's rows): `app --service` (no browser or console, logs to `<home>/app.log` rotated at 5 MB with two kept, keeps campaigns' windows), `app install-startup` / `app uninstall-startup` (Windows: the logon task "evolvekit app", printed; macOS and Linux: the unit to install, printed), `app --clock ISO --clock-speed N` (a rehearsal clock for campaigns: windows follow it, runs keep real time; Home says so). `docs/app.md` *Starting it*: the same three rows in the option table, and one sentence that a second `evolvekit app` on the same library opens the first.
+- [ ] **Step 5: Docs** — README: the `schedule:` paragraph names `keep_awake: false` (by default a scheduled session keeps the computer from sleeping until its window ends, and through a final check that runs past it; a session started by hand does not). The command table (the app's rows): `app stop` (stops the app of this library cleanly), `app --service` (no browser or console, logs to `<home>/app.log` rotated at 5 MB with two kept, keeps campaigns' windows), `app install-startup` / `app uninstall-startup` (Windows: the logon task "evolvekit app", printed; macOS and Linux: the unit to install, printed; on Windows this is not yet tried on a real logon), `app --clock ISO --clock-speed N` (a rehearsal clock for campaigns: windows follow it, runs keep real time; Home says so). `docs/app.md` *Starting it*: the same rows in the option table, and one sentence that a second `evolvekit app` on the same library opens the first.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add evolvekit tests README.md docs/app.md
-git commit -m "app --service: a rotated log, one app per home, the logon task, a rehearsal clock"
+git commit -m "app --service: a rotated log, one app per home, the logon task, a rehearsal clock, app stop, keep-awake in a window"
 ```
 
 ---
@@ -804,7 +976,7 @@ git commit -m "memory: what finished studies learned about an application's sett
   - `param_lhs_typed(space, parent, *, seed, n_variants=6)`: after the hypercube, for each variant in order and each parameter with a prior in declaration order, one `rng.random() < weight` decides whether that value is drawn instead from the band (`from_unit(clamp(to_unit(value) + rng.uniform(-PRIOR_BAND, PRIOR_BAND)))`; a bool or choice takes the value itself); the result's `meta["prior"]` lists the names drawn so; the rest is as today.
   - `memory.MIN_PRIOR_WEIGHT = 0.05`.
   - `@dataclass class Warm: from_slug: str; run: str; at: str; ranked: list[str]` and `Study.warm: Warm | None = None`; YAML `warm: {from, run, at, ranked}` (`ranked` only when re-ranked).
-  - `memory.warm_start(home, harness: Harness, study: Study, *, document_of=build_status) -> tuple[Study, list[str]]` — the study with `start` set on each tuned setting to the latest `use` study's winner (only winners inside the study's range for that setting), `warm` recorded, and the lines to say; with a template that tunes `recommended` and at least three finished settings studies, the tuned set is the `len(harness.recommended)` settings with the highest mean importance (unknown importance after, in the harness's rank order).
+  - `memory.warm_start(home, harness: Harness, study: Study, *, document_of=build_status) -> tuple[Study, list[str]]` — the study with `start` set on each tuned setting to the latest `use` study's winner (only winners inside the study's range for that setting), `warm` recorded, and the lines to say; with a template that tunes `recommended` and at least three finished settings studies, the tuned set is the `len(harness.recommended)` settings with the highest mean importance (unknown importance after, in the harness's rank order). `harness` is the version the new study is made with: its `recommended` is the one re-ranked.
   - `memory.priors_for(home, study: Study, *, document_of=build_status) -> dict[str, dict]` — `{name: {"value", "weight"}}` for the study's tuned settings with a `use` winner: `weight = 0.5 ** k`, `k = 1 +` the finished studies on the harness after the winner's; dropped below `MIN_PRIOR_WEIGHT` and when the value is outside the study's range.
   - `compile_study(..., priors: dict[str, dict] | None = None)` writes `problem.parameters[name].prior`; `write_run` passes `memory.priors_for(Home-like(root.parent.parent), study)` when `study.warm` is set and `root.parent.name == "studies"`, else none.
   - `study new NAME --harness ID [--template T] --warm` — stderr: `warm start from Depot spring (use): neighbours 12, restart_after 13000` and, re-ranked, `tuned: the 3 settings that went most with the measure in 4 studies: …`; with no `use` study: `nothing to warm-start from: no finished study on demo-tour says use; a plain start`. `--warm --dir` exits 2: `--warm reads the library home's finished studies; leave out --dir`.
@@ -828,9 +1000,13 @@ def test_warm_start_values_inside_the_study_range(tmp_path):
     # an input settings file giving neighbours 5 does not override the warm start's 16 (start wins over the file)
 
 def test_warm_reranks_recommended_after_three(tmp_path):
-    # three settings studies with importance accept_worse 0.7, neighbours 0.5, restart_after 0.1 and init 0.6
-    # (init not recommended): tuned == {"accept_worse", "init", "neighbours"}; warm.ranked starts accept_worse, init;
-    # with two studies the tuned set is the harness's recommended
+    # The home's library holds a copy of demo-tour, harnesses/demo-tour-1.1.1/ (version raised so it is the newest
+    # and the one `study new` makes the study with and `current_harness` reads), whose harness.yaml says
+    # `init: recommended: false`: its recommended are neighbours, restart_after, accept_worse (three).
+    # Three finished settings studies with importance accept_worse 0.7, init 0.6, neighbours 0.5, restart_after 0.1:
+    # study new --warm --template tune -> tuned == {"accept_worse", "init", "neighbours"} (init enters, restart_after
+    # leaves); warm.ranked == ["accept_worse", "init", "neighbours", "restart_after"].
+    # With two finished studies: tuned == {"neighbours", "restart_after", "accept_worse"}, no `ranked`.
 
 def test_prior_weight_decays_by_half(tmp_path):
     home, docs = Home(tmp_path / "my home"), {}
@@ -1215,11 +1391,11 @@ git commit -m "per_group: one search and one final check per kind of case, the v
 - Create: `docs/superpowers/reviews/2026-11-08-over-time-gate-log.md`
 
 - [ ] **Step 1: README — `### Studies over time`**, each part a few sentences and one example, moving the paragraphs Tasks 3, 6 and 9 wrote here and linking the rows:
-  - *Campaigns* — the `schedule:` YAML; windows in the computer's own time, a window across midnight belongs to the day it starts, daylight-saving changes keep the clock times; `budget.hours` is the campaign's whole search time; at a window's start the run starts, carries on or gets more time, at its end it stops cleanly unless it is in its final check; one study at a time across the library, the oldest campaign first; `study start` waits for the first window, `--now`, `study stop` pauses; the app must run in the windows (`app --service`, `app install-startup`); a missed window is said on Home.
+  - *Campaigns* — the `schedule:` YAML (with `keep_awake`); windows in the computer's own time, a window across midnight belongs to the day it starts, daylight-saving changes keep the clock times; `budget.hours` is the campaign's whole search time; at a window's start the run starts, carries on or gets more time, at its end it stops cleanly unless it is in its final check; one study at a time across the library, the oldest campaign first; `study start` waits for the first window, `--now`, `study stop` pauses; the app must run in the windows (`app --service`, `app install-startup`, `app stop`); a scheduled session keeps the computer awake in its window; a missed window is said on Home; when the search time is spent Home says *Campaign finished*.
   - *What evolvekit learned* — the harness page; `study new --warm`; the prior halving per study; what is left out after a harness changes.
   - *Settings per kind of case* — features and tags, `study groups`, `per_group`, the verdict and the two files.
-- [ ] **Step 2: `docs/app.md`** — *The app as a service* (what `--service` does, where the log is, the logon task and how to remove it, that a second `evolvekit app` opens the first); *Rehearsing a campaign* (`evolvekit app --service --clock 2026-11-13T17:30 --clock-speed 120`: the windows follow the rehearsal clock, the runs keep real time, Home says so, the clock ends with the app); *When it runs* in Set up's *Limits and budget*.
-- [ ] **Step 3: The shared reference** — `study start --now`, `study groups`, `study new --warm`, `app --service`, `app install-startup`, `app uninstall-startup` with their exit codes; then `.venv/Scripts/python.exe -m pytest tests/test_skills_content.py tests/test_skills_install.py -q` → PASS (every `evolvekit …` span parses; the reference stays ≤ 200 lines; no banned word).
+- [ ] **Step 2: `docs/app.md`** — *The app as a service* (what `--service` does, where the log is, the logon task and how to remove it, that a second `evolvekit app` opens the first); *Rehearsing a campaign* (`evolvekit app --service --clock 2026-11-13T17:30 --clock-speed 120`: the windows follow the rehearsal clock, the runs keep real time, Home says so, `app.log` gives both times, `evolvekit app stop` ends it and the clock with it); *When it runs* in Set up's *Limits and budget*.
+- [ ] **Step 3: The shared reference** — `study start --now`, `study groups`, `study new --warm`, `app --service`, `app stop`, `app install-startup`, `app uninstall-startup` with their exit codes; then `.venv/Scripts/python.exe -m pytest tests/test_skills_content.py tests/test_skills_install.py -q` → PASS (every `evolvekit …` span parses; the reference stays ≤ 200 lines; no banned word).
 - [ ] **Step 4: The persona gate (design §8, project 4)**
 
   Materials, made by the controller in a throwaway folder `C:\gate\p4\` (never in the evolvekit checkout): a library home `C:\gate\p4\home` with demo-tour built in and the example solver as its application; two finished studies on demo-tour made beforehand from the CLI with real short runs (`study new "Depot spring" --template tune`, then `"Depot summer"`, four sample cases each with one held back, `budget.hours` 0.1), whatever their verdicts say; a draft study "Weekend depot" with eight cases (four `{"seed": n, "cities": 20}`, four `{"seed": n, "cities": 80}`, two held back), the `tune` template, `budget.hours` 0.3, everything set but *When it runs*; `C:\gate\p4\rehearse.cmd` — `"<venv>\Scripts\python.exe" -m evolvekit app --service --home "C:\gate\p4\home" --clock 2026-11-13T17:30 --clock-speed 120`; `C:\gate\p4\open.cmd` — `… -m evolvekit app --home "C:\gate\p4\home"`. The reviewer is a fresh agent in Claude Code with its working folder `C:\gate\p4\`, `evolvekit` on PATH, the built-in browser, and only `README.md` and `docs/app.md` of the evolvekit checkout as reading. It never sees the code, the design, the plans or earlier reviews.
@@ -1236,7 +1412,7 @@ git commit -m "per_group: one search and one final check per kind of case, the v
   >
   > Score the whole experience out of 10 for a planner who wants to set a study going before the weekend and trust what it says on Monday. Name any blocker: something that stopped you or that you would not trust. Say whether anything ran outside the weekend, whether anything claimed "better" before the final check did, and where the numbers came from.
 
-  Pass: 8 or more with no blocker. Each round is logged in `docs/superpowers/reviews/2026-11-08-over-time-gate-log.md` (the round, the score, the blocker, the fixes made, the commits), the transcripts with any token redacted. Fix and repeat until it passes. The controller checks afterwards: `<home>\app.log` shows every start, resume, continuation and stop of the campaign at a rehearsal time inside Saturday 00:00 – Sunday 23:59 (a final check may run on past the end); the study has one run folder whose sessions are its history; `C:\gate\p4\home\clock.json` is gone once the app stopped; `schtasks /Query /TN "evolvekit app"` finds no task (the gate never installs one); the service is stopped at the end.
+  Pass: 8 or more with no blocker. Each round is logged in `docs/superpowers/reviews/2026-11-08-over-time-gate-log.md` (the round, the score, the blocker, the fixes made, the commits), the transcripts with any token redacted. Fix and repeat until it passes. The controller checks afterwards: `<home>\app.log` shows every start, resume, continuation and stop of the campaign at a rehearsal time inside Saturday 00:00 – Sunday 23:59 (a final check may run on past the end); every such line in `app.log` carries both its rehearsal and its real time (`tick_once`); the study has one run folder whose sessions are its history (or, after a session that failed before its first round, a new one beside the failed one); the controller stops the service with `evolvekit app stop --home "C:\gate\p4\home"` (exit 0), after which `app.json` and `clock.json` are gone; `schtasks /Query /TN "evolvekit app"` finds no task (neither the reviewer nor the controller runs `install-startup` in the gate, D51).
 - [ ] **Step 5: The gate** — the controller runs `python tasks.py check` (never beside a demo study or the persona gate) → exit 0.
 - [ ] **Step 6: Commit and the PR**
 
@@ -1244,7 +1420,7 @@ git commit -m "per_group: one search and one final check per kind of case, the v
 git add README.md docs evolvekit/skills
 git commit -m "docs: studies over time -- campaigns, the service, what evolvekit learned, settings per kind of case; the gate's log"
 git push -u origin agent/4-over-time
-gh pr create --base master --head agent/4-over-time --title "Agent path 4: studies over time" --body-file <the PR body: what it adds; no new dependency (schtasks is part of Windows); the gate's score; stacked on agent/3-code>
+gh pr create --base master --head agent/4-over-time --title "Agent path 4: studies over time" --body-file <the PR body: what it adds; no new dependency (schtasks is part of Windows); that `app install-startup` is tested only with `schtasks` patched and is unverified on a real Windows logon; the gate's score; stacked on agent/3-code>
 ```
 
 ---
@@ -1256,17 +1432,17 @@ Choices made where the design was silent, each with its reason and what it costs
 - **D1 — Where the schedule is read.** From the study folder's `study.yaml` (so a planner may change the windows between sessions); the budget from the run's pinned copy. Cost: a window changed during a session applies from the next tick.
 - **D2 — The tick is level-triggered.** Every tick decides from what is on disk (inside a span or not, the latest run's phase), never from having seen an edge, so the app down at a window's start, a sleep and a restart all become "starts late", and the end is never carried over. Cost: a phase misread on disk is acted on within five seconds.
 - **D3 — A campaign is armed.** `campaign.json` is written by `study start` or the app's Start ("submits the first window"); a schedule alone never starts a draft. Cost: one more file in the study folder.
-- **D4 — A person's actions win.** A person's stop pauses the campaign; a person's start, resume, continuation or `--now` is a session by hand that no window edge stops. Cost: a planner who stops on Saturday must start again for Sunday.
+- **D4 — A person's actions win.** A person's stop pauses the campaign; a person's start, resume, continuation, check again or `--now` is a session by hand that no window edge stops (made precise by D47). Cost: a planner who stops on Saturday must start again for Sunday.
 - **D5 — How a finished plan goes on.** Design §6.1 says `budget.hours` is the campaign's whole search time and also that a finished plan is continued with the window's length. Both hold if a continuation is given the smaller of the window's time left and the campaign's search time left (`plan.max_hours` less what the run's sessions used); under ten minutes it is not started, and a campaign with less than that left is `complete`. Cost if wrong: the owner meant every window to add time without end; a planner then raises `budget.hours`.
 - **D6 — The queue.** Runs queued by a person launch first (the existing ticker, unchanged), then campaigns, the oldest `armed_at` first; nothing is pre-empted. Cost: a long run queued by hand can take a campaign's window.
 - **D7 — A final check that did not finish** (stopped, or the computer restarted in it) is run again at the campaign's next window (`resume_final_check`); without this the campaign would wait for ever.
-- **D8 — Failure bounds.** At most three launches per window and three failed sessions in a row, then the campaign pauses with the error; a run that fails at once does not make a new run folder every five seconds.
+- **D8 — Failure bounds.** At most three launches per window, and three failed sessions in a row pause the campaign (counted as D48 says); a run that fails at once does not make a new run folder every five seconds.
 - **D9 — Window edges.** A window belongs to the day it starts; windows whose occurrences meet within a minute are one span (the design's own `23:59` / `00:00` example would otherwise stop at midnight); `24:00` is refused with "use 23:59"; YAML's sexagesimal integers are read as clock times.
 - **D10 — Time zone.** The computer's own zone through `datetime.astimezone()`, because `zoneinfo` has no data on Windows without the `tzdata` package; functions take an optional `tz` so tests use a fixed-rule zone (and `ZoneInfo("Europe/Amsterdam")` where it loads). Cost: a schedule cannot name another zone.
 - **D11 — Day and month words** are a fixed English table, never `strftime("%a")`, whose words follow the Windows locale.
 - **D12 — `until`** is inclusive by the window's start date; a window started on that date runs to its end.
 - **D13 — One app per home, one tick at a time.** A second `evolvekit app` opens the first, `--service` exits when one runs, and every tick holds `<home>/scheduler.lock` (an exclusive create, taken over when its pid is dead or it is a minute old), because `study wait` in a terminal ticks too. `RunLock` is not used: it reads, then writes, and two processes can both win.
-- **D14 — Sleep.** `active_seconds` counts a session from its first event to its last, so a computer asleep in a session spends search time; this project leaves that rule alone (it is the engine's for every run). On waking outside the window the run is stopped at the next tick; one that reached its final check finishes. See open question 1.
+- **D14 — Sleep.** A scheduled session keeps the computer awake until its window ends and through a final check past it (D46), so sleep inside a window happens only with `keep_awake: false`, in a session by hand, or when a person closes the lid. Then `active_seconds` still counts the sleep as search time (the engine's rule for every run, left alone); on waking outside the window the run is stopped at the next tick, and one in its final check finishes.
 - **D15 — The rehearsal clock.** `app --clock ISO --clock-speed N` writes `<home>/clock.json`, which every process of that home honours only while the app that wrote it runs; it moves the windows only (runs keep real time, so a rehearsal spends real search time), Home and `app.log` say it is on, and it ends with the app. This lets a persona live a weekend in half an hour with no code access, and nothing a planner does by accident can turn it on.
 - **D16 — The logon task is an XML definition.** `schtasks /Create /SC ONLOGON /TR …` makes a task that Windows ends after 72 hours, that does not start on battery, whose command is limited to 261 characters and whose quoting breaks on paths with spaces; `/XML` with `ExecutionTimeLimit PT0S` and the battery conditions off has none of that. The task runs `pythonw.exe` (no console window); runs are always launched with `python.exe` (`detach.python_for_runs`).
 - **D17 — `study open` starts the service**, with the launcher's output in `app-start.log`, so a library has one app log and rotation never meets a handle another process holds.
@@ -1299,7 +1475,12 @@ Choices made where the design was silent, each with its reason and what it costs
 - **D44 — Review focus** keeps the task-level plan's five lines and adds six from project 3's gate, each with its test.
 - **D45 — The gate never installs the logon task** (a persistent change to the owner's account); Task 4's tests patch `schtasks`.
 
-## Open questions for the controller
+Taken by the controller on the builder check and the open questions (R1–R6, Q1–Q2):
 
-1. **Keep the computer awake during a window?** A laptop that sleeps inside a window spends the campaign's search time asleep (D14). The service could ask Windows not to sleep while a campaign's run is in its window (`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` through `ctypes`, released when the run ends; nothing persistent). Add it to Task 4, or leave the README's advice to keep the computer awake?
-2. **A real `schtasks` round trip.** Unit tests patch `subprocess`; whether a standard (non-administrator) account may create a logon task from XML is unverified on this machine. May the controller run `evolvekit app install-startup` and `uninstall-startup` once on the owner's account (it adds a task and removes it), or should that wait for the owner?
+- **D46 — Keep-awake (R1, Q1).** Task 4. `schedule.keep_awake` (default true; Set up does not show it). The run learns its span from a file, never from new keywords to `jobs.start`, `continue_run` or `resume_final_check`: the tick writes `<run>/campaign-span.json` `{"until_real"}` (under the rehearsal clock `real_now + (span_end - now) / speed`) when it launches a session, and the run's process holds `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` from one thread of its own while the file's time has not passed, and through a final check that runs past it, releasing at the run's end; a no-op off Windows. The tick also writes it for a re-check (a session of the run like the others). Sessions by hand get no file. Cost: a laptop on battery stays awake through a scheduled window.
+- **D47 — `by_hand` is a session, not a run (R2).** `{"run", "session"}`, the session being `launch.json`'s launch number; `mark_by_hand(home, slug, run)` is called inside `tick_lock` by `--now` and by the existing resume, continue and check-again routes when the campaign is armed; the tick clears it once that session has ended, and later scheduled sessions of the same run keep the windows. Cost: `launch.json` gains a counter.
+- **D48 — A failed session (R3).** Inside a window the tick resumes the same run when `can_resume`; a run that failed before its first round (nothing archived) is replaced by a new run, the failed one listed as failed. A failure is counted once per session (`failed_sessions`, `<run>:<session>`), a clean session empties the list, three in a row pause with "The campaign is paused: its last three sessions failed (<last error>). Start it again when the cause is fixed."
+- **D49 — `complete` and `ended` on every tick (R4).** Judged inside a window or not, so a final check that ends after Sunday makes the campaign complete on Monday and `study wait` returns then; Home says "Campaign finished". A `done` run with ten minutes or more of search time left is continued in the next window and checked again: intended (the design keeps the archive and continues); Home and the Study page show the latest verdict with the campaign's line beside it.
+- **D50 — Stopping the service and its log (R5).** `evolvekit app stop` calls a key-guarded `POST /api/shutdown` and waits up to 10 s; the shutdown runs the same `finally` (`clear_clock`, `app.json` removed); a `clock.json` whose app is gone is ignored and removed. `tick_once` logs every line the tick returns with the rehearsal time and the real time; the gate's checks read those lines.
+- **D51 — No real `schtasks` here (Q2).** Creating and deleting a logon task is persistent system configuration the owner has not approved: no test, step or gate runs it on this machine; unit tests patch `subprocess`; the README marks it untried on a real logon and the PR body says `install-startup` is unverified.
+- **D52 — The re-rank test (R6)** uses a library copy of demo-tour in the test's home in which `init` is not recommended, so importance changes the set; `recommended` is read from the harness version the new study is made with (the one `warm_start` is given).
