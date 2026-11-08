@@ -289,3 +289,68 @@ visible; no "better" over unchecked figures anywhere. Each wave had its own revi
 
 [meaurisch/evolvekit#74](https://github.com/meaurisch/evolvekit/pull/74), stacked on #73; opened 2026-11-08 from `agent/3-code` (dd58f55 plus the logs).
 
+
+## Project 4 — Studies over time
+
+Branch `agent/4-over-time` from `agent/3-code`. Plan:
+[2026-11-07-agent-4-over-time.md](../plans/2026-11-07-agent-4-over-time.md), expanded to step level on this
+branch by a planner (1486 lines, ten tasks), then the builder check by a fresh reviewer; its six questions and
+the planner's two were ruled and folded in as D46–D52. Tasks run strictly in order (shared files everywhere),
+except where two touched disjoint files and ran side by side.
+
+### Decisions
+
+The ones a reader should know (all in the plan with their reasons, the rest in the SDD ledger):
+
+- **A campaign's `budget.hours` is its whole search time**; a window only decides when it runs. A finished plan is
+  continued for the smaller of the window's time left and the campaign's search time left (D5).
+- **The rehearsal clock**: `evolvekit app --service --clock <time> --clock-speed <n>` runs the scheduler on a
+  simulated clock, written to the home and shown as a warning on Home, so a campaign can be watched in minutes.
+  `ticked_at` and every window judgement use that clock.
+- **A person's session is not a scheduled one**: `study start --now`, Carry on, Continue and Check again on an
+  armed campaign mark that session by hand, and the window never stops it; a person's stop pauses the campaign.
+- **Nothing stays stuck**: a failed session is resumed in the next window, three failed sessions in a row pause
+  the campaign with a sentence; a stopped continuation goes on while campaign time is left and is checked again
+  when it is used up; a finished campaign started again begins a new one.
+- **The missed window is kept**: a weekend the app slept through is said on Home until the next window starts.
+- **Keep-awake**: a scheduled session keeps a Windows computer awake while inside its window (released at the
+  run's end; `schedule.keep_awake: false` turns it off).
+- **The logon task is never created on this machine** (it is persistent system configuration the owner has not
+  approved): `app install-startup` is tested with a patched `schtasks`, and is unverified against a real logon.
+- **The service never opens a console window**: every console program the app or a run starts gets
+  `CREATE_NO_WINDOW` through one helper; `app.log` is private and never holds the app's key.
+- **A prior's weight starts at 0.5 and halves per study since the winner**; a weight of 1 is refused, so a prior
+  never excludes any value in range; a study without priors draws exactly as before (pinned against the old code).
+- **Features never read a private column** (refused when the harness loads); tags win over features and are
+  folded when their folder names would collide.
+
+The final whole-branch review (most capable model): with fixes, 0 Critical, 2 Important (arming a campaign over a
+running run let the next tick outside a window stop it; a run that could not go on left its campaign armed for ever),
+3 minors. One fix wave took them; its re-review found nothing open.
+
+### Gate
+
+| Commit | Command | Result |
+|---|---|---|
+| dde6ff9 | `python tasks.py check`, nothing else running | exit 0: **2452 passed, 5 skipped** in 28:38 |
+| e283eeb | the same, after the persona gate's fixes | exit 1: one timing-tight test (`test_preflight` 0.6 s sleep against a 0.8 s timeout) failed under load; it passes alone and its code was unchanged; its margins were widened (f03ab98) |
+| f03ab98 | the same | exit 0: **2498 passed, 5 skipped** in 28:23 |
+
+### Persona gate
+
+A transport planner, not a programmer, schedules "Weekend depot" for the weekend on Friday 17:30, closes the
+browser, and on Monday reads its answer and what all three studies on the solver learned, on a rehearsal clock at
+120 times real speed. Materials restored from one template each round. Log:
+[2026-11-08-over-time-gate-log.md](2026-11-08-over-time-gate-log.md).
+
+| Round | Code | Score | Blocker | What it found |
+|---|---|---|---|---|
+| 1 | dde6ff9 | 7/10 | none | the weekend barely used and the plan bar said "done around 17:34"; a keep whose cases both improved read as a contradiction; when it ran only in `app.log`; What we learned's strength unexplained |
+| 2 | ffb59c5 | **8/10** | none | **pass**; "Search through the whole window" left no room for the final check (fixed before the gate); a drawer cut at 1024 px; no Save confirmation |
+
+Both rounds: the campaign ran only inside the weekend, nothing claimed "better" before the final check, every
+`app.log` campaign line carried its rehearsal and real time, `evolvekit app stop` left no `app.json` or
+`clock.json`, and no scheduled task existed.
+
+### PR
+
