@@ -545,3 +545,14 @@ def test_a_code_studys_header_counts_no_settings():
     """Persona round 2, M1: a code study's header said "N settings"."""
     head = _page_function(STUDY_PAGE, "header")
     assert "isCode()" in head and 'EK.plural(tuned, "setting")' in head, head
+
+
+TRIES_AXIS = "% change vs today, on the cases it learned from (not checked)"
+
+
+def test_the_tries_plots_axis_says_its_points_are_not_checked():
+    """Persona round 3, E5: the y-axis read "% BETTER THAN TODAY" over points no final check had seen."""
+    plots = (STATIC / "js" / "plots.js").read_text(encoding="utf-8")
+    tries = plots[plots.index("EK.triesPlot = function"):plots.index("EK.triesLegend = function")]
+    assert TRIES_AXIS in tries, "the axis label, as it is (not upper-cased)"
+    assert "better" not in tries.lower(), "never 'better' over unchecked points, the axis and its aria label included"
