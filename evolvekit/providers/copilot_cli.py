@@ -38,6 +38,12 @@ child runs with `COPILOT_AUTO_UPDATE=false`.
 Cost: Copilot counts requests against the plan, not dollars. `usd` is 0.0 so
 dollar caps hold; `requests` is 1 per call unless the JSON output reports
 premium requests.
+
+`act` (design §5.4) runs it as a coding agent in a folder, unverified against
+a real Copilot CLI (see `build_act_argv`):
+
+    copilot [--add-dir <the brief's folder>] -p <short prompt> --allow-tool=write
+        --allow-tool=shell --no-ask-user -s [--model=<model>]
 """
 
 from __future__ import annotations
@@ -46,10 +52,13 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
+from evolvekit.providers.agent_run import agent_env, run_agent
 from evolvekit.providers.base import (
+    AgentResult,
     Completion,
     Message,
     ProviderError,
@@ -69,6 +78,10 @@ __all__ = [
 DEFAULT_TIMEOUT = 600.0
 KINDS = ("missing", "not_signed_in", "policy_blocked", "failed")
 DENIED_TOOLS = ("shell", "write")
+ACT_TOOLS = ("write", "shell")
+"""What `act` allows: the agent edits files and runs commands in its folder."""
+SIGN_IN = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+"""The CLI's own sign-in, kept in the agent's environment."""
 MAX_DIRECT_COMMAND = 30_000
 """Characters allowed on a Windows command line run straight through
 CreateProcess (32767), less a margin for quoting."""
@@ -319,6 +332,10 @@ class CopilotCliProvider:
         argv += ["--output-format=json"] if self._json else ["-s"]
         if model:  # an empty model is the CLI's own default
             argv.append(f"--model={model}")
+        self._check_length(argv)
+        return argv
+
+    def _check_length(self, argv: list[str]) -> None:
         if self._windows:
             length = len(subprocess.list2cmdline(argv))
             if length > MAX_DIRECT_COMMAND:
@@ -327,7 +344,67 @@ class CopilotCliProvider:
                     f"at most {MAX_DIRECT_COMMAND}). Ask in fewer words, or choose another provider in Settings.",
                     "failed",
                 )
+
+    # -- act: the coding agent (design §5.4) --------------------------------
+    #
+    # UNVERIFIED against a real Copilot CLI: none is installed on the machine
+    # this was built on. The argv is GitHub's documented programmatic flags
+    # (`--allow-tool=write`, `--allow-tool=shell`, `--add-dir`); only its shape
+    # is unit-tested.
+
+    def build_act_argv(self, prompt: str, *, model: str, read_dirs: Sequence[Path | str] = ()) -> list[str]:
+        """`copilot -p` as an agent in its folder: writing files and running
+        commands allowed, never asking anyone, `read_dirs` readable. `prompt` is
+        the short prompt naming the brief file (decision 39), never the brief."""
+        prefix, through_cmd = self._resolve()
+        if through_cmd:
+            raise CopilotCliError(
+                f"GitHub Copilot CLI at {prefix[0]} could not be run safely: point COPILOT_CLI_PATH "
+                "at its program (copilot.exe, or the package's .js file) rather than the .cmd file",
+                "missing",
+            )
+        argv = [*prefix]
+        for folder in read_dirs:
+            argv += ["--add-dir", str(folder)]
+        argv += ["-p", prompt, *(f"--allow-tool={tool}" for tool in ACT_TOOLS), "--no-ask-user", "-s"]
+        if model:
+            argv.append(f"--model={model}")
+        self._check_length(argv)
         return argv
+
+    def act(
+        self,
+        brief: str,
+        *,
+        cwd: Path,
+        model: str,
+        timeout_s: float,
+        read_dirs: Sequence[Path | str] = (),
+        max_usd: float | None = None,
+        cancel: threading.Event | None = None,
+    ) -> AgentResult:
+        """One agent run in `cwd`; its whole tree ended on `timeout_s` or on
+        `cancel`. One request per call, as `complete` counts it; `max_usd` has
+        no meaning for a plan that counts requests."""
+        del max_usd
+        argv = self.build_act_argv(brief, model=model, read_dirs=read_dirs)
+        env = agent_env(keep=SIGN_IN)
+        env["COPILOT_AUTO_UPDATE"] = "false"
+        runner = self._runner if self._runner is not subprocess.run else run_agent
+        try:
+            proc = runner(argv, input=None, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", stdin=subprocess.DEVNULL, timeout=timeout_s, env=env, cancel=cancel)
+        except subprocess.TimeoutExpired as exc:
+            raise CopilotCliError(f"GitHub Copilot CLI timed out after {timeout_s:g}s", "failed") from exc
+        except FileNotFoundError as exc:
+            raise CopilotCliError(MISSING, "missing") from exc
+        except OSError as exc:
+            raise CopilotCliError(f"GitHub Copilot CLI could not be started: {exc}", "failed") from exc
+        if proc.returncode != 0:
+            raise classify_failure(proc.stdout, proc.stderr)
+        text = (proc.stdout or "").strip()
+        return AgentResult(ok=True, text=text, usd=0.0, requests=1.0, input_tokens=estimate_tokens(brief),
+                           output_tokens=estimate_tokens(text))
 
     @staticmethod
     def build_prompt(messages: list[Message]) -> str:

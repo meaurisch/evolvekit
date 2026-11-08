@@ -226,8 +226,8 @@ def test_fixture_prints_bash_lines(tmp_path, capsys):
 DROPPED = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_PID", "CLAUDE_EFFORT",
            "CLAUDE_PREVIEW_PORT"]
 KEPT = ["CLAUDE_CODE_GIT_BASH_PATH", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
-        "ANTHROPIC_API_KEY", "CLAUDE_CLI_PATH"]
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY", "CLAUDE_CLI_PATH"]
 
 
 def _session_env(monkeypatch):
@@ -244,7 +244,7 @@ def test_gate_env_drops_the_launching_sessions_identity_and_keeps_the_sign_in(tm
     upper = {k.upper() for k in env}
     assert not set(DROPPED) & upper
     assert set(KEPT) <= upper
-    assert set(agent_gate.KEEP) == set(KEPT[:6])
+    assert set(agent_gate.KEEP) == set(KEPT[:8])
     assert env["EVOLVEKIT_HOME"] == str(tmp_path / "home")
 
 

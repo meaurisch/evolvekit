@@ -46,7 +46,8 @@ from evolvekit.harness.study import Study, parse_within, resolve_kpi
 
 __all__ = [
     "compile_study", "write_run", "runner_input", "runner_kpi", "base_settings",
-    "OPERATORS", "OPERATORS_WITH_AI", "OPERATORS_CODE", "OPERATORS_NO_SEARCH", "STUDY_RUN", "CONFIG", "UP",
+    "OPERATORS", "OPERATORS_WITH_AI", "OPERATORS_CODE", "OPERATORS_CODE_AGENT", "OPERATORS_NO_SEARCH",
+    "ACT_PROVIDERS", "STUDY_RUN", "CONFIG", "UP",
 ]
 
 STUDY_RUN = "study-run.json"
@@ -60,6 +61,14 @@ OPERATORS_WITH_AI = {"param_local": 0.35, "rewrite": 0.3, "param_tpe": 0.2, "par
 OPERATORS_CODE = {"diff": 1.0}
 """A code study's search: a diff against the base (decision 37: no rewrite,
 crossover or big step on a tree)."""
+
+ACT_PROVIDERS = ("claude-cli", "copilot-cli")
+"""The providers whose `act` runs a coding agent (`providers.base.supports_act`)."""
+
+OPERATORS_CODE_AGENT = {"agent_patch": 0.5, "diff": 0.5}
+"""A code study whose strong model's provider can act (decision 37): the
+coding agent beside the diff prompt. The plan's `rewrite` share is not
+compiled: `rewrite` does not work on a tree."""
 
 OPERATORS_NO_SEARCH = {"param_lhs": 1.0}
 """A bake-off, or a code study without a model: nothing is generated, and the
@@ -276,7 +285,8 @@ def compile_study(
     if code is not None:
         problem = {"description": _description(study, harness) + "\nWhat to improve: " + code.brief,
                    "tree": _tree(study, harness)}
-        operators = OPERATORS_CODE if ai else OPERATORS_NO_SEARCH
+        acts = ai and (models or {}).get("strong", {}).get("provider") in ACT_PROVIDERS
+        operators = (OPERATORS_CODE_AGENT if acts else OPERATORS_CODE) if ai else OPERATORS_NO_SEARCH
     else:
         problem = {"description": _description(study, harness), "parameters": parameters}
         operators = OPERATORS_WITH_AI if ai else OPERATORS

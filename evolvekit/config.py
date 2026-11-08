@@ -1588,7 +1588,7 @@ class NoveltyConfig:
 
 
 KNOWN_OPERATORS = (
-    "diff", "rewrite", "crossover", "param_lhs", "param_local", "param_cross", "param_tpe",
+    "diff", "rewrite", "crossover", "param_lhs", "param_local", "param_cross", "param_tpe", "agent_patch",
 )
 TYPED_SPACE_OPERATORS = frozenset({"param_local", "param_cross", "param_tpe"})
 """Operators that are arithmetic on a declared `problem.parameters` space."""
@@ -1859,8 +1859,9 @@ def _tree_rules(config: Config) -> Config:
     driver evaluate one candidate at a time, so `top_k_per_generation` would
     rank a round of one and promote everyone: refused. A `builtin-build` stage
     runs that build, under its timeout; without a build it has nothing to run.
-    The only AI operator on a tree is `diff` (decision 37): `rewrite`,
-    `crossover`, `big_step` and scheduled big steps are refused.
+    The AI operators on a tree are `diff` and `agent_patch` (decision 37):
+    `rewrite`, `crossover`, `big_step` and scheduled big steps are refused, and
+    `agent_patch` (a coding agent editing the tree) is refused without one.
     """
     tree = config.problem.tree
     for index, stage in enumerate(config.evaluate.stages):
@@ -1869,6 +1870,11 @@ def _tree_rules(config: Config) -> Config:
                 f"evaluate.stages[{index}]: a builtin-build stage runs problem.tree.build, and the problem gives none"
             )
     if tree is None:
+        if config.search.operators.get("agent_patch", 0) > 0:
+            raise ConfigError(
+                "search.operators.agent_patch: agent_patch changes a source tree, and this problem has none "
+                "(problem.tree)"
+            )
         return config
     for name in ("crossover", "rewrite"):
         if config.search.operators.get(name, 0) > 0:

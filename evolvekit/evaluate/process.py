@@ -95,6 +95,7 @@ def run_bounded(
     cpus: Sequence[int] = (),
     cancel: threading.Event | None = None,
     env: Mapping[str, str] | None = None,
+    stdin_path: Path | None = None,
 ) -> BoundedRun:
     """Run `argv`; never take longer than `timeout` plus the time to kill it.
 
@@ -103,17 +104,22 @@ def run_bounded(
     it. `cancel`, once set, ends the run as a timeout would: several runs in
     flight on worker threads have no Ctrl+C of their own to be reached by.
     `env` is the command's whole environment; without one, this process's
-    without its secrets (`scrubbed_environment`).
+    without its secrets (`scrubbed_environment`). `stdin_path` is read as the
+    command's stdin (a file, like its output: nothing here waits on a pipe);
+    without one, stdin is empty.
     """
     started = time.perf_counter()
     deadline = started + timeout
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     with open(stdout_path, "wb") as out, open(stderr_path, "wb") as err:
+        feed: Any = subprocess.DEVNULL
         try:
+            if stdin_path is not None:
+                feed = open(stdin_path, "rb")
             tree = _spawn(
                 list(argv),
                 tuple(cpus),
-                stdin=subprocess.DEVNULL,
+                stdin=feed,
                 stdout=out,
                 stderr=err,
                 cwd=str(cwd),
@@ -121,6 +127,9 @@ def run_bounded(
             )
         except OSError as exc:
             return BoundedRun(None, False, time.perf_counter() - started, str(exc))
+        finally:
+            if stdin_path is not None and feed is not subprocess.DEVNULL:
+                feed.close()  # the child holds its own handle now
         if tree.unpinned is not None:
             _warn_unpinned(tree.unpinned)
 

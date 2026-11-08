@@ -55,6 +55,7 @@ OPERATOR_ROLES = {
     "param_cross": "none",
     "param_tpe": "none",
     "big_step": "strong",
+    "agent_patch": "strong",  # a coding agent on the parent's tree (`search/agent_patch.py`)
 }
 
 

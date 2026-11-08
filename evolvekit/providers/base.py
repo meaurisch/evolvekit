@@ -12,12 +12,14 @@ from typing import Any, Protocol, runtime_checkable
 __all__ = [
     "Message",
     "Completion",
+    "AgentResult",
     "Provider",
     "EmbeddingProvider",
     "ProviderError",
     "split_system",
     "estimate_tokens",
     "embedding_tokens",
+    "supports_act",
 ]
 
 Message = dict[str, str]
@@ -49,6 +51,23 @@ class Completion:
         return self.input_tokens + self.output_tokens
 
 
+@dataclass(frozen=True)
+class AgentResult:
+    """What one `act` call did: the agent's last words and what it cost.
+
+    `ok` is false when the agent stopped at a limit (turns, money) before it
+    said it was done; its edits are still in the folder and are used as they
+    are (decision D14). A call that could not run, or failed outright, raises
+    `ProviderError` instead."""
+
+    ok: bool
+    text: str
+    usd: float | None = None
+    requests: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 @runtime_checkable
 class Provider(Protocol):
     """Structural type for all backends."""
@@ -68,6 +87,19 @@ class Provider(Protocol):
         assistant, `{"type": "json_object"}`): passed through by the backends
         whose API has it, accepted and ignored by the others."""
         ...
+
+
+def supports_act(provider: object) -> bool:
+    """The optional agent capability (design §5.4), asked for like `embed`:
+
+        act(brief: str, *, cwd: Path, model: str, timeout_s: float,
+            read_dirs: Sequence[Path] = (), max_usd: float | None = None,
+            cancel: threading.Event | None = None) -> AgentResult
+
+    A coding agent edits the files under `cwd` as `brief` asks, may read the
+    folders `read_dirs` names, spends at most `max_usd` when the tool can be
+    told so, and is ended (its whole process tree) when `cancel` is set."""
+    return callable(getattr(provider, "act", None))
 
 
 @runtime_checkable

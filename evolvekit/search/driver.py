@@ -1322,6 +1322,9 @@ class Driver:
         )
         if verdict.novel or not self.config.search.novelty_retry or role == "none":
             return outcome, verdict, attempts
+        if operator == "agent_patch":
+            # A whole agent run is not re-asked for a duplicate: the next round's brief shows it.
+            return outcome, verdict, attempts
         if not self.budget.check().allowed:
             return outcome, verdict, attempts
 
@@ -1366,6 +1369,8 @@ class Driver:
             if operator == "param_cross":
                 return param_cross(space, parent, self._mate_for(parent), seed=seed)
             return param_tpe(space, parent, self._observations(), seed=seed)
+        if operator == "agent_patch":
+            return self._agent_patch(parent, role, candidate_id)
         return run_operator(
             operator,
             config=self.config,
@@ -1381,6 +1386,59 @@ class Driver:
             extra_instruction=hint,
             tree=self._tree_context(candidate_id),
         )
+
+    AGENT_FAILURES = 3
+    """The most recent failures an agent's brief shows."""
+
+    def _agent_patch(self, parent: Candidate, role: str, candidate_id: str) -> OperatorResult:
+        """A coding agent on the parent's tree (`search/agent_patch.py`): shown the
+        archive's best and worst and the last failures, bounded by the study's time
+        left and what is left of `budget.max_usd`, ended by a Stop request."""
+        from evolvekit.search.agent_patch import agent_patch
+
+        context = self._tree_context(candidate_id)
+        if context is None:  # `config._tree_rules` refuses agent_patch without a tree
+            return OperatorResult(operator="agent_patch", messages=[],
+                                  error="agent_patch changes a source tree, and this problem has none")
+        best = self.best
+        competing = [c for c in self.archive if _competes(c) and c.fitness is not None]
+        worst = min(competing, key=lambda c: (c.fitness, c.id)) if competing else None
+        left_usd = self.budget.config.max_usd - self.budget.state.usd
+        return agent_patch(
+            config=self.config,
+            provider=self.provider(role),
+            model_role=role,
+            parent=parent,
+            parent_result=self.results.get(parent.id),
+            context=context,
+            best=best,
+            worst=None if worst is None or (best is not None and worst.id == best.id) else worst,
+            failures=self._failures(),
+            time_left_s=self.run_stop.left_s(),
+            max_usd=max(0.0, left_usd),
+            cancel=self.run_stop.event,
+        )
+
+    def _failures(self) -> list[str]:
+        """The archive's last `AGENT_FAILURES` failures, oldest first, each the
+        candidate's id, its reason and its feedback's tail (`FAILURE_LIMIT` at most)."""
+        from evolvekit.prompts import FAILURE_LIMIT
+
+        found: list[str] = []
+        for candidate in reversed(self.archive):
+            failure = (candidate.last_failure or "").strip()
+            if not failure:
+                continue
+            head, _, rest = failure.partition("\n")
+            if head.startswith("stage "):  # the stage's own feedback is the fuller tail
+                stage = head[len("stage "):].split(":", 1)[0]
+                rest = (candidate.feedback or {}).get(stage) or rest
+            lead = f"{candidate.id}: {head}"
+            room = max(0, FAILURE_LIMIT - len(lead) - 1)
+            found.append(f"{lead}\n{rest[-room:]}" if rest.strip() and room else lead[:FAILURE_LIMIT])
+            if len(found) == self.AGENT_FAILURES:
+                break
+        return list(reversed(found))
 
     def _tree_context(self, candidate_id: str) -> TreeContext | None:
         """For a tree problem: where the operator checks the parent out (a draft

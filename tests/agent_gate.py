@@ -144,20 +144,13 @@ def build_fixture(repo: Path, *, home: Path, harness: bool = True) -> None:
         subprocess.run(["git", *quiet, "commit", "-q", "--no-verify", "-m", "fixture"], cwd=repo, check=True)
 
 
-SESSION_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_PREVIEW_")
-SESSION_NAMES = ("CLAUDECODE",)
-KEEP = ("CLAUDE_CODE_GIT_BASH_PATH", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH")
-"""The launching coding-agent session's identity: with it the one-shot tool runs as that session's child (or
-refuses to start), so a fresh agent sees none of it. `KEEP` is configuration an engineer's sign-in may need, and
-every `ANTHROPIC_*` variable (the key, the endpoint, the model) and `CLAUDE_CLI_PATH` (evolvekit's own) are kept."""
-
-
-def _from_session(name: str) -> bool:
-    upper = name.upper()
-    if upper in KEEP:
-        return False
-    return upper in SESSION_NAMES or upper.startswith(SESSION_PREFIXES)
+# The launching coding-agent session's identity: with it the one-shot tool runs as that session's child (or
+# refuses to start), so a fresh agent sees none of it. One list for the gate and the providers' `act`
+# (`evolvekit/providers/agent_run.py`): `KEEP` is configuration an engineer's sign-in may need, and every
+# `ANTHROPIC_*` variable (the key, the endpoint, the model) and `CLAUDE_CLI_PATH` (evolvekit's own) are kept.
+from evolvekit.providers.agent_run import KEEP, SESSION_NAMES, SESSION_PREFIXES  # noqa: E402, F401
+from evolvekit.providers.agent_run import from_session as _from_session  # noqa: E402
+from evolvekit.providers.agent_run import without_session  # noqa: E402
 
 
 def _session_names() -> list[str]:
@@ -168,8 +161,7 @@ def _session_names() -> list[str]:
 def gate_env(home: Path) -> dict[str, str]:
     """The tool's environment: this home, the venv's `Scripts` first so `evolvekit` resolves, and nothing of
     the session that launched the gate."""
-    inherited = {k: v for k, v in os.environ.items() if not _from_session(k)}
-    return {**inherited, "EVOLVEKIT_HOME": str(home), "PYTHONIOENCODING": "utf-8",
+    return {**without_session(), "EVOLVEKIT_HOME": str(home), "PYTHONIOENCODING": "utf-8",
             "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
 
 
