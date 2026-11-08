@@ -37,17 +37,22 @@ from evolvekit.prompts import (
     _score_breakdown,
     problem_sections,
 )
-from evolvekit.tree import Tree, git, glob_pattern
+from evolvekit.tree import Repo, Tree, git, glob_pattern, relative_diff, resolve_commit
 
 __all__ = [
     "DIFF_FORMAT",
     "INSPIRATION_LINES",
+    "OPEN_LINES",
     "REFUSALS_SHOWN",
     "Refusal",
+    "base_files",
+    "for_model",
     "marked_block",
     "numbered",
     "open_files",
+    "open_lines_problem",
     "parse_diff_response",
+    "shown_lines",
     "tree_messages",
 ]
 
@@ -86,6 +91,14 @@ INSPIRATION_LINES = 80
 REFUSALS_SHOWN = 3
 """The most recent refused changes (build and static-check failures) a prompt shows."""
 
+OPEN_LINES = 2000
+"""The most numbered lines a prompt shows of the open files (of their one marked
+block, when they hold one). The files are shown whole, so a code study whose
+open files hold more is refused (`study check`), and so is an operator call
+whose parent grew them past it."""
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
 
 @dataclass(frozen=True)
 class Refusal:
@@ -115,6 +128,57 @@ def open_files(made: Tree, open: Sequence[str]) -> dict[str, str]:
             continue
         files[name] = data.decode("utf-8", errors="surrogateescape")
     return files
+
+
+def base_files(repo: Repo, ref: str, open: Sequence[str]) -> dict[str, str]:
+    """`open_files` as they are at `ref` (`working`: the working tree as it is),
+    read without checking anything out."""
+    patterns = [glob_pattern(p) for p in open]
+    if ref == "working":
+        listed = git(repo.path, "ls-files", "-z", "-c", "-o", "--exclude-standard", "--", ".").split("\0")
+        commit = ""
+    else:
+        commit = resolve_commit(repo, ref)
+        listed = git(repo.path, "ls-tree", "-r", "-z", "--name-only", commit, "--", ".").split("\0")
+    files: dict[str, str] = {}
+    for name in sorted({n for n in listed if n}):
+        if not any(p.fullmatch(name) for p in patterns):
+            continue
+        if commit:
+            text = git(repo.toplevel, "cat-file", "blob", f"{commit}:{repo.prefix}{name}")
+        else:
+            path = repo.path / name
+            if not path.is_file():
+                continue
+            text = path.read_bytes().decode("utf-8", errors="surrogateescape")
+        if "\0" not in text:
+            files[name] = text
+    return files
+
+
+def _count(text: str) -> int:
+    return len(text.split("\n")) - text.endswith("\n") if text else 0
+
+
+def shown_lines(files: dict[str, str], start: str, end: str) -> int:
+    """The numbered lines a prompt shows of these files: the one marked block's, else all of theirs."""
+    block = marked_block(files, start, end)
+    if block is not None:
+        return _count(block[1])
+    return sum(_count(text) for text in files.values())
+
+
+def open_lines_problem(lines: int) -> str:
+    return (f"the open files hold {lines} lines; a code study shows them whole, up to {OPEN_LINES} "
+            "— narrow vary.code.open")
+
+
+def for_model(text: str) -> str:
+    """Text that goes to a model: a lone surrogate (a byte of an open file that is
+    not UTF-8) becomes U+FFFD, which every backend can encode. Files on disk keep
+    their bytes (`surrogateescape`); a hunk the model writes over such a line
+    then does not apply, an ordinary format failure."""
+    return _SURROGATE.sub("\ufffd", text)
 
 
 def numbered(text: str) -> str:
@@ -163,14 +227,14 @@ def _refusal_section(refusals: Sequence[Refusal]) -> str:
     return "\n".join(parts) + "\n"
 
 
-def _inspiration_section(inspirations: Sequence[Inspiration]) -> str:
+def _inspiration_section(inspirations: Sequence[Inspiration], prefix: str) -> str:
     if not inspirations:
         return ""
     parts = ["\n## Other combinations in the archive (do not copy them verbatim)"]
     for item in inspirations:
         parts.append(f"### Another combination's change ({item.id}, {item.score_line})")
         if item.block is not None and item.block.strip():
-            lines = item.block.rstrip("\n").split("\n")
+            lines = relative_diff(item.block, prefix).rstrip("\n").split("\n")
             shown = "\n".join(lines[:INSPIRATION_LINES])
             if len(lines) > INSPIRATION_LINES:
                 shown += f"\n... ({len(lines) - INSPIRATION_LINES} more lines)"
@@ -193,9 +257,12 @@ def tree_messages(
     extra_instruction: str | None = None,
     block: tuple[str, str] | None = None,
     refusals: Sequence[Refusal] = (),
+    prefix: str = "",
 ) -> list[dict[str, str]]:
     """The system message (the protocol, then the problem's sections: identical
-    for every call of a run) and the bounded user message."""
+    for every call of a run) and the bounded user message. `prefix` (`Repo.prefix`)
+    is taken off the inspirations' paths, so they read like the open files'.
+    Both messages are `for_model`: no lone surrogate reaches a provider."""
     protocol = TREE_PROTOCOL if block is None else BLOCK_PROTOCOL
     system = f"{protocol}\n{problem_sections(config)}"
 
@@ -223,14 +290,16 @@ def tree_messages(
         f"{shown}\n"
         f"## How it scored\n{_score_breakdown(result, parent)}\n"
         f"{_feedback_section(result, parent)}{context}{_refusal_section(refusals)}"
-        f"{_inspiration_section(inspirations)}{_scratchpad_section(scratchpad)}{failure_section}\n"
+        f"{_inspiration_section(inspirations, prefix)}{_scratchpad_section(scratchpad)}{failure_section}\n"
         f"## Your task\n{instruction}\n\n{fmt}"
     )
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    return [{"role": "system", "content": for_model(system)}, {"role": "user", "content": for_model(user)}]
 
 
 _FENCED = re.compile(r"^```[ \t]*([A-Za-z0-9_+-]*)[^\n]*\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _START = re.compile(r"^(?:diff --git |--- )", re.MULTILINE)
+_DIFF_LEADS = (" ", "+", "-", "@@", "\\", "diff --git ", "index ", "new file", "deleted file", "old mode", "new mode",
+               "similarity ", "dissimilarity ", "rename ", "copy ", "Binary files ", "GIT binary patch")
 
 
 def _is_diff(text: str) -> bool:
@@ -239,8 +308,9 @@ def _is_diff(text: str) -> bool:
 
 def parse_diff_response(text: str) -> str:
     """The unified diff in a reply: the first ```diff, ```patch or bare fence that
-    holds one, else the text from its first `diff --git ` or `--- ` line (up to a
-    closing fence). Raises `DiffError` when there is none."""
+    holds one, else the text from its first `diff --git ` or `--- ` line, up to a
+    closing fence or to a blank line followed by a line no diff holds (the
+    commentary after it). Raises `DiffError` when there is none."""
     for match in _FENCED.finditer(text):
         if match.group(1).lower() in ("diff", "patch", "") and _is_diff(match.group(2)):
             return match.group(2)
@@ -250,6 +320,11 @@ def parse_diff_response(text: str) -> str:
         close = re.search(r"^```", body, re.MULTILINE)
         if close is not None:
             body = body[:close.start()]
+        lines = body.split("\n")
+        for i in range(1, len(lines) - 1):
+            if lines[i] == "" and lines[i + 1] and not lines[i + 1].startswith(_DIFF_LEADS):
+                body = "\n".join(lines[:i]) + "\n"
+                break
         if _is_diff(body):
             return body
     raise DiffError("the reply holds no unified diff (no '--- a/…', '+++ b/…' and '@@' lines)")

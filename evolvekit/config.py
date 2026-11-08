@@ -1859,6 +1859,8 @@ def _tree_rules(config: Config) -> Config:
     driver evaluate one candidate at a time, so `top_k_per_generation` would
     rank a round of one and promote everyone: refused. A `builtin-build` stage
     runs that build, under its timeout; without a build it has nothing to run.
+    The only AI operator on a tree is `diff` (decision 37): `rewrite`,
+    `crossover`, `big_step` and scheduled big steps are refused.
     """
     tree = config.problem.tree
     for index, stage in enumerate(config.evaluate.stages):
@@ -1868,6 +1870,16 @@ def _tree_rules(config: Config) -> Config:
             )
     if tree is None:
         return config
+    for name in ("crossover", "rewrite"):
+        if config.search.operators.get(name, 0) > 0:
+            raise ConfigError(
+                f"search.operators.{name}: does not work on a source tree (problem.tree); "
+                "a code study's AI operator is diff -- give it this share"
+            )
+    if config.search.takes_big_steps:
+        raise ConfigError(
+            "search.big_step_every: big steps do not work on a source tree (problem.tree); set it to 0"
+        )
     if tree.build:
         listed = config.evaluate.stages
         if len(listed) < 2 or listed[1].kind != "builtin-build":

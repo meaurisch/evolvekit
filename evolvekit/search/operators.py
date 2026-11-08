@@ -184,7 +184,16 @@ def _on_tree(
                    f"a code study uses {', '.join(TREE_OPERATORS)}"),
         )
     from evolvekit import tree as trees
-    from evolvekit.tree_prompts import marked_block, open_files, parse_diff_response, tree_messages
+    from evolvekit.tree_prompts import (
+        OPEN_LINES,
+        for_model,
+        marked_block,
+        open_files,
+        open_lines_problem,
+        parse_diff_response,
+        shown_lines,
+        tree_messages,
+    )
 
     problem = config.problem
     model_cfg = config.models.by_role(model_role)
@@ -198,14 +207,21 @@ def _on_tree(
         draft = trees.materialise(ctx.run_dir, repo=ctx.repo, base=ctx.base, diff=parent.block,
                                   candidate_id=ctx.draft_id)
     except trees.TreeError as exc:
-        return failed(f"the parent's change could not be checked out: {exc}")
+        # Not the model's answer: git or the run folder failed. Unpaid, and counted
+        # like a backend failure, so a run whose trees cannot be made stops.
+        return OperatorResult(operator=operator, messages=[], provider_error=True,
+                              error=f"the parent's change could not be checked out: {exc}")
     try:
         files = open_files(draft, ctx.open)
+        lines = shown_lines(files, problem.block_start, problem.block_end)
+        if lines > OPEN_LINES:  # the parent's diff grew them: refused before any call is paid for
+            return failed(open_lines_problem(lines))
         block = marked_block(files, problem.block_start, problem.block_end)
         messages = tree_messages(
             config, parent=parent, result=parent_result, operator=operator, files=files,
             best_score=best_score, inspirations=inspirations, scratchpad=scratchpad,
             extra_instruction=extra_instruction, block=block, refusals=ctx.refusals,
+            prefix=ctx.repo.prefix,
         )
         try:
             completion = provider.complete(
@@ -218,6 +234,10 @@ def _on_tree(
             if block is not None:
                 path, old = block
                 new, mode = apply_response(old, completion.text)
+                if new.count("\ufffd") > old.count("\ufffd") and for_model(old) != old:
+                    # The model saw U+FFFD for a byte that is not UTF-8 and wrote it back.
+                    raise DiffError("the reply rewrote a line holding a byte that is not UTF-8 "
+                                    "(shown as U+FFFD); leave such lines as they are")
                 target = draft.path / path
                 text = target.read_bytes().decode("utf-8", errors="surrogateescape")
                 spliced = splice_block(text, new, problem.block_start, problem.block_end)

@@ -243,3 +243,27 @@ def test_write_run_refuses_a_source_without_a_full_path(tmp_path, repo):
     with pytest.raises(HarnessError, match=re.escape("vary.code.repo: give the full path to the source")):
         write_run(study, harness, Plan.fixed(), tmp_path, "r1", bakeoff=True)
     assert not (tmp_path / "runs" / "r1").exists(), "nothing is written"
+
+
+def test_open_files_past_the_prompt_limit_refuse_the_study(tmp_path):
+    from evolvekit.tree_prompts import OPEN_LINES
+
+    top = tmp_path / "my repo"
+    (top / "src").mkdir(parents=True)
+    (top / "src" / "solver.py").write_text("".join(f"X{i} = {i}\n" for i in range(OPEN_LINES + 1)), encoding="utf-8")
+    git_init_commit(top)
+    harness = load_harness(DEMO)
+    study = study_from_template(harness, "faster", "F")
+    study.code.repo, study.budget.ai_enabled = str(top / "src"), True
+    sentence = (f"vary.code.open: the open files hold {OPEN_LINES + 1} lines; a code study shows them whole, "
+                f"up to {OPEN_LINES} — narrow vary.code.open")
+    assert sentence in study_problems(study, harness)
+    assert not any("open files hold" in p for p in study_problems(study, harness, for_search=False)), \
+        "a bake-off shows no files to a model"
+    (top / "src" / "solver.py").write_text("X = 1\n", encoding="utf-8")
+    assert sentence in study_problems(study, harness), "measured at the base (HEAD), not the working tree"
+    study.code.from_ref = "working"
+    assert not any("open files hold" in p for p in study_problems(study, harness))
+    tree_git(top, "commit", "-qam", "small")
+    study.code.from_ref = "HEAD"
+    assert not any("open files hold" in p for p in study_problems(study, harness))

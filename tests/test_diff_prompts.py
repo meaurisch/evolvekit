@@ -6,21 +6,24 @@ format failure; marked blocks inside an open file are the cheap special case."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 from test_driver_tree import _raw
 from tree_helpers import SOLVER, change, git_init_commit, head, make_repo
+from tree_helpers import git as tree_git
 
 from evolvekit import tree
 from evolvekit.candidate import Candidate
-from evolvekit.config import ArchiveConfig, DescriptorConfig, build_config
+from evolvekit.config import ArchiveConfig, ConfigError, DescriptorConfig, build_config
 from evolvekit.diffs import DiffError
+from evolvekit.prompts import Inspiration
 from evolvekit.providers.fake import FakeProvider
 from evolvekit.search.archive import Archive, descriptor_value
 from evolvekit.search.driver import Driver
 from evolvekit.search.operators import TreeContext, run_operator
-from evolvekit.tree_prompts import marked_block, numbered, open_files, parse_diff_response
+from evolvekit.tree_prompts import OPEN_LINES, marked_block, numbered, open_files, parse_diff_response
 
 
 @pytest.fixture
@@ -84,6 +87,10 @@ def test_parse_diff_fenced_and_bare():
     assert parse_diff_response(f"```patch\n{body}```") == body
     assert parse_diff_response(f"```\n{body}```") == body
     assert parse_diff_response("I changed one line.\n" + body) == body
+    assert parse_diff_response("I changed one line.\n" + body + "\nThat should help.\n") == body, \
+        "unfenced: cut at a blank line followed by a line no diff holds"
+    two = body + "\n--- a/other.py\n+++ b/other.py\n@@ -1 +1 @@\n-a\n+b\n"
+    assert parse_diff_response(two) == two, "a blank line between files is kept"
     assert parse_diff_response("diff --git a/solver.py b/solver.py\n" + body).startswith("diff --git")
     assert parse_diff_response(f"```python\nx = 1\n```\n```diff\n{body}```") == body, "the first fence with a diff"
     with pytest.raises(DiffError, match="holds no unified diff"):
@@ -190,15 +197,142 @@ def test_bytes_that_are_not_utf8_survive_the_prompt_and_the_diff(tmp_path):
     config = build_config(_raw(top, base), base_dir=tmp_path)
     ctx = TreeContext(tmp_path / "run", tree.Repo(top / "app dir"), base, ("solver.py",), "d.draft")
     seed = Candidate(id="s", generation=0, block="", source="", operator="human-seed")
-    reply = "```diff\n--- a/solver.py\n+++ b/solver.py\n@@ -1,3 +1,3 @@\n # caf\udce9\n-VALUE = 5\n+VALUE = 2\n print(VALUE)\n```"
-    provider = FakeProvider(responses=[reply])
+    over = "```diff\n--- a/solver.py\n+++ b/solver.py\n@@ -1,3 +1,3 @@\n # caf�\n-VALUE = 5\n+VALUE = 2\n print(VALUE)\n```"
+    clear = "```diff\n--- a/solver.py\n+++ b/solver.py\n@@ -2,2 +2,2 @@\n-VALUE = 5\n+VALUE = 2\n print(VALUE)\n```"
+    provider = FakeProvider(responses=[over, clear])
     try:
         result = _run("diff", provider, config=config, parent=seed, ctx=ctx)
-        assert "    1  # caf\udce9" in provider.calls[0]["messages"][-1]["content"]
+        sent = "".join(m["content"] for m in provider.calls[0]["messages"])
+        assert "    1  # caf�" in sent and not any("\ud800" <= ch <= "\udfff" for ch in sent), \
+            "U+FFFD to the model, never a lone surrogate"
+        assert not result.ok and not result.provider_error and "does not apply" in result.error, \
+            "a hunk over such a line is an ordinary format failure"
+        result = _run("diff", provider, config=config, parent=seed, ctx=ctx)
         assert result.ok and "+VALUE = 2" in result.block, result.error
-        assert tree.applies(ctx.repo, base, result.block)
+        assert tree.applies(ctx.repo, base, result.block), "the byte on disk is kept"
     finally:
         tree.remove_all(tmp_path / "run")
+
+
+def test_a_block_rewrite_that_writes_u_fffd_back_is_refused(tmp_path):
+    repo, base = _block_repo(tmp_path)
+    (repo / "app dir" / "rules.py").write_bytes(
+        b"# EVOLVE-BLOCK-START\ndef rule():\n    # caf\xe9\n    return 1\n# EVOLVE-BLOCK-END\n")
+    git_init_commit_again(repo)
+    raw = _raw(repo, head(repo))
+    raw["problem"]["tree"]["open"] = ["rules.py"]
+    config = build_config(raw, base_dir=tmp_path)
+    ctx = TreeContext(tmp_path / "run", tree.Repo(repo / "app dir"), head(repo), ("rules.py",), "b.draft")
+    seed = Candidate(id="s", generation=0, block="", source="", operator="human-seed")
+    try:
+        echo = "```python\ndef rule():\n    # caf�\n    return 2\n```"
+        result = _run("diff", FakeProvider(responses=[echo]), config=config, parent=seed, ctx=ctx)
+        assert not result.ok and "byte that is not UTF-8" in result.error
+        edit = "<<<<<<< SEARCH\n    return 1\n=======\n    return 2\n>>>>>>> REPLACE\n"
+        result = _run("diff", FakeProvider(responses=[edit]), config=config, parent=seed, ctx=ctx)
+        assert result.ok and "+    return 2" in result.block and tree.applies(ctx.repo, head(repo), result.block)
+    finally:
+        tree.remove_all(tmp_path / "run")
+
+
+def git_init_commit_again(top: Path) -> None:
+    tree_git(top, "add", "-A")
+    tree_git(top, "commit", "-q", "-m", "next")
+
+
+# -- paths: the open folder's, or the toplevel's -----------------------------
+
+
+def test_a_reply_in_toplevel_paths_applies_and_inspirations_read_relative(ctx, config, parent, project):
+    repo, _ = project
+    top = "--- a/app dir/solver.py\n+++ b/app dir/solver.py\n@@ -2 +2 @@\n-VALUE = 3\n+VALUE = 2\n"
+    result = _run("diff", FakeProvider(responses=[f"```diff\n{top}```"]), config=config, parent=parent, ctx=ctx)
+    assert result.ok and "+VALUE = 2" in result.block, result.error
+    other = change(repo, {"app dir/solver.py": SOLVER.replace("VALUE = 5", "VALUE = 4")})
+    assert "a/app dir/solver.py" in other
+    provider = FakeProvider(responses=["no diff"])
+    run_operator("diff", config=config, provider=provider, model_role="small", parent=parent, parent_result=None,
+                 skeleton_prefix="", skeleton_suffix="", tree=ctx,
+                 inspirations=[Inspiration(id="g001-c0002", summary="s", score_line="score 1", block=other)])
+    prompt = provider.calls[0]["messages"][-1]["content"]
+    assert "### Another combination's change (g001-c0002, score 1)" in prompt
+    assert "--- a/solver.py" in prompt and "+++ b/solver.py" in prompt and "app dir/" not in prompt
+    assert tree.relative_diff(other, "app dir/").startswith("diff --git a/solver.py b/solver.py")
+
+
+def test_a_crlf_file_takes_an_lf_diff(tmp_path):
+    top = tmp_path / "my repo"
+    (top / "app dir").mkdir(parents=True)
+    (top / ".gitattributes").write_bytes(b"* -text\n")
+    (top / "app dir" / "win.py").write_bytes(b"A = 1\r\nB = 2\r\nC = 3\r\n")
+    (top / "app dir" / "unix.py").write_bytes(b"X = 1\n")
+    git_init_commit(top)
+    repo = tree.Repo(top / "app dir")
+    made = tree.materialise(tmp_path / "run", repo=repo, base=head(top), diff="", candidate_id="c")
+    try:
+        assert (made.path / "win.py").read_bytes().count(b"\r\n") == 3
+        lf = ("--- a/win.py\n+++ b/win.py\n@@ -1,3 +1,3 @@\n A = 1\n-B = 2\n+B = 5\n C = 3\n"
+              "--- a/unix.py\n+++ b/unix.py\n@@ -1 +1 @@\n-X = 1\n+X = 2\n")
+        tree.apply_in(made, lf, directory="app dir")
+        assert (made.path / "win.py").read_bytes() == b"A = 1\r\nB = 5\r\nC = 3\r\n"
+        assert (made.path / "unix.py").read_bytes() == b"X = 2\n", "an LF file keeps LF"
+        with pytest.raises(tree.TreeError, match="the diff does not apply"):
+            tree.apply_in(made, "--- a/win.py\n+++ b/win.py\n@@ -2 +2 @@\n-B = 9\n+B = 1\n", directory="app dir")
+    finally:
+        tree.remove_all(tmp_path / "run")
+
+
+def test_a_reply_of_two_files_without_git_headers_and_wrong_counts_applies(project, tmp_path):
+    repo, base = project
+    made = tree.materialise(tmp_path / "run", repo=tree.Repo(repo / "app dir"), base=base, diff="", candidate_id="m")
+    try:
+        # git's own --recount would read bench.py's `--- a/` line as a removed line
+        reply = ("--- a/solver.py\n+++ b/solver.py\n@@ -1,9 +1,9 @@\n import json, os, sys, time\n-VALUE = 5\n"
+                 "+VALUE = 1\n started = time.time()\n\n--- a/bench.py\n+++ b/bench.py\n@@ -1 +1 @@\n"
+                 "-print('bench')\n+print('b')\n")
+        tree.apply_in(made, reply, directory="app dir")
+        assert "VALUE = 1" in (made.path / "solver.py").read_text(encoding="utf-8")
+        assert (made.path / "bench.py").read_text(encoding="utf-8") == "print('b')\n"
+    finally:
+        tree.remove_all(tmp_path / "run")
+
+
+# -- limits and faults -------------------------------------------------------
+
+
+def test_open_files_past_the_line_limit_are_refused_before_a_call(ctx, config, project):
+    repo, _ = project
+    grown = change(repo, {"app dir/solver.py": SOLVER + "".join(f"X{i} = {i}\n" for i in range(OPEN_LINES))})
+    big = Candidate(id="g001-c0001", generation=1, block=grown, source="", operator="diff")
+    provider = FakeProvider(responses=["x"])
+    result = _run("diff", provider, config=config, parent=big, ctx=ctx)
+    lines = OPEN_LINES + SOLVER.count("\n")
+    assert not result.ok and not provider.calls and not result.provider_error
+    assert result.error == (f"the open files hold {lines} lines; a code study shows them whole, up to 2000 "
+                            "— narrow vary.code.open")
+    assert not tree.tree_dir(ctx.run_dir, ctx.draft_id).exists()
+
+
+def test_a_parent_that_cannot_be_checked_out_is_not_the_model_s_failure(ctx, config):
+    broken = Candidate(id="p", generation=1, block="--- a/x\n+++ b/x\n@@ -1 +1 @@\n-no\n+yes\n", source="",
+                       operator="diff")
+    provider = FakeProvider(responses=["x"])
+    result = _run("diff", provider, config=config, parent=broken, ctx=ctx)
+    assert not result.ok and result.provider_error and not provider.calls
+    assert result.error.startswith("the parent's change could not be checked out")
+
+
+def test_a_tree_config_refuses_the_other_ai_operators(project, tmp_path):
+    repo, base = project
+    for name in ("rewrite", "crossover"):  # big_step is no share; it is `big_step_every`
+        raw = _raw(repo, base)
+        raw["search"]["operators"] = {"diff": 1.0, name: 0.5}
+        with pytest.raises(ConfigError, match=re.escape(f"search.operators.{name}: does not work on a source tree")):
+            build_config(raw, base_dir=tmp_path)
+    raw = _raw(repo, base)
+    raw["search"]["big_step_every"] = 3
+    with pytest.raises(ConfigError, match=re.escape("search.big_step_every: big steps do not work on a source tree")):
+        build_config(raw, base_dir=tmp_path)
 
 
 # -- the archive: a diff's size is its complexity ----------------------------

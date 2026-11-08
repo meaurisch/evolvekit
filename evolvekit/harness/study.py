@@ -19,7 +19,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import yaml
 
@@ -575,6 +575,23 @@ def _is_absolute(path: str) -> bool:
     return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
 
 
+def _open_lines(code: CodeVary, harness_open: Sequence[str]) -> str | None:
+    """A code study's prompts show the open files whole: past `OPEN_LINES` at the
+    base (the one marked block's lines, when they hold one), the sentence that
+    refuses the study; `None` otherwise, or when the source or the base cannot be
+    read (writing the run says why)."""
+    from evolvekit import tree
+    from evolvekit.config import ProblemConfig
+    from evolvekit.tree_prompts import OPEN_LINES, base_files, open_lines_problem, shown_lines
+
+    try:
+        files = base_files(tree.Repo(code.repo), code.from_ref, code.open or list(harness_open))
+    except tree.TreeError:
+        return None
+    lines = shown_lines(files, ProblemConfig.block_start, ProblemConfig.block_end)
+    return f"vary.code.open: {open_lines_problem(lines)}" if lines > OPEN_LINES else None
+
+
 def _code_problems(study: Study, harness: Harness, root: Path | None, for_search: bool) -> list[str]:
     """What keeps a code study (`vary.code`) from running: the source first."""
     code, problems = study.code, []
@@ -598,6 +615,11 @@ def _code_problems(study: Study, harness: Harness, root: Path | None, for_search
             if name not in harness.code.open and not any(p.fullmatch(name.replace("\\", "/").removeprefix("./"))
                                                          for p in allowed):
                 add(f"vary.code.open: {name} is not among the files the harness lets change")
+    if (for_search and harness.code is not None and code.repo and _is_absolute(code.repo)
+            and Path(code.repo).is_dir()):
+        shown = _open_lines(code, harness.code.open)
+        if shown is not None:
+            add(shown)
     if study.tunables():
         add("vary: a study changes code or tunes settings, not both yet; fix the settings, or vary code alone")
     if for_search and not study.budget.ai_enabled:

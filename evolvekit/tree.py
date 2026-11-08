@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +32,7 @@ __all__ = [
     "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError", "applies",
     "apply_in",
     "changed_files", "diff_between", "diff_stat", "git", "git_version", "glob_pattern", "materialise",
-    "normalise_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "staged_diff",
+    "normalise_diff", "relative_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "staged_diff",
     "touches_only",
     "tree_dir",
 ]
@@ -366,29 +366,146 @@ def _side_raw(path: str) -> str:
     return path.split("\t")[0].strip()
 
 
+def _mostly_crlf(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    crlf = data.count(b"\r\n")
+    return crlf > 0 and crlf * 2 > data.count(b"\n")
+
+
+def _with_crlf(diff: str, is_crlf: Callable[[str], bool]) -> str | None:
+    """The diff with `\\r` added to the hunk lines (context, removed, added) of
+    every file `is_crlf` names; `None` when it names none of the diff's files."""
+    norm = diff.replace("\r\n", "\n").replace("\r", "")
+    out: list[str] = []
+    crlf, minus, changed = False, "", False
+    for line, (kind, text) in zip(norm.split("\n"), _lines(norm)):
+        if kind == "h":
+            if text.startswith("diff --git "):
+                crlf = False
+            elif text.startswith("--- "):
+                minus = _side(text[4:])
+            elif text.startswith("+++ "):
+                plus = _side(text[4:])
+                crlf = is_crlf(minus if plus == "/dev/null" else plus)
+        elif kind in ("+", "-", " ") and crlf:
+            out.append((line or " ") + "\r")
+            changed = True
+            continue
+        out.append(line)
+    return "\n".join(out) if changed else None
+
+
+def _recount(diff: str) -> str:
+    """The diff with every hunk header's line counts made true, as a model's reply
+    needs. A hunk ends at the next hunk or file header (`diff --git`, or a `--- `
+    line followed by a `+++ ` line) or at a line no hunk holds; an empty line
+    inside it is an empty context line whose space was lost, and empty lines at
+    its end are dropped."""
+    lines = diff.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        hunk = _HUNK.match(lines[i])
+        if hunk is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        body: list[str] = []
+        j = i + 1
+        while j < len(lines):
+            line = lines[j]
+            if _HUNK.match(line) or line.startswith("diff --git ") or (
+                    line.startswith("--- ") and j + 1 < len(lines) and lines[j + 1].startswith("+++ ")):
+                break
+            if line and line[0] not in " +-\\":
+                break
+            body.append(line)
+            j += 1
+        while body and body[-1] == "":
+            body.pop()
+        body = [line or " " for line in body]
+        old = sum(line[0] in " -" for line in body)
+        new = sum(line[0] in " +" for line in body)
+        out.append(f"@@ -{hunk.group(1)},{old} +{hunk.group(3)},{new} @@{lines[i][hunk.end():]}")
+        out.extend(body)
+        i = j
+    return "\n".join(out)
+
+
 def apply_in(made: Tree, diff: str, *, directory: str = "") -> None:
     """Apply a diff (an operator's reply) to a tree's worktree and its index.
 
-    Paths are relative to `directory` (the repo's folder, `Repo.prefix`), with
-    or without git's `a/`/`b/`. Hunk counts are recounted and a hunk without
-    context lines is accepted (`--unidiff-zero`): models write both. Raises
-    `TreeError("the diff does not apply: …")`; the tree may then hold part of it.
+    Paths are relative to `directory` (the repo's folder, `Repo.prefix`), or
+    already from the toplevel (every path starts with `directory`), with or
+    without git's `a/`/`b/`. Hunk counts are recounted, and a hunk without
+    context lines is accepted (`--unidiff-zero`): models write both. Such a hunk
+    is anchored by its line number only, so it lands wherever its removed lines
+    match there. `git apply` without `--reject` is atomic: a diff that fails
+    leaves the tree as it was. A file committed with CRLF endings is shown
+    without its CRs, so when the diff fails as it is, it is tried once more with
+    `\\r` on the hunk lines of every file that is mostly CRLF (never with
+    `--ignore-whitespace`). Raises `TreeError("the diff does not apply: …")`.
     """
-    args = ["apply", "--index", "--whitespace=nowarn", "--recount", "--unidiff-zero"]
-    if directory:
-        args.append(f"--directory={directory}")
+    # Counted here, not by `--recount`: git's recount takes the next file's
+    # `--- a/x` for a removed line when a diff has no `diff --git` headers.
+    diff = _recount(diff)
+    args = ["apply", "--index", "--whitespace=nowarn", "--unidiff-zero"]
+    names = changed_files(diff)
+    root = directory.rstrip("/")
+    if root and not (names and all(name.startswith(root + "/") for name in names)):
+        args.append(f"--directory={root}")
+    else:
+        root = ""
     if not _sides_prefixed(diff):
         args.append("-p0")
-    with tempfile.TemporaryDirectory(prefix="evolvekit-reply-") as scratch:
-        patch = Path(scratch) / "reply.patch"
-        patch.write_text(diff if diff.endswith("\n") else diff + "\n", encoding="utf-8",
-                         errors="surrogateescape", newline="\n")
-        try:
+
+    def attempt(text: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="evolvekit-reply-") as scratch:
+            patch = Path(scratch) / "reply.patch"
+            patch.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8",
+                             errors="surrogateescape", newline="\n")
             _git(made.worktree, *args, str(patch))
-        except TreeError as exc:
-            if str(exc) == _MISSING:
-                raise
-            raise TreeError(f"the diff does not apply: {exc}") from None
+
+    try:
+        attempt(diff)
+        return
+    except TreeError as exc:
+        if str(exc) == _MISSING:
+            raise
+        first = exc
+    crlf = _with_crlf(diff, lambda name: _mostly_crlf(made.worktree / (f"{root}/{name}" if root else name)))
+    if crlf is not None:
+        try:
+            attempt(crlf)
+            return
+        except TreeError:
+            pass
+    raise TreeError(f"the diff does not apply: {first}") from None
+
+
+def relative_diff(diff: str, prefix: str) -> str:
+    """A candidate's diff (toplevel paths) with `prefix` (`Repo.prefix`) taken off
+    its file paths, as the open files are listed in a prompt."""
+    if not prefix:
+        return diff
+    out: list[str] = []
+    for kind, text in _lines(diff):
+        if kind in ("+", "-", " "):
+            out.append(kind + text)
+            continue
+        if kind == "h":
+            if text.startswith(("diff --git ", "--- ", "+++ ")):
+                for side in ("a/", "b/"):
+                    text = text.replace(f" {side}{prefix}", f" {side}").replace(f' "{side}{prefix}', f' "{side}')
+            else:
+                for lead in ("rename from ", "rename to ", "copy from ", "copy to "):
+                    if text.startswith(lead + prefix):
+                        text = lead + text[len(lead + prefix):]
+        out.append(text)
+    return "\n".join(out)
 
 
 def staged_diff(made: Tree, base: str) -> str:
