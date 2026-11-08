@@ -370,6 +370,8 @@ body.drawer-dims main { opacity: .5; }
 .strip-main { display: flex; gap: 16px; align-items: flex-start; min-width: 0; }
 .strip-words .type-display { overflow-wrap: anywhere; }
 .strip-branches { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.cand-cases { margin: 4px 0 8px; }
+.cand-cases td, .cand-cases th { padding: 4px 12px 4px 0; }
 .strip-words { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .strip-words .type-label { color: var(--ink-2); }
 .strip-words .tone-critical { color: var(--critical); }
@@ -378,7 +380,7 @@ body.drawer-dims main { opacity: .5; }
 .strip-side { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .strip-acts { display: flex; gap: 10px; flex-wrap: wrap; grid-column: 1 / -1; align-items: center; }
 .strip-rule { grid-column: 1 / -1; }
-.strip-facts { display: flex; gap: 6px 24px; flex-wrap: wrap; }
+.strip-facts { display: flex; gap: 6px 24px; flex-wrap: wrap; overflow-wrap: anywhere; }
 .strip-facts span { font: var(--type-small); }
 /* Below 1100 px the verdict's words take the full width and the range goes under them: beside it, a
    long verdict line wrapped to a word a line. */

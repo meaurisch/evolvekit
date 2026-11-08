@@ -26,14 +26,14 @@
         EK.onStudyChanged = function () { load().then(function () { if (EK.isCurrent(gen)) update(main); }); };
         draw(main);
         if (st.openRuns) runsDrawer();
-        // A live run's progress every 2.5 s; every 5 s, live or not, the study's runs: a run started
-        // elsewhere (a bake-off from the terminal) or a run that ended shows here without a reload.
-        var tick = 0;
+        // A live run's progress every 2.5 s; live or not, the study's runs as often as the runs route
+        // says (`poll_s`: 5 s while a run is live, 10 s when none is): a run started elsewhere (a
+        // bake-off from the terminal) or a run that ended shows here without a reload.
+        st.runsAt = Date.now() + runsDelay(null, isLive());
         EK.every(2500, function () {
           if (!st.status) return;
-          tick++;
           if (isLive()) load().then(function () { if (EK.isCurrent(gen)) update(main); }).catch(function () { /* the next poll tries again */ });
-          if (tick % 2 === 0) watchRuns();
+          if (Date.now() + 1250 >= st.runsAt) watchRuns();  // the beat nearest the time the route asked for
         });
         window.addEventListener("resize", onResize);
       });
@@ -63,9 +63,11 @@
   /** Ask for the study's runs as they are now; follow a new run, or bring the header, the notices and
       an open runs drawer up to date (a run that ended, a run that started while another was shown). */
   function watchRuns() {
-    var gen = st.gen;
+    var gen = st.gen, asked = Date.now();
+    st.runsAt = asked + runsDelay(null, !!st.status && isLive());  // asked: not again before the next beat
     return EK.get(EK.studyPath(st.slug, "/runs")).then(function (d) {
       if (!EK.isCurrent(gen)) return;
+      st.runsAt = asked + runsDelay(d, !!st.status && isLive());
       var old = st.doc.runs || [], fresh = d.runs || [];
       var to = newerRun(old, fresh, st.run);
       st.doc.runs = fresh;
@@ -77,6 +79,12 @@
       if (n) { var nh = String(notices()); n.innerHTML = nh; st.lastNotices = nh; }
       if (EK.drawerKind() === "runs") EK.refreshDrawer({ body: runsBody() });
     }).catch(function () { /* the next poll tries again */ });
+  }
+  /** How long until the runs route is asked again, in ms: its own `poll_s` (5 while a run of the study
+      is live, 10 when none is); before its first answer, the page's guess from the run it shows. */
+  function runsDelay(d, live) {
+    var s = d && Number(d.poll_s);
+    return (s > 0 ? s : live ? 5 : 10) * 1000;
   }
   /** Show a run that started while the page was open, in place of the one that was the newest. */
   function follow(run) {
@@ -175,7 +183,7 @@
     } else if (s.phase === "search") {
       var b = bestPct();
       Object.assign(x, { kicker: (cardState().continued ? "Searching again · " : "Searching · ") + roundWord(), head: b ? "Best so far: " + bestSays() : "Nothing better yet",
-        tag: b ? "Not checked yet" : "", sub: foundWords() || s.now || s.sentence,
+        tag: b ? "Not checked yet" : "", sub: searchSub(s, foundWords()),
         caption: EK.capital(roundWord()) + (s.time && s.time.finish_at ? " · done around " + s.time.finish_at : left ? " · " + left : ""),
         acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
     } else if (s.phase === "check") {
@@ -238,6 +246,20 @@
     }
     return x;
   }
+  /** The searching strip's sentence: while the AI writes a round's changes, the status document's `now`
+      ("Writing changes: 7 of 12."); else when the best so far was found, or what runs now. */
+  function searchSub(s, found) {
+    return s.writing ? s.now : found || s.now || s.sentence;
+  }
+  /** Facts said under a live run's strip, as the status document gives them: the AI's spend of its cap
+      while it searches or checks, and while it searches, how many planned rounds its pace buys. They
+      claim nothing about the result: that is the verdict's alone. */
+  function liveFacts(s) {
+    var out = [];
+    if ((s.phase === "search" || s.phase === "check") && s.spent && s.spent.line) out.push(s.spent.line);
+    if (s.phase === "search" && s.pace && s.pace.line) out.push(s.pace.line);
+    return out;
+  }
   /** The verdict in the results document's own words (design 3.4): its `line` is the headline and
       its `advice` the sentence under it, verbatim, so the page and the terminal say the same. */
   function verdictHead(f) { return f.line || "No answer yet"; }
@@ -266,11 +288,13 @@
       : x.range ? EK.intervalStrip(x.range[0], x.range[1], x.range[2], { width: w, onAccent: acc }) : "";
     var acts = x.acts.map(function (a) { return EK.button(a.text, Object.assign({ kind: "primary", onAccent: acc }, a)); });
     var rule = x.rule ? html`<p class="type-small strip-rule${acc ? "" : " ink-2"}">The rule: use it at 9 in 10 or better, worst within 1 %. ${EK.link("Why", { act: "why", cls: acc ? "on-accent-link" : "" })}</p>` : "";
+    var facts = liveFacts(st.status);
+    var factLine = facts.length ? html`<div class="strip-facts${acc ? "" : " ink-2"}">${facts.map(function (f) { return html`<span>${f}</span>`; })}</div>` : "";
     return html`<section class="status-strip${acc ? " is-accent" : ""}" aria-label="Status" aria-live="polite" aria-atomic="true">
       <div class="strip-main">${EK.verdictMark(x.mark, phone ? 36 : 44, acc)}<div class="strip-words">
         <span class="type-label${x.kickerTone === "accent" && !acc ? " accent-ink" : x.kickerTone === "critical" ? " tone-critical" : ""}">${x.kicker}</span>
         <p class="${acc ? "type-display" : "strip-head"}">${EK.figures(x.head)}${x.tag ? html` <span class="strip-tag">${x.tag}</span>` : ""}</p>
-        <p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p>${branchLines(acc)}</div></div>
+        <p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p>${factLine}${branchLines(acc)}</div></div>
       <div class="strip-side">${vis}${x.caption ? html`<span class="type-small${acc ? "" : " ink-2"}">${x.caption}</span>` : ""}
         ${acts.length ? html`<div class="actions">${acts}</div>` : ""}${rule}</div></section>`;
   }
@@ -443,6 +467,7 @@
   function drawView() {
     var panel = document.getElementById("view-panel");
     if (!panel) return;
+    syncCounts();
     var markup = String(viewHtml());
     if (markup === st.lastPlot) return;
     st.lastPlot = markup;
@@ -466,7 +491,16 @@
   function chipFigure(c) {
     var r = st.results, best = c && r && r.best_id === c.id && r.learned_pct != null;
     var now = c && st.status && isLive() && st.status.best && st.status.best.id === c.id && st.status.best.pct != null;
-    return { pct: best ? r.learned_pct : now ? st.status.best.pct : null, direction: (goalOf() || {}).direction };
+    return { pct: best ? r.learned_pct : now ? st.status.best.pct : null, direction: (goalOf() || {}).direction,
+      after: c ? chipAfter(decisionOf(), r && r.best_id, c) : null };
+  }
+  /** Once the final check has decided, the chip says no figure (a figure there reads as a live search):
+      on the combination it checked, the decision ("final check: keep"); on any other, nothing. Null
+      while there is no decision, and the chip says the figure, not checked. */
+  function chipAfter(decision, checkedId, c) {
+    var word = { use: "use it", keep: "keep", worse: "worse", single: "one case" }[decision];
+    if (!word) return null;
+    return c && c.id === checkedId ? "final check: " + word : "";
   }
   function chosenCombo() { var c = st.chosen && combo(st.chosen); return c && !c.base ? c : null; }
 
@@ -589,16 +623,25 @@
     out.push(EK.link("Compare with…", { href: "#/compare?a=" + EK.q(st.slug + "/" + st.run) }));
     return html`<section class="section" aria-labelledby="next-title"><h2 id="next-title">What next</h2><div class="actions">${out}</div></section>`;
   }
+  /** What the AI spent of its cap: the verdict's figure (`r.spent`) once there is one, the live one
+      (`s.spent`) before it; null for a run without AI. A fact, not a claim. */
+  function spentNow() {
+    var r = st.results, s = st.status;
+    return (r && r.spent) || (s.spent && s.spent.line ? s.spent : null);
+  }
   function details() {
     var r = st.results, s = st.status;
     var parts = [];
+    var spent = spentNow();
+    if (!r && spent) parts.push(html`<p class="type-small" id="details-spent">${spent.line}</p>`);
     if (r) {
       var c = r.context || {};
       parts.push(html`<div class="facts-grid">
         <div class="fact"><span class="type-label">Time per case</span><span>${EK.duration(c.time_per_case_s)}</span></div>
         <div class="fact"><span class="type-label">Time in total</span><span>${EK.hours(c.hours)}${c.took ? " · took " + c.took : ""}</span></div>
         <div class="fact"><span class="type-label">Combinations</span><span>${c.tried != null ? EK.int(c.tried) + " tried" : ""}</span></div>
-        <div class="fact"><span class="type-label">Starting point</span><span>${c.compared_with || ""}</span></div></div>`);
+        <div class="fact"><span class="type-label">Starting point</span><span>${c.compared_with || ""}</span></div>
+        ${spent ? html`<div class="fact"><span class="type-label">AI spend</span><span id="details-spent">${spent.line}</span></div>` : ""}</div>`);
       // How much of the plan ran, when less did: the verdict document's own sentence.
       if (r.how_it_ran) parts.push(html`<p class="type-small">${r.how_it_ran}</p>`);
       if (r.final && r.final.next) parts.push(html`<p class="type-small ink-2">${r.final.next}</p>`);
@@ -634,7 +677,8 @@
   function header() {
     var t = st.tries, tuned = ((t && t.parameters) || []).length, cases = ((st.doc.study.cases || {}).training || []).length;
     var runs = st.doc.runs || [];
-    var sub = (tuned ? EK.plural(tuned, "setting") + " · " : "") + EK.plural(cases, "study case") + " · " + heldCount() + " held back";
+    // A code study changes code: its header counts no settings (its fixed ones are not tuned).
+    var sub = (tuned && !isCode() ? EK.plural(tuned, "setting") + " · " : "") + EK.plural(cases, "study case") + " · " + heldCount() + " held back";
     return html`${EK.titleBlock("Study · " + EK.when(runStartedAt()), st.doc.study.name, sub,
       html`<div class="actions">${EK.link("Past runs (" + runs.length + ")", { act: "runs" })}${EK.link("Set up", { href: "#/setup/" + EK.q(st.slug) })}</div>`)}`;
   }
@@ -643,15 +687,35 @@
     var s = st.status, out = [];
     if (s.phase === "search" && /again/.test(s.sentence || "")) out.push(EK.notice("info", "Continued where it stopped, after a restart."));
     if (s.busy_line && isLive()) out.push(EK.notice("warning", "Your computer is busy. Tries may run slower.", { text: "Is it still fair?", act: "busy" }));
+    // Before and while the run: what to hear besides the plan (too few held-back cases for a firm answer).
+    if (isLive()) (s.notes || []).forEach(function (note) { out.push(EK.notice("info", note)); });
     var latest = (st.doc.runs || []).slice(-1)[0];
     if (latest && latest.id !== st.run) out.push(EK.notice("info", "An older run of this study.", { text: "See the latest", act: "latest" }));
     return EK.join(out);
   }
+  /** The view tabs' counts, from the tries the plot draws: combinations tried, cases, settings tuned and
+      combinations with a change to the code; null before there are tries. */
+  function tabCounts(t) {
+    if (!t || !t.available) return null;
+    var tried = (t.combinations || []).filter(function (c) { return !c.base; });
+    return { tries: tried.length, cases: (t.cases || []).length, settings: (t.parameters || []).length,
+      code: tried.filter(function (c) { return c.diff_stat; }).length };
+  }
+  /** Bring the tabs' counts up to the plot (a live run redraws the plot, never the tabs). */
+  function syncCounts() {
+    var counts = EK.isPhone() ? null : tabCounts(st.tries);
+    if (!counts) return;
+    EK.$$(".view-head .tab[data-arg]").forEach(function (tab) {
+      var n = counts[tab.getAttribute("data-arg")];
+      if (n == null) return;
+      var el = tab.querySelector(".tab-count");
+      if (!el) { el = document.createElement("span"); el.className = "tab-count"; tab.appendChild(el); }
+      if (el.textContent !== String(n)) el.textContent = String(n);
+    });
+  }
   function draw(main) {
     var phone = EK.isPhone();
-    var tried = st.tries && st.tries.available ? st.tries.combinations.filter(function (c) { return !c.base; }) : null;
-    var counts = tried ? { tries: tried.length, cases: st.tries.cases.length, settings: (st.tries.parameters || []).length,
-      code: tried.filter(function (c) { return c.diff_stat; }).length } : null;
+    var counts = tabCounts(st.tries);
     EK.mount(main, html`<div class="page"><div class="page-inner"><div id="study-head">${header()}</div><div id="study-notices">${notices()}</div>
       <div id="strip-slot">${statusStrip()}</div>
       <div class="sub-section"><div class="view-head">${EK.viewTabs(st.view, phone ? null : counts, viewKeys())}<div id="chip-slot" class="actions" style="padding:6px 0">${chipHtml()}</div></div>
@@ -675,6 +739,8 @@
     }
     var n = document.getElementById("study-notices");
     if (n) { var nh = String(notices()); if (nh !== st.lastNotices) { n.innerHTML = nh; st.lastNotices = nh; } }
+    var spentEl = document.getElementById("details-spent"), spent = spentNow();
+    if (spentEl && spent && spentEl.textContent !== spent.line) spentEl.textContent = spent.line;  // Details stays open
     if (!st.hover) drawView();
     companion();
     if (!isLive()) { EK._moveFocus = false; draw(main); watchRuns(); }
@@ -784,7 +850,8 @@
       var per = c.cases[st.tries.full_stage] || c.cases[Object.keys(c.cases).slice(-1)[0]] || {};
       var failed = (d.evaluations || []).filter(function (e) { return String(e.ok) === "false" || e.ok === false; });
       var parent = d.parent_id && combo(d.parent_id);
-      var body = html`<p class="type-body strong">${c.failed || c.pct == null ? "Did not finish" : EK.capital(EK.change(chipFigure(c).pct != null ? chipFigure(c).pct : c.pct, chipFigure(c).direction)) + " on the cases it learned from, not checked"}</p>
+      var body = html`<p class="type-body strong">${c.failed || c.pct == null ? "Did not finish" : EK.capital(EK.change(chipFigure(c).pct != null ? chipFigure(c).pct : c.pct, chipFigure(c).direction)) + " on the cases it learned from"
+          + (chipFigure(c).after ? "; the final check’s verdict is the answer" : ", not checked")}</p>
         <p class="type-small ink-2">${lookWords(c)}${parent ? " · comes from combination " + (parent.base ? (c.diff_stat ? "0, today’s code" : "0, today’s settings") : parent.n) : ""}</p>
         <div class="sub-section"><h3 class="type-heading">What it changed</h3>
           ${c.diff_stat ? html`<p class="type-small ink-2">${diffWords(c.diff_stat)}</p>` : ""}

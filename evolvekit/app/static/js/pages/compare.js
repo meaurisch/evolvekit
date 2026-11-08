@@ -72,8 +72,21 @@
 
   /** A bake-off's branches side by side (design 5.5): the starting point's column, then one column per
       branch with its mark, its own verdict line verbatim and its likely range. Nothing here composes a verdict. */
+  /** A case's name as the tables say it: its file name without folder or extension ("b-60"). */
+  function caseName(name) { return String(name || "").split("/").pop().replace(/\.[A-Za-z0-9]+$/, ""); }
+  /** A branch's held-back cases, each with its change (the paired mean of the final check's runs,
+      `by_case`), in the goal's direction as the report says it; none for a branch at the starting commit. */
+  function caseFigures(c, direction) {
+    var rows = c.by_case || [];
+    if (!rows.length) return "";
+    return html`<table class="changed-table cand-cases type-small"><thead><tr><th>Held-back case</th><th>Change (mean of the paired runs)</th></tr></thead><tbody>
+      ${rows.map(function (r) {
+        return html`<tr><td class="mono">${caseName(r.name)}</td><td>${r.outcome === "failed" ? "no runs finished" : EK.change(r.change_pct, direction)}</td></tr>`;
+      })}</tbody></table>`;
+  }
   function candidatesView(d, w) {
     var cols = [], c, mark = { use: "use", keep: "keep", worse: "worse" };
+    var direction = ["higher", "maximize"].indexOf((d.measure || {}).direction) >= 0 ? "higher" : "lower";
     var held = (d.held_back || {}).cases || 0, runs = (d.held_back || {}).runs_per_case;
     cols.push(html`<section class="cand-col"><span class="type-label ink-2">Starting point</span><p class="type-heading">Today’s code</p>
       ${EK.verdictMark("open", 36)}<p class="type-body">What every branch is measured against, on ${EK.plural(held, "held-back case")}${runs ? ", " + EK.plural(runs, "run") + " each" : ""}.</p></section>`);
@@ -82,6 +95,7 @@
       cols.push(html`<section class="cand-col"><span class="type-label ink-2">Branch</span><p class="type-heading mono">${c.ref}</p>
         <p class="type-small ink-2 mono">${String(c.commit || "").slice(0, 7)}</p>
         ${EK.verdictMark(mark[c.decision] || "none", 36)}<p class="type-body">${EK.figures(c.line)}</p>
+        ${caseFigures(c, direction)}
         ${c.mean_pct != null ? EK.intervalStrip(c.mean_pct, c.ci95_pct && c.ci95_pct[0], c.ci95_pct && c.ci95_pct[1], { width: w }) : ""}</section>`);
     }
     return html`<div class="cand-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(${Math.min(w, 240)}px,1fr));gap:24px">${cols}</div>`;

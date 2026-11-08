@@ -383,7 +383,8 @@ def test_no_difference_in_any_run_shows_its_line_and_no_band():
     lines = _page_function(STUDY_PAGE, "branchLines")
     assert "b.line" in lines and "intervalStrip" not in lines and "branchLines(acc)" in _page_function(STUDY_PAGE, "statusStrip"), \
         "a finished bake-off's strip says each branch's own line, with no band"
-    out = _node(_page_function(COMPARE_PAGE, "candidatesView"), """
+    out = _node(_page_function(COMPARE_PAGE, "caseName"), _page_function(COMPARE_PAGE, "caseFigures"),
+                _page_function(COMPARE_PAGE, "candidatesView"), """
       var line = "No difference in any run: every run of this change gave exactly today's result.";
       var d = {held_back: {cases: 2, runs_per_case: 12}, candidates: [
         {ref: "nearest-first", commit: "95dc9c5aa", decision: "keep", same: true, line: line},
@@ -408,3 +409,137 @@ def test_the_strip_and_the_drawer_never_push_the_page_sideways():
     assert ".status-strip > *" in css and "min-width: 0" in css[css.index(".status-strip > *"):][:80]
     words = css[css.index(".strip-words .type-display"):][:120]
     assert "overflow-wrap: anywhere" in words
+
+
+# ---------------------------------------------------------------------------
+# persona round 2 (code studies): the AI's spend and pace while it searches, the
+# AI's writing, counts that follow the plot, a chip and Details that end with the
+# verdict, each branch case by case, the thin-check note, the runs poll's pace
+# ---------------------------------------------------------------------------
+
+SETUP_PAGE = (STATIC / "js" / "pages" / "setup.js").read_text(encoding="utf-8")
+
+
+def test_the_strip_says_the_ai_spend_and_the_pace_while_a_run_searches():
+    """Persona round 2, D3 and D1: the AI's spend against its cap was shown nowhere, and the plan's 11
+    rounds became 2 with no word until the end. While a run searches the strip says the status
+    document's `spent.line` and `pace.line` as they are (facts: no gain claimed); Details and the
+    finished verdict's facts carry the spend."""
+    out = _node(_page_function(STUDY_PAGE, "liveFacts"), """
+      var spent = {usd: 0.42, cap_usd: 1, line: "AI: $0.42 of $1.00"};
+      var pace = {rounds: 2, planned: 11, line: "At this pace about 2 of the 11 planned rounds will run."};
+      process.stdout.write(JSON.stringify({
+        search: liveFacts({phase: "search", spent: spent, pace: pace}),
+        check: liveFacts({phase: "check", spent: spent, pace: null}),
+        noai: liveFacts({phase: "search", spent: null, pace: null}),
+        done: liveFacts({phase: "done", spent: spent, pace: pace})}));""")
+    assert out == {"search": ["AI: $0.42 of $1.00", "At this pace about 2 of the 11 planned rounds will run."],
+                   "check": ["AI: $0.42 of $1.00"], "noai": [], "done": []}, out
+    strip = _page_function(STUDY_PAGE, "statusStrip")
+    assert "liveFacts(st.status)" in strip and "strip-facts" in strip
+    spent = _page_function(STUDY_PAGE, "spentNow")
+    assert "r.spent" in spent and "s.spent" in spent, "the verdict's spend once finished, the live one before"
+    details = _page_function(STUDY_PAGE, "details")
+    assert "spentNow()" in details and "AI spend" in details, "Details' facts carry the spend"
+    assert "details-spent" in _page_function(STUDY_PAGE, "update"), "an open Details follows the live spend"
+    for word in ("better", "gain"):
+        assert word not in _page_function(STUDY_PAGE, "liveFacts")
+
+
+def test_while_the_ai_writes_a_rounds_changes_the_strip_says_so():
+    """Persona round 2, D4: for 3.5 minutes the strip said "Getting ready: preparing the runs" while the AI
+    wrote 12 changes. While `writing` is set the strip's sentence is the status document's `now`
+    ("Writing changes: 7 of 12."), even when a best so far was found in an earlier round."""
+    out = _node(_page_function(STUDY_PAGE, "searchSub"), """
+      var w = {phase: "search", writing: {done: 7, planned: 12}, now: "Writing changes: 7 of 12.", sentence: "Searching for better code."};
+      var r = {phase: "search", writing: null, now: "Round 2: 12 combinations on 5 cases, 3 of 60 runs done.", sentence: "Searching for better code."};
+      process.stdout.write(JSON.stringify({
+        writing: searchSub(w, "Found 3 min ago, on the 5 study cases."), first: searchSub(w, ""),
+        runs: searchSub(r, "Found 3 min ago, on the 5 study cases."), nothing: searchSub(r, "")}));""")
+    assert out == {"writing": "Writing changes: 7 of 12.", "first": "Writing changes: 7 of 12.",
+                   "runs": "Found 3 min ago, on the 5 study cases.",
+                   "nothing": "Round 2: 12 combinations on 5 cases, 3 of 60 runs done."}, out
+    assert "searchSub(s, foundWords())" in _strip_branches(STUDY_PAGE)
+
+
+def test_the_tab_counts_follow_the_plot_and_the_chip_ends_with_the_verdict():
+    """Persona round 2, D5: the Tries and Code tabs said "0" while dots and a best so far were on the plot;
+    after the verdict the chip still read "7.4 % lower on the cases it learned from, not checked". The
+    counts are redrawn with the plot; once the final check has decided, the chip says the decision on the
+    checked combination and no figure on any."""
+    out = _node(_page_function(STUDY_PAGE, "tabCounts"), _page_function(STUDY_PAGE, "chipAfter"), """
+      var t = {available: true, cases: ["a", "b"], parameters: [], combinations: [
+        {id: "seed", base: true}, {id: "c1", diff_stat: {added: 1}}, {id: "c2", diff_stat: {added: 2}}, {id: "c3"}]};
+      var c = {id: "c1", n: 17, pct: 7.4};
+      process.stdout.write(JSON.stringify({
+        counts: tabCounts(t), none: tabCounts({available: false}), empty: tabCounts({available: true, cases: [], combinations: [{id: "s", base: true}]}),
+        live: chipAfter(null, "c1", c), checked: chipAfter("keep", "c1", c), use: chipAfter("use", "c1", c), other: chipAfter("keep", "c9", c),
+        stopped: chipAfter("stopped", "c1", c),
+        chipLive: String(EK.chosenChip(c, {pct: 7.4, direction: "lower"})),
+        chipDone: String(EK.chosenChip(c, {after: chipAfter("keep", "c1", c)})),
+        chipOther: String(EK.chosenChip(c, {after: chipAfter("keep", "c9", c)}))}));""")
+    assert out["counts"] == {"tries": 3, "cases": 2, "settings": 0, "code": 2}, out["counts"]
+    assert out["none"] is None and out["empty"] == {"tries": 0, "cases": 0, "settings": 0, "code": 0}
+    assert out["live"] is None and out["stopped"] is None, "no decision: the figure, labelled as not checked"
+    assert out["checked"] == "final check: keep" and out["use"] == "final check: use it" and out["other"] == ""
+    assert "7.4 % lower" in out["chipLive"] and "not checked" in out["chipLive"]
+    for done in (out["chipDone"], out["chipOther"]):
+        assert "not checked" not in done and "%" not in done and "17" in done, done
+    assert "final check: keep" in out["chipDone"]
+    draw_view = _page_function(STUDY_PAGE, "drawView")
+    assert "syncCounts()" in draw_view, "the counts are redrawn with the plot"
+    assert "tabCounts(" in _page_function(STUDY_PAGE, "syncCounts") and "tabCounts(" in _page_function(STUDY_PAGE, "draw")
+    assert "chipAfter(" in _page_function(STUDY_PAGE, "chipFigure")
+
+
+def test_compare_branches_shows_each_branchs_held_back_cases():
+    """Persona round 2, D6: Compare branches gave each branch's line and band, not its figures on
+    b-60 and e-150. Under each branch's line: each held-back case's change (`by_case`), in the goal's
+    direction as the report says it; a branch at the starting commit has none."""
+    out = _node(_page_function(COMPARE_PAGE, "caseName"), _page_function(COMPARE_PAGE, "caseFigures"),
+                _page_function(COMPARE_PAGE, "candidatesView"), """
+      var d = {held_back: {cases: 2, runs_per_case: 12}, measure: {direction: "lower"}, candidates: [
+        {ref: "nearest-first", commit: "46a98f6aa", decision: "keep", line: "Not proven", mean_pct: 4.5, ci95_pct: [-2.6, 12.1],
+         by_case: [{name: "cases/b-60.json", change_pct: 4.1, outcome: "better"}, {name: "cases/e-150.json", change_pct: 5.3, outcome: "better"}]},
+        {ref: "restart-sooner", commit: "61782a1aa", decision: "keep", same: true, line: "No difference in any run",
+         by_case: [{name: "cases/b-60.json", change_pct: 0, outcome: "same"}, {name: "cases/e-150.json", change_pct: 0, outcome: "same"}]},
+        {ref: "main", commit: "0629c1faa", decision: "keep", today: true, line: "main is today's commit"}]};
+      var cols = String(candidatesView(d, 260)).split('<section class="cand-col">');
+      process.stdout.write(JSON.stringify({near: cols[2], same: cols[3], today: cols[4]}));""")
+    near, same, today = out["near"], out["same"], out["today"]
+    assert "b-60" in near and "4.1 % lower" in near and "e-150" in near and "5.3 % lower" in near, near
+    assert near.index("Not proven") < near.index("b-60"), "under its line"
+    assert "cases/" not in near and ".json" not in near
+    assert same.count("the same") == 2, same
+    assert "b-60" not in today, today
+    table = near[near.index("cand-cases"):near.index("</table>")]
+    assert "better" not in table, "a figure says lower or higher, never better"
+
+
+def test_the_thin_check_note_shows_before_and_during_the_run():
+    """Persona round 2, D2: nobody said that 2 held-back cases can hardly reach "use" until the money was
+    spent. The plan's `notes` show on Review and start, with the AI's assumed time; the status
+    document's `notes` show on the Study page while the run waits, starts, searches or checks."""
+    plan = _page_function(SETUP_PAGE, "planBlock")
+    assert "p.notes" in plan and 'EK.notice("info"' in plan[plan.index("p.notes") - 200:], plan
+    assert "p.ai_change_s" in plan, "the plan says what it assumes of the AI"
+    notes = _page_function(STUDY_PAGE, "notices")
+    assert "s.notes" in notes and "isLive()" in notes[notes.index("s.notes") - 80:notes.index("s.notes") + 80], notes
+
+
+def test_the_runs_poll_asks_as_often_as_the_route_says():
+    """Persona round 2, I1: the runs route is asked every `poll_s` seconds it answers with (5 while a run
+    is live, 10 when none is), and at the page's own guess of that before its first answer."""
+    out = _node(_page_function(STUDY_PAGE, "runsDelay"), """
+      process.stdout.write(JSON.stringify([runsDelay({poll_s: 5}, false), runsDelay({poll_s: 10}, true),
+        runsDelay(null, true), runsDelay(null, false), runsDelay({}, false)]));""")
+    assert out == [5000, 10000, 5000, 10000, 10000], out
+    watch = _page_function(STUDY_PAGE, "watchRuns")
+    assert "d.poll_s" in watch or "runsDelay(d" in watch, watch
+    assert "tick % 2" not in STUDY_PAGE, "no fixed 5 s beat any more"
+
+
+def test_a_code_studys_header_counts_no_settings():
+    """Persona round 2, M1: a code study's header said "N settings"."""
+    head = _page_function(STUDY_PAGE, "header")
+    assert "isCode()" in head and 'EK.plural(tuned, "setting")' in head, head

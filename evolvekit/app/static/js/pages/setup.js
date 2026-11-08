@@ -175,8 +175,12 @@
       return EK.button(text, { kind: i === 0 ? "secondary" : "quiet", act: "fix", arg: i, describedby: "fix-" + i });
     });
     var details = (p.fixes || []).map(function (f, i) { return html`<p class="type-small ink-2" id="fix-${i}">${f.kind === "fewer" ? "Top " + f.keep.length : "More time"}: ${f.detail}</p>`; });
+    // The time the plan counts for each change the AI writes (0 without AI), and what to hear before
+    // the start besides the plan: too few held-back cases for a firm answer. Neither stops the start.
+    var ai = p.ai_change_s > 0 ? html`<p class="type-small ink-2">The plan counts about ${Math.round(p.ai_change_s)} s for each change the AI writes.</p>` : "";
+    var notes = (p.notes || []).map(function (note) { return EK.notice("info", note); });
     return html`${bar}${fixes.length ? html`<div class="actions">${fixes}</div>${details}` : ""}
-      ${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}`;
+      ${ai}${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}${notes}`;
   }
 
   function testRun() {
