@@ -75,10 +75,18 @@ def test_entry_stop_on_the_cli_exe_is_the_clis_own(tmp_path, monkeypatch, calls)
     ["dashboard", "--export", "board.html"], ["harness", "new", "mine"],
     ["study", "new", "Depot", "--harness", "demo-tour", "--dir", "here"],
     ["harness", "pack", "_internal/harnesses/demo-tour"],
+    # fix round 1: the rest of what writes relative to the working folder
+    ["harness", "pack", "OUTSIDE", "--out", "."], ["leaderboard"],
+    ["leaderboard", "--run-dir", "OUTSIDE", "--html", "board.html"],
+    ["study", "run", "_internal"], ["study", "compile", "_internal"], ["study", "preview", "_internal"],
+    ["study", "list", "--home", "here"], ["study", "export", "depot", "--diff", "--home=."],
+    ["harness", "install", "x.zip", "--home", "lib"], ["doctor", "--home", "."], ["app", "--home", "."],
+    ["init", "OUTSIDE/../evolvekit app"],                        # an absolute path into the bundle
 ])
 def test_cli_refuses_to_write_into_the_bundle(tmp_path, monkeypatch, capsys, calls, argv):
     bundle = fake_bundle(monkeypatch, tmp_path / "Zoë Intern" / "evolvekit app", exe=resources.CLI_EXE)
     monkeypatch.chdir(bundle)
+    argv = [a.replace("OUTSIDE", str(tmp_path / "Zoë Intern" / "elsewhere")) for a in argv]
     assert entry.main(argv) == 2 and calls == []
     assert capsys.readouterr().err.strip() == ("error: this is the app's own folder: run evolvekit-cli.exe from a "
                                                "folder of yours (its full path works from anywhere)")
@@ -91,6 +99,81 @@ def test_cli_writes_outside_the_bundle_are_allowed(tmp_path, monkeypatch, calls)
     mine = tmp_path / "my work"; mine.mkdir(); monkeypatch.chdir(mine)
     assert entry.main(["init"]) == 0 and entry.main(["run"]) == 0                       # relative to a folder of yours
     assert calls == [["skill", "install", "--dir", str(tmp_path / "project")], ["study", "list"], ["doctor"], ["init"], ["run"]]
+
+@pytest.mark.parametrize("argv", [
+    ["preflight"], ["status"], ["export"], ["dashboard"], ["harness", "check", "_internal/harnesses/demo-tour"],
+    ["study", "run", "depot"], ["study", "compile", "depot", "--home", "HOME"],   # a study's name: in the home
+    ["harness", "pack", "_internal/harnesses/demo-tour", "--out", "ZIPS"],         # --out given: only it counts
+    ["init", "-h"], ["skill", "install", "--help"],                                # help prints, writes nothing
+    ["study", "list", "--home", "HOME"],
+])
+def test_cli_reads_and_outside_writes_run_in_the_bundle(tmp_path, monkeypatch, calls, argv):
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    monkeypatch.chdir(bundle)
+    argv = [{"HOME": str(tmp_path / "home"), "ZIPS": str(tmp_path / "zips")}.get(a, a) for a in argv]
+    assert entry.main(argv) == 0 and calls == [argv]
+
+def test_confirm_without_seeds_is_judged_by_its_run_dir(tmp_path, monkeypatch, calls):
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    monkeypatch.chdir(bundle)
+    assert entry.main(["confirm"]) == 2 and calls == []          # runs/latest would be in the bundle
+    monkeypatch.chdir(tmp_path)
+    assert entry.main(["confirm"]) == 0 and calls == [["confirm"]]  # cli.main then says --seeds is missing
+
+def test_a_failing_relaxed_parser_refuses_only_inside_the_bundle(tmp_path, monkeypatch, calls):
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    def broken(parser):
+        raise AttributeError("_actions")
+    monkeypatch.setattr(entry, "_relaxed", broken)
+    monkeypatch.chdir(bundle)
+    assert entry.main(["init", str(tmp_path / "mine")]) == 2 and calls == []
+    monkeypatch.chdir(tmp_path)
+    assert entry.main(["init"]) == 0 and calls == [["init"]]
+
+def test_writes_into_bundle_is_false_unfrozen(tmp_path):
+    assert resources.is_frozen() is False
+    assert entry.writes_into_bundle(["init"]) is False and entry.writes_into_bundle(["run"]) is False
+
+@pytest.mark.parametrize("given", ["--home", "--home=", "--hom"])
+def test_a_relative_home_is_made_absolute_once(tmp_path, monkeypatch, calls, given):
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app"); fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    home = (tmp_path / "rel ë").resolve()
+    argv = [given + "rel ë"] if given.endswith("=") else [given, "rel ë"]
+    assert entry.main([*argv, "--no-browser"]) == 0
+    expected = [given + str(home)] if given.endswith("=") else [given, str(home)]
+    assert calls == [["app", *expected, "--no-browser"]]
+    assert os.path.samefile(Path.cwd(), home) and not (home / "rel ë").exists()
+
+def test_a_relative_home_is_served_where_it_was_made(tmp_path, monkeypatch):
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app"); fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    served = []
+    monkeypatch.setattr(AppServer, "serve_forever", lambda self: served.append(self.home.root))
+    monkeypatch.setattr("evolvekit.dashboard.open_in_browser", lambda url: None)
+    assert entry.main(["--home", "rel", "--port", "8794"]) == 0
+    assert len(served) == 1 and os.path.samefile(served[0], tmp_path / "rel")
+    assert not (tmp_path / "rel" / "rel").exists()
+
+@pytest.mark.parametrize("windowless", [True, False])
+def test_a_home_that_cannot_be_made_is_said(tmp_path, monkeypatch, capsys, calls, windowless):
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    (tmp_path / "a file").write_text("", encoding="utf-8")
+    boxes = []
+    monkeypatch.setattr(entry, "_message_box", boxes.append)
+    if windowless:
+        monkeypatch.setattr(sys, "stdout", None); monkeypatch.setattr(sys, "stderr", None)
+    assert entry.main(["--home", str(tmp_path / "a file" / "home")]) == 1 and calls == []
+    said = boxes if windowless else [capsys.readouterr().err.strip()]
+    assert len(said) == 1 and said[0].startswith(f"error: the library home {(tmp_path / 'a file' / 'home').resolve()} "
+                                                 "cannot be used: ")
+    assert boxes == [] or windowless
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a Windows message box")
+def test_message_box_is_messageboxw(monkeypatch):
+    import ctypes
+    shown = []
+    monkeypatch.setattr(ctypes.windll.user32, "MessageBoxW", lambda *a: shown.append(a) or 1)
+    entry._message_box("the reason")
+    assert shown == [(None, "the reason", "evolvekit", 0x10)]
 
 def test_entry_m_runs_a_module(tmp_path, monkeypatch):
     (tmp_path / "ek_probe_mod.py").write_text(
@@ -111,11 +194,57 @@ def test_entry_c_runs_code(tmp_path, monkeypatch):
     assert entry.main(["-c", code, str(out)]) == 0
     assert json.loads(out.read_text(encoding="utf-8")) == ["__main__", ["-c", str(out)]]
 
-@pytest.mark.parametrize("form", [["--script"], []])
-def test_entry_script_runs_a_file(tmp_path, monkeypatch, form):
+@pytest.mark.parametrize("form", ["-m", "-c"])
+def test_m_and_c_import_from_the_current_folder(tmp_path, monkeypatch, form):
+    name = "ek_local_" + form[1]
+    (tmp_path / f"{name}.py").write_text("import sys\nsys.ek_seen = sys.path[0]\n", encoding="utf-8")
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(sys, "ek_seen", None, raising=False)
+    assert entry.main(["-m", name] if form == "-m" else ["-c", f"import {name}"]) == 0
+    assert sys.ek_seen == (os.getcwd() if form == "-m" else "")
+    sys.modules.pop(name, None)
+
+@pytest.mark.parametrize("form", [["-c"], ["--script"], ["-u"], ["-X"], ["-B", "doctor"]])
+def test_python_forms_without_their_argument_are_usage(tmp_path, monkeypatch, capsys, calls, form):
+    assert entry.main(form) == 2 and calls == []
+    assert capsys.readouterr().err.startswith("usage: ")
+
+@pytest.mark.parametrize("flags", [["-u"], ["-B"], ["-uB"], ["-X", "utf8"], ["-Xutf8"], ["-W", "ignore"],
+                                   ["-u", "-X", "utf8", "-W", "ignore", "-B"]])
+def test_pythons_own_flags_are_ignored(tmp_path, monkeypatch, flags):
+    out = tmp_path / "flags.json"
+    code = "import json, sys; open(sys.argv[1], 'w', encoding='utf-8').write(json.dumps(sys.argv))"
+    assert entry.main([*flags, "-c", code, str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8")) == ["-c", str(out)]
+
+@pytest.mark.parametrize("argv", [["-"], ["-u", "-"], ["-", "x"]])
+def test_a_program_from_stdin_is_refused(tmp_path, monkeypatch, capsys, calls, argv):
+    assert entry.main(argv) == 2 and calls == []
+    assert capsys.readouterr().err.strip() == "evolvekit-cli.exe cannot read a program from its input; give a file"
+
+@pytest.mark.parametrize("code, exit_code", [("raise SystemExit('msg')", "msg"), ("raise SystemExit(None)", None),
+                                             ("raise SystemExit(4)", 4)])
+def test_system_exit_passes_through(tmp_path, monkeypatch, code, exit_code):
+    with pytest.raises(SystemExit) as stopped:
+        entry.main(["-c", code])
+    assert stopped.value.code == exit_code
+
+@pytest.mark.parametrize("code, exit_code, said", [("raise SystemExit('msg')", 1, "msg"),
+                                                   ("raise SystemExit(None)", 0, ""),
+                                                   ("raise ValueError('boom ë')", 1, "Traceback")])
+def test_the_exit_code_is_pythons(tmp_path, code, exit_code, said):
+    import subprocess
+    checkout = Path(entry.__file__).resolve().parents[2]
+    done = subprocess.run([sys.executable, "-m", "evolvekit.app.entry", "-c", code], cwd=checkout,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    assert done.returncode == exit_code
+    assert said in done.stderr and ("ValueError: boom" in done.stderr if said == "Traceback" else True)
+
+@pytest.mark.parametrize("form, name", [(["--script"], "run me.py"), ([], "run me.py"), ([], "RUN ME.PY")])
+def test_entry_script_runs_a_file(tmp_path, monkeypatch, form, name):
     folder = tmp_path / "my scripts ë"; folder.mkdir()
     (folder / "helper_ek.py").write_text("WORD = 'beside'\n", encoding="utf-8")
-    script = folder / "run me.py"
+    script = folder / name
     script.write_text("import json, sys, helper_ek\n"
                       "open(sys.argv[1], 'w', encoding='utf-8').write(json.dumps([__name__, helper_ek.WORD, sys.argv]))\n",
                       encoding="utf-8")
@@ -127,9 +256,13 @@ def test_entry_script_runs_a_file(tmp_path, monkeypatch, form):
 def test_entry_gives_a_windowless_process_streams(tmp_path, monkeypatch):
     fake_bundle(monkeypatch, tmp_path / "evolvekit app")
     monkeypatch.setattr(sys, "stdout", None); monkeypatch.setattr(sys, "stderr", None)
-    monkeypatch.setattr(cli, "main", lambda argv=None: (sys.stdout.write("x"), sys.stdout.flush(), 0)[-1])
+    seen = []
+    monkeypatch.setattr(cli, "main", lambda argv=None: (seen.extend([sys.stdout, sys.stderr]), sys.stdout.write("x"),
+                                                        sys.stdout.flush(), sys.stderr.flush(), 0)[-1])
     assert entry.main(["study", "list"]) == 0
     assert sys.dont_write_bytecode is True
+    assert len(seen) == 2 and all(handle.closed for handle in seen)   # the devnull handles are closed after
+    assert sys.stdout is None and sys.stderr is None
 
 def test_second_start_opens_running_app(tmp_path, monkeypatch):
     fake_bundle(monkeypatch, tmp_path / "evolvekit app")
