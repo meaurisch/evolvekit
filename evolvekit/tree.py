@@ -9,8 +9,11 @@ files it changes, refuse files outside `open`, and count its lines.
 The engineer's checkout is never touched: worktrees, temporary index files and
 `refs/evolvekit/*` only. Every git call goes through `_git`, which pins the
 settings that would otherwise differ between machines (a Windows checkout's
-`core.autocrlf=true` would refuse LF diffs). Nothing here is imported unless a
-study varies code, so settings studies never need git.
+`core.autocrlf=true` would refuse LF diffs), so a tree holds its commit's files
+byte for byte. Only a candidate's change is added with the repository's own
+line-ending rules (`staged_diff`), so its block is what the engineer's git would
+commit. Nothing here is imported unless a study varies code, so settings
+studies never need git.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from typing import Any
 __all__ = [
     "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError", "applies",
     "apply_in",
-    "changed_files", "diff_between", "diff_stat", "git", "git_version", "glob_pattern", "materialise",
+    "changed_files", "diff_between", "diff_stat", "git", "git_version", "glob_pattern", "keep_endings", "materialise",
     "normalise_diff", "relative_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "staged_diff", "staged_diff_without_strays",
     "touches_only",
     "tree_dir",
@@ -578,10 +581,57 @@ def relative_diff(diff: str, prefix: str) -> str:
     return "\n".join(out)
 
 
+def _ending(data: bytes) -> bytes | None:
+    """`\\r\\n` when every line of `data` ends so, `\\n` when none does; `None` when
+    they are mixed or there is no line end."""
+    lf, crlf = data.count(b"\n"), data.count(b"\r\n")
+    if not lf:
+        return None
+    return b"\r\n" if crlf == lf else b"\n" if not crlf else None
+
+
+def keep_endings(made: Tree) -> list[str]:
+    """Give every tracked file an operator rewrote the line endings the tree's
+    commit holds it with: a file that was all LF is LF again, one that was all
+    CRLF is CRLF again (a file with mixed endings, a new file and a binary file
+    stay as written). A coding agent's editor may write a whole file with CRLF,
+    and a marked block's rewrite comes back LF: either would otherwise record a
+    rewrite of every line. The toplevel paths changed, sorted."""
+    listed = _git(made.worktree, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=M", "HEAD", "--")
+    fixed: list[str] = []
+    for rel in sorted(name for name in listed.split("\0") if name):
+        target = made.worktree / rel
+        try:
+            data = target.read_bytes()
+            old = _git(made.worktree, "cat-file", "blob", f"HEAD:{rel}").encode("utf-8", errors="surrogateescape")
+        except (OSError, TreeError):
+            continue
+        want = _ending(old)
+        if want is None or b"\0" in data or b"\0" in old:
+            continue
+        lf = data.replace(b"\r\n", b"\n")
+        kept = lf if want == b"\n" else lf.replace(b"\n", b"\r\n")
+        if kept != data:
+            target.write_bytes(kept)
+            fixed.append(rel)
+    return fixed
+
+
+def _add_all(made: Tree) -> None:
+    """`git add -A` with the repository's own line-ending rules (`core.autocrlf`,
+    `core.eol`, `.gitattributes`), so the block is what the engineer's git would
+    commit: under `core.autocrlf=true` a CRLF file is recorded LF. Never refused
+    for a conversion it could not undo (`core.safecrlf`): nothing is checked out."""
+    _git(made.worktree, "-c", "core.safecrlf=false", "add", "-A", "--", ".", checkout_eol=True)
+
+
 def staged_diff(made: Tree, base: str) -> str:
     """Everything the tree's worktree now holds against `base`, as a candidate's block
-    (cumulative, toplevel paths with `a/`/`b/`): `git add -A`, then the index's diff."""
-    _git(made.worktree, "add", "-A", "--", ".")
+    (cumulative, toplevel paths with `a/`/`b/`): the rewritten files' line endings
+    kept (`keep_endings`), `git add -A` with the repository's own rules, then the
+    index's diff."""
+    keep_endings(made)
+    _add_all(made)
     return _git(made.worktree, "diff", "--cached", *_DIFF, base)
 
 
@@ -595,7 +645,8 @@ def staged_diff_without_strays(made: Tree, base: str, open: Sequence[str], *, pr
     or a cache it leaves behind is not its change. A tracked file outside `open`
     that is modified, deleted or has its mode changed stays in the block (a rename
     is a deletion and an addition: `--no-renames`), so `touches_only` still refuses it."""
-    _git(made.worktree, "add", "-A", "--", ".")
+    keep_endings(made)
+    _add_all(made)
     listed = _git(made.worktree, "diff", "--cached", "--name-status", "-z", "--no-renames", "--diff-filter=A",
                   base)
     parts = [part for part in listed.split("\0") if part]
