@@ -74,7 +74,13 @@
     return { kind: kind, phase: s.phase, decision: d, rounds: s.rounds, continued: /again|on, with more time/.test(s.sentence || ""),
       check_stopped: d === "stopped" || (s.phase === "stopped" && f.state === "stopped"), what: whatOf() };
   }
-  function whatOf() { return Object.keys((st.doc.study.vary || {}).data || {}).length && !Object.keys((st.doc.study.vary || {}).settings || {}).length ? "data" : "settings"; }
+  function whatOf() {
+    if (isCode()) return "code";
+    return Object.keys((st.doc.study.vary || {}).data || {}).length && !Object.keys((st.doc.study.vary || {}).settings || {}).length ? "data" : "settings";
+  }
+  /** A code study (vary.code): its runs can compare branches; a bake-off run has its branches side by side. */
+  function isCode() { return !!(st.doc.study.vary || {}).code; }
+  function isBakeoff() { return !!(st.status && st.status.bakeoff && st.status.bakeoff.length); }
   function heldCount() { return ((st.doc.study.cases || {}).test || []).length; }
   function roundWord() {
     var r = st.status.rounds || {}, now = Math.min((r.done || 0) + 1, r.planned || 99);
@@ -167,6 +173,11 @@
         acts: [{ text: "Continue the check", act: "check" }] });
     } else {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Finished", head: verdictHead(f), sub: verdictSub(f), acts: [] });
+    }
+    if (s.phase === "done" && isCode()) {
+      // A code study's finished run: given branches can be checked against its starting point.
+      if (isBakeoff()) x.acts.push({ text: "See the branches side by side", kind: "secondary", act: "candidates" });
+      x.acts.push({ text: "Compare branches", kind: "secondary", act: "branches" });
     }
     return x;
   }
@@ -425,10 +436,12 @@
     var dl = (r.downloads || []).map(function (x) {
       return EK.link(x.label, { href: EK.withToken(EK.studyPath(st.slug, "/download/" + EK.q(x.name) + "?run=" + EK.q(st.run))), download: true, icon: EK.gl("file", 18) });
     });
-    var keepIt = d !== "use";
-    return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">${keepIt ? "Settings to keep" : "Settings to use"}</h2>
+    var keepIt = d !== "use", code = isCode();
+    var title = code ? (keepIt ? "Code to keep" : "The code change to use") : (keepIt ? "Settings to keep" : "Settings to use");
+    return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">${title}</h2>
       ${keepIt ? html`<p class="type-body strong">Nothing to change: ${EK.keepWords({ what: whatOf() }).replace(/^Keep /, "keep ")}${(r.context || {}).compared_with ? " (" + r.context.compared_with + ")" : ""}.</p>
-        <p class="type-small ink-2">Hand over today’s settings. Below them is what the search found: not proven on held-back cases, so not recommended.</p>` : ""}
+        <p class="type-small ink-2">${code ? "Keep today’s code. Below it is the change that came closest: not proven on held-back cases, so not recommended."
+          : "Hand over today’s settings. Below them is what the search found: not proven on held-back cases, so not recommended."}</p>` : ""}
       ${changedTable()}
       <div class="actions">${keepIt && hasExport("settings_json") ? EK.button("Show today’s settings", { act: "show-today" }) : ""}
         ${hasExport("settings_json") ? EK.button(keepIt ? "Settings found, not recommended" : "Show the settings file", { kind: "secondary", act: "show-settings" }) : ""}
@@ -616,6 +629,8 @@
       },
       latest: function () { EK.go(EK.studyHref(st.slug)); },
       runs: runsDrawer,
+      branches: branchesDrawer,
+      candidates: function () { EK.go("#/compare?run=" + EK.q(st.slug + "/" + st.run)); },
       details: function (el) { return comboDrawer(el.getAttribute("data-arg")); }
     };
   }
@@ -645,6 +660,27 @@
           })}</div>` : ""}`;
       EK.openDrawer({ title: "Combination " + c.n + " · round " + c.round, wide: true, body: body });
     }).catch(EK.fail);
+  }
+  /** "Compare branches": branch names, one per line, each checked against the starting point with no search. */
+  function branchesDrawer() {
+    var draft = "", said = "";
+    function body() {
+      return html`<p class="type-small ink-2">Each branch is run against the starting point on the ${EK.plural(heldCount(), "held-back case")}, with no search. Only the open files may differ.</p>
+        <form class="sub-section" data-submit="go">
+          ${EK.textInput({ id: "bake-refs", label: "Branches, one per line", mono: true, multiline: true, rows: 4, value: draft, invalid: said || null,
+            hint: "Names of branches, tags or commits of the source." })}
+          <div class="actions">${EK.button("Compare them", { type: "submit" })}</div></form>`;
+    }
+    EK.openDrawer({ kind: "branches", title: "Compare branches", sub: "Your own branches against the starting point", body: body(),
+      acts: { go: function () {
+        draft = document.getElementById("bake-refs").value;
+        var refs = draft.split(/\r?\n/).map(function (r) { return r.trim(); }).filter(Boolean);
+        EK.post(EK.studyPath(st.slug, "/bakeoff"), { refs: refs }).then(function (res) {
+          EK.closeDrawer();
+          EK.toast("done", res.queued ? "Queued: it starts when the running study finishes" : "Comparing " + EK.plural(refs.length, "branch", "branches"));
+          EK.go(EK.studyHref(st.slug, res.run));
+        }).catch(function (err) { said = err.message; EK.refreshDrawer({ body: body() }); });
+      } } });
   }
   function runsDrawer() {
     var runs = (st.doc.runs || []).slice().reverse().map(function (r) {

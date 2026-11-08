@@ -40,7 +40,15 @@ from evolvekit.evaluate.process import scrubbed_environment
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import CONFIG, STUDY_RUN
-from evolvekit.harness.execute import JOB, ExportFailed, export_path, read_job, run_study_of, write_exports
+from evolvekit.harness.execute import (
+    BAKEOFF,
+    JOB,
+    ExportFailed,
+    export_path,
+    read_job,
+    run_study_of,
+    write_exports,
+)
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
@@ -49,7 +57,8 @@ from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
 __all__ = ["active_run", "can_continue", "can_resume", "continue_run", "download", "latest_run", "launch_queued",
-           "next_study", "phase", "report_html", "results", "resume_final_check", "run_alive", "run_line", "running", "runs",
+           "check_refs", "next_study", "phase", "report_html", "results", "resume_final_check", "run_alive", "run_line",
+           "running", "runs",
            "start", "state_line", "status", "stop"]
 
 LAUNCH = "launch.json"
@@ -388,7 +397,8 @@ def can_resume(run_dir: Path, job: dict[str, Any]) -> bool:
     process died) with a search on record that has rounds of its plan left.
     A run that never searched, or searched to the end, starts again instead;
     a check that stopped is `resume_final_check`'s."""
-    if job.get("phase") not in ("failed", "stopped") or not (run_dir / "runs.jsonl").is_file():
+    if (job.get("phase") not in ("failed", "stopped") or not (run_dir / "runs.jsonl").is_file()
+            or job.get("bakeoff")):  # a bake-off has no search: its check is checked again instead
         return False
     search = job.get("search") or {}
     planned = int(_plan(run_dir, job).get("generations") or 0)
@@ -399,7 +409,7 @@ def can_continue(run_dir: Path, job: dict[str, Any]) -> bool:
     """Whether a run can go on with more time (`continue_run`): it ended --
     done, or stopped -- with a search on record that was not aborted, on a
     directory that still holds the compiled study and the runs."""
-    if job.get("phase") not in ("done", "stopped"):
+    if job.get("phase") not in ("done", "stopped") or job.get("bakeoff"):  # a bake-off has no search to go on with
         return False
     search = job.get("search") or {}
     if not search or search.get("aborted") or search.get("generations") is None:
@@ -427,15 +437,99 @@ def continue_run(home: Any, root: Path, run: str, hours: float | None = None) ->
     return {"run": run, "continued": True}
 
 
-def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]:
+def check_refs(root: Path, study: Study, harness: Harness, refs: list[str], *,
+               base: str | None = None) -> list[dict[str, Any]]:
+    """The branches a bake-off compares, checked before anything runs:
+    `[{"ref", "commit", "files"}]` in the order given. Each ref's change is its
+    own (`tree.diff_between`, from the merge-base with the base), may touch only
+    the open files, and must apply on the base. `base` is the commit the run
+    pinned; by default the study's `vary.code.from` as it is now (for `working`,
+    `HEAD`: the snapshot is taken once, when the run is written). Raises
+    `AppError` (409) with the sentence that says what to do."""
+    if study.code is None:
+        raise AppError("study bakeoff compares branches of a code study; this study tunes settings", 409)
+    if not isinstance(refs, list) or not refs or not all(isinstance(r, str) and r.strip() for r in refs):
+        raise AppError("refs: name at least one branch", 400)
+    problems = study_problems(study, harness, root=root, for_search=False)
+    if problems:
+        raise AppError(f"the study is not ready yet: {problems[0]}", 409)
+    if not study.test:
+        raise AppError("cases.test: hold back at least one case; branches are compared on held-back cases", 409)
+    twice = next((r for i, r in enumerate(refs) if r in refs[:i]), None)
+    if twice is not None:
+        raise AppError(f"{twice} is given twice", 409)
+    from evolvekit import tree  # only a code study needs git
+
+    open_files = list(study.code.open or (harness.code.open if harness.code else ()))
+    try:
+        repo = tree.Repo(study.code.repo)
+        if base is None:
+            base = tree.resolve_commit(repo, "HEAD" if study.code.from_ref == "working" else study.code.from_ref)
+        checked = []
+        for ref in refs:
+            commit = tree.resolve_commit(repo, ref)
+            diff = tree.diff_between(repo, base, ref)
+            outside = tree.touches_only(diff, open_files, prefix=repo.prefix)
+            if outside:
+                raise AppError(f"{ref} changes files outside the open files: {', '.join(outside)}; "
+                               "widen vary.code.open or the harness's code.open", 409)
+            if not tree.applies(repo, base, diff):
+                raise AppError(f"{ref}: does not apply on the base; rebase {ref} onto it", 409)
+            prefix = repo.prefix
+            checked.append({"ref": ref, "commit": commit,
+                            "files": [f[len(prefix):] if prefix and f.startswith(prefix) else f
+                                      for f in tree.changed_files(diff)]})
+    except tree.TreeError as exc:
+        raise AppError(str(exc), 409) from None
+    return checked
+
+
+def _start_bakeoff(home: Any, root: Path, refs: list[str]) -> dict[str, Any]:
+    study, harness = load_study(root), load_harness(root / "harness")
+    check_refs(root, study, harness, refs)  # now, so a bad ref is refused before any run exists
+    run_dir = _new_run_dir(root)
+    _atomic_write(run_dir / BAKEOFF, json.dumps({"refs": list(refs)}, indent=2) + "\n")
+    with _launch_guard:
+        if active_run(home) is not None:
+            (run_dir / QUEUED).write_text(json.dumps({"queued_at": _now().isoformat(timespec="seconds")}, indent=2),
+                                          encoding="utf-8")
+            return {"run": run_dir.name, "queued": True}
+        _launch(home, root, run_dir, ["--bakeoff"], with_keys=False)
+    return {"run": run_dir.name}
+
+
+def _new_run_dir(root: Path) -> Path:
+    """A new run directory, named by the time; `-2`, `-3`, ... for a second start within the second."""
+    base = _now().astimezone().strftime("%Y%m%d-%H%M%S")
+    run_id, number = base, 2
+    while (root / "runs" / run_id).exists():
+        run_id, number = f"{base}-{number}", number + 1
+    run_dir = root / "runs" / run_id
+    run_dir.mkdir(parents=True)  # new, so no stale stop request can be waiting in it
+    return run_dir
+
+
+def _launch_args(run_dir: Path) -> list[str]:
+    """What `job.py` is told for a run launched from the queue: a bake-off compares its branches."""
+    return ["--bakeoff"] if (run_dir / BAKEOFF).is_file() else []
+
+
+def start(home: Any, root: Path, *, resume: str | None = None, bakeoff: list[str] | None = None) -> dict[str, Any]:
     """Start the study: a new run, or with `resume` the run of that name
     again from where it stopped (`job.py --resume`). A stop request left in
     the run directory is removed first: it was answered, and the resume is
     not to answer it again. One study runs at a time: while another study's
     run is active, a new run is queued (`{"run": id, "queued": True}`) and
-    launched by the server when that one is done."""
+    launched by the server when that one is done.
+
+    With `bakeoff` (branch names), a run with no search that checks each
+    branch against the starting point on the held-back cases: the refs are
+    checked first (`check_refs`), then written to `runs/<id>/bakeoff.json`,
+    and the run is `job.py --bakeoff`."""
     if running(root):
         raise AppError("the study is already running", 409)
+    if bakeoff is not None:
+        return _start_bakeoff(home, root, bakeoff)
     if resume is not None:
         run_dir = _run_dir(root, resume)
         if not can_resume(run_dir, phase(run_dir)):
@@ -455,12 +549,8 @@ def start(home: Any, root: Path, *, resume: str | None = None) -> dict[str, Any]
         if models is None:
             raise AppError("AI search help is on, and there is no key for it: add one in Settings, or turn AI help off", 409)
         _cap_holds(home, study)
-    base = _now().astimezone().strftime("%Y%m%d-%H%M%S")
-    run_id, number = base, 2
-    while (root / "runs" / run_id).exists():  # a second start within the second: -2, -3, ...
-        run_id, number = f"{base}-{number}", number + 1
-    run_dir = root / "runs" / run_id
-    run_dir.mkdir(parents=True)  # new, so no stale stop request can be waiting in it
+    run_dir = _new_run_dir(root)
+    run_id = run_dir.name
     if models:
         (run_dir / MODELS).write_text(json.dumps(models, indent=2), encoding="utf-8")
     with _launch_guard:
@@ -514,7 +604,8 @@ def launch_queued(home: Any) -> str | None:
             waited = None
         (run_dir / QUEUED).unlink(missing_ok=True)
         try:
-            _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir), claimed=True)
+            _launch(home, root, run_dir, _launch_args(run_dir), with_keys=_wants_keys(root, run_dir) and not _launch_args(run_dir),
+                    claimed=True)
         except AppError:
             # The launcher started nothing: queued again, as it was, and the
             # next tick tries once more. Any other failure may have started
@@ -601,13 +692,19 @@ def _in_sentence(label: str) -> str:
 
 
 def _what(study: Study) -> str:
+    if study.code is not None:
+        return "code change"
     settings, data = bool(study.tuned_settings()), bool(study.data)
     return "combination of settings and data changes" if settings and data else "data changes" if data else "settings"
 
 
 def _baseline(study: Study, harness: Harness, seed: dict[str, Any] | None) -> str:
     """What the starting point is, in words: "PyVRP's own defaults", "the
-    settings in today.json", "the data as it is", or both."""
+    settings in today.json", "the data as it is", or both; for a code study
+    "the code at <ref>"."""
+    if study.code is not None:
+        ref = study.code.from_ref
+        return "the files as they were when the run started" if ref == "working" else f"the code at {ref}"
     parts = []
     settings_input = next((n for n, s in harness.inputs.items() if s.provides == "settings"), None)
     params = (seed or {}).get("params") or {}
@@ -781,8 +878,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "starting": "Starting.",
         "search": ("Searching on, with more time." if _continued(job)
                    else "Searching again, from where it stopped." if job.get("resumed_at")
-                   else "Searching for better " + _what(study) + "."),
-        "check": "Checking the best on the cases the search never saw.",
+                   else "Searching for better " + ("code" if study.code is not None else _what(study)) + "."),
+        "check": ("Checking each branch against the starting point on the held-back cases." if job.get("bakeoff")
+                  else "Checking the best on the cases the search never saw."),
         "done": "Finished.",
         "stopped": "Stopped." + (f" {job['search'].get('stop_reason')}." if (job.get("search") or {}).get("stop_reason") else ""),
         "failed": "It failed: " + str(job.get("error") or "no reason recorded") + ".",
@@ -812,6 +910,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "busy_line": ("Other programs kept this computer busy during the study. A run with a time limit then finds a "
                       "little less than it would alone, so close heavy programs while a study runs." if busy else ""),
         "final": job.get("final"),
+        "bakeoff": job.get("bakeoff"),
         # A run stopped before its search began has a `search` but no runs, and nothing to check.
         "can_check": (bool(job.get("search")) and job.get("phase") in ("stopped", "failed") and bool(study.test)
                       and (run_dir / "runs.jsonl").is_file()),
@@ -1060,17 +1159,23 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     document = document_of(run_dir) if (run_dir / "events.jsonl").exists() else {}
     goal = _goal(study, harness)
     seed, best = _seed_and_best(run_dir, document)
+    if best is None and job.get("bakeoff"):  # no search, so no status document: the branch the check chose
+        best = verdict_doc._best_of(job, _rows(run_dir))
     improvement = ((document.get("progress") or {}).get("improvement") or {})
     pct = improvement.get("pct")
     what = _what(study)
     learned = "on the cases the search learned from"
     start_words = f"your starting point ({_baseline(study, harness, seed)})"
-    if best is None or seed is None:
+    if job.get("bakeoff"):
+        count = len(job["bakeoff"])
+        headline = (f"{count} branch{'es' if count != 1 else ''} checked against {start_words} "
+                    "on the held-back cases, with no search.")
+    elif best is None or seed is None:
         headline = "The search has no finished result yet."
     elif best.get("id") == seed.get("id") or not pct or pct <= 0:
         headline = f"No {what} found beat {start_words} {learned}."
     else:
-        headline = (f"The best {what} found give{'s' if what.startswith('combination') else ''} {_pct(pct)} "
+        headline = (f"The best {what} found give{'s' if what.startswith(('combination', 'code')) else ''} {_pct(pct)} "
                     f"{_better_word(goal['direction'])} {goal['says']} than {start_words} {learned}.")
     final_state = job.get("final") or {}
     comparison, check_runs = verdict_doc._check_of(run_dir, final_state)
@@ -1078,7 +1183,8 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     facts = verdict_doc._run_facts(run_dir, job)
     started, used_s = facts["started"], facts["used_s"]
     final = _final_words(job, comparison, goal, what, baseline)
-    final["recheck"] = _recheck(final, plan, comparison, used_s) if job.get("phase") == "done" else None
+    final["recheck"] = (_recheck(final, plan, comparison, used_s)
+                        if job.get("phase") == "done" and not job.get("bakeoff") else None)
     if final.get("state") in ("unclear", "worse", "single"):
         final["next"] = ("For a firmer answer: bring more cases (other days or weeks) and start a new study from "
                          "this result that holds more of them back.")
@@ -1130,7 +1236,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     # The headline, the advice, the decision and its numbers are the verdict
     # document's, so the page and `build_verdict` cannot say two things.
     verdict = verdict_doc._document(root, run_dir, study, harness, job, final, comparison, by_case["held"], changed,
-                                    facts, learned_pct)
+                                    facts, learned_pct, baseline=baseline)
     final["line"], final["advice"] = verdict["line"], verdict["advice"]
     # The held-back table's change is the document's: the paired mean over the final check's runs.
     paired = {row["name"]: row["change_pct"] for row in verdict["by_case"]}
@@ -1150,6 +1256,8 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "cases": {"training": list(study.training), "test": list(study.test)},
         "can_continue": can_continue(run_dir, job),
     }
+    if "candidates" in verdict:  # a bake-off: every branch with its own decision and line
+        data["candidates"], data["bakeoff"] = verdict["candidates"], job.get("bakeoff")
     data["summary_text"] = _summary_text(data)
     return data
 
@@ -1351,9 +1459,11 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
 
 
 def _kind_of(study: Study | None) -> str:
-    """"settings", "data" or "both": what a study changes, for "keep today's settings"."""
+    """"settings", "data", "both" or "code": what a study changes, for "keep today's settings"."""
     if study is None:
         return "settings"
+    if study.code is not None:
+        return "code"
     settings, data = bool(study.tuned_settings()), bool(study.data)
     return "both" if settings and data else "data" if data else "settings"
 
@@ -1371,7 +1481,7 @@ def _check_progress(run_dir: Path, job: dict[str, Any], plan: dict[str, Any], st
     if events.is_file():
         with events.open(encoding="utf-8", errors="replace") as handle:
             done = sum(1 for line in handle if '"eval_finished"' in line)
-    planned = 2 * cases * seeds
+    planned = (1 + len(job.get("bakeoff") or [None])) * cases * seeds  # the starting point and each candidate
     return {"done": min(done, planned), "planned": planned}
 
 

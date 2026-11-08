@@ -61,7 +61,47 @@
     });
   }
 
+  /** A bake-off's branches side by side (design 5.5): the starting point's column, then one column per
+      branch with its mark, its own verdict line verbatim and its likely range. Nothing here composes a verdict. */
+  function candidatesView(d, w) {
+    var cols = [], c, mark = { use: "use", keep: "keep", worse: "worse" };
+    var held = (d.held_back || {}).cases || 0, runs = (d.held_back || {}).runs_per_case;
+    cols.push(html`<section class="cand-col"><span class="type-label ink-2">Starting point</span><p class="type-heading">Today’s code</p>
+      ${EK.verdictMark("open", 36)}<p class="type-body">What every branch is measured against, on ${EK.plural(held, "held-back case")}${runs ? ", " + EK.plural(runs, "run") + " each" : ""}.</p></section>`);
+    for (var i = 0; i < (d.candidates || []).length; i++) {
+      c = d.candidates[i];
+      cols.push(html`<section class="cand-col"><span class="type-label ink-2">Branch</span><p class="type-heading mono">${c.ref}</p>
+        <p class="type-small ink-2 mono">${String(c.commit || "").slice(0, 7)}</p>
+        ${EK.verdictMark(mark[c.decision] || "none", 36)}<p class="type-body">${EK.figures(c.line)}</p>
+        ${c.mean_pct != null ? EK.intervalStrip(c.mean_pct, c.ci95_pct && c.ci95_pct[0], c.ci95_pct && c.ci95_pct[1], { width: w }) : ""}</section>`);
+    }
+    return html`<div class="cand-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(${Math.min(w, 240)}px,1fr));gap:24px">${cols}</div>`;
+  }
+
+  function renderCandidates(main, run, gen) {
+    var slug = run.split("/")[0], id = run.split("/").slice(1).join("/");
+    return EK.get(EK.studyPath(slug, "/verdict?run=" + EK.q(id))).then(function (d) {
+      if (!EK.isCurrent(gen)) return;
+      var back = EK.link("Back to the run", { href: EK.studyHref(slug, id) });
+      if (!d.candidates) {
+        EK.mount(main, html`<div class="page"><div class="page-inner narrow">${EK.titleBlock("Compare branches", "No branches in this run")}
+          ${EK.notice("info", "This run searched; it compared no branches.")}<p>${back}</p></div></div>`);
+        return;
+      }
+      var w = EK.isPhone() ? 300 : 260;
+      EK.mount(main, html`<div class="page"><div class="page-inner">${EK.titleBlock("Compare branches · " + EK.plural(d.candidates.length, "branch", "branches"), d.line, d.advice)}
+        ${candidatesView(d, w)}
+        <p class="type-small ink-2">${d.rule ? "The rule, for each branch: " + d.rule : ""}</p>
+        <div class="actions">${back}${EK.link("Home", { href: "#/" })}</div></div></div>`);
+      EK.companion.show({ phase: d.decision === "use" ? "butterfly" : "butterfly-dull", say: d.line });
+    }, function (err) {
+      if (!EK.isCurrent(gen)) return;
+      EK.mount(main, html`<div class="page"><div class="page-inner narrow">${EK.titleBlock("Compare branches", "Nothing to compare")}${EK.notice("error", err.message)}<p>${EK.link("Home", { href: "#/" })}</p></div></div>`);
+    });
+  }
+
   function render(main, slug, query, gen) {
+    if (query.run) return renderCandidates(main, query.run, gen);
     if (!query.a) {
       EK.mount(main, html`<div class="page"><div class="page-inner narrow">${EK.titleBlock("Compare", "Which did better?")}
         ${EK.notice("info", "Pick two studies on Home, under Compare two studies.")}<p>${EK.link("Home", { href: "#/" })}</p></div></div>`);

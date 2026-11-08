@@ -16,6 +16,15 @@ search measured, the starting point among them: a plan of 2 combinations a
 round for 2 rounds gives 5. The page (`jobs.results`), the
 command line and the report all render from it, so they cannot disagree.
 
+A bake-off's document (a run of `study bakeoff`) also holds `candidates`:
+`[{"ref", "commit", "decision", "line", "mean_pct", "ci95_pct", "worst_pct",
+"chance"}]`, one per branch in the order given, each against the starting
+point by the same rule (numbers absent while there is no answer). Its own
+`decision` and `line` are the chosen branch's -- the largest mean among those
+whose decision is `use` -- said as one of N, or `keep` with "None of the N
+branches is shown to beat the starting point." The key exists only on
+bake-off runs.
+
 The words themselves -- the chance in twentieths, the decision of a run made
 before runs decided, and the sentences of the final check -- live here too.
 """
@@ -117,11 +126,11 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     rule that decided in a third: the app says "use it" only by `decide`."""
     final = job.get("final") or {}
     new = f"the new {what}"
-    they = "it is" if what.startswith("combination") else "they are"
+    they = "it is" if what.startswith(("combination", "code")) else "they are"
     # Anything but "use" says the action outright, as the page does: keep today's settings, then why.
-    keep = {"settings": "Keep today's settings", "data changes": "Keep today's data"}.get(
-        what, "Keep today's settings and data")
-    if baseline and what != "data changes":
+    keep = {"settings": "Keep today's settings", "data changes": "Keep today's data",
+            "code change": "Keep today's code"}.get(what, "Keep today's settings and data")
+    if baseline and what not in ("data changes", "code change"):
         keep += f" ({baseline})"
     if final.get("skipped"):
         reason = str(final["skipped"])
@@ -243,9 +252,12 @@ def _by_case(run_dir: Path, goal: dict[str, Any], seed_id: str, best_id: str, ca
 def _changed(root: Path, study: Any, harness: Any, seed: dict[str, Any] | None,
              best: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Every setting and data change the study tuned: the starting value, the
-    best's, both as people write them, and whether it changed."""
+    best's, both as people write them, and whether it changed. A code study's
+    one row is the change to its source: from the base, to the best's diff in lines."""
     from evolvekit.app import jobs
 
+    if getattr(study, "code", None) is not None:
+        return [_code_row(study, harness, seed, best)]
     changed = []
     starting = (seed or {}).get("params") or {}
     found = (best or {}).get("params") or {}
@@ -273,6 +285,23 @@ def _changed(root: Path, study: Any, harness: Any, seed: dict[str, Any] | None,
                         "old_text": jobs._describe_value(old), "new_text": jobs._describe_value(new),
                         "changed": old != new})
     return changed
+
+
+def _code_row(study: Any, harness: Any, seed: dict[str, Any] | None, best: dict[str, Any] | None) -> dict[str, Any]:
+    """`{"name": "code", "label", "from": "<ref> (<base[:7]>)", "to": "+N −M lines in <file or N files>"}`,
+    in the keys `_changed`'s rows have."""
+    from evolvekit import tree  # only a code study's verdict reads a diff
+
+    base = str((seed or {}).get("commit") or "")
+    old = study.code.from_ref + (f" ({base[:7]})" if base else "")
+    block = str((best or {}).get("block") or "")
+    stat = tree.diff_stat(block)
+    files = stat["files"]
+    where = files[0] if len(files) == 1 else f"{len(files)} files"
+    new = f"+{stat['added']} −{stat['removed']} lines in {where}" if files else "no change"
+    label = harness.code.label if getattr(harness, "code", None) is not None else "The source"
+    return {"name": "code", "label": label, "help": "", "old": base or None, "new": (best or {}).get("commit"),
+            "old_text": old, "new_text": new, "changed": bool(block.strip())}
 
 
 # ---------------------------------------------------------------------------
@@ -359,10 +388,11 @@ def _files(root: Path, run_dir: Path) -> list[str]:
 
 def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str, Any], words: dict[str, Any],
               comparison: dict[str, Any] | None, held: list[dict[str, Any]], changed: list[dict[str, Any]],
-              facts: dict[str, Any], learned_pct: float | None) -> dict[str, Any]:
+              facts: dict[str, Any], learned_pct: float | None, *, baseline: str = "") -> dict[str, Any]:
     """The verdict document of a run from what the page computes too:
     `words` (`_final_words`), the held-back rows of `_by_case`, `_changed`
-    and `_run_facts`."""
+    and `_run_facts`. A bake-off's document also lists its `candidates`
+    (`baseline` is the starting point in words, for their sentences)."""
     from evolvekit.app import jobs
 
     final = job.get("final") or {}
@@ -373,6 +403,10 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     if decision in ("skipped", "none"):
         document["reason"] = str(final.get("skipped") or "")
     document["line"], document["advice"] = words.get("line", ""), words.get("advice", "")
+    candidates = (_candidates(job, comparison, goal, jobs._what(study), baseline)
+                  if job.get("bakeoff") else None)
+    if candidates:
+        decision = _bakeoff_headline(document, job, candidates)
     candidate = final.get("candidate") or next(iter((comparison or {}).get("per_candidate") or {}), None)
     result = ((comparison or {}).get("per_candidate") or {}).get(candidate) or {}
     levels = _levels(study, harness, result["levels"]) if isinstance(result.get("levels"), dict) else []
@@ -402,7 +436,54 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     document.update({"started_at": job.get("started_at") or (facts["started"].isoformat() if facts["started"] else None),
                      "finished_at": facts["finished_at"], "elapsed_s": facts["used_s"],
                      "rounds": (job.get("search") or {}).get("generations"), "combinations": facts["tried"]})
+    if candidates is not None:
+        document["candidates"] = candidates
     return _clean(document)
+
+
+def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str,
+                baseline: str) -> list[dict[str, Any]]:
+    """A bake-off's branches in the order they were given, each with its own
+    decision and line against the starting point: `_final_words` as if the
+    final check had checked that one alone."""
+    final = job.get("final") or {}
+    decisions = final.get("decisions") or {}
+    out = []
+    for entry in job.get("bakeoff") or []:
+        cid = str(entry.get("id") or "")
+        own = {**final, "candidate": cid}
+        own.pop("decision", None)
+        if cid in decisions:
+            own["decision"] = decisions[cid]
+        words = _final_words({**job, "final": own}, comparison, goal, what, baseline)
+        decision = _decision_word(words, own)
+        row: dict[str, Any] = {"ref": entry.get("ref"), "commit": entry.get("commit"), "decision": decision,
+                               "line": words.get("line", "")}
+        if decision not in _NO_ANSWER:
+            row.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"),
+                        "worst_pct": words.get("worst_pct"), "chance": words.get("chance")})
+        out.append(row)
+    return out
+
+
+def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+    """Decision 32: a bake-off's own decision and line are those of the branch
+    it chose (the largest mean among those whose own decision is `use`), said as
+    one of N; when none is `use`, the starting point stays (`keep`). A check
+    with no answer by the rule (stopped, pending, one case) keeps its own words.
+    Returns the decision."""
+    count = len(candidates)
+    branches = f"{count} branch{'es' if count != 1 else ''}"
+    chosen_id = str((job.get("final") or {}).get("candidate") or "")
+    chosen = next((c for e, c in zip(job.get("bakeoff") or [], candidates) if str(e.get("id")) == chosen_id), None)
+    if chosen is not None and chosen["decision"] == "use":
+        line = chosen["line"]
+        document["decision"], document["line"] = "use", f"Of {branches}, {chosen['ref']}: {line[:1].lower()}{line[1:]}"
+    elif any(c["decision"] in ("keep", "worse") for c in candidates):
+        document["decision"] = "keep"
+        document["line"] = (f"None of the {branches} is shown to beat the starting point." if count != 1
+                            else "The branch is not shown to beat the starting point.")
+    return str(document["decision"])
 
 
 def _best_of(job: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -450,8 +531,10 @@ def build_verdict(root: Path, run: str | None = None) -> dict[str, Any]:
     seed, best = jobs._seed_and_best(run_dir, {}, rows)[0], _best_of(job, rows)
     final = job.get("final") or {}
     comparison, check_runs = _check_of(run_dir, final)
-    words = _final_words(job, comparison, goal, jobs._what(study), jobs._baseline(study, harness, seed))
+    baseline = jobs._baseline(study, harness, seed)
+    words = _final_words(job, comparison, goal, jobs._what(study), baseline)
     candidate = str(final.get("candidate") or "")
     held = _by_case(run_dir, goal, "", "", candidate, check_runs, learned=False)["held"]
     return _document(root, run_dir, study, harness, job, words, comparison, held,
-                     _changed(root, study, harness, seed, best), _run_facts(run_dir, job), _learned_pct(seed, best, goal))
+                     _changed(root, study, harness, seed, best), _run_facts(run_dir, job), _learned_pct(seed, best, goal),
+                     baseline=baseline)

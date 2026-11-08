@@ -55,6 +55,7 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study compile SLUG` | prints the plan: rounds, combinations, the final check, "done around HH:MM", or the thin plan with its three ways out | 0 a plan; 2 a thin plan or a problem |
 | `evolvekit study run SLUG` | compile, search and run the final check in the foreground | |
 | `evolvekit study start SLUG [--wait [--timeout S]] [--json]` | start the study as the app's Start does (queued while another study runs) | |
+| `evolvekit study bakeoff SLUG --ref REF [--ref REF] [--wait [--timeout S]] [--json]` | a code study: check given branches against the starting point on the held-back cases, with no search; the verdict's `candidates` hold each branch's own line | 0 started or queued; 2 a settings study, no held-back case, no such ref, a branch outside the open files or one that does not apply on the base |
 | `evolvekit study stop SLUG [--json]` | stop the running run, or take back a queued one | |
 | `evolvekit study status SLUG [--run ID] [--json]` | where the run is: the state line, or the app's status document | |
 | `evolvekit study watch SLUG [--every S] [--json]` | the status every few seconds until the run ends; starts a queued run | |

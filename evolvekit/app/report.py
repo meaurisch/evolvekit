@@ -110,6 +110,13 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     if verdict.get("rule"):
         out += ["", f"The rule: {verdict['rule']}"]
 
+    candidates = verdict.get("candidates")
+    if candidates:
+        # A bake-off: each branch against the starting point, in its own verdict's words.
+        out += ["", "## Branches compared", ""]
+        out += _table(["Branch", "Commit", "Verdict"],
+                      [[c.get("ref") or "", str(c.get("commit") or "")[:7], c.get("line") or ""] for c in candidates])
+
     out += ["", "## Held-back cases", ""]
     rows = verdict.get("by_case") or []
     if rows:
@@ -128,7 +135,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
             else "## What changed (found, not recommended)", ""]
     changed = verdict.get("changed") or []
     if changed:
-        out += _table(["Setting or data change", "From", "To"], [[c["label"], c["from"], c["to"]] for c in changed])
+        kind = "Code change" if any(c.get("name") == "code" for c in changed) else "Setting or data change"
+        out += _table([kind, "From", "To"], [[c["label"], c["from"], c["to"]] for c in changed])
     else:
         out.append("Nothing changed.")
 
@@ -139,7 +147,15 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     if isinstance(tried, int) and tried >= 1:
         # `combinations` counts the starting point too: say the plan's number, and the start beside it.
         tried = f"{tried - 1}, plus today's settings"
-    for label, value in (("Rounds", verdict.get("rounds")), ("Combinations tried", tried),
+    rounds = verdict.get("rounds")
+    if candidates:
+        # No search, so nothing was learned from: the branches are the candidates, and the more there are, the
+        # likelier one looks ahead by chance.
+        count = len(candidates)
+        ran = [f"{count} branch{'es were' if count != 1 else ' was'} compared; the more are compared, "
+               "the likelier one looks ahead by chance."]
+        rounds = tried = None
+    for label, value in (("Rounds", rounds), ("Combinations tried", tried),
                          ("Time", _duration(verdict.get("elapsed_s"))), ("Started", _when(verdict.get("started_at"))),
                          ("Held-back cases", held.get("cases")),
                          ("Runs per case in the final check", held.get("runs_per_case"))):

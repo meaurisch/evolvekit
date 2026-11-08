@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
-    "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError",
+    "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError", "applies",
     "changed_files", "diff_between", "diff_stat", "git", "git_version", "glob_pattern", "materialise",
     "normalise_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "touches_only",
     "tree_dir",
@@ -328,6 +328,26 @@ def diff_between(repo: Repo, base: str, ref: str) -> str:
     if old == new:
         return ""
     return _git(repo.toplevel, "diff", *_DIFF, f"{old}...{new}")
+
+
+def applies(repo: Repo, base: str, diff: str) -> bool:
+    """Whether `diff` applies on `base`, as `materialise` would apply it: checked
+    against a temporary index, so no tree is made and the engineer's index is not written."""
+    if not diff.strip():
+        return True
+    with tempfile.TemporaryDirectory(prefix="evolvekit-apply-") as scratch:
+        env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        patch = Path(scratch) / "change.patch"
+        patch.write_text(diff if diff.endswith("\n") else diff + "\n", encoding="utf-8",
+                         errors="surrogateescape", newline="\n")
+        _git(repo.toplevel, "read-tree", resolve_commit(repo, base), env=env)
+        try:
+            _git(repo.toplevel, "apply", "--cached", "--check", "--whitespace=nowarn", "--recount", str(patch), env=env)
+        except TreeError as exc:
+            if str(exc) == _MISSING:
+                raise
+            return False
+    return True
 
 
 # --- reading diffs -------------------------------------------------------------

@@ -32,9 +32,9 @@
     return "caterpillar"; // stopped or failed in the search
   };
 
-  /** "Keep today's settings" or "Keep today's data", by what the study changes. */
+  /** "Keep today's settings", "Keep today's data" or "Keep today's code", by what the study changes. */
   EK.keepWords = function (s) {
-    return s && s.what === "data" ? "Keep today’s data" : "Keep today’s settings";
+    return s && s.what === "data" ? "Keep today’s data" : s && s.what === "code" ? "Keep today’s code" : "Keep today’s settings";
   };
 
   /** "on cost as PyVRP counts it (lower)": the goal's measure and which way is better. */

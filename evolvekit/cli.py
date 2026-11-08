@@ -459,6 +459,15 @@ def build_parser() -> argparse.ArgumentParser:
     s_start.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
     s_start.add_argument("--home", help=home_help)
     s_start.add_argument("--json", action="store_true", help='print {"run", "started"|"queued"} (one JSON document per line)')
+    s_bake = study.add_parser("bakeoff", help="check given branches of a code study against its starting point "
+                                              "on the held-back cases, with no search")
+    s_bake.add_argument("slug", help="the study's name in the library home")
+    s_bake.add_argument("--ref", dest="refs", action="append", required=True, metavar="REF",
+                        help="a branch, tag or commit of the source to compare (once per branch)")
+    s_bake.add_argument("--wait", action="store_true", help="then wait until the run has ended, as study wait does")
+    s_bake.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
+    s_bake.add_argument("--home", help=home_help)
+    s_bake.add_argument("--json", action="store_true", help='print {"run", "started"|"queued", "refs"} (one JSON document per line)')
     s_stop = study.add_parser("stop", help="ask the study's running run to stop, or take back a queued one")
     s_stop.add_argument("slug", help="the study's name in the library home")
     s_stop.add_argument("--home", help=home_help)
@@ -1299,6 +1308,8 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
     if command == "watch":
         return _watch(home, slug, args.every, args.json)
     root, study, _ = home.load(slug)
+    if command == "bakeoff":
+        return _bakeoff(home, root, study, args)
     if command == "start":
         answer = jobs.start(home, root)
         run = answer["run"]
@@ -1330,6 +1341,31 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         print(jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status)["line"])  # noqa: SLF001
     else:
         print(jobs.state_line(root, study, build_status)["line"])
+    return 0
+
+
+def _bakeoff(home, root: Path, study, args: argparse.Namespace) -> int:
+    """`study bakeoff SLUG --ref A --ref B`: the app's "Compare branches"; a refusal exits 2."""
+    from evolvekit.app import jobs
+
+    try:
+        answer = jobs.start(home, root, bakeoff=list(args.refs))
+    except AppError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    run, count = answer["run"], len(args.refs)
+    if answer.get("queued"):
+        other = jobs._waiting_for(root) or "another study"  # noqa: SLF001 - the name the app's card shows
+        document = {"run": run, "queued": True, "refs": list(args.refs)}
+        line = (f"queued behind {other}; it starts when that study finishes "
+                "(the app or `evolvekit study wait` starts it)")
+    else:
+        document = {"run": run, "started": True, "refs": list(args.refs)}
+        line = f"started run {run}: {count} branch{'es' if count != 1 else ''} against {study.code.from_ref}"
+    print(json.dumps(document) if args.json else line, flush=True)
+    if args.wait:
+        return _wait(home, args.slug, args.timeout, args.json, args)
+    _say_next(args, f"study wait {args.slug}", f"study open {args.slug}")
     return 0
 
 
@@ -1382,7 +1418,7 @@ def cmd_study(args: argparse.Namespace) -> int:
         return 0
     if command in ("application", "code", "list", "check", "cases"):
         return _study_library_command(command, args)
-    if command in ("start", "stop", "status", "watch", "wait"):
+    if command in ("start", "bakeoff", "stop", "status", "watch", "wait"):
         return _study_run_command(command, args)
     if command in ("verdict", "report"):
         return _verdict_command(command, args)

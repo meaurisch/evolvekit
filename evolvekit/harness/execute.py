@@ -71,6 +71,7 @@ __all__ = [
     "read_preview",
     "resume_study",
     "run_study",
+    "run_bakeoff",
     "run_study_of",
     "runner_command",
     "smallest_case",
@@ -368,6 +369,121 @@ def run_study(
     return job.state
 
 
+BAKEOFF = "bakeoff.json"
+"""`{"refs": [...]}` in a bake-off's run directory, written by whoever starts it (`jobs.start`)."""
+NO_SEARCH = "branches compared: no search"
+
+
+def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
+                log: Callable[[str], None] = print) -> dict[str, Any]:
+    """The bake-off (design §5.5): a run with no search whose candidates are
+    the branches in `runs/<id>/bakeoff.json`, each checked against the
+    starting point (the pinned base) on the held-back cases by the final
+    check's paired statistics. `runs.jsonl` holds the starting point and one
+    row per branch (its own change, `tree.diff_between`, and its commit).
+    `job.final.candidate` is the branch with the largest mean among those whose
+    own decision is `use`, else the largest mean (decision 32); `final.decisions`
+    holds every branch's. A run whose check was stopped is checked again on the
+    same rows (the runs already done are kept); `seeds` asks for that many runs
+    per case. Returns the final `job.json`."""
+    from evolvekit import tree
+    from evolvekit.app import AppError, jobs
+    from evolvekit.candidate import SEED_OPERATOR, Candidate
+    from evolvekit.ledger import Ledger
+
+    root = Path(root)
+    run_dir = root / "runs" / run_id
+    state = read_job(run_dir) or {}
+    again = bool(state.get("bakeoff")) and (run_dir / CONFIG).is_file() and (run_dir / "runs.jsonl").is_file()
+    if again:
+        study = run_study_of(root, run_dir)
+        stored = state.get("plan") or _read_plan(run_dir)
+        checks = int(seeds or stored.get("check_seeds") or DEFAULT_CHECK_SEEDS)
+        (run_dir / STOP_REQUEST).unlink(missing_ok=True)
+        job = Job.resume(run_dir, {**state, "plan": {**stored, "check_seeds": checks}}, "check")
+        job.state.pop("final", None)
+        entries = list(state["bakeoff"])
+    else:
+        study = load_study(root)
+        if (run_dir / STOP_REQUEST).is_file():  # stopped while starting, as `run_study` says it
+            job = Job(run_dir, run_id=run_id, study=study.name, plan={})
+            job.finish("stopped", search={"stop_reason": "stopped on request before the check began",
+                                          "generations": 0, "aborted": False})
+            return job.state
+        harness = study_harness(root)
+        try:
+            refs = json.loads((run_dir / BAKEOFF).read_text(encoding="utf-8"))["refs"]
+        except (OSError, ValueError, KeyError, TypeError):
+            raise HarnessError(f"runs/{run_id}/{BAKEOFF}: name the branches to compare as {{\"refs\": [...]}}") from None
+        try:
+            jobs.check_refs(root, study, harness, refs)  # again: a branch may have moved since the start
+        except AppError as exc:
+            raise HarnessError(str(exc)) from None
+        # No rounds: the compiled config keeps the one generation it must have to load, and no driver runs it
+        # (a blocked plan is not blocked here: it is the search's time that does not fit).
+        plan = replace(plan_for(study, harness, measured(root)), generations=1, rounds=0, children=len(refs),
+                       blocked="", ways_out=())
+        write_run(study, harness, plan, root, run_id, bakeoff=True)  # pins the base to a commit
+        config = load_config(run_dir / CONFIG)
+        base = config.problem.tree.base
+        repo = tree.Repo(config.problem.tree.repo)
+        try:
+            checked = jobs.check_refs(root, study, harness, refs, base=base)  # against the pinned base
+        except AppError as exc:
+            raise HarnessError(str(exc)) from None
+        ledger = Ledger(run_dir)
+        seed = Candidate(id="g000-c0001", generation=0, block="", source="", operator=SEED_OPERATOR, model="human",
+                         provider="human", role="human", commit=base)
+        ledger.record_run(seed.to_record())
+        entries = []
+        for i, ref in enumerate(checked):
+            cid = f"g000-c{i + 2:04d}"
+            ledger.record_run(Candidate(id=cid, generation=0, block=tree.diff_between(repo, base, ref["ref"]), source="",
+                                        operator="given", role="none", parent_id=seed.id, commit=ref["commit"]).to_record())
+            entries.append({"ref": ref["ref"], "id": cid, "commit": ref["commit"]})
+        checks = plan.check_seeds
+        job = Job(run_dir, run_id=run_id, study=study.name, plan=plan.to_json(), phase="check", bakeoff=entries)
+    try:
+        config = load_config(run_dir / CONFIG)
+        ids = [e["id"] for e in entries]
+        log(f"bake-off: {len(ids)} branch(es) against the starting point on {len(study.test)} held-back case(s), "
+            f"{checks} run(s) per case")
+        job.update(check={"seeds": checks})
+        stop = RunStop(run_dir)
+        stop.start(0.0)
+        try:
+            comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:max(1, min(checks, len(CHECK_SEEDS)))]),
+                                 candidates=",".join(ids), instances=[f"{UP}/{case}" for case in study.test],
+                                 label="final", log=log, stop=stop.event)
+        except ConfirmStopped:
+            job.finish("stopped", search=_no_search(None), final={"stopped": True})
+            return job.state
+        finally:
+            stop.close()
+        decisions = {cid: _decision(result) for cid, result in comparison.per_candidate.items()}
+
+        def mean(cid: str) -> float:
+            value = (comparison.per_candidate[cid].get("summary") or {}).get("mean")
+            return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else -math.inf
+
+        using = [cid for cid in ids if decisions.get(cid) == "use"]
+        chosen = max(using or ids, key=mean)  # `max` keeps the first of equals: the order the refs were given
+        own = decisions.get(chosen, "keep")
+        decision = "use" if own == "use" else "keep" if own in ("keep", "worse") else own
+        _write_exports(run_dir, log)
+        job.finish("done", search=_no_search(chosen),
+                   final={"candidate": chosen, "confirmed": decision == "use", "decision": decision,
+                          "decisions": decisions, "seeds": checks, "comparison": "confirm/final/comparison.json"})
+    except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
+        job.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    return job.state
+
+
+def _no_search(best_id: str | None) -> dict[str, Any]:
+    return {"stop_reason": NO_SEARCH, "generations": 0, "best_id": best_id, "aborted": False}
+
+
 def run_study_of(root: str | Path, run_dir: str | Path) -> Study:
     """The study a run was started with: the copy of `study.yaml` the run
     keeps, so its cases, goal and choices stay the run's own when the study
@@ -386,6 +502,8 @@ def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
     root = Path(root)
     run_dir = root / "runs" / run_id
     state = read_job(run_dir)
+    if state and state.get("bakeoff"):  # a bake-off checks every branch again, not the search's best
+        return run_bakeoff(root, run_id, seeds=seeds, log=log)
     if not state or not state.get("search"):
         raise HarnessError(f"runs/{run_id}: the search has not finished, so there is nothing to check yet")
     if (state.get("search") or {}).get("aborted"):
@@ -652,15 +770,17 @@ def write_exports(root: str | Path, run_dir: str | Path, values: dict[str, Any] 
     `ExportFailed` when the runner does not write one."""
     root, run_dir = Path(root), Path(run_dir)
     study, harness = load_study(root), study_harness(root)
-    if values is None:
-        values = _best_values(run_dir)
     if names is None:
         tuned = run_study_of(root, run_dir)
         kinds = ({"settings"} if tuned.tuned_settings() else set()) | ({"data"} if tuned.data else set())
         names = [name for name, export in harness.exports.items() if export.applies_to in kinds]
         cases = tuned.training + tuned.test
+        if not names:  # a code study tunes nothing an export writes
+            return []
     else:
         cases = [case] if case else []
+    if values is None:
+        values = _best_values(run_dir)
     scratch = run_dir / DOWNLOADS
     scratch.mkdir(exist_ok=True)
     stored = scratch / "values.json"

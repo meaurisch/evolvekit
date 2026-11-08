@@ -566,6 +566,24 @@ def start(req: Request) -> dict[str, Any]:
     return jobs.start(req.home, root, resume=resume)
 
 
+def bakeoff(req: Request) -> dict[str, Any]:
+    """`{"refs": ["branch", ...]}`: a run with no search that checks each branch
+    against the starting point on the held-back cases (`jobs.start(bakeoff=)`)."""
+    root, _, _ = req.home.load(req.params["slug"])
+    refs = req.json().get("refs")
+    if not isinstance(refs, list) or not refs or not all(isinstance(r, str) and r.strip() for r in refs):
+        raise AppError("refs: name at least one branch")
+    return jobs.start(req.home, root, bakeoff=[r.strip() for r in refs])
+
+
+def verdict(req: Request) -> dict[str, Any]:
+    """The verdict document of a run (`?run=`, else the latest): design 3.4."""
+    from evolvekit.app.verdict import build_verdict
+
+    root, _, _ = req.home.load(req.params["slug"])
+    return build_verdict(root, _run(req, root))
+
+
 def stop(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
     return jobs.stop(root, _run(req, root))
@@ -687,11 +705,13 @@ ROUTES = [
     route("POST", "/api/studies/{slug}/test-run")(start_test_run),
     route("GET", "/api/studies/{slug}/test-run")(test_run),
     route("POST", "/api/studies/{slug}/start")(start),
+    route("POST", "/api/studies/{slug}/bakeoff")(bakeoff),
     route("POST", "/api/studies/{slug}/stop")(stop),
     route("POST", "/api/studies/{slug}/final-check")(final_check),
     route("POST", "/api/studies/{slug}/continue")(continue_run),
     route("GET", "/api/studies/{slug}/status")(status),
     route("GET", "/api/studies/{slug}/results")(results),
+    route("GET", "/api/studies/{slug}/verdict")(verdict),
     route("GET", "/api/studies/{slug}/tries")(tries_of),
     route("GET", "/api/studies/{slug}/tries/{combination}")(try_of),
     route("GET", "/api/studies/{slug}/download/{export}")(download),

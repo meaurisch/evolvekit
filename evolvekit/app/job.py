@@ -5,6 +5,7 @@
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID --check --seeds 6    ... with 6 runs per case
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID --resume   the search again from where it stopped, then the check
     python -m evolvekit.app.job STUDY_FOLDER RUN_ID --continue --hours 2    a finished search on for 2 hours more, then the check again
+    python -m evolvekit.app.job STUDY_FOLDER RUN_ID --bakeoff  the branches in runs/<id>/bakeoff.json against the starting point
 
 Everything it does is `evolvekit.harness.execute`; this module only reads the
 models the app chose (`runs/<id>/models.json`, when AI search help is on) and
@@ -19,7 +20,16 @@ import sys
 import traceback
 from pathlib import Path
 
-from evolvekit.harness.execute import JOB, Job, continue_study, final_check, read_job, resume_study, run_study
+from evolvekit.harness.execute import (
+    JOB,
+    Job,
+    continue_study,
+    final_check,
+    read_job,
+    resume_study,
+    run_bakeoff,
+    run_study,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true", help="continue a stopped or dead search where it was")
     parser.add_argument("--continue", dest="more", action="store_true", help="a finished search on, with --hours more")
     parser.add_argument("--hours", type=float, default=None, help="with --continue: how much more time")
+    parser.add_argument("--bakeoff", action="store_true", help="compare the branches in bakeoff.json, with no search")
     args = parser.parse_args(argv)
     root = Path(args.study).resolve()
     run_dir = root / "runs" / args.run
@@ -39,7 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         print(message, flush=True)
 
     try:
-        if args.check:
+        if args.bakeoff:
+            job = run_bakeoff(root, args.run, log=log)
+        elif args.check:
             job = final_check(root, args.run, seeds=args.seeds, log=log)
         else:
             models_path = run_dir / "models.json"
