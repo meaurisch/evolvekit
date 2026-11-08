@@ -27,6 +27,7 @@ from typing import Any
 import yaml
 
 from evolvekit.app import AppError
+from evolvekit.app.detach import no_window_flags
 from evolvekit.env import parse_env
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import runner_command
@@ -817,7 +818,7 @@ class Home:
         try:
             argv = runner_command(study, harness, str(root / "harness" / "runner.py")) + ["inspect", "--case", str(path)]
             done = subprocess.run(argv, cwd=root, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=INSPECT_TIMEOUT_S)
+                                  errors="replace", timeout=INSPECT_TIMEOUT_S, creationflags=no_window_flags())
         except subprocess.TimeoutExpired:
             result = {"ok": False, "summary": "", "error": f"reading it took longer than {INSPECT_TIMEOUT_S} s"}
         except (OSError, HarnessError) as exc:

@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from evolvekit.providers.agent_run import agent_env, run_agent
+from evolvekit.app.detach import no_window_flags
 from evolvekit.providers.base import (
     AgentError,
     AgentResult,
@@ -182,7 +183,8 @@ class ClaudeCliProvider:
         if exe not in cache:
             try:
                 proc = self._runner([exe, "--help"], capture_output=True, text=True, encoding="utf-8",
-                                    errors="replace", timeout=HELP_TIMEOUT, stdin=subprocess.DEVNULL)
+                                    errors="replace", timeout=HELP_TIMEOUT, stdin=subprocess.DEVNULL,
+                                    creationflags=no_window_flags())
                 text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
             except (OSError, subprocess.SubprocessError):
                 text = ""
@@ -301,6 +303,7 @@ class ClaudeCliProvider:
                 text=True,
                 encoding="utf-8",
                 timeout=self._timeout,
+                creationflags=no_window_flags(),
             )
         except subprocess.TimeoutExpired as exc:
             raise ProviderError(

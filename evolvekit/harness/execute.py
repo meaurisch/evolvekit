@@ -36,6 +36,7 @@ from typing import Any, Callable
 import yaml
 
 from evolvekit.config import load_config
+from evolvekit.app.detach import no_window_flags
 from evolvekit.confirm import ConfirmStopped, confirm, decide
 from evolvekit.evaluate.process import read_tail, run_bounded
 from evolvekit.harness import HarnessError
@@ -836,7 +837,7 @@ def write_exports(root: str | Path, run_dir: str | Path, values: dict[str, Any] 
             if one:
                 argv += ["--case", str((root / one).resolve())]
             done = subprocess.run(argv, cwd=run_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                  timeout=EXPORT_TIMEOUT_S)
+                                  timeout=EXPORT_TIMEOUT_S, creationflags=no_window_flags())
             if done.returncode != 0 or not out.is_file():
                 said = (done.stderr.strip().splitlines() or ["no message"])[-1]
                 raise ExportFailed(f"the export {name} failed: {said}")

@@ -853,3 +853,11 @@ def test_a_session_by_hand_has_no_span_file(tmp_path):
     assert (run_dir / scheduler.SPAN).is_file(), "the last scheduled session's"
     scheduler.mark_by_hand(home, root.name, "r1")
     assert not (run_dir / scheduler.SPAN).exists()
+
+
+def test_a_refused_launch_leaves_no_span_file(tmp_path):
+    home, root = campaign_study(tmp_path)
+    run_dir = write_run(root, "r1", "stopped", generations=2, planned=6)
+    rec = Recorder(start_raises=AppError("the application is not there", 409))
+    scheduler.tick(home, now=local("2026-11-15 23:29"), **rec.calls_for())
+    assert rec.names() == ["start"] and not (run_dir / scheduler.SPAN).exists()

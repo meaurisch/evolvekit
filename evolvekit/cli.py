@@ -756,12 +756,18 @@ def cmd_app(args: argparse.Namespace) -> int:
         return 2
     running = read_running(home)
     if running is not None:  # one app per home: two tickers never share one
+        unset = ("the rehearsal clock was not set: stop that app first (evolvekit app stop), then start it with --clock"
+                 if clock[0] is not None else None)
         if args.service:
             logger = service.start_logging(home)
-            logger.info("already running at %s", running.get("url"))
+            logger.info("already running at %s (the key is in app.json)", service.address(str(running.get("url"))))
+            if unset:
+                logger.info("%s", unset)
             service.stop_logging(logger)
             return 0
         print(f"the app is already running for this library: {running.get('url')}", flush=True)
+        if unset:
+            print(unset, file=sys.stderr, flush=True)
         if not args.no_browser:
             open_in_browser(str(running.get("url")))
         return 0
@@ -813,9 +819,10 @@ def _serve_service(home: Path, port: int, clock: tuple[datetime | None, float]) 
         logger.exception("the app could not start")
         service.stop_logging(logger)
         return 1
+    code = 0
     try:
         _set_clock(home, clock)
-        logger.info("evolvekit app : %s", server.url_with_token)
+        logger.info("evolvekit app : %s  (the key is in app.json)", server.url)
         logger.info("library home  : %s", server.home.root)
         if clock[0] is not None:
             logger.info("%s", scheduler.clock_of(home).words())
@@ -826,12 +833,15 @@ def _serve_service(home: Path, port: int, clock: tuple[datetime | None, float]) 
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    except Exception:  # noqa: BLE001 - said in the log before the streams are given back
+        logger.exception("the app stopped on an error")
+        code = 1
     finally:
         scheduler.clear_clock(home)
         server.stop()
         logger.info("stopped")
         service.stop_logging(logger)
-    return 0
+    return code
 
 
 def cmd_status(args: argparse.Namespace) -> int:

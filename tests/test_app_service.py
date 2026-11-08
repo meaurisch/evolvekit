@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime
@@ -53,7 +54,8 @@ def test_service_writes_log_and_app_json(tmp_path):
         running = _until(lambda: read_running(home), timeout=30)
         assert urllib.request.urlopen(running["url"]).status == 200
         log = _until(lambda: (home / "app.log").is_file() and (home / "app.log").read_text(encoding="utf-8"))
-        assert running["url"] in log and str(home.resolve()) in log
+        assert running["url"].split("?")[0] in log and str(home.resolve()) in log
+        assert "token=" not in log and "the key is in app.json" in log, "the address without its key"
     finally:
         proc.terminate()
         out, err = proc.communicate(timeout=30)
@@ -213,7 +215,8 @@ def test_a_second_service_on_the_same_home_exits_quietly(tmp_path, capsys):
     finally:
         sys.stdout, sys.stderr = out, err
     assert capsys.readouterr().out == ""
-    assert "already running at http://127.0.0.1:8790/?token=k" in (home / "app.log").read_text(encoding="utf-8")
+    log = (home / "app.log").read_text(encoding="utf-8")
+    assert "already running at http://127.0.0.1:8790/ (the key is in app.json)" in log and "token=k" not in log
 
 
 def test_clock_flag_writes_and_the_home_reads_it(tmp_path):
@@ -310,3 +313,107 @@ def test_a_stale_clock_is_removed(tmp_path):
     scheduler.write_clock(home.root, local("2026-11-13 17:30"), 60.0)
     write_running(home.root, pid=2 ** 22 + 7, port=1, url="u")      # a pid that is gone
     assert not scheduler.clock_of(home).simulated and not (home.root / "clock.json").exists()
+
+
+# -- fix round 1: the log never breaks the service, and is its owner's alone
+
+
+def test_a_held_log_never_breaks_printing(tmp_path, monkeypatch):
+    """Windows refuses to rename a file another handle holds: the rotation waits, no line is lost,
+    and the log's own errors never go back into the log (they once recursed until RecursionError)."""
+    monkeypatch.setattr(service, "LOG_BYTES", 500)
+    out, err = sys.stdout, sys.stderr
+    logger = service.start_logging(tmp_path, redirect=True)
+    holder = open(tmp_path / "app.log", "a", encoding="utf-8")   # another handle, as a viewer holds it
+    said, failures = [], []
+
+    def ticker():
+        try:
+            for i in range(120):
+                print(f"tick line {i} {'x' * 40}", flush=True)
+                said.append(i)
+        except BaseException as exc:  # noqa: BLE001 - the test says what ended it
+            failures.append(exc)
+
+    try:
+        thread = threading.Thread(target=ticker)
+        thread.start()
+        thread.join(timeout=30)
+        print("Traceback (most recent call last):", file=sys.stderr)
+    finally:
+        holder.close()
+        service.stop_logging(logger)
+        sys.stdout, sys.stderr = out, err
+    assert not failures and len(said) == 120, failures
+    text = "".join(p.read_text(encoding="utf-8") for p in tmp_path.iterdir() if p.name.startswith("app.log"))
+    assert "tick line 119 " in text and "Traceback (most recent call last):" in text
+
+
+def test_an_emit_error_is_not_logged_again(tmp_path):
+    out, err = sys.stdout, sys.stderr
+    logger = service.start_logging(tmp_path, redirect=True)
+    handler = logger.handlers[0]
+    try:
+        def broken(record):
+            raise OSError("the disk is full")
+
+        handler.stream.close()
+        handler.stream = type("Broken", (), {"write": broken, "flush": lambda self: None, "close": lambda self: None})()
+        print("this line cannot be written")          # handleError goes to the real stderr, not the log
+        print("nor this one", file=sys.stderr)
+    finally:
+        service.stop_logging(logger)
+        sys.stdout, sys.stderr = out, err
+
+
+def test_lines_of_two_threads_never_merge(tmp_path):
+    out = sys.stdout
+    logger = service.start_logging(tmp_path, redirect=True)
+    writer = sys.stdout
+    start = threading.Barrier(2)
+
+    def write(name):
+        start.wait()
+        for i in range(200):
+            writer.write(f"{name}-{i}")
+            writer.write("\n")
+
+    try:
+        threads = [threading.Thread(target=write, args=(name,)) for name in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        service.stop_logging(logger)
+        sys.stdout = out
+    lines = [line.split(" ", 2)[-1] for line in (tmp_path / "app.log").read_text(encoding="utf-8").splitlines()]
+    assert sorted(lines) == sorted([f"{n}-{i}" for n in ("a", "b") for i in range(200)])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows has no mode bits to set")
+def test_the_log_is_private_to_the_user(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "LOG_BYTES", 300)
+    logger = service.start_logging(tmp_path)
+    try:
+        for i in range(40):
+            logger.info("line %d %s", i, "x" * 40)
+    finally:
+        service.stop_logging(logger)
+    for path in tmp_path.iterdir():
+        if path.name.startswith("app.log"):
+            assert path.stat().st_mode & 0o777 == 0o600, path.name
+
+
+def test_the_address_without_its_key():
+    assert service.address("http://127.0.0.1:8790/?token=k") == "http://127.0.0.1:8790/"
+
+
+def test_a_clock_for_an_app_already_running_is_said_not_set(tmp_path, capsys):
+    home = tmp_path / "my home"
+    home.mkdir()
+    write_running(home, pid=os.getpid(), port=8790, url="http://127.0.0.1:8790/?token=k")
+    assert main(["app", "--home", str(home), "--no-browser", "--clock", "2026-11-13T17:30"]) == 0
+    said = capsys.readouterr()
+    assert said.out.strip() == "the app is already running for this library: http://127.0.0.1:8790/?token=k"
+    assert "the rehearsal clock was not set" in said.err and not (home / "clock.json").exists()

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from evolvekit.app import AppError, assistant, compare, jobs, scheduler, tries, work
+from evolvekit.app.detach import no_window_flags
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
 from evolvekit.harness import HarnessError
@@ -306,7 +307,8 @@ def pick_file(req: Request) -> dict[str, Any]:
     title = str(body.get("title") or ("Choose a folder" if kind == "folder" else "Choose a file"))[:120]
     try:
         done = subprocess.run([sys.executable, "-c", _PICK, title, kind], capture_output=True, text=True,
-                              timeout=PICK_TIMEOUT_S, encoding="utf-8", errors="replace")
+                              timeout=PICK_TIMEOUT_S, encoding="utf-8", errors="replace",
+                              creationflags=no_window_flags())
     except subprocess.TimeoutExpired:
         return {"cancelled": True}
     try:

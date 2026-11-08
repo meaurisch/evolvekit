@@ -204,6 +204,7 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .card-vis { padding-top: 4px; }
 .card-vis .interval-strip { max-width: 100% !important; }
 .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.home-clock { margin: 4px 0 12px; } /* the rehearsal clock's warning notice, above the cards */
 .home-links { display: flex; gap: 4px 28px; flex-wrap: wrap; border-top: 1px solid var(--line-rule); padding-top: 8px; }
 .hero { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 14px; padding: 72px 0 40px; }
 @media (max-width: 759.98px) { .hero { padding: 40px 0; } }

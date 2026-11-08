@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from evolvekit.harness import HarnessError
+from evolvekit.app.detach import no_window_flags
 from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
 from evolvekit.harness.probe import probe_application
 from evolvekit.harness.sdk import evk_harness as evk
@@ -89,7 +90,7 @@ class _Runner:
         try:
             return subprocess.run(
                 [*self.base, *args], cwd=self.folder, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=timeout,
+                encoding="utf-8", errors="replace", timeout=timeout, creationflags=no_window_flags(),
             )
         except subprocess.TimeoutExpired:
             return subprocess.CompletedProcess(args, 1, "", f"no answer within {timeout:g} s\n")

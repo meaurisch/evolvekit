@@ -45,7 +45,7 @@ from evolvekit.stopping import STOP_REQUEST, active_seconds
 
 __all__ = [
     "ACTIONS_PER_WINDOW", "BY_YOU", "CAMPAIGN", "CLOCK_FILE", "Clock", "FAILED_PAUSE_LINE", "FAILURES_TO_PAUSE", "LOCK",
-    "MIN_SESSION_S", "NO_SCHEDULE", "SPAN", "SPAN_FILE", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_run",
+    "MIN_SESSION_S", "NO_SCHEDULE", "SPAN", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_run",
     "campaign_state", "clear_clock",
     "clock_of", "launch_queued", "mark_by_hand", "pause", "read_campaign", "search_left_s", "session_of",
     "scheduled_words", "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
@@ -79,7 +79,6 @@ SPAN = "campaign-span.json"
 session ends; the run keeps the computer awake until then, and through a final check past it
 (`awake`, D46). `session` is the launch it was written for, so a later session by hand of the same
 run is never kept awake by it."""
-SPAN_FILE = SPAN
 FAILED_PAUSE_LINE = "The campaign is paused: its last three sessions failed ({error}). Start it again when the cause is fixed."
 NO_SCHEDULE = "the study has no schedule any more"
 COMPLETE = "the campaign's search time is used"
@@ -170,7 +169,8 @@ def clock_of(home: Any) -> Clock:
     """The rehearsal clock while the app whose pid `clock.json` names still runs (`read_running`),
     else the real clock. A `clock.json` whose process is gone is removed, and so is one beside an
     `app.json` whose app is gone (its writing app ended without its `finally`). One whose process
-    lives with no `app.json` yet is kept: an app writes its clock just before it starts serving."""
+    lives with no `app.json` is left: it is honoured only beside a live `app.json` that names its
+    pid, so it is never read, and the next app clears or rewrites it."""
     root = _home_root(home)
     doc = _read(root / CLOCK_FILE)
     if doc is None:
@@ -397,7 +397,7 @@ def mark_by_hand(home: Any, slug: str, run_id: str) -> None:
     campaign["by_hand"] = {"run": run_id, "session": session_of(run_dir)}
     campaign["missed"] = None  # a session of the campaign ran: the missed window is past news
     _write_campaign(root, campaign)
-    (run_dir / SPAN_FILE).unlink(missing_ok=True)
+    (run_dir / SPAN).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +613,10 @@ class _Tick:
         try:
             answer = self.calls[name](*args, **kwargs)
         except (AppError, HarnessError) as exc:
+            if not fresh and run_dir is not None:
+                # Refused: that launch's number is not used up, so a later session (by hand,
+                # say) would take it and the file with it.
+                (run_dir / SPAN).unlink(missing_ok=True)
             if jobs.active_run(self.home) is not None:
                 # Another run took the computer between this tick's look and the launch: not a
                 # failure of this campaign, nor one of its window's launches.

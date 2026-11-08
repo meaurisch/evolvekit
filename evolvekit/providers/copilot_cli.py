@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from evolvekit.providers.agent_run import agent_env, run_agent
+from evolvekit.app.detach import no_window_flags
 from evolvekit.providers.base import (
     AgentError,
     AgentResult,
@@ -445,6 +446,7 @@ class CopilotCliProvider:
                 stdin=subprocess.DEVNULL,
                 timeout=self._timeout,
                 env=env,
+                creationflags=no_window_flags(),
             )
         except subprocess.TimeoutExpired as exc:
             raise CopilotCliError(f"GitHub Copilot CLI timed out after {self._timeout:g}s", "failed") from exc

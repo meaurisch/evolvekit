@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__all__ = ["DetachError", "python_for_runs", "spawn_detached"]
+__all__ = ["DetachError", "no_window_flags", "python_for_runs", "spawn_detached"]
 
 _DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 _BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
@@ -36,6 +36,14 @@ with open(log, "ab") as out:
         process = subprocess.Popen(argv, start_new_session=True, **options)
 print(process.pid)
 """ % (_DETACHED | _BREAKAWAY, _DETACHED)
+
+
+def no_window_flags() -> int:
+    """`creationflags` for a console program the app or a run starts: `CREATE_NO_WINDOW` on
+    Windows, so a process with no console of its own (the service under `pythonw.exe`, a detached
+    app or run) never opens a console window for it; 0 elsewhere. Only for a program whose output
+    is captured or sent to a file: it gets a hidden console, not the caller's."""
+    return _NO_WINDOW if sys.platform == "win32" else 0
 
 
 def python_for_runs() -> str:
@@ -79,10 +87,10 @@ def spawn_detached(argv: list[str], *, cwd: Path | None = None, env: dict | None
     if log:
         _private_file(Path(log))
     # No console window for the launcher either: the service that starts it has none to share.
-    flags = {"creationflags": _NO_WINDOW} if os.name == "nt" else {}
     done = subprocess.run([python_for_runs(), "-c", _LAUNCHER, json.dumps(list(argv)), str(cwd) if cwd else "",
                            str(log) if log else ""],
-                          env=env, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S, **flags)
+                          env=env, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S,
+                          creationflags=no_window_flags())
     try:
         return int(done.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError):
