@@ -178,8 +178,8 @@
     if (p == null || !isFinite(p)) return "";
     if (p >= 0.995) return "almost certain";
     if (p < 0.9 && Math.round(p * 20) >= 18) return "chance under 9 in 10";
-    if (p <= 0.05) return "chance 1 in 20 or less";
-    if (p > 0.95) return "chance over 19 in 20";
+    if (p < 0.05) return "chance less than 1 in 20";
+    if (Math.round(p * 20) >= 20) return "chance better than 19 in 20";
     return "chance about " + Math.round(p * 20) + " in 20";
   };
   EK.plural = function (n, one, many) { return EK.int(n) + " " + (n === 1 ? one : (many || one + "s")); };

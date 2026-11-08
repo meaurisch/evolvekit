@@ -222,7 +222,8 @@ def test_verdict_files_list_existing_downloads(use_run):
 
 
 @pytest.mark.parametrize("p,words", [(0.996, "almost certain"), (0.95, "about 19 in 20"), (0.897, "under 9 in 10"),
-                                     (0.5, "about 10 in 20"), (0.04, "1 in 20 or less"), (None, "")])
+                                     (0.5, "about 10 in 20"), (0.04, "less than 1 in 20"), (None, ""),
+                                     (0.98, "better than 19 in 20"), (0.96, "about 19 in 20"), (0.03, "less than 1 in 20")])
 def test_chance_words_table(p, words):
     assert _chance_words(p) == words
 

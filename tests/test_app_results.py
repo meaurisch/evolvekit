@@ -63,10 +63,10 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     assert keep["advice"] == "Keep today's settings for now: the gain is not proven."
     worse = words_for([-1.5, -1.0, -1.2, -0.8])
     assert worse["state"] == "worse" and worse["decision"] == "worse"
-    assert worse["line"].startswith("Worse on 4 held-back cases: 1.1 % higher real cost, a chance of 1 in 20 or less of a gain")
+    assert worse["line"].startswith("Worse on 4 held-back cases: 1.1 % higher real cost, a chance of less than 1 in 20 of a gain")
     assert words_for([0.4])["state"] == "single" and words_for([0.4])["decision"] == "single"
     assert words_for([3.0, 3.1, 2.9, -1.4])["decision"] == "keep", "the chance is high, the worst case beyond 1 %"
-    assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "1 in 20 or less"
+    assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "less than 1 in 20" and jobs._chance_words(0.98) == "better than 19 in 20"
     assert jobs._chance_words(0.5) == "about 10 in 20" and jobs._chance_words(None) == ""
     assert jobs._chance_words(0.897) == "under 9 in 10", "a keep never reads like the rule's 9 in 10"
     assert jobs._chance_words(0.9) == "about 18 in 20" and jobs._chance_words(0.947) == "about 19 in 20"
@@ -81,11 +81,11 @@ def test_the_final_check_says_what_to_do():
                                "(somewhere between 10.1 % worse and 11.5 % better).")
     assert unclear["advice"] == "Keep today's settings for now: the gain is not proven."
     confirmed = words([1.2, 5.0], 3.1)
-    assert confirmed["line"] == ("Probably better: 3.1 % lower real cost on 3 held-back cases, a chance of about 20 in 20; "
+    assert confirmed["line"] == ("Probably better: 3.1 % lower real cost on 3 held-back cases, a chance of better than 19 in 20; "
                                  "at least 1.2 % better than your starting point.")
     assert confirmed["advice"] == "Use the new settings: they are probably better on cases the search never saw."
     worse = words([-8.0, -1.0], -4.0)
-    assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of 1 in 20 or less of a gain "
+    assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of less than 1 in 20 of a gain "
                              "(likely between 1.0 % and 8.0 % worse).")
     assert worse["advice"] == "Keep today's settings: the new settings did worse on cases the search never saw."
     single = words(None, 2.0)

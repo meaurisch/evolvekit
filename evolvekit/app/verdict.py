@@ -96,18 +96,21 @@ def _span(low: float, high: float) -> str:
 
 
 def _chance_words(p: float | None) -> str:
-    """A chance of a gain in twentieths: "about 19 in 20", with "almost
-    certain" and "1 in 20 or less" at the ends; nothing for no chance."""
+    """A chance of a gain in twentieths: "about 19 in 20", never sounding
+    certain: "better than 19 in 20" above it, "less than 1 in 20" below 1 in 20,
+    and "almost certain" from 0.995; nothing for no chance."""
     if p is None:
         return ""
     if p >= 0.995:
         return "almost certain"
-    if p <= 0.05:
-        return "1 in 20 or less"
+    if p < 0.05:
+        return "less than 1 in 20"
     if p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
         # 0.897 would round to "about 18 in 20", which reads like the rule's
         # 9 in 10 when the rule said no: say which side of it the chance is.
         return f"under {round(USE_CHANCE * 10)} in 10"
+    if round(p * 20) >= 20:
+        return "better than 19 in 20"
     return f"about {round(p * 20)} in 20"
 
 
