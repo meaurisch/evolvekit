@@ -344,7 +344,9 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .drawer { position: fixed; top: 64px; right: 0; bottom: 0; width: 420px; max-width: 100vw; z-index: 25; background: var(--surface-raised); box-shadow: var(--elev-2);
   display: flex; flex-direction: column; animation: slide-in var(--dur-base) var(--ease-enter); }
 .drawer.is-wide { width: 560px; }
-@keyframes slide-in { from { transform: translateX(24px); } to { transform: none; } }
+/* The entrance fades in place: a slide from the right left the drawer 24 px past the edge whenever the
+   animation did not run (a page in the background, a capture of it). */
+@keyframes slide-in { from { opacity: .4; } to { opacity: 1; } }
 .drawer-head { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 16px; border-bottom: 1px solid var(--line-rule); min-height: 57px; }
 .drawer-titles { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .drawer-titles h2 { outline: none; }
@@ -364,7 +366,10 @@ body.drawer-dims main { opacity: .5; }
 .status-strip.is-accent { background: var(--accent); color: var(--on-accent); }
 .status-strip.is-accent .ink-2, .status-strip.is-accent .type-label, .status-strip.is-accent .link { color: var(--on-accent); }
 .status-strip.is-accent :focus-visible { outline-color: var(--on-accent); }
+.status-strip > * { min-width: 0; max-width: 100%; }
 .strip-main { display: flex; gap: 16px; align-items: flex-start; min-width: 0; }
+.strip-words .type-display { overflow-wrap: anywhere; }
+.strip-branches { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
 .strip-words { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .strip-words .type-label { color: var(--ink-2); }
 .strip-words .tone-critical { color: var(--critical); }
@@ -375,7 +380,10 @@ body.drawer-dims main { opacity: .5; }
 .strip-rule { grid-column: 1 / -1; }
 .strip-facts { display: flex; gap: 6px 24px; flex-wrap: wrap; }
 .strip-facts span { font: var(--type-small); }
-@media (max-width: 900px) { .status-strip { grid-template-columns: 1fr; padding: 18px 16px; gap: 16px; } }
+/* Below 1100 px the verdict's words take the full width and the range goes under them: beside it, a
+   long verdict line wrapped to a word a line. */
+@media (max-width: 1100px) { .status-strip { grid-template-columns: minmax(0, 1fr); gap: 16px; } }
+@media (max-width: 900px) { .status-strip { padding: 18px 16px; } }
 .strip-caption { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-2); }
 .interval-strip.on-accent .strip-caption { color: var(--on-accent); }
 .interval-strip { width: 100%; display: flex; flex-direction: column; gap: 2px; }

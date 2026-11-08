@@ -11,7 +11,7 @@
   var st = null;
 
   function render(main, slug, query, gen) {
-    st = { slug: slug, gen: gen, run: query.run || "", view: ["tries", "cases", "settings"].indexOf(query.view) >= 0 ? query.view : "tries",
+    st = { slug: slug, gen: gen, run: query.run || "", view: ["tries", "cases", "settings", "code"].indexOf(query.view) >= 0 ? query.view : "tries",
       chosen: null, chosenSet: false, doc: null, h: null, status: null, results: null, tries: null, hover: null, lastStrip: "", lastPlot: "", phase: null,
       showAllSettings: false, openRuns: query.runs === "1" };
     // Everything at once: the study, its harness and the run (status, tries, results) in one round.
@@ -19,15 +19,21 @@
       if (!EK.isCurrent(gen)) return;
       st.doc = r[0]; st.h = r[1];
       if (r[2] === "no run" || !st.doc.runs || !st.doc.runs.length) { location.replace(((st.doc.study.step || 1) >= 4 ? "#/setup/" : "#/start/") + EK.q(slug)); return; }
+      if (viewKeys().indexOf(st.view) < 0) st.view = st.view === "settings" || st.view === "code" ? viewKeys()[2] : "tries";
       return Promise.resolve().then(function () {
         if (!EK.isCurrent(gen)) return;
         EK.hoverEscape = hoverEscape;
         EK.onStudyChanged = function () { load().then(function () { if (EK.isCurrent(gen)) update(main); }); };
         draw(main);
         if (st.openRuns) runsDrawer();
+        // A live run's progress every 2.5 s; every 5 s, live or not, the study's runs: a run started
+        // elsewhere (a bake-off from the terminal) or a run that ended shows here without a reload.
+        var tick = 0;
         EK.every(2500, function () {
-          if (!st.status || !isLive()) return;
-          load().then(function () { if (EK.isCurrent(gen)) update(main); }).catch(function () { /* the next poll tries again */ });
+          if (!st.status) return;
+          tick++;
+          if (isLive()) load().then(function () { if (EK.isCurrent(gen)) update(main); }).catch(function () { /* the next poll tries again */ });
+          if (tick % 2 === 0) watchRuns();
         });
         window.addEventListener("resize", onResize);
       });
@@ -43,6 +49,41 @@
   /** The phases in which no run is live, so "Compare branches" is offered on a code study. */
   var BRANCHES_WHEN = ["done", "stopped", "failed"];
   function runQ() { return st.run ? "?run=" + EK.q(st.run) : ""; }
+  /** The three views: a code study's third is Code (what each combination changed), else Settings. */
+  function viewKeys() { return ["tries", "cases", isCode() ? "code" : "settings"]; }
+
+  // ------------------------------------------------------------------ the study's runs, while the page is open
+  /** The run to move to: the newest, when it is new and the page showed the newest before it. */
+  function newerRun(old, fresh, shown) {
+    var was = (old[old.length - 1] || {}).id, now = (fresh[fresh.length - 1] || {}).id;
+    return now && was && now !== was && shown === was ? now : null;
+  }
+  /** What the header, the notices and the runs drawer show of the runs: when it changes, they follow. */
+  function runsKey(runs) { return runs.map(function (r) { return r.id + "\u0001" + r.kind + "\u0001" + r.line; }).join("\u0002"); }
+  /** Ask for the study's runs as they are now; follow a new run, or bring the header, the notices and
+      an open runs drawer up to date (a run that ended, a run that started while another was shown). */
+  function watchRuns() {
+    var gen = st.gen;
+    return EK.get(EK.studyPath(st.slug, "/runs")).then(function (d) {
+      if (!EK.isCurrent(gen)) return;
+      var old = st.doc.runs || [], fresh = d.runs || [];
+      var to = newerRun(old, fresh, st.run);
+      st.doc.runs = fresh;
+      if (to) { follow(to); return; }
+      if (runsKey(old) === runsKey(fresh)) return;
+      var head = document.getElementById("study-head");
+      if (head) head.innerHTML = String(header());
+      var n = document.getElementById("study-notices");
+      if (n) { var nh = String(notices()); n.innerHTML = nh; st.lastNotices = nh; }
+      if (EK.drawerKind() === "runs") EK.refreshDrawer({ body: runsBody() });
+    }).catch(function () { /* the next poll tries again */ });
+  }
+  /** Show a run that started while the page was open, in place of the one that was the newest. */
+  function follow(run) {
+    EK._moveFocus = false;
+    EK.toast("done", "A new run of this study started: showing it");
+    location.replace(location.pathname + location.search + EK.studyHref(st.slug, run));
+  }
 
   /** The run's status, tries and results, asked for together. While the search runs, the results wait. */
   function load(first) {
@@ -105,12 +146,17 @@
     var planned = c.runs_per_case && heldCount() ? c.runs_per_case * heldCount() : null;
     return Object.assign({}, c, { planned: planned });
   }
+  /** The best so far: one figure, the status document's (`verdict.best_so_far`), the very number
+      `study status` prints; positive is better, and nothing is shown until it beats today. */
   function bestPct() {
-    var t = st.tries, last = t && (t.best || []).slice(-1)[0];
-    if (last && last.id !== t.base) return last.pct > 0 ? last.pct : null;
-    if (t && t.available && t.combinations.length) return null; // tries, and no full look beat today yet
     var b = (st.status.best || {}).pct;
     return b != null && b > 0 ? b : null;
+  }
+  /** That figure in `study status`'s words ("6.1 % lower tour length", the server's `says`), labelled as the chip labels it. */
+  function bestSays() {
+    var b = st.status.best || {}, goal = goalOf() || {};
+    var says = b.says || EK.change(b.pct, goal.direction) + (goal.says ? " " + goal.says : "");
+    return says + " on the cases it learned from";
   }
 
   function strip() {
@@ -128,7 +174,7 @@
           : (s.rounds || {}).planned ? "Then " + EK.plural(s.rounds.planned, "round") + " and the final check" : "Then the search and the final check", acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
     } else if (s.phase === "search") {
       var b = bestPct();
-      Object.assign(x, { kicker: (cardState().continued ? "Searching again · " : "Searching · ") + roundWord(), head: b ? "Best so far: " + EK.better(b) : "Nothing better yet",
+      Object.assign(x, { kicker: (cardState().continued ? "Searching again · " : "Searching · ") + roundWord(), head: b ? "Best so far: " + bestSays() : "Nothing better yet",
         tag: b ? "Not checked yet" : "", sub: foundWords() || s.now || s.sentence,
         caption: EK.capital(roundWord()) + (s.time && s.time.finish_at ? " · done around " + s.time.finish_at : left ? " · " + left : ""),
         acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
@@ -146,7 +192,7 @@
         acts: [s.can_resume ? { text: "Continue where it stopped", act: "resume" } : null, { text: "Start it again", kind: "secondary", act: "restart" }].filter(Boolean) });
     } else if (s.phase === "stopped" && !(f.state === "stopped")) {
       var b2 = bestPct();
-      Object.assign(x, { kickerTone: "", kicker: "Stopped by you · " + roundWord().replace(/ of \d+$/, ""), head: b2 ? "Best so far: " + EK.better(b2) : "Stopped before a better one",
+      Object.assign(x, { kickerTone: "", kicker: "Stopped by you · " + roundWord().replace(/ of \d+$/, ""), head: b2 ? "Best so far: " + bestSays() : "Stopped before a better one",
         tag: b2 ? "Not checked yet" : "", sub: s.can_check ? "Check it, or carry on searching." : s.can_resume ? "Carry on searching when you like." : "Tries up to the stop are kept.",
         caption: EK.capital(roundWord()) + (s.time && s.time.used ? " · stopped at " + s.time.used : ""), stoppedAt: true,
         acts: [s.can_check ? { text: "Run the final check", act: "check" } : null, s.can_resume ? { text: "Carry on", kind: s.can_check ? "secondary" : "primary", act: "resume" } : null].filter(Boolean) });
@@ -156,10 +202,12 @@
         range: [f.mean, f.ci95 && f.ci95[0], f.ci95 && f.ci95[1]], caption: "Likely range, on the final check", rule: true,
         acts: [hasExport("settings_json") ? { text: "Save settings file", act: "save-settings" } : null, { text: "Copy", kind: "secondary", act: "copy-summary", label: "Copy a summary" }].filter(Boolean) });
     } else if (d === "keep") {
+      // "No difference in any run" (`state: same`): the verdict's line, and no band, range or chance.
+      var same = f.state === "same";
       Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Keep · final check on " + EK.plural(f.n || heldCount(), "held-back case"), head: verdictHead(f),
         sub: verdictSub(f), right: "range",
-        range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null,
-        caption: isBakeoff() && !f.ci95 ? "Each branch’s range is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
+        range: !same && f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null,
+        caption: same ? "" : isBakeoff() && !f.ci95 ? "Each branch’s answer is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
         acts: [f.recheck ? { text: "Check with more runs", kind: "secondary", act: "recheck" } : null].filter(Boolean) });
     } else if (d === "worse") {
       Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Worse · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
@@ -222,9 +270,19 @@
       <div class="strip-main">${EK.verdictMark(x.mark, phone ? 36 : 44, acc)}<div class="strip-words">
         <span class="type-label${x.kickerTone === "accent" && !acc ? " accent-ink" : x.kickerTone === "critical" ? " tone-critical" : ""}">${x.kicker}</span>
         <p class="${acc ? "type-display" : "strip-head"}">${EK.figures(x.head)}${x.tag ? html` <span class="strip-tag">${x.tag}</span>` : ""}</p>
-        <p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p></div></div>
+        <p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p>${branchLines(acc)}</div></div>
       <div class="strip-side">${vis}${x.caption ? html`<span class="type-small${acc ? "" : " ink-2"}">${x.caption}</span>` : ""}
         ${acts.length ? html`<div class="actions">${acts}</div>` : ""}${rule}</div></section>`;
+  }
+
+  /** A finished bake-off: each branch's own line under the verdict, verbatim (as `study verdict` prints
+      them), so a branch no run told from today's says so here too; its band, if any, is on Compare branches. */
+  function branchLines(acc) {
+    var c = (st.results && st.status.phase === "done" && st.results.candidates) || [];
+    if (!isBakeoff() || !c.length) return "";
+    return html`<ul class="strip-branches type-small${acc ? "" : " ink-2"}">${c.map(function (b) {
+      return html`<li><span class="mono">${b.ref}</span>: ${EK.figures(b.line)}</li>`;
+    })}</ul>`;
   }
 
   // ------------------------------------------------------------------ Pepper and the page title
@@ -317,7 +375,7 @@
       return html`<div class="plot-empty"><p class="type-body">${msg}</p></div>`;
     }
     var family = !!st.chosen && decisionOf() === "use";
-    var keepWord = whatOf() === "data" ? "today’s data" : "today’s settings";
+    var keepWord = whatOf() === "code" ? "today’s code" : whatOf() === "data" ? "today’s data" : "today’s settings";
     if (st.view === "tries") {
       var say = sayLine(t, family);
       var planH = isLive() && st.status.time && st.status.time.hours ? st.status.time.hours * 0.85 : 0;
@@ -336,6 +394,7 @@
         <span>right column: tries better than today on that case</span></div>
         ${weakest ? html`<p class="type-small ink-2">Hardest case: ${EK.shortCase(weakest[0])}, better in ${weakest[2][0]} of ${weakest[2][1]} full looks.</p>` : ""}`;
     }
+    if (st.view === "code") { plotPoints = []; return codeView(t); }
     if (!st.paramOrder || st.paramOrder.length !== (t.parameters || []).length) {
       st.paramOrder = (t.parameters || []).slice().sort(function (a, b) { return EK.settingWeight(t, b) - EK.settingWeight(t, a); }).map(function (p) { return p.name; });
     }
@@ -351,6 +410,24 @@
     return html`<p class="type-small ink-2">${EK.plural(params.length, "setting")} tuned, the ones that moved the result most first. The band: values in tries over 1 % better.</p>
       <div class="settings-grid">${panels}</div>
       ${params.length > 6 && !st.showAllSettings ? html`<p>${EK.link("Show all " + params.length, { act: "all-settings" })}</p>` : ""}`;
+  }
+  /** A code study's third view: what each combination changed in the source, the best first, then
+      the newest. No figures here: they stay in Tries, on one base, so two views never disagree. */
+  function codeView(t) {
+    var r = st.results, done = decisionOf() && ["use", "keep", "worse", "single"].indexOf(decisionOf()) >= 0 && r && r.best_id;
+    var bestId = done ? r.best_id : (st.status.best || {}).id;
+    var all = t.combinations.filter(function (c) { return !c.base && c.diff_stat; })
+      .sort(function (a, b) { return (b.id === bestId) - (a.id === bestId) || b.n - a.n; });
+    if (!all.length) return html`<div class="plot-empty"><p class="type-body">No change to the code yet.</p></div>`;
+    var shown = all.slice(0, 30);
+    return html`<p class="type-small ink-2">${EK.plural(all.length, "combination")} tried, each a change to today’s code; its diff is one click away.</p>
+      <div class="cases-wrap"><table class="changed-table"><thead><tr><th>Combination</th><th>What it changed</th><th><span class="sr-only">Details</span></th></tr></thead><tbody>
+      ${shown.map(function (c) {
+        var mark = c.id === bestId ? (done ? " · the one the final check checked" : " · best so far, not checked") : "";
+        return html`<tr><td>No. ${c.n} · round ${c.round}${c.failed ? " · did not finish" : ""}${mark ? html`<br><span class="ink-2">${mark.slice(3)}</span>` : ""}</td>
+          <td>${diffWords(c.diff_stat)}</td><td>${EK.button("Details", { kind: "quiet", size: "s", act: "details", arg: c.id, label: "Details of combination " + c.n })}</td></tr>`;
+      })}</tbody></table></div>
+      ${all.length > shown.length ? html`<p class="type-small ink-2">${all.length - shown.length} older not shown.</p>` : ""}`;
   }
   /** One sentence over the Tries plot: what is new, or what is marked. */
   function sayLine(t, family) {
@@ -384,10 +461,12 @@
     var c = chosenCombo();
     return html`${EK.chosenChip(c, chipFigure(c))}${c ? EK.button("Details", { kind: "quiet", size: "s", act: "details", arg: c.id, label: "Details of combination " + c.n }) : ""}`;
   }
-  /** The chip's figure: the verdict document's `learned_from` (`learned_pct`) for the best combination, else its own. */
+  /** The chip's figure: the verdict document's `learned_from` (`learned_pct`) for the best combination,
+      the strip's best so far for it while the run searches, else its own. */
   function chipFigure(c) {
     var r = st.results, best = c && r && r.best_id === c.id && r.learned_pct != null;
-    return { pct: best ? r.learned_pct : null, direction: (goalOf() || {}).direction };
+    var now = c && st.status && isLive() && st.status.best && st.status.best.id === c.id && st.status.best.pct != null;
+    return { pct: best ? r.learned_pct : now ? st.status.best.pct : null, direction: (goalOf() || {}).direction };
   }
   function chosenCombo() { var c = st.chosen && combo(st.chosen); return c && !c.base ? c : null; }
 
@@ -466,9 +545,21 @@
   // ------------------------------------------------------------------ below the views
   function changedTable() {
     var ch = ((st.results || {}).changed || []).filter(function (c) { return c.changed; });
+    if (isCode()) return codeChange(ch);
     if (!ch.length) return html`<p class="type-body ink-2">${(st.results || {}).is_seed ? "Nothing: the starting point stayed the best." : "No changes."}</p>`;
     return html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Today</th><th>New</th></tr></thead><tbody>
       ${ch.map(function (c) { return html`<tr><td>${c.label || c.name}${c.help ? html`<br><span class="ink-2">${c.help}</span>` : ""}</td><td>${c.old_text}</td><td class="new">${c.new_text}</td></tr>`; })}</tbody></table></div>`;
+  }
+  /** A code study's hand-over: the change against today's code (its diff in lines, and Details for the
+      diff itself); a bake-off's branches are on the page that shows them side by side. */
+  function codeChange(ch) {
+    var r = st.results || {};
+    if (isBakeoff()) return html`<p class="type-body ink-2">Each branch’s own answer is on the page that shows them side by side.</p>`;
+    if (!ch.length) return html`<p class="type-body ink-2">${r.is_seed ? "Nothing: today’s code stayed the best." : "No change to the code."}</p>`;
+    var c = ch[0];
+    return html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Source</th><th>Today’s code</th><th>The change</th></tr></thead><tbody>
+      <tr><td>${c.label || "The source"}</td><td class="mono">${c.old_text}</td><td class="new">${c.new_text}</td></tr></tbody></table></div>
+      ${r.best_id && combo(r.best_id) ? html`<div class="actions">${EK.button("Show the change", { kind: "secondary", act: "details", arg: r.best_id })}</div>` : ""}`;
   }
   function handOver() {
     var r = st.results;
@@ -481,7 +572,8 @@
     var title = code ? (keepIt ? "Code to keep" : "The code change to use") : (keepIt ? "Settings to keep" : "Settings to use");
     return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">${title}</h2>
       ${keepIt ? html`<p class="type-body strong">Nothing to change: ${EK.keepWords({ what: whatOf() }).replace(/^Keep /, "keep ")}${(r.context || {}).compared_with ? " (" + r.context.compared_with + ")" : ""}.</p>
-        <p class="type-small ink-2">${code ? "Keep today’s code. Below it is the change that came closest: not proven on held-back cases, so not recommended."
+        <p class="type-small ink-2">${code && isBakeoff() ? "Keep today’s code: no branch is shown to beat it."
+          : code ? "Keep today’s code. Below it is the change that came closest: not proven on held-back cases, so not recommended."
           : "Hand over today’s settings. Below them is what the search found: not proven on held-back cases, so not recommended."}</p>` : ""}
       ${changedTable()}
       <div class="actions">${keepIt && hasExport("settings_json") ? EK.button("Show today’s settings", { act: "show-today" }) : ""}
@@ -507,6 +599,8 @@
         <div class="fact"><span class="type-label">Time in total</span><span>${EK.hours(c.hours)}${c.took ? " · took " + c.took : ""}</span></div>
         <div class="fact"><span class="type-label">Combinations</span><span>${c.tried != null ? EK.int(c.tried) + " tried" : ""}</span></div>
         <div class="fact"><span class="type-label">Starting point</span><span>${c.compared_with || ""}</span></div></div>`);
+      // How much of the plan ran, when less did: the verdict document's own sentence.
+      if (r.how_it_ran) parts.push(html`<p class="type-small">${r.how_it_ran}</p>`);
       if (r.final && r.final.next) parts.push(html`<p class="type-small ink-2">${r.final.next}</p>`);
       if (r.final && r.final.recheck) parts.push(html`<div class="actions">${EK.button(r.final.recheck.label, { kind: r.final.recheck.over ? "quiet" : "secondary", act: "recheck" })}</div><p class="type-small ink-2">${r.final.recheck.why}</p>`);
       var dir = (goalOf() || {}).direction, measure = (goalOf() || {}).label || "the measure";
@@ -555,10 +649,12 @@
   }
   function draw(main) {
     var phone = EK.isPhone();
-    var counts = st.tries && st.tries.available ? { tries: st.tries.combinations.filter(function (c) { return !c.base; }).length, cases: st.tries.cases.length, settings: (st.tries.parameters || []).length } : null;
-    EK.mount(main, html`<div class="page"><div class="page-inner">${header()}<div id="study-notices">${notices()}</div>
+    var tried = st.tries && st.tries.available ? st.tries.combinations.filter(function (c) { return !c.base; }) : null;
+    var counts = tried ? { tries: tried.length, cases: st.tries.cases.length, settings: (st.tries.parameters || []).length,
+      code: tried.filter(function (c) { return c.diff_stat; }).length } : null;
+    EK.mount(main, html`<div class="page"><div class="page-inner"><div id="study-head">${header()}</div><div id="study-notices">${notices()}</div>
       <div id="strip-slot">${statusStrip()}</div>
-      <div class="sub-section"><div class="view-head">${EK.viewTabs(st.view, phone ? null : counts)}<div id="chip-slot" class="actions" style="padding:6px 0">${chipHtml()}</div></div>
+      <div class="sub-section"><div class="view-head">${EK.viewTabs(st.view, phone ? null : counts, viewKeys())}<div id="chip-slot" class="actions" style="padding:6px 0">${chipHtml()}</div></div>
         <div class="view-panel" id="view-panel" role="tabpanel" aria-labelledby="tab-${st.view}"></div></div>
       ${handOver()}${nextSteps()}${details()}</div></div>`, acts(main));
     st.lastStrip = String(statusStrip());
@@ -581,7 +677,7 @@
     if (n) { var nh = String(notices()); if (nh !== st.lastNotices) { n.innerHTML = nh; st.lastNotices = nh; } }
     if (!st.hover) drawView();
     companion();
-    if (!isLive()) { EK._moveFocus = false; draw(main); }
+    if (!isLive()) { EK._moveFocus = false; draw(main); watchRuns(); }
   }
 
   // ------------------------------------------------------------------ actions
@@ -596,7 +692,7 @@
         history.replaceState(null, "", location.pathname + location.search + "#/study/" + EK.q(st.slug) + "?run=" + EK.q(st.run) + "&view=" + st.view);
       },
       tabkey: function (el, ev) {
-        var order = ["tries", "cases", "settings"], i = order.indexOf(st.view);
+        var order = viewKeys(), i = order.indexOf(st.view);
         if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
         ev.preventDefault();
         var next = order[(i + (ev.key === "ArrowRight" ? 1 : 2)) % 3];
@@ -669,7 +765,7 @@
       },
       busy: function () {
         EK.openDrawer({ title: "Your computer is busy", body: html`<p class="type-body">Other programs used this computer while the study ran.</p>
-          <p class="type-body">Tries then take longer and may find a little less. The answer stays fair: the final check runs today’s settings and the new ones side by side, under the same load.</p>
+          <p class="type-body">Tries then take longer and may find a little less. The answer stays fair: the final check runs today’s ${whatOf() === "both" ? "settings and data" : whatOf()} and the change side by side, under the same load.</p>
           <p class="type-small ink-2">You need not stop the study. For the best result, close heavy programs while it runs.</p>` });
       },
       latest: function () { EK.go(EK.studyHref(st.slug)); },
@@ -709,13 +805,19 @@
   }
   /** "Compare branches": the shared drawer (`EK.branchesDrawer`, drawer.js). */
   function branchesDrawer() { EK.branchesDrawer(st.slug, heldCount()); }
-  function runsDrawer() {
+  /** The runs drawer's body: every run as the page last heard of it, newest first. */
+  function runsBody() {
     var runs = (st.doc.runs || []).slice().reverse().map(function (r) {
       var mark = r.kind === "finished" ? EK.markOf({ kind: "finished", decision: r.decision, tone: r.tone }) : r.kind === "failed" ? "error" : "open";
       return Object.assign({}, r, { mark: mark });
     });
-    EK.openDrawer({ title: "This study’s runs", sub: "Newest first", body: html`${EK.runList(runs, st.run, function (r) { return EK.studyHref(st.slug, r.id); })}
-      ${runs.length > 1 ? html`<p>${EK.link("Compare two runs", { href: "#/compare?a=" + EK.q(st.slug + "/" + runs[0].id) + "&b=" + EK.q(st.slug + "/" + runs[1].id) })}</p>` : ""}` });
+    return html`${EK.runList(runs, st.run, function (r) { return EK.studyHref(st.slug, r.id); })}
+      ${runs.length > 1 ? html`<p>${EK.link("Compare two runs", { href: "#/compare?a=" + EK.q(st.slug + "/" + runs[0].id) + "&b=" + EK.q(st.slug + "/" + runs[1].id) })}</p>` : ""}`;
+  }
+  /** Open on what the page knows, then ask for the runs as they are now: the drawer follows. */
+  function runsDrawer() {
+    EK.openDrawer({ kind: "runs", title: "This study’s runs", sub: "Newest first", body: runsBody() });
+    watchRuns();
   }
 
   EK.pages.study = { render: render };

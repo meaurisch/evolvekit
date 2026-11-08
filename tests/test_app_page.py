@@ -276,3 +276,135 @@ def test_the_verdict_words_are_escaped_once():
     assert tour == ('<p>at worst <span class="fig">0.3 %</span> worse than your starting point'
                     " (Demo tour&#39;s own defaults).</p>"), tour
     assert markup == '<p>&lt;b&gt;&amp;&lt;/b&gt; <span class="fig">12</span></p>', markup
+
+
+# ---------------------------------------------------------------------------
+# persona round 1 (code studies): a run that starts or ends while the page is
+# open, one best so far, a code study's words, no figure where no run differed,
+# nothing pushed off the right edge
+# ---------------------------------------------------------------------------
+
+COMPARE_PAGE = (STATIC / "js" / "pages" / "compare.js").read_text(encoding="utf-8")
+NODE_GLOBALS = ("var window = {}, document = {addEventListener: function () {}}, navigator = {}, "
+                "location = {href: 'http://127.0.0.1/', hash: '', search: ''};")
+
+
+def _page_function(js: str, name: str) -> str:
+    """The source of one of a page's two-space-indented functions."""
+    start = js.index(f"  function {name}(")
+    return js[start:js.index("\n  }\n", start) + 4]
+
+
+def _node(*parts: str):
+    """Run the page's own scripts and `parts` under node; the last part prints JSON."""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+    scripts = [(STATIC / "js" / name).read_text(encoding="utf-8") for name in ("core.js", "parts.js", "words.js")]
+    script = "\n".join([NODE_GLOBALS, *scripts, "var EK = window.EK, html = EK.html;", *parts])
+    done = subprocess.run([node, "-"], input=script, capture_output=True, encoding="utf-8", check=False)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_the_study_page_notices_a_new_run_and_a_runs_end():
+    """Persona round 1, F4: after a bake-off started from the terminal the Study page kept the first
+    run's verdict and "Past runs (1)", and its runs drawer said "running · 10 min left" of a finished
+    run. The page asks the runs route while it is open, live run or not; it moves to a new run when it
+    showed the newest one; the header, the notices and an open runs drawer follow every change."""
+    assert 'EK.studyPath(st.slug, "/runs")' in STUDY_PAGE
+    assert "if (!st.status || !isLive()) return;" not in STUDY_PAGE, "the poll no longer stops once no run is live"
+    watch = _page_function(STUDY_PAGE, "watchRuns")
+    assert "newerRun(" in watch and "follow(" in watch and 'EK.drawerKind() === "runs"' in watch
+    assert "study-head" in watch and "notices()" in watch
+    drawer = _page_function(STUDY_PAGE, "runsDrawer")
+    assert 'kind: "runs"' in drawer and "watchRuns(" in drawer, "the drawer opens on what is known, then brings it up to date"
+    out = _node(_page_function(STUDY_PAGE, "newerRun"), _page_function(STUDY_PAGE, "runsKey"), """
+      var a = {id: "a", kind: "finished", line: "finished · not proven"}, b = {id: "b", kind: "running", line: "running · 1 min left"};
+      process.stdout.write(JSON.stringify({
+        follows: newerRun([a], [a, b], "a"), same: newerRun([a, b], [a, b], "b"),
+        older: newerRun([{id: "0"}, a], [{id: "0"}, a, b], "0"), first: newerRun([], [a], ""),
+        ended: runsKey([a, b]) !== runsKey([a, Object.assign({}, b, {kind: "finished", line: "finished · probably better"})]),
+        still: runsKey([a, b]) === runsKey([a, Object.assign({}, b)])}));""")
+    assert out == {"follows": "b", "same": None, "older": None, "first": None, "ended": True, "still": True}, out
+
+
+def test_the_strip_shows_the_one_best_so_far_in_study_status_words():
+    """Persona round 1, F3: the strip said "Best so far: 8.99 % better" (the Tries digest's figure) while
+    `study status` said "0.4 % lower". The strip reads the status document's `best` -- `pct` to decide,
+    `says` to say it -- and labels it as the chip does; the Tries line is labelled as what it is."""
+    best = _page_function(STUDY_PAGE, "bestPct")
+    assert "st.status.best" in best and "st.tries" not in best and "t.best" not in best
+    body = _strip_branches(STUDY_PAGE)
+    assert "bestSays()" in body and "on the cases it learned from" in _page_function(STUDY_PAGE, "bestSays")
+    assert "EK.better(b)" not in body and "EK.better(b2)" not in body
+    words = (STATIC / "js" / "words.js").read_text(encoding="utf-8")
+    card = words[words.index("EK.cardOf = function"):]
+    assert "s.best_says" in card and "EK.better(s.best_pct)" not in card, "the Home card: the same words"
+    plots = (STATIC / "js" / "plots.js").read_text(encoding="utf-8")
+    legend = plots[plots.index("EK.triesLegend = function"):]
+    assert "best so far, each case’s change averaged" in legend[:600], "the plot's line is on another base: said so"
+
+
+def test_a_code_study_speaks_of_code_not_settings():
+    """Persona round 1, F5: a code study showed "Settings 0", "TODAY'S SETTINGS" and a
+    "SETTING / TODAY / NEW" table. Its third view is Code (what each combination changed), the Tries
+    plot's line is today's code, and the hand-over shows the change against today's code."""
+    out = _node("""process.stdout.write(JSON.stringify({
+      code: String(EK.viewTabs("code", {tries: 3, cases: 5, code: 2}, ["tries", "cases", "code"])),
+      plain: String(EK.viewTabs("tries", null))}));""")
+    assert ">Code<" in out["code"] and "Settings" not in out["code"] and 'data-arg="code"' in out["code"]
+    assert ">Settings<" in out["plain"], "a settings study keeps its three views"
+    assert "function viewKeys" in STUDY_PAGE and "EK.viewTabs(st.view, phone ? null : counts, viewKeys())" in STUDY_PAGE
+    view = _page_function(STUDY_PAGE, "codeView")
+    assert "diffWords(c.diff_stat)" in view and 'act: "details"' in view and "EK.better" not in view and ".pct" not in view, \
+        "the Code view lists the changes; the figures stay in Tries, on one base"
+    assert 'whatOf() === "code" ? "today’s code"' in STUDY_PAGE, "the Tries plot's zero line"
+    hand = _page_function(STUDY_PAGE, "codeChange")
+    assert "Today’s code" in hand and "The change" in hand and "<th>Setting</th>" not in hand
+    assert "codeChange(" in _page_function(STUDY_PAGE, "changedTable")
+    busy = STUDY_PAGE[STUDY_PAGE.index("busy: function"):STUDY_PAGE.index("latest: function")]
+    assert "today’s settings and the new ones" not in busy
+    assert 'what: "settings"' not in COMPARE_PAGE and "s.what" in COMPARE_PAGE, "two runs compared: each in its own words"
+    details = _page_function(STUDY_PAGE, "details")
+    assert "r.how_it_ran" in details, "how much of the plan ran, where the page says how the run went"
+
+
+def test_no_difference_in_any_run_shows_its_line_and_no_band():
+    """Persona round 1, B2: a change whose every run equals today's shows the verdict's line and no
+    band or range -- the strip, Compare branches and two runs compared."""
+    body = _strip_branches(STUDY_PAGE)
+    keep = body[body.index('d === "keep"'):body.index('d === "worse"')]
+    assert 'f.state === "same"' in keep
+    lines = _page_function(STUDY_PAGE, "branchLines")
+    assert "b.line" in lines and "intervalStrip" not in lines and "branchLines(acc)" in _page_function(STUDY_PAGE, "statusStrip"), \
+        "a finished bake-off's strip says each branch's own line, with no band"
+    out = _node(_page_function(COMPARE_PAGE, "candidatesView"), """
+      var line = "No difference in any run: every run of this change gave exactly today's result.";
+      var d = {held_back: {cases: 2, runs_per_case: 12}, candidates: [
+        {ref: "nearest-first", commit: "95dc9c5aa", decision: "keep", same: true, line: line},
+        {ref: "restart-sooner", commit: "1234567aa", decision: "keep", line: "Not proven", mean_pct: 0.4, ci95_pct: [-1, 2]}]};
+      var cols = String(candidatesView(d, 260)).split('<section class="cand-col">');
+      process.stdout.write(JSON.stringify({same: cols[2], other: cols[3]}));""")
+    assert "No difference in any run" in out["same"] and "interval-strip" not in out["same"]
+    assert "interval-strip" in out["other"]
+    answer = _page_function(COMPARE_PAGE, "answer")
+    assert 'f.state === "same"' in answer and "f.line" in answer
+    assert 'f.state === "same"' in _page_function(COMPARE_PAGE, "rangeOf")
+
+
+def test_the_strip_and_the_drawer_never_push_the_page_sideways():
+    """Persona round 1, F8: the verdict strip and its drawer were cut off at the right in a narrower
+    window. The strip's columns and words may shrink and wrap; the drawer's entrance never places it
+    past the right edge (an entrance that does not run leaves it where it ends)."""
+    css = (STATIC / "css" / "app.css").read_text(encoding="utf-8")
+    start = css.index("@keyframes slide-in")
+    slide = css[start:css.index("\n", start)]
+    assert "translate" not in slide, slide
+    assert ".status-strip > *" in css and "min-width: 0" in css[css.index(".status-strip > *"):][:80]
+    words = css[css.index(".strip-words .type-display"):][:120]
+    assert "overflow-wrap: anywhere" in words

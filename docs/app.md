@@ -189,8 +189,10 @@ must keep), **Data changes** and AI help.
 ![The Study page](app/study-light.png)
 
 The **status strip** at the top says the study's one answer right now —
-*Searching · round 7 of 12 · Best so far: 1.95 % better · Not checked yet* —
-and becomes the verdict when the final check has decided. Nothing says *use
+*Searching · round 7 of 12 · Best so far: 1.9 % lower cost on the cases it
+learned from · Not checked yet* — and becomes the verdict when the final check
+has decided. The best so far is one figure, the one `evolvekit study status`
+prints, in its words; the Home card says the same. Nothing says *use
 it* before then. Once there is a verdict, the strip's headline and the
 sentence under it are the verdict's own `line` and `advice`, word for word,
 as `evolvekit study verdict` prints them: the page never composes its own.
@@ -223,7 +225,9 @@ Below the strip three linked views:
 - **Tries** — every combination by when it finished and how much better
   than today; the orange line is the best so far, on full looks only (all
   study cases), so a lucky quick look on a few cases never sets it; rings at
-  *now* are tries still running.
+  *now* are tries still running. The line averages each case's change, so its
+  legend says so: it can differ by a few tenths from the strip's figure,
+  which compares the plain averages as the verdict does.
 - **Cases** — a row per study case, a dot per try, and how many tries beat
   today on it.
 - **Settings** — one panel per tuned setting: the value tried across, the
@@ -241,7 +245,12 @@ In a code study a combination is a change to the source. Its card's last
 line says how big it is — *+3 −1 lines in solver.py*, or *No change: today's
 code* for the starting point — and *Details* shows the change itself under
 *What it changed*: the diff as it is, in monospace, added lines on a green
-tint and removed ones on a red one. The verdict's answer for a code study
+tint and removed ones on a red one. The third view is **Code** in place of
+Settings: every combination's change, the best first, each with *Details*.
+The page speaks of code throughout: the Tries plot's zero line is *Today's
+code*, and **Code to keep** (or **The code change to use**) shows the source
+against today's code (*HEAD (e973d92)* → *+18 −9 lines in solver.py*) with
+*Show the change*. The verdict's answer for a code study
 speaks of the code (*Keep today's code …*), and the change is taken away
 from the command line: `study export SLUG --diff` writes it as a patch, and
 `study pr SLUG` makes a branch and a pull request of it (only with `--yes`;
@@ -268,7 +277,14 @@ check runs again), *Start a new study from this*, *Compare with…*; and
 **Details** — the set-up, every held-back case and every case the search
 learned from, every measure, and *What went wrong*: failed runs grouped with
 what to do about them, and the combinations that had them, each with its
-output. *Past runs* lists every run of the study with its verdict.
+output; a search that ran fewer rounds than planned says so there. *Past
+runs* lists every run of the study with its verdict. The page keeps up with
+the study while it is open: a run started elsewhere (a bake-off from the
+terminal) is shown as soon as it starts, when the page showed the newest run,
+and *Past runs* and its list follow every run that starts or ends. A
+bake-off's strip lists each branch's own line under the verdict; a branch
+whose every run gave today's result says *No difference in any run* and has
+no band, there and on *Compare branches*.
 
 The app runs one study at a time. A study started while another runs waits
 its turn and starts by itself; a run that was continued after it died says
@@ -402,7 +418,12 @@ runs, the run is queued and the server starts it later), `stop` (on a queued
 run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,
 with N runs per case), `continue` (`{"run": RUN, "hours": H}`: a finished
 run searches on for H hours more, at most 48, then checks again; 409 while
-anything runs), `status`, `results`, `tries` (every try of a run, digested for the
+anything runs), `status` (its `best` is the best so far as `study status` says it:
+`pct`, `says` in words such as "6.1 % lower tour length", and the combination's
+`id`), `runs` (every run as it is now and the newest, `{runs, latest}`: the open
+Study page asks it every few seconds, so a run started elsewhere, such as a
+bake-off from the terminal, or a run that ended shows without a reload),
+`results`, `tries` (every try of a run, digested for the
 Study page's three views: `evolvekit/app/tries.py`; in a code study each
 carries `diff_stat`, and `tries/{combination}` its `diff`), `download/{export}`
 (`download/report?view=1` opens the report in the browser; `download/study`
@@ -436,15 +457,17 @@ names:
 | `line`, `advice` | the verdict's one sentence, as the Study page shows it, and the sentence after it |
 | `measure` | `{"kpi", "label", "unit", "direction"}` of the measure that decided |
 | `held_back` | `{"cases", "runs_per_case"}` |
-| `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point; absent with `pending`, `stopped` and `skipped` |
+| `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point; absent with `pending`, `stopped` and `skipped`, and on a `keep` whose every run gave exactly today's result (its `line` begins "No difference in any run"; the page shows that line and no band) |
 | `levels` | with goals in order of importance: one entry per goal with the same keys, `deciding: true` on the one that decided |
 | `learned_from` | `{"cases", "pct"}`: the cases the search learned from, labelled as such |
 | `rule` | the fixed rule, in words |
 | `by_case` | one row per held-back case: `name`, `start`, `best`, `change_pct`, `outcome` (`better`, `worse`, `same`, `failed`) |
 | `changed` | the settings and data changes of the best combination: `name`, `label`, `from`, `to` |
-| `candidates` | only on a bake-off's run (`study bakeoff`): one entry per branch in the order given, `ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance` — each against the starting point by the same rule |
+| `candidates` | only on a bake-off's run (`study bakeoff`): one entry per branch in the order given, `ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance` — each against the starting point by the same rule; `same: true` and no figures on a branch whose every run gave exactly today's result |
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
+| `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
+| `how_it_ran` | only when the search stopped on time with fewer rounds than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …" — the Study page shows it under Details |
 
 The page is plain HTML, CSS and JavaScript with no build step, under
 `evolvekit/app/static/`: `app.html` (the shell), `css/tokens.css` (every

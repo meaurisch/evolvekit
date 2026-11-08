@@ -94,8 +94,9 @@
         c.sub = "Nothing lost" + (s.finish_at ? " · done around " + s.finish_at : "");
       } else {
         c.kicker = s.phase === "starting" ? "Starting" : "Running" + (round ? " · " + round : "");
-        c.head = s.best_pct != null && s.best_pct > 0 ? "Best so far: " + EK.better(s.best_pct) : "Nothing better yet";
-        c.sub = "Not checked yet" + (s.finish_at ? " · done around " + s.finish_at : "");
+        // The best so far in `study status`'s words (the server's `best_says`), on the cases it learned from.
+        c.head = s.best_says ? "Best so far: " + s.best_says : "Nothing better yet";
+        c.sub = (s.best_says ? "On the cases it learned from, not checked yet" : "Not checked yet") + (s.finish_at ? " · done around " + s.finish_at : "");
       }
       c.timeline = { rounds: r.planned || Math.max(1, (r.done || 0) + 1), done: r.done || 0, running: s.phase === "check" ? null : (r.done || 0) + 1,
         check: s.phase === "check" && s.check ? [s.check.done, s.check.planned] : null };
@@ -108,8 +109,8 @@
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
     } else if (s.kind === "stopped") {
       c.kicker = s.check_stopped ? "Final check stopped" : "Stopped" + (r.done ? " · round " + (r.done + 1) : "");
-      c.head = s.check_stopped ? "No answer yet" : s.best_pct != null && s.best_pct > 0 ? "Best so far: " + EK.better(s.best_pct) : "Stopped by you";
-      c.sub = s.check_stopped ? "The runs so far are kept." : "Not checked yet";
+      c.head = s.check_stopped ? "No answer yet" : s.best_says ? "Best so far: " + s.best_says : "Stopped by you";
+      c.sub = s.check_stopped ? "The runs so far are kept." : s.best_says ? "On the cases it learned from, not checked yet" : "Not checked yet";
       c.timeline = { rounds: r.planned || Math.max(1, r.done || 1), done: r.done || 0, stoppedAt: (r.done || 0) + 1 };
     } else if (s.kind === "failed") {
       c.kicker = "Stopped by an error";

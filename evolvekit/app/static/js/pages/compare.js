@@ -16,11 +16,20 @@
     if (!checked(s)) {
       return [kind, (s.improvement_pct != null ? EK.capital(EK.better(s.improvement_pct)) : "A number") + ", not checked", "On its own study cases"];
     }
-    var w = EK.answerWords({ decision: f.decision, mean: f.mean, ci95: f.ci95, chance: f.chance, what: "settings", goal: s.goal });
+    // No run told the change from today's: the verdict's own line, and no figure.
+    if (f.state === "same") return [kind, f.line, EK.keepWords({ what: s.what }) + "."];
+    var w = EK.answerWords({ decision: f.decision, mean: f.mean, ci95: f.ci95, chance: f.chance, what: s.what, goal: s.goal });
     var sub = (EK.capital(EK.chanceWords(f.chance)) || "") + (f.n ? (f.chance != null ? " · " : "") + EK.plural(f.n, "held-back case") : "");
     return [kind, w.head, sub];
   }
   function overlap(a, b) { return a && b && a[0] <= b[1] && b[0] <= a[1]; }
+  /** A side's likely range: the band and its words, or why there is none. */
+  function rangeOf(s, w) {
+    var f = s.final || {};
+    if (f.state === "same") return html`<p class="type-small ink-2">No range: every run gave today’s result.</p>`;
+    if (!checked(s) || f.mean == null) return html`<p class="type-small ink-2">No range: no final check.</p>`;
+    return html`${EK.intervalStrip(f.mean, f.ci95 && f.ci95[0], f.ci95 && f.ci95[1], { width: w })}<p class="type-small ink-2">${EK.rangeWords(f.ci95 && f.ci95[0], f.ci95 && f.ci95[1])}</p>`;
+  }
 
   function verdictHead(d) {
     var A = d.a, B = d.b, ka = sideKind(A), kb = sideKind(B);
@@ -117,11 +126,7 @@
         return html`<div><span class="type-label ink-2">${tag}</span><p class="type-heading"><a class="card-link" href="${link(s)}">${s.name}</a></p>
           <p class="type-small ink-2">${s.harness} · ${EK.hours(s.setup.hours)}</p></div>`;
       };
-      var range = function (s) {
-        var f = s.final || {};
-        if (!checked(s) || f.mean == null) return html`<p class="type-small ink-2">No range: no final check.</p>`;
-        return html`${EK.intervalStrip(f.mean, f.ci95 && f.ci95[0], f.ci95 && f.ci95[1], { width: w })}<p class="type-small ink-2">${EK.rangeWords(f.ci95 && f.ci95[0], f.ci95 && f.ci95[1])}</p>`;
-      };
+      var range = function (s) { return rangeOf(s, w); };
       var shared = {}, rows = [];
       (A.held || []).forEach(function (h) { shared[h.case] = [h.change_pct, null]; });
       (B.held || []).forEach(function (h) { if (shared[h.case]) shared[h.case][1] = h.change_pct; });

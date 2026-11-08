@@ -380,10 +380,10 @@
   };
 
   // ------------------------------------------------------------------ Study
-  /** ViewTabs: Tries · Cases · Settings. */
-  EK.viewTabs = function (current, counts) {
-    var out = ["tries", "cases", "settings"].map(function (k) {
-      var on = k === current, word = { tries: "Tries", cases: "Cases", settings: "Settings" }[k];
+  /** ViewTabs: Tries · Cases · Settings, or Tries · Cases · Code for a code study (`keys`). */
+  EK.viewTabs = function (current, counts, keys) {
+    var out = (keys || ["tries", "cases", "settings"]).map(function (k) {
+      var on = k === current, word = { tries: "Tries", cases: "Cases", settings: "Settings", code: "Code" }[k];
       return html`<button type="button" role="tab" class="tab${on ? " is-on" : ""}" id="tab-${k}" aria-selected="${on ? "true" : "false"}" aria-controls="view-panel"
         tabindex="${on ? "0" : "-1"}" data-act="view" data-arg="${k}" data-key="tabkey">${word}${counts && counts[k] != null ? html`<span class="tab-count">${counts[k]}</span>` : ""}</button>`;
     });
