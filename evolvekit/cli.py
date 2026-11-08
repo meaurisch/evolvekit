@@ -6,10 +6,10 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import shutil
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
@@ -1539,8 +1539,25 @@ def cmd_study(args: argparse.Namespace) -> int:
     models = _study_models(args, study, keys=command == "run")
     if command == "compile":
         plan = execute.plan_for(study, harness, execute.measured(folder), models=models)
-        run_dir = write_run(study, harness, plan, folder, args.run_id or datetime.now().strftime("%Y%m%d-%H%M%S"),
-                            models=models)
+        if not args.run_id:
+            # Nothing was asked to be kept: compile to prove it works, then leave no folder
+            # in runs/ -- it holds only runs that were started (persona round 4, F2).
+            scratch = f".compile-{os.getpid()}"
+            runs_existed = (folder / "runs").is_dir()
+            try:
+                write_run(study, harness, plan, folder, scratch, models=models)
+            finally:
+                shutil.rmtree(folder / "runs" / scratch, ignore_errors=True)
+                if not runs_existed:
+                    try:
+                        (folder / "runs").rmdir()
+                    except OSError:
+                        pass
+            print(f"compiled, nothing written (give --run-id to keep the files): {plan.summary()}")
+            if not Path(args.directory).is_dir():
+                _say_next(args, f"study start {args.directory}")
+            return 0
+        run_dir = write_run(study, harness, plan, folder, args.run_id, models=models)
         print(f"compiled into {run_dir}: {plan.summary()}")
         if not Path(args.directory).is_dir():  # a name in the library home: start it as the skills say
             _say_next(args, f"study start {args.directory}")

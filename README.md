@@ -1638,9 +1638,10 @@ the cap, so the spend can exceed it by at most that one call.
 
 `study preview`, `study compile` and `study run` take a study folder or a
 study's name: a value that is a folder on disk is a folder, anything else is
-a study in the library home. `study compile` writes the automatic plan into a
-run folder of its own, `runs/<id>/evolvekit.yaml`, for `evolvekit run`;
-`study start` does not need it. `study run` compiles, searches and runs the
+a study in the library home. `study compile` shows the automatic plan and
+writes nothing; with `--run-id ID` it keeps the plan in a run folder,
+`runs/ID/evolvekit.yaml`, for `evolvekit run` (`study start` does not need
+it), so `runs/` holds only runs that were started. `study run` compiles, searches and runs the
 final check in the foreground of this terminal, for scripts and for a
 standalone `--dir` folder; the other `study` commands take a study in the
 library home.

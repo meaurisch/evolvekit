@@ -257,9 +257,15 @@ def test_compiled_study_is_not_a_failed_run(tmp_path, capsys):
 
     _new(tmp_path, "Depot A", "--template", "tune", "--app", str(SOLVER))
     assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
-    assert main(["study", "compile", "depot-a", "--home", str(tmp_path)]) == 0
     root = tmp_path / "studies" / "depot-a"
-    assert any((root / "runs").iterdir())
+    assert main(["study", "check", "depot-a", "--home", str(tmp_path)]) == 0
+    assert not (root / "runs").exists(), "a check leaves no run folder"
+    assert main(["study", "compile", "depot-a", "--home", str(tmp_path)]) == 0
+    assert not (root / "runs").exists(), "a compile without --run-id leaves no run folder (persona round 4, F2)"
+    assert "nothing written" in capsys.readouterr().out
+    assert main(["study", "compile", "depot-a", "--run-id", "keep1", "--home", str(tmp_path)]) == 0
+    assert [p.name for p in (root / "runs").iterdir()] == ["keep1"], "a named compile keeps its files"
+    assert jobs.latest_run(root) is None and jobs.runs(root) == [], "a compile-only folder is not a run"
     capsys.readouterr()
     assert main(["study", "status", "depot-a", "--home", str(tmp_path)]) == 0
     assert capsys.readouterr().out.startswith("draft")
@@ -324,7 +330,7 @@ def test_compile_on_a_home_study_points_to_study_start(tmp_path, capsys):
     capsys.readouterr()
     assert main(["study", "compile", "depot-a", "--home", str(tmp_path)]) == 0
     out, err = capsys.readouterr()
-    assert out.startswith("compiled into ")
+    assert out.startswith("compiled, nothing written")
     assert f'next: evolvekit study start depot-a --home "{tmp_path}"' in err.splitlines()
     assert "--config" not in out + err
 

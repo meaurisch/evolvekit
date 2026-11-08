@@ -68,7 +68,7 @@ evolvekit study application SLUG PATH
 
 ## 4. Show the plan
 
-- Run `evolvekit study compile SLUG`. Its line says the rounds, the combinations, the final check on the held-back cases and "done around HH:MM", and the run folder it compiled the plan into, `runs/<id>/evolvekit.yaml`.
+- Run `evolvekit study compile SLUG`. Its line says the rounds, the combinations, the final check on the held-back cases and "done around HH:MM". It writes no run folder, so only runs that were started appear in the study; `--run-id ID` keeps the compiled files in `runs/<id>/evolvekit.yaml`.
 - On a thin plan `study compile` exits 2 with `plan: … fewer than 3 rounds …`; the sentences after it are the ways out — relay them, change nothing in `study.yaml` yourself.
 - Show that line to the engineer as it is.
 - Put the plan line (rounds, combinations, held-back cases, done around) in your message before `study start`, whether or not you must wait for a yes.
