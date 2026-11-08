@@ -12,7 +12,10 @@ from typing import Any
 
 from evolvekit.app import AppError, jobs
 
-__all__ = ["compare"]
+__all__ = ["PER_GROUP_COMPARE", "compare"]
+
+PER_GROUP_COMPARE = "a run tuned per kind of case is compared group by group on its own page"
+"""Why a per-group run is not one side of a compare (409)."""
 
 
 def compare(home: Any, a: str, b: str, document_of: jobs.DocumentOf | None = None) -> dict[str, Any]:
@@ -36,7 +39,10 @@ def _side(home: Any, ref: str, document_of: jobs.DocumentOf) -> dict[str, Any]:
     run = run or jobs.latest_run(root)
     if not run:
         raise AppError(f"the study {slug!r} has not been run yet: there is nothing to compare", 404)
-    data = jobs.results(root, run, document_of)  # an unknown run is a 404 here
+    if jobs.is_per_group(jobs._run_dir(root, run)):  # noqa: SLF001 - an unknown run is a 404 here
+        # One group's results under the run's name would claim what only the run's own verdict may.
+        raise AppError(PER_GROUP_COMPARE, 409)
+    data = jobs.results(root, run, document_of)
     goal, final, context = data["goal"], data["final"], data["context"]
     what = jobs._kind_of(jobs.run_study_of(root, jobs._run_dir(root, run)))  # noqa: SLF001 - settings, data, both or code
     return {

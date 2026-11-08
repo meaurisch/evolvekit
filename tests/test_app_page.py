@@ -711,3 +711,19 @@ def test_study_page_picks_a_group():
     assert 'act: "group"' in chips
     assert "group=" in _page_function(STUDY_PAGE, "runQ"), "status, tries and results of the group picked"
     assert "EK.casesBadges" in (STATIC / "js" / "plots.js").read_text(encoding="utf-8")
+
+
+def test_a_per_group_run_is_offered_no_compare_and_starts_again_when_stopped():
+    """Fix round 1 of task 9: a run per kind of case is never one side of a compare (the Study page's
+    Compare with... and Compare two runs, Home's menu and its compare drawer), and stopped, it says it
+    cannot carry on and offers Start it again."""
+    steps = _page_function(STUDY_PAGE, "nextSteps")
+    assert 'if (!s.group) out.push(EK.link("Compare with' in steps
+    body = _page_function(STUDY_PAGE, "runsBody")
+    assert "!r.per_group" in body and "pair[0].id" in body and "runs[0].id" not in body
+    menu = _page_function(HOME_PAGE, "studyMenu")
+    assert "!s.per_group" in menu.split("Compare with")[0]
+    assert "!s.per_group" in _page_function(HOME_PAGE, "compareDrawer")
+    strip = _page_function(STUDY_PAGE, "strip")
+    assert 'if (s.group && s.phase === "stopped")' in strip and 'act: "restart"' in strip.split('if (s.group && s.phase === "stopped")')[1]
+    assert 'var PER_GROUP_STOPPED = "A run per kind of case cannot carry on yet: start the study again.";' in STUDY_PAGE

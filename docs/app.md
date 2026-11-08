@@ -309,7 +309,15 @@ group it is on, marked *running*, else the first); *Settings to use* or
 and in *Past runs* says which group it is on (*running · group 2 of 3
 (large) · round 1 of 4 · 9 min left*). Such a run offers no *Continue*,
 *Carry on* or *Check with more runs*: it cannot yet go on, and starts again
-instead.
+instead — stopped, its strip says *A run per kind of case cannot carry on
+yet: start the study again.* with *Start it again*; stopped or failed, the
+views show the group it stopped in. *Open the report* and *Copy a summary*
+lead with the run's own line and advice and each group's own line; what
+follows is the shown group's, and says so (*The final check of small*,
+*Final check (small): …*). A run per kind of case is never one side of a
+compare: the page, *Past runs* and Home offer none, and `/api/compare`
+answers 409 *a run tuned per kind of case is compared group by group on its
+own page*.
 
 The Cases view shows each case's group as a small badge before its name:
 for a run per kind of case, the group the run gave it; for any other run,
@@ -520,7 +528,9 @@ have); `status` then has a `group` (`name`, `index`, `count`, `order`,
 `current`, its own `phase`), `results` a `per_group` (the group shown, the
 run's `decision`, `line`, `advice` and `rule`, each group's `name`,
 `decision`, `line` and `cases`, and `case_groups`), and
-`download/settings_by_group` and `download/rule` are the run's two files; and each run's dashboard at
+`download/settings_by_group` and `download/rule` are the run's two files; a
+group folder's dashboard is at `/studies/{name}/runs/{run}/groups/{folder}/dashboard/`
+(the `dashboard` of `status` on such a run); and each run's dashboard at
 `/studies/{name}/runs/{run}/dashboard/`. Managing studies: `DELETE
 /api/studies/{name}` moves one to the trash (409 while it runs or waits) and
 `POST /api/trash/{entry}/restore` brings it back; `POST

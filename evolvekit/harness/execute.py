@@ -73,6 +73,7 @@ __all__ = [
     "continue_study",
     "final_check",
     "group_dirs",
+    "group_study",
     "is_per_group",
     "run_per_group",
     "split_budget",
@@ -440,6 +441,17 @@ def group_dirs(run_dir: str | Path) -> dict[str, Path]:
     return {p.name: p for p in sorted(folder.iterdir()) if p.is_dir()}
 
 
+def group_study(study: Study, part: dict[str, Any], hours: float, usd: float) -> Study:
+    """The study one group of a per-group run searches: that group's cases,
+    its share of the hours and of the AI cap (`split_budget`), and no
+    `per_group` of its own. A share of the AI cap that floors to $0 is no AI
+    at all: compiled with a cap of 0, a run would get the $1 default
+    (`compile.ai_cap_usd`) and the groups together could pass the study's cap."""
+    ai = bool(study.budget.ai_enabled) and usd > 0
+    return replace(study, training=list(part.get("training") or []), test=list(part.get("test") or []), per_group=False,
+                   budget=replace(study.budget, hours=hours, ai_max_usd=usd, ai_enabled=ai))
+
+
 def is_per_group(run_dir: str | Path, job: dict[str, Any] | None = None) -> bool:
     """Whether the run is a per-group run: its `job.json` says `per_group`, or it has group folders."""
     job = read_job(run_dir) if job is None else job
@@ -496,8 +508,14 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
     require_valid(study, harness, root=root)
     doc = kinds.read_groups(root, study)
     if doc is None:
-        log("per kind of case: groups.json is missing or out of date, so the cases are grouped now")
-        doc = kinds.compute(root)
+        cases = list(study.training) + list(study.test)
+        tagged = any(kinds.read_tag(root, case) for case in cases)
+        if tagged:  # the tags decide the groups: no case is solved for its features
+            log("per kind of case: groups.json is missing or out of date, so the cases are grouped now, by their tags")
+        else:
+            log(f"per kind of case: groups.json is missing or out of date, so the cases are grouped now: "
+                f"solving {len(cases)} case(s) for their features")
+        doc = kinds.compute(root, features=not tagged)
     order = list(doc["groups"])
     log(f"per kind of case: {len(order)} group{'s' if len(order) != 1 else ''} by {doc.get('method')}: "
         + ", ".join(order))
@@ -509,10 +527,10 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
     studies: dict[str, Study] = {}
     plans: dict[str, Plan] = {}
     for name in order:
-        part = doc["groups"][name]
         hours, usd = split[name]
-        own = replace(study, training=list(part["training"]), test=list(part["test"]), per_group=False,
-                      budget=replace(study.budget, hours=hours, ai_max_usd=usd))
+        own = group_study(study, doc["groups"][name], hours, usd)
+        if study.budget.ai_enabled and not own.budget.ai_enabled:
+            log(f"per kind of case: {name}: its share of the AI cap rounds to $0, so it searches without AI")
         plans[name] = plan_for(own, harness, timing, hours=hours, models=models)
         if plans[name].blocked:
             raise HarnessError(f"per kind of case: {name}: its share of the time ({hours:g} h) is too little: "
@@ -567,6 +585,7 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
     try:
         from evolvekit.app.verdict import build_verdict
 
+        kinds.cache_stump(run_dir / kinds.GROUPS)  # the rule's split, once: every verdict reads it from here
         write_group_exports(root, run_dir, build_verdict(root, run_id))
     except Exception as exc:  # noqa: BLE001 - the files are a convenience, the verdict is the result
         log(f"per kind of case: settings_by_group.json and rule.md could not be written: {exc}")

@@ -46,6 +46,8 @@
     resizeTimer = setTimeout(function () { st.lastPlot = ""; drawView(); }, 150);
   }
   function isLive() { var p = st.status.phase; return p === "queued" || p === "starting" || p === "search" || p === "check"; }
+  /** What a stopped run per kind of case says under its strip: it starts again (D37). */
+  var PER_GROUP_STOPPED = "A run per kind of case cannot carry on yet: start the study again.";
   /** The phases in which no run is live, so "Compare branches" is offered on a code study. */
   var BRANCHES_WHEN = ["done", "stopped", "failed"];
   /** `?run=` of the run shown and, on a per-group run, `&group=` of the group picked (its chips). */
@@ -262,6 +264,11 @@
         acts: [{ text: "Continue the check", act: "check" }] });
     } else {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Finished", head: verdictHead(f), sub: verdictSub(f), acts: [] });
+    }
+    if (s.group && s.phase === "stopped") {
+      // A run per kind of case cannot carry on, nor check again (D37): it starts again.
+      x.sub = PER_GROUP_STOPPED;
+      x.acts = [{ text: "Start it again", act: "restart" }];
     }
     if (isCode() && BRANCHES_WHEN.indexOf(s.phase) >= 0) {
       // A code study with no run live (done, stopped or failed): given branches can be checked
@@ -685,7 +692,8 @@
     if (s.can_continue) out.push(EK.button("Continue for " + EK.hours((st.doc.study.budget || {}).hours || 1) + " more", { kind: "secondary", act: "continue" }));
     // A per-group run has one result per group, so no one result to start from (`s.group`).
     if ((s.phase === "done" || s.phase === "stopped") && !s.group) out.push(EK.button("Start a new study from this", { kind: "secondary", act: "next" }));
-    out.push(EK.link("Compare with…", { href: "#/compare?a=" + EK.q(st.slug + "/" + st.run) }));
+    // A run per kind of case is compared group by group on its own page, never as one side of a compare.
+    if (!s.group) out.push(EK.link("Compare with…", { href: "#/compare?a=" + EK.q(st.slug + "/" + st.run) }));
     return html`<section class="section" aria-labelledby="next-title"><h2 id="next-title">What next</h2><div class="actions">${out}</div></section>`;
   }
   /** What the AI spent of its cap: the verdict's figure (`r.spent`) once there is one, the live one
@@ -978,8 +986,10 @@
       var mark = r.kind === "finished" ? EK.markOf({ kind: "finished", decision: r.decision, tone: r.tone }) : r.kind === "failed" ? "error" : "open";
       return Object.assign({}, r, { mark: mark });
     });
+    // The newest two runs that can be compared: a run per kind of case is not one side of a compare.
+    var pair = runs.filter(function (r) { return !r.per_group; });
     return html`${EK.runList(runs, st.run, function (r) { return EK.studyHref(st.slug, r.id); })}
-      ${runs.length > 1 ? html`<p>${EK.link("Compare two runs", { href: "#/compare?a=" + EK.q(st.slug + "/" + runs[0].id) + "&b=" + EK.q(st.slug + "/" + runs[1].id) })}</p>` : ""}`;
+      ${pair.length > 1 ? html`<p>${EK.link("Compare two runs", { href: "#/compare?a=" + EK.q(st.slug + "/" + pair[0].id) + "&b=" + EK.q(st.slug + "/" + pair[1].id) })}</p>` : ""}`;
   }
   /** Open on what the page knows, then ask for the runs as they are now: the drawer follows. */
   function runsDrawer() {

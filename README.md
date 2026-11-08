@@ -1704,8 +1704,10 @@ stops is above 51, use the settings of group 2; otherwise those of group
 1.`), for groups by tags one line per tag (`For cases tagged large, use
 today's settings (large: not shown to beat today's).`). A per-group run
 cannot yet be continued, resumed or checked again (start the study again
-instead), and `per_group` cannot be combined with a `schedule` or a code
-study.
+instead), nor compared with another run (each group's verdict is on its own
+page), and `per_group` cannot be combined with a `schedule` or a code
+study. A start that groups the cases itself solves each case once for its
+features, unless tags decide the groups.
 
 The AI spend stays within its cap, give or take one call. Every claude call,
 a reply or a coding agent's run, is told what is left (`--max-budget-usd`, when

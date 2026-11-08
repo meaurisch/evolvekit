@@ -10,7 +10,9 @@
 
   function studyMenu(s) {
     var items = [{ text: "Rename", act: "rename", arg: s.slug }, { text: "Duplicate", act: "duplicate", arg: s.slug }];
-    if (HAS_RUN[s.kind]) items.push({ text: "Compare with…", act: "compare-with", arg: s.slug }, { text: "Past runs", act: "runs", arg: s.slug });
+    // A latest run tuned per kind of case is compared group by group on its own page, not here.
+    if (HAS_RUN[s.kind] && !s.per_group) items.push({ text: "Compare with…", act: "compare-with", arg: s.slug });
+    if (HAS_RUN[s.kind]) items.push({ text: "Past runs", act: "runs", arg: s.slug });
     items.push({ text: "Save as zip", act: "zip", arg: s.slug }, null,
       { text: s.archived ? "Restore from archive" : "Archive", act: "archive", arg: s.slug },
       { text: "Delete", act: "delete", arg: s.slug, danger: true });
@@ -264,7 +266,7 @@
     wireDrop(document.getElementById("drawer"));
   }
   function compareDrawer() {
-    var ran = data.studies.filter(function (s) { return HAS_RUN[s.kind]; });
+    var ran = data.studies.filter(function (s) { return HAS_RUN[s.kind] && !s.per_group; });
     if (ran.length < 2) {
       EK.openDrawer({ title: "Compare two studies", body: html`<p class="type-body">Two studies need a run each first.</p>` });
       return;

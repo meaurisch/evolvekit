@@ -792,6 +792,13 @@ PER_GROUP_WORDS = {
     "stopped": ("Per kind of case: the final check of {name} has not finished.",
                 "Keep today's settings for now: the run stopped before every group had its answer."),
 }
+PER_GROUP_NONE_BEGUN = {
+    "stopped": ("Per kind of case: the run stopped before any group began.",
+                "Keep today's settings: no group has an answer."),
+    "pending": ("Per kind of case: no group has begun yet.",
+                "Keep today's settings for now: no group has its answer yet."),
+}
+"""A per-group run with no group of its own yet (stopped before it began, or still starting)."""
 
 
 def _group_held(doc: dict[str, Any]) -> int:
@@ -806,6 +813,9 @@ def per_group_decision(order: list[str], docs: dict[str, dict[str, Any]], phase:
     one); `single` when no group has two; else `keep`, naming the first group
     that does not say `use`. The verdict is the only claim: these words say
     only what the groups' own verdicts say."""
+    if not order:  # no group began: the run has no answer, whatever groups.json says
+        decision = "stopped" if phase in ("stopped", "failed") else "pending"
+        return (decision, *PER_GROUP_NONE_BEGUN[decision])
     waiting = next((name for name in order if docs[name].get("decision") in ("pending", "stopped")), None)
     if waiting is not None:
         decision = "stopped" if phase == "stopped" else str(docs[waiting]["decision"])
@@ -844,7 +854,8 @@ def _per_group_verdict(root: Path, run_dir: Path, study: Any, harness: Any, job:
     run = run_dir.name
     grouped = _run_groups(root, run_dir)
     dirs = group_dirs(run_dir)
-    order = list(dirs) or list(grouped.get("groups") or {})
+    # The run's own groups (`job.json`'s); `groups.json` names them only for a run made before it said so.
+    order = list(dirs) if job.get("per_group") is not None else list(grouped.get("groups") or {})
     goal = jobs._goal(study, harness)
     measure = _measure_of(study, harness, goal["kpi"], goal["direction"])
     docs: dict[str, dict[str, Any]] = {}
@@ -869,7 +880,9 @@ def _per_group_verdict(root: Path, run_dir: Path, study: Any, harness: Any, job:
         "measure": next((d["measure"] for d in docs.values() if d.get("measure")), measure),
         "held_back": {"cases": len(study.test), "runs_per_case": runs_per_case.pop() if len(runs_per_case) == 1 else None},
         "rule": PER_GROUP_RULE, "groups": docs,
-        "rule_lines": rule_lines(grouped, {name: str(d.get("decision") or "") for name, d in docs.items()}) if grouped else [],
+        # Said once the run is done: no rule before every group has its answer (and the split is cached then).
+        "rule_lines": (rule_lines(grouped, {name: str(d.get("decision") or "") for name, d in docs.items()})
+                       if grouped and order and job.get("phase") == "done" else []),
         "by_case": [{**row, "group": name} for name, d in docs.items() for row in d.get("by_case") or []],
         "files": _files(root, run_dir),
         "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),

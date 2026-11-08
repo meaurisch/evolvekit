@@ -73,7 +73,8 @@ SKIPPED = 64 * 1024
 """The most of a refused request's body the server swallows to close cleanly;
 a larger body is left unread and the connection is closed instead."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
-_DASHBOARD = re.compile(r"^/studies/(?P<slug>[^/]+)/runs/(?P<run>[^/]+)/dashboard/(?P<rest>.*)$")
+_DASHBOARD = re.compile(r"^/studies/(?P<slug>[^/]+)/runs/(?P<run>[^/]+)(?:/groups/(?P<group>[^/]+))?/dashboard/(?P<rest>.*)$")
+"""A run's dashboard; a per-group run's group folder has its own (`runs/<id>/groups/<slug>/dashboard/`)."""
 STATUS_FILES = ("events.jsonl", "runs.jsonl", "heartbeat.json")
 """The files of a run the status document is built from; a change to any
 of them is a reason to build it again."""
@@ -271,7 +272,8 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
                     return
                 dashboard = _DASHBOARD.match(path)
                 if dashboard and self.command in ("GET", "HEAD"):
-                    self._dashboard(dashboard.group("slug"), dashboard.group("run"), dashboard.group("rest"), query)
+                    self._dashboard(dashboard.group("slug"), dashboard.group("run"), dashboard.group("rest"), query,
+                                    group=dashboard.group("group"))
                     return
                 for method, pattern, handle in api.ROUTES:
                     match = pattern.fullmatch(path)
@@ -301,7 +303,7 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
             else:
                 self._json(result)
 
-        def _dashboard(self, slug: str, run: str, rest: str, query: dict[str, str]) -> None:
+        def _dashboard(self, slug: str, run: str, rest: str, query: dict[str, str], group: str | None = None) -> None:
             from evolvekit.dashboard import PAGE as DASHBOARD_PAGE
             from evolvekit.dashboard import _read_tail, _safe_path
             from evolvekit.status import candidate_detail
@@ -311,6 +313,11 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
             run_dir = root / "runs" / run
             if not _RUN.match(run) or not run_dir.is_dir():
                 raise AppError(f"there is no run {run!r} in this study", 404)
+            if group is not None:
+                group = unquote(group)
+                if not _RUN.match(group) or not (run_dir / "groups" / group).is_dir():
+                    raise AppError(f"there is no group {group!r} in this run", 404)
+                run_dir = run_dir / "groups" / group
             if rest in ("", "index.html"):
                 self._send(DASHBOARD_PAGE.read_bytes(), "text/html; charset=utf-8")
             elif rest == "api/status":

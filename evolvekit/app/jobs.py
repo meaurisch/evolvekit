@@ -240,6 +240,8 @@ def runs(root: Path) -> list[dict[str, Any]]:
                        "tone": line.get("tone"), "decision": line.get("decision")})
         if line.get("branch"):
             listed[-1]["branch"] = line["branch"]  # what `study pr` made for it
+        if line.get("per_group"):
+            listed[-1]["per_group"] = True  # tuned per kind of case: not one run to compare with another
     return listed
 
 
@@ -952,8 +954,9 @@ def _session_left(root: Path, run_dir: Path, job: dict[str, Any], started: datet
 
 def _group_folder(run_dir: Path, job: dict[str, Any], group: str | None) -> tuple[str, Path] | None:
     """A per-group run's group to read, `(name, folder)`: `group` (a 404 when
-    the run has none of that name), else the current group while the run is
-    live, else the first. None for any other run, or before any group was named."""
+    the run has none of that name), else -- live, stopped or failed -- the
+    current group, else the first. None for any other run, or before any
+    group was named."""
     if not is_per_group(run_dir, job):
         return None
     dirs = group_dirs(run_dir)
@@ -962,7 +965,14 @@ def _group_folder(run_dir: Path, job: dict[str, Any], group: str | None) -> tupl
             raise AppError(f"there is no group {group!r} in this run", 404)
         return group, dirs[group]
     current = (job.get("per_group") or {}).get("current")
-    if job.get("phase") in ACTIVE and current in dirs:
+    if job.get("phase") != "done" and current in dirs:
+        # Live, stopped or failed: the group the run is on, or stopped in -- its folder, once it was made,
+        # else the last group that has one.
+        if (dirs[current] / JOB).is_file():
+            return current, dirs[current]
+        began = [name for name in dirs if (dirs[name] / JOB).is_file()]
+        if began:
+            return began[-1], dirs[began[-1]]
         return current, dirs[current]
     first = next(iter(dirs), None)
     return (first, dirs[first]) if first is not None else None
@@ -1015,6 +1025,8 @@ def status(root: Path, run: str, document_of: DocumentOf, *, now: datetime | Non
         cases = {"training": len(pinned.training), "test": len(pinned.test)}
     except HarnessError:
         cases = None
+    if folder != run_dir:  # the group's own events: its dashboard (server: `runs/<id>/groups/<slug>/dashboard/`)
+        out["dashboard"] = f"/studies/{root.name}/runs/{run}/groups/{folder.name}/dashboard/"
     out.update({"phase": state, "error": job.get("error"), "group": {**words, "phase": own.get("phase"), "cases": cases},
                 "can_check": False, "can_resume": False, "can_continue": False})
     return out
@@ -1352,21 +1364,31 @@ def _kpi_help(study: Study, harness: Harness, name: str) -> str:
 
 
 def _summary_text(data: dict[str, Any]) -> str:
-    """The result as plain text to paste into a message."""
+    """The result as plain text to paste into a message. A per-group run's
+    (`per_group`) leads with the run's own line and advice and each group's
+    own line; what follows is the shown group's, and says so."""
     context, final = data["context"], data["final"]
     learned, held = data["cases"]["training"], data["cases"]["test"]
     lines = [f"{data['study']} ({data['harness']}), run {data['run']}"]
-    if final.get("advice"):
+    kinds = data.get("per_group")
+    of = ""
+    if kinds:
+        lines.append(f"Answer: {kinds.get('line') or ''} {kinds.get('advice') or ''}".rstrip())
+        lines.append("Per kind of case:")
+        lines += [f"- {g['name']}: {g.get('line') or ''}" for g in kinds.get("groups") or []]
+        of = f" ({kinds['group']})"
+        lines.append(f"The rest is the group {kinds['group']}'s alone:")
+    elif final.get("advice"):
         lines.append(f"Answer: {final['advice']}")
-    if final.get("rule"):
+    if final.get("rule") and not kinds:
         lines.append(str(final["rule"]))
     lines += [
         f"Set-up: {_number(context['time_per_case_s'])} s per case, {_duration(context['hours'] * 3600)} in total; "
         f"the search learned from {len(learned)} case{'s' if len(learned) != 1 else ''}"
         + (f" and was checked on {len(held)} held-back case{'s' if len(held) != 1 else ''}" if held else "") + "."
         + (f" Compared with {context['compared_with']}." if context.get("compared_with") else ""),
-        f"Search: {data['headline']}",
-        f"Final check: {final['line']}",
+        f"Search{of}: {data['headline']}",
+        f"Final check{of}: {final['line']}",
     ]
     side = []
     for k in data.get("kpis") or []:
@@ -1433,6 +1455,7 @@ def results(root: Path, run: str, document_of: DocumentOf, group: str | None = N
         "case_groups": [{"name": case, "group": name} for name, part in (_run_groups(root, run_dir).get("groups") or {}).items()
                         for case in [*(part.get("training") or []), *(part.get("test") or [])]],
     }
+    data["summary_text"] = _summary_text(data)  # the run's own words first, then the group's, named
     return data
 
 
@@ -1691,7 +1714,8 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
         by_case += "<h3>Cases the search learned from</h3>" + case_table(data["by_case"]["learned"])
     if by_case:
         label = goal.get("label") or goal["says"]
-        by_case = f"<h2>{esc(label[:1].upper() + label[1:])}, case by case</h2>" + by_case
+        named = f" ({data['per_group']['group']})" if data.get("per_group") else ""
+        by_case = f"<h2>{esc(label[:1].upper() + label[1:])}, case by case{esc(named)}</h2>" + by_case
     facts = [("Time per case", _duration(context["time_per_case_s"])), ("Time for the study", _duration(context["hours"] * 3600)),
              ("Combinations tried", str(context["tried"]))]
     if context.get("took"):
@@ -1709,6 +1733,22 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
     learned = ", ".join(Path(c).stem for c in data["cases"]["training"])
     held = ", ".join(Path(c).stem for c in data["cases"]["test"]) or "none"
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+    kinds = data.get("per_group")
+    headline, advice, state, of = data["headline"], final.get("advice") or "", final.get("state"), ""
+    kinds_html = group_head = ""
+    if kinds:
+        group_head = f"<div class='card'><div class='headline'>{esc(data['headline'])}</div></div>"  # the group's search
+        # A run per kind of case: the verdict is the run's own; every figure below is one group's, named.
+        headline, advice = kinds.get("line") or "", kinds.get("advice") or ""
+        state = {"use": "confirmed", "single": "single"}.get(str(kinds.get("decision")), "unclear")
+        of = f" of {kinds['group']}"
+        rows = "".join(f"<li><b>{esc(str(g['name']))}</b>: {esc(str(g.get('line') or ''))}</li>"
+                       for g in kinds.get("groups") or [])
+        rule = "".join(f"<li>{esc(line)}</li>" for line in kinds.get("rule") or [])
+        kinds_html = (f"<h2>Per kind of case</h2><div class='card'><ul>{rows}</ul></div>"
+                      + (f"<h3>Which cases get which settings</h3><div class='card'><ul>{rule}</ul></div>" if rule else "")
+                      + f"<h2>The group {esc(kinds['group'])}</h2><p class='help'>Everything below is the group "
+                      f"{esc(kinds['group'])}'s alone: its search, its final check and its figures.</p>")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(data['study'])}: results</title>
@@ -1737,17 +1777,19 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 </style></head><body><main>
 <h1>{esc(data['study'])}</h1>
 <div class="meta">{esc(data['harness'])} · run {esc(data['run'])} · report made {generated}</div>
-<div class="card"><div class="headline">{esc(data['headline'])}</div>
-<div class="advice" data-state="{esc(str(final.get('state')))}">{esc(final.get('advice') or '')}</div>{rule_note}</div>
+<div class="card"><div class="headline">{esc(headline)}</div>
+<div class="advice" data-state="{esc(str(state))}">{esc(advice)}</div>{rule_note}</div>
+{kinds_html}
 <div class="facts">{facts_html}</div>
-<h2>The final check</h2>
+{group_head}
+<h2>The final check{esc(of)}</h2>
 <div class="card final" data-state="{esc(str(final.get('state')))}">{esc(final['line'])}{check_note}</div>
 {by_case}
-<h2>Every measure</h2>
+<h2>Every measure{esc(of)}</h2>
 <div class="card wrap"><table><thead><tr><th rowspan="2">Measure</th><th class="n group" colspan="2">Cases the search learned from</th><th class="n group" colspan="2">Held-back cases</th></tr>
 <tr><th class="n">Start</th><th class="n">Best</th><th class="n">Start</th><th class="n">Best</th></tr></thead>
 <tbody>{kpi_rows}</tbody></table></div>
-<h2>What changed</h2>
+<h2>What changed{esc(of)}</h2>
 <div class="card wrap"><table><thead><tr><th>What</th><th>Before</th><th>Now</th></tr></thead><tbody>{changed_rows}</tbody></table></div>
 {rules_html}
 {attached_html}
@@ -2119,13 +2161,13 @@ def _per_group_line(root: Path, study: Study | None, run_dir: Path, document_of:
     if state in ACTIVE:
         folder = picked[1] if picked is not None and (picked[1] / JOB).is_file() else run_dir
         card = _run_line(root, study, folder, document_of, phase(folder) if folder != run_dir else job, now=now)
-        card.update({"kind": "running", "run": run_dir.name, "phase": state, "group": words})
+        card.update({"kind": "running", "run": run_dir.name, "phase": state, "group": words, "per_group": True})
         if card.get("line", "").startswith("running") and words["name"] == words["current"] and words["index"]:
             card["line"] = card["line"].replace("running", f"running · group {words['index']} of {words['count']} "
                                                            f"({words['name']})", 1)
         return card
     if state != "done":
-        return {**_run_line(root, study, run_dir, document_of, job, now=now), "group": words}
+        return {**_run_line(root, study, run_dir, document_of, job, now=now), "group": words, "per_group": True}
     try:
         document = verdict_doc.build_verdict(root, run_dir.name)
     except Exception:  # noqa: BLE001 - a card must render even for a damaged run
@@ -2140,7 +2182,7 @@ def _per_group_line(root: Path, study: Study | None, run_dir: Path, document_of:
     card = {"kind": "finished", "run": run_dir.name, "line": line, "phase": state, "what": _kind_of(pinned),
             "goal": {"says": goal.get("says"), "label": goal.get("label"), "direction": goal.get("direction")},
             "rounds": {"done": 0, "planned": 0}, "decision": decision, "mean": None, "ci95": None, "chance": None,
-            "n": int((document.get("held_back") or {}).get("cases") or 0), "group": words}
+            "n": int((document.get("held_back") or {}).get("cases") or 0), "group": words, "per_group": True}
     if tone:
         card["tone"] = tone
     return _with_verdict(root, run_dir, document_of, card)

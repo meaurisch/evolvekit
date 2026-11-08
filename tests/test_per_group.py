@@ -370,6 +370,130 @@ def test_a_per_group_run_stopped_before_it_began(tmp_path):
     (run_dir / STOP_REQUEST).write_text("stop\n", encoding="utf-8")
     state = execute.run_study(root, "r1", log=lambda line: None)
     assert state["phase"] == "stopped" and state["per_group"]["order"] == []
+    # With a groups.json in the study, the verdict still names no group the run never made.
+    study = load_study(root)
+    groups.compute(root, tables=fake_tables({c: 20 for c in study.training + study.test}))
+    doc = build_verdict(root, "r1")
+    assert doc["decision"] == "stopped" and doc["groups"] == {} and doc["rule_lines"] == []
+    assert doc["line"] == "Per kind of case: the run stopped before any group began."
+
+
+# ---------------------------------------------------------------------------
+# fix round 1: the verdict is the only claim on every surface, and the minors
+# ---------------------------------------------------------------------------
+
+
+def _home(root: Path):
+    from evolvekit.app.store import Home
+
+    return Home(root.parent.parent)
+
+
+def test_compare_refuses_a_per_group_run(tmp_path):
+    from evolvekit.app import compare
+
+    root, _ = per_group_run(tmp_path, {"small": ("use", 2), "large": ("keep", 2)})
+    with pytest.raises(AppError, match="a run tuned per kind of case is compared group by group on its own page") as err:
+        compare.compare(_home(root), f"{root.name}/r1", f"{root.name}/r1", document_of)
+    assert err.value.status == 409
+    listed = jobs.runs(root)
+    assert listed[0]["per_group"] is True, "the runs list says so: the page offers no compare of it"
+    assert jobs.run_line(root, load_study(root), root / "runs" / "r1")["per_group"] is True
+
+
+def test_the_html_report_leads_with_the_runs_own_words(tmp_path):
+    root, _ = per_group_run(tmp_path, {"small": ("use", 2), "large": ("keep", 2)})
+    run_line = build_verdict(root, "r1")["line"]
+    data = jobs.results(root, "r1", document_of, group="small")
+    small_line, large_line = (next(g["line"] for g in data["per_group"]["groups"] if g["name"] == n) for n in ("small", "large"))
+    page = jobs.report_html(data)
+    escaped = page.replace("&#x27;", "'")
+    assert escaped.index(run_line) < escaped.index(small_line), "the run's line comes first"
+    assert large_line in escaped and "<h2>Per kind of case</h2>" in page
+    assert "The group small" in page and "The final check of small" in page and "What changed of small" in page
+
+
+def test_the_summary_leads_with_the_runs_own_words(tmp_path):
+    root, _ = per_group_run(tmp_path, {"small": ("use", 2), "large": ("keep", 2)})
+    run = build_verdict(root, "r1")
+    text = jobs.results(root, "r1", document_of, group="small")["summary_text"]
+    lines = text.splitlines()
+    assert lines[1] == f"Answer: {run['line']} {run['advice']}"
+    assert f"- large: {run['groups']['large']['line']}" in lines and f"- small: {run['groups']['small']['line']}" in lines
+    assert any(line.startswith("Final check (small): ") for line in lines)
+    assert not any(line.startswith("Final check: ") for line in lines), "no group figure without its group's name"
+
+
+def test_a_group_whose_ai_share_rounds_to_nothing_searches_without_ai(tmp_path):
+    study = replace(load_study(per_group_study(tmp_path, sizes=[20] * 9, held=0)),
+                    budget=Budget(hours=1.0, ai_enabled=True, ai_max_usd=0.0003))
+    parts = {"a": {"training": [str(i) for i in range(8)], "test": []}, "b": {"training": ["8"], "test": []}}
+    split = execute.split_budget(study, parts)
+    assert split["b"][1] == 0.0
+    assert execute.group_study(study, parts["b"], *split["b"]).budget.ai_enabled is False, "never the $1 default cap"
+    own = execute.group_study(study, parts["a"], *split["a"])
+    assert own.budget.ai_enabled is True and own.budget.ai_max_usd == split["a"][1] and own.per_group is False
+
+
+def test_a_stopped_run_shows_the_group_it_stopped_in(tmp_path):
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("keep", 2)})
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job["phase"], job["per_group"]["current"] = "stopped", "small"
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    assert jobs.status(root, "r1", document_of)["group"]["name"] == "small"
+    assert jobs.results(root, "r1", document_of)["per_group"]["group"] == "small"
+    status = jobs.status(root, "r1", document_of)
+    assert status["dashboard"] == f"/studies/{root.name}/runs/r1/groups/small/dashboard/"
+    job["phase"] = "done"
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    assert jobs.results(root, "r1", document_of)["per_group"]["group"] == "large", "a finished run: its first group"
+
+
+def test_the_dashboard_route_reaches_a_group_folder():
+    from evolvekit.app import server
+
+    found = server._DASHBOARD.match("/studies/s/runs/r1/groups/small/dashboard/api/status")  # noqa: SLF001
+    assert found and found.group("run") == "r1" and found.group("group") == "small" and found.group("rest") == "api/status"
+    plain = server._DASHBOARD.match("/studies/s/runs/r1/dashboard/")  # noqa: SLF001
+    assert plain and plain.group("group") is None
+
+
+def test_with_tags_a_start_solves_no_case_for_its_features(tmp_path):
+    root = per_group_study(tmp_path, held=2, tags={"small": 4, "large": 4})
+
+    def no_solve(_root, case, say=None):
+        raise AssertionError(f"{case} was solved")
+
+    doc = groups.compute(root, tables=no_solve, features=False)
+    assert doc["method"] == "tags" and doc["features"] == {} and set(doc["groups"]) == {"small", "large"}
+
+
+def test_the_rules_split_is_kept_once_the_run_is_done(tmp_path):
+    doc = {"method": "features", "describe": {"rows_stops": "the number of rows in stops"},
+           "features": {"c0": {"rows_stops": 20.0}, "c1": {"rows_stops": 22.0}, "c2": {"rows_stops": 80.0},
+                        "c3": {"rows_stops": 82.0}},
+           "groups": {"group 1": {"training": ["c0", "c1"], "test": []}, "group 2": {"training": ["c2", "c3"], "test": []}}}
+    path = tmp_path / "groups.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert groups.cache_stump(path)["thresholds"] == [51.0]
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    kept["stump"]["thresholds"] = [40.0]  # the kept split is the one read, not computed again
+    lines = groups.rule_lines(kept, {"group 1": "use", "group 2": "use"})
+    assert lines[0].startswith("If the number of rows in stops is above 40,")
+
+
+def test_a_per_group_run_is_not_resumed_continued_or_checked_again(tmp_path):
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("keep", 2)})
+    for refuse in (lambda: execute.final_check(root, "r1", log=lambda line: None),
+                   lambda: execute.resume_study(root, "r1", log=lambda line: None),
+                   lambda: execute.continue_study(root, "r1", hours=0.1, log=lambda line: None)):
+        with pytest.raises(execute.HarnessError, match="a run per kind of case cannot be resumed, continued or checked again"):
+            refuse()
+    home = _home(root)
+    for refuse in (lambda: jobs.continue_run(home, root, "r1", 0.1), lambda: jobs.resume_final_check(home, root, "r1")):
+        with pytest.raises(AppError, match="a run per kind of case") as err:
+            refuse()
+        assert err.value.status == 409
 
 
 # ---------------------------------------------------------------------------

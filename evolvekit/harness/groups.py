@@ -46,6 +46,7 @@ from evolvekit.ledger import _atomic_write
 __all__ = [
     "SolveFailed", "GROUPS", "KS", "MIN_TRAINING", "RESTARTS", "TAGS", "TAG_MAX",
     "case_tables", "compute", "features_of", "kmeans", "read_groups", "read_tag", "rule_lines", "rule_stump", "silhouette",
+    "cache_stump", "stump_of",
     "slug_of",
     "standardise", "write_tag",
 ]
@@ -378,8 +379,12 @@ def _tag_groups(study: Study, cases: list[str], tags: dict[str, str],
     return {label_of[key]: _split(study, {c for c in cases if key_of[c] == key}) for key in order}
 
 
-def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], Path] = case_tables) -> dict[str, Any]:
-    """Group the study's training and held-back cases, write `groups.json` and return it."""
+def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], Path] = case_tables,
+            features: bool = True) -> dict[str, Any]:
+    """Group the study's training and held-back cases, write `groups.json` and return it.
+    `features=False` (a per-group run's start): when tags decide the groups, no case is solved
+    for its features, and `features` stays empty; without tags it has no effect."""
+    wanted = features
     root = Path(root)
     study = load_study(root)
     harness = execute.study_harness(root)
@@ -395,6 +400,8 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
     for case in cases:
         if not by_tags:
             features[case] = features_of(root, case, tables=tables)
+            continue
+        if not wanted:
             continue
         try:  # the tags decide; a case that cannot be solved only lacks its features
             features[case] = features_of(root, case, tables=tables)
@@ -541,6 +548,33 @@ def _value(number: float) -> str:
     return "0" if text in ("", "-0") else text
 
 
+def stump_of(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The one-split rule of `groups.json` (`doc`) grouped by features, over the cases to learn
+    from (`rule_stump`); None for tags, one group, more than three groups, or no split."""
+    named = doc.get("groups") or {}
+    if doc.get("method") != "features" or len(named) not in (2, 3):
+        return None
+    labels = {case: name for name, part in named.items() for case in part.get("training") or []}
+    features = {case: values for case, values in (doc.get("features") or {}).items() if case in labels}
+    return rule_stump(features, labels)
+
+
+def cache_stump(path: Path) -> dict[str, Any] | None:
+    """Keep the rule's split in a run's copy of `groups.json` (`path`), once, when the run
+    finishes: every verdict of the run reads it from there (`rule_lines`) and none computes it
+    again. Returns it."""
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    if "stump" not in doc:
+        doc["stump"] = stump_of(doc)
+        _atomic_write(Path(path), json.dumps(doc, indent=2) + "\n")
+    return doc["stump"]
+
+
 def rule_lines(doc: dict[str, Any], decisions: dict[str, str]) -> list[str]:
     """`rule.md`'s sentences: which cases get which group's settings, from
     `groups.json` (`doc`) -- by features a one-split rule (`rule_stump`) over
@@ -570,8 +604,7 @@ def rule_lines(doc: dict[str, Any], decisions: dict[str, str]) -> list[str]:
     if method == "one" or len(named) == 1:
         return [f"For every case, {use(name)}." for name in named]
     labels = {case: name for name, part in named.items() for case in part.get("training") or []}
-    features = {case: values for case, values in (doc.get("features") or {}).items() if case in labels}
-    stump = rule_stump(features, labels) if len(named) in (2, 3) else None
+    stump = doc["stump"] if "stump" in doc else stump_of(doc)  # a finished run keeps its own (`cache_stump`)
     if stump is None:  # more groups than one split tells apart: each group by its cases
         return [f"For the cases {', '.join(Path(c).stem for c in (part.get('training') or []) + (part.get('test') or []))}, "
                 f"{use(name)}." for name, part in named.items()]
