@@ -843,7 +843,8 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     verdict = improvement.get("verdict")
     # The best so far is one figure everywhere (`verdict.best_so_far`): on the cases learned from, as
     # the verdict's learned-from figure says it -- not the status document's, which is on another base.
-    pct = verdict_doc.best_so_far(run_dir, goal, rows, job)["pct"] if document else None
+    best_now = verdict_doc.best_so_far(run_dir, goal, rows, job) if document else {"id": None, "pct": None}
+    pct = best_now["pct"]
     better = _better_word(goal["direction"])
     seed, _ = _seed_and_best(run_dir, document, rows) if document else (None, None)
     start_words = f"the starting point ({_baseline(study, harness, seed)})"
@@ -914,7 +915,9 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
                  "hours": hours},
         "rounds": rounds,
         "goal": goal,
-        "best": {"pct": pct, "verdict": verdict, "line": best_line,
+        # `says` is the figure in `study status`'s words ("6.1 % lower tour length"), so the page never
+        # formats it a second way; `id` is the combination it belongs to.
+        "best": {"pct": pct, "id": best_now["id"], "says": _best_says(pct, goal), "verdict": verdict, "line": best_line,
                  "levels": levels.get("levels") if levels.get("available") else None,
                  "levels_verdict": levels.get("verdict") if levels.get("available") else None},
         "series": series,
@@ -1281,6 +1284,9 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "cases": {"training": list(study.training), "test": list(study.test)},
         "can_continue": can_continue(run_dir, job),
     }
+    for key in ("how_it_ran", "planned"):  # how much of the plan ran, in the verdict's own words
+        if verdict.get(key):
+            data[key] = verdict[key]
     if "candidates" in verdict:  # a bake-off: every branch with its own decision and line
         data["candidates"], data["bakeoff"] = verdict["candidates"], job.get("bakeoff")
     data["summary_text"] = _summary_text(data)
@@ -1519,6 +1525,14 @@ def _rounds_by_hand(plan: dict[str, Any], study: Study | None) -> bool:
     return not chosen.get("auto", True) and bool({"rounds", "generations"} & set(chosen))
 
 
+def _best_says(pct: float | None, goal: dict[str, Any]) -> str | None:
+    """The best so far in `study status`'s words, "6.1 % lower tour length"; None until it beats the
+    starting point. Not "better": nothing claims that before the final check does."""
+    if not isinstance(pct, (int, float)) or pct <= 0:
+        return None
+    return f"{_pct(pct)} {_better_word(goal.get('direction') or 'lower')} {goal.get('says') or 'the goal'}"
+
+
 def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None) -> dict[str, Any]:
     """One run's state in the card's few words (`state_line`): `kind`, `run`,
     `line`, and a `tone` where the news is bad or open. The run is described
@@ -1535,7 +1549,7 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
     and `same` (no figures: "finished · no difference in any run") when every
     run gave exactly the starting point's result -- for a bake-off, every
     branch's; `check_stopped` for a final check stopped before it decided.
-    `best_pct` is `verdict.best_so_far`'s figure."""
+    `best_pct` is `verdict.best_so_far`'s figure, `best_says` that figure in words."""
     job = phase(run_dir)
     state = job.get("phase")
     try:
@@ -1557,6 +1571,8 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
     pct = verdict_doc.best_so_far(run_dir, goal, job=job)["pct"] if document else None
     if isinstance(pct, (int, float)):
         facts["best_pct"] = pct
+        if _best_says(pct, goal):
+            facts["best_says"] = _best_says(pct, goal)
     if state == "queued":
         waiting = _waiting_for(root)
         return {"kind": "queued", "run": run_dir.name, "line": "queued" + (f" · after {waiting}" if waiting else ""),
@@ -1585,7 +1601,7 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         if document_of is not None and (run_dir / "events.jsonl").exists():
             if pct is not None and pct > 0:
                 # Not "better": nothing claims that before the final check does.
-                line += f" · {_pct(pct)} {_better_word(goal['direction'])} {goal['says']} so far, not checked yet"
+                line += f" · {_best_says(pct, goal)} so far, not checked yet"
         facts.update({"left_s": left, "hours": hours, "continued": _continued(job) or bool(job.get("resumed_at")),
                       "finish_at": (started + timedelta(hours=hours)).astimezone().strftime("%H:%M") if started and hours else None})
         if state == "check":

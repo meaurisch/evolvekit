@@ -78,3 +78,17 @@ def test_the_compare_route(app):
     assert body["a"]["name"] == "First" and body["b"]["run"] == "20260102-000000"
     assert call(app, "GET", f"/api/compare?a={first['slug']}&b=nope")[0] == 404
     assert call(app, "GET", "/api/compare?a=" + first["slug"])[0] == 404
+
+
+def test_a_side_whose_every_run_equals_today_has_its_line_and_no_figures(tmp_path):
+    """Persona round 1, B2 and F5: a side says what its study changes (`what`), and a change no run told
+    from today's carries the verdict's "No difference in any run" line with no mean and no range."""
+    from test_verdict import SAME_SETTINGS, _same_run
+
+    from evolvekit.app.store import Home
+
+    root, run = _same_run(tmp_path, flagged=True)
+    side = compare.compare(Home(root.parents[1]), f"{root.name}/{run}", f"{root.name}/{run}", document_of)["a"]
+    assert side["what"] == "settings"
+    assert side["final"]["state"] == "same" and side["final"]["line"] == SAME_SETTINGS
+    assert side["final"]["mean"] is None and side["final"]["ci95"] is None and side["final"]["chance"] is None

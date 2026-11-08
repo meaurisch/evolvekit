@@ -348,6 +348,8 @@ def test_a_search_that_ran_short_of_its_plan_says_so(tmp_path, capsys):
     said = ("Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; "
             "the AI's replies took longer than the plan assumed.")
     assert v["how_it_ran"] == said and v["planned"] == {"rounds": 11, "combinations": 132}
+    page = jobs.results(root, run, document_of)  # the Study page's Details say how it ran, in the same words
+    assert page["how_it_ran"] == said and page["planned"] == {"rounds": 11, "combinations": 132}
     report = render_report(v)
     how = report.split("## How it ran", 1)[1]
     assert said.rstrip(".") in how and "- Rounds:" not in how and "- Combinations tried:" not in how
@@ -402,9 +404,13 @@ def test_the_best_so_far_is_one_figure_that_never_moves_while_the_best_stays(tmp
     def status(_run_dir: Path) -> dict:
         return {"progress": {"best": {"id": "c1"}, "improvement": {"pct": 6.4, "verdict": "within noise"}}}
 
-    assert jobs.status(root, run, status)["best"]["pct"] == pytest.approx(learned)
+    best = jobs.status(root, run, status)["best"]
+    assert best["pct"] == pytest.approx(learned)
+    # The app's strip and card say it in `study status`'s words, from the server: never formatted twice.
+    assert best["id"] == "c1" and best["says"] == "6.1 % lower tour length"
     card = jobs.run_line(root, load_study(root), run_dir, status)
     assert card["best_pct"] == pytest.approx(learned) and " · 6.1 % lower tour length so far, not checked yet" in card["line"]
+    assert card["best_says"] == "6.1 % lower tour length"
     # A combination still being measured has no row yet: the figure stays until it has one.
     with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"type": "eval_finished", "candidate_id": "g2-half", "instance": "a", "ok": True,

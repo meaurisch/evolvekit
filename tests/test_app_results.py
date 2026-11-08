@@ -403,3 +403,36 @@ def test_a_running_run_says_how_far_it_got_only_when_asked(tmp_path, monkeypatch
     assert told["line"].endswith(" · 4.2 % lower tour length so far, not checked yet")
     assert "better" not in told["line"]
     assert jobs.runs(root)[0]["line"] == plain["line"], "the list does not read the status document"
+
+
+def test_the_runs_route_says_each_runs_state_now(tmp_path):
+    """Persona round 1, F4: the Study page kept "Past runs (1)" and a finished run as "running · 10 min
+    left" until the engineer went Home and back. `GET /api/studies/<slug>/runs` is what the page asks
+    while it is open: every run as it is now, the newest named, with no status document read."""
+    import json
+
+    from evolvekit.app.server import AppServer
+    from test_app_server import call
+
+    root, home = study_with_runs(tmp_path)
+    finished_run(root / "runs" / "20260101-000000")
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        status, body = call(server, "GET", f"/api/studies/{root.name}/runs")
+        assert status == 200 and body["latest"] == "20260101-000000"
+        assert [(r["id"], r["kind"]) for r in body["runs"]] == [("20260101-000000", "finished")]
+        # A bake-off started from the terminal: a new run, waiting for its turn.
+        newer = root / "runs" / "20260102-000000"
+        newer.mkdir(parents=True)
+        (newer / "job.json").write_text(json.dumps({"phase": "queued", "started_at": "2026-01-02T00:00:00+00:00"}),
+                                        encoding="utf-8")
+        status, body = call(server, "GET", f"/api/studies/{root.name}/runs")
+        assert body["latest"] == "20260102-000000" and [r["kind"] for r in body["runs"]] == ["finished", "queued"]
+        # ...and once it ended, its line is the finished one.
+        finished_run(newer, started="2026-01-02T00:00:00+00:00", decision="keep", mean=0.4)
+        status, body = call(server, "GET", f"/api/studies/{root.name}/runs")
+        assert body["runs"][-1]["kind"] == "finished" and body["runs"][-1]["line"] == "finished · not proven on the held-back cases"
+        assert call(server, "GET", "/api/studies/nope/runs")[0] == 404
+    finally:
+        server.stop()

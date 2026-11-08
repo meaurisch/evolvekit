@@ -611,6 +611,13 @@ def status(req: Request) -> dict[str, Any]:
     return jobs.status(root, _run(req, root), req.server.status_document)
 
 
+def runs_of(req: Request) -> dict[str, Any]:
+    """Every run of the study as it is now (`jobs.runs`, no status document read) and the newest:
+    what the open Study page asks every few seconds, so it notices a run that started or ended."""
+    root, _, _ = req.home.load(req.params["slug"])
+    return {"runs": jobs.runs(root), "latest": jobs.latest_run(root)}
+
+
 def tries_of(req: Request) -> dict[str, Any]:
     """Every try of a run, for the Study page's Tries, Cases and Settings views (`tries.digest`)."""
     root, _, _ = req.home.load(req.params["slug"])
@@ -712,6 +719,7 @@ ROUTES = [
     route("POST", "/api/studies/{slug}/final-check")(final_check),
     route("POST", "/api/studies/{slug}/continue")(continue_run),
     route("GET", "/api/studies/{slug}/status")(status),
+    route("GET", "/api/studies/{slug}/runs")(runs_of),
     route("GET", "/api/studies/{slug}/results")(results),
     route("GET", "/api/studies/{slug}/verdict")(verdict),
     route("GET", "/api/studies/{slug}/tries")(tries_of),
