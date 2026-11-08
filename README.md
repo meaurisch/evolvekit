@@ -1524,23 +1524,7 @@ blank. `--dir PATH` writes a standalone study folder there instead, outside
 the library home.
 
 `--warm` starts the study from what the home's finished studies on this
-harness learned: each tuned setting starts from the latest `use` study's
-winning value (when it lies in the study's range); and with a `recommended`
-template and three finished settings studies the tuned settings are the ones
-that went most with the measure in them. Each run of the study then draws a
-share of its combinations around each tuned setting's latest `use` winner,
-worked out when the run starts (usually the same values; a setting the
-latest `use` study did not tune follows an older one): a prior of weight one
-half, which halves again with every other study finished since that winner
-and is dropped once four have. It never stops the search from trying any
-value in range. `study new` says what it did
-on stderr: `warm start from Depot spring (use): neighbours 12, restart_after
-13000`, and `study.yaml` records it as `warm: {from, run, at, ranked}`. The warm
-start changes the starting point the final check compares with: the result
-is judged against the winner's values, not the settings in use before, so it
-suits a planner who uses the winner today. With no `use` study it is a plain
-start, and it says that (as it does for a template that tunes no setting);
-`--warm` needs the library home, not `--dir`.
+harness learned ([Studies over time](#studies-over-time)).
 
 **Say where the application is.** From the terminal a relative path works
 and is recorded as the full path (the app's API still wants the full path).
@@ -1646,68 +1630,7 @@ report's *How it ran* says the same. Nothing else; `--json` prints the whole
 verdict document (see [docs/app.md](docs/app.md#for-developers)).
 
 **Run it in windows.** A study may run only at certain hours, in local
-wall-clock time — at night, at weekends:
-
-```yaml
-schedule:
-  windows:
-    - {days: [mon, tue, wed, thu, fri], from: "01:00", to: "06:00"}
-    - {days: [sat, sun], from: "00:00", to: "23:59"}
-  until: 2026-12-31     # optional
-```
-
-`budget.hours` is then the whole campaign's search time, spread over as many
-windows as it takes: each window resumes the same run where the last one
-stopped, or gives a run that finished its plan more search time, and the
-final check runs when the plan is done. `study start depot-a` waits for the
-first window (`scheduled: next window Sat 00:00 (the app, or evolvekit study
-wait, starts it then)`); `--now` starts at once, and that session is not
-stopped at a window's end. `study stop` pauses the campaign (`study start`
-resumes it). A start after the campaign has finished begins a new one
-(`scheduled: a new campaign (the last one finished); next window …`): its
-first window starts a new run, `--now` at once, and the old run stays a past
-run. The windows are kept only while the app runs then — `evolvekit
-app --service`, or a terminal with `study wait depot-a`, which waits until
-the campaign has its answer, not for the first window's stop. `study status`
-says the campaign's line (`campaign · next window Sat 00:00`); the app's Set
-up offers the same windows under *When it runs*. By default a scheduled
-session keeps the computer from sleeping until its window ends, and through a
-final check that runs past it; a session started by hand does not.
-`keep_awake: false` under `schedule:` turns that off.
-
-**Settings per kind of case.** When the cases are of different kinds —
-small depots and large ones, say — one setting for all of them may suit
-none. `per_group: true` in `study.yaml` learns settings for each kind:
-
-```yaml
-per_group: true
-```
-
-The groups are those of `study groups` (`groups.json`; a start groups the
-cases itself when `groups.json` is missing or no longer matches them), or
-the tags given in the app's Cases list. The run searches once per group, one
-group after another, each in a complete run folder of its own,
-`runs/<id>/groups/<name>/`, under the study's time and AI cap split by the
-groups' cases (a group with half of the cases, those to learn from and the
-held-back ones, gets half of the hours and half of the cap); each group has
-its own final check, on its own held-back cases. The verdict's rule: *use*
-only when every group checked on two or more held-back cases says use; with
-no such group, `single`; else `keep`, naming the first group that does not
-(`Per kind of case: not every group is shown to beat today's settings
-(large: keep).`). `study verdict` prints each group's own line under it, and
-the report has a *Per kind of case* section. A finished run writes two files
-into `runs/<id>/downloads/`: `settings_by_group.json`, each group's cases,
-decision and settings — those the search found only where the group's own
-decision is use, today's elsewhere — and `rule.md`, which cases get which
-settings: for groups by features a one-split rule (`If the number of rows in
-stops is above 51, use the settings of group 2; otherwise those of group
-1.`), for groups by tags one line per tag (`For cases tagged large, use
-today's settings (large: not shown to beat today's).`). A per-group run
-cannot yet be continued, resumed or checked again (start the study again
-instead), nor compared with another run (each group's verdict is on its own
-page), and `per_group` cannot be combined with a `schedule` or a code
-study. A start that groups the cases itself solves each case once for its
-features, unless tags decide the groups.
+wall-clock time — at night, at weekends: see [Studies over time](#studies-over-time).
 
 The AI spend stays within its cap, give or take one call. Every claude call,
 a reply or a coding agent's run, is told what is left (`--max-budget-usd`, when
@@ -1806,7 +1729,7 @@ What `study.yaml` can say:
 | `goal.levels` | one KPI; or up to four in order of importance, each but the last with `equal_within` (`"1 %"` or a number), as in [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels); or one weighted KPI |
 | `guardrails` | `{kpi, max}` or `{kpi, min}`: a candidate that breaks one is out of the running, as a [gate](#gates-conditions-every-candidate-has-to-meet-evaluategates) |
 | `inputs` | the extra files a harness asks for, such as PyVRP's `solver_settings` to start from |
-| `schedule` | `{windows: [{days, from, to}], until, keep_awake}`: the hours the study may run in, local wall-clock time; `budget.hours` is then the whole campaign's search time; `keep_awake: false`: a scheduled session lets the computer sleep ([run it in windows](#a-study-from-the-command-line)) |
+| `schedule` | `{windows: [{days, from, to}], until, keep_awake}`: the hours the study may run in, local wall-clock time; `budget.hours` is then the whole campaign's search time; `keep_awake: false`: a scheduled session lets the computer sleep ([campaigns](#studies-over-time)) |
 | `warm` | `{from, run, at, ranked}`: written by `study new --warm`: the finished study (and its run, finished `at`) whose winner is the starting point; `ranked`, only when the tuned settings were chosen by importance, the settings in the order they went with the measure |
 
 **The comparability trap.** A data change that alters what the solver *sees*
@@ -2040,6 +1963,169 @@ and in PowerShell:
 ```
 git for-each-ref --format="%(refname)" refs/evolvekit/ | ForEach-Object { git update-ref -d $_ }
 ```
+
+### Studies over time
+
+A study need not be one afternoon's work. It can run only at some hours, it
+can start from what earlier studies found, and it can learn settings for each
+kind of case. Their commands are in the table of
+[A study from the command line](#a-study-from-the-command-line).
+
+**Campaigns.** A study may run only at certain hours, in the computer's own
+local time — at night, at weekends:
+
+```yaml
+schedule:
+  windows:
+    - {days: [mon, tue, wed, thu, fri], from: "01:00", to: "06:00"}
+    - {days: [sat, sun], from: "00:00", to: "23:59"}
+  until: 2026-12-31     # optional: the last day a window may start
+  keep_awake: true      # the default; false lets the computer sleep
+```
+
+The app's Set up offers the common windows under *When it runs* (nights,
+weekends, both, and an *Until* date); anything else is written in
+`study.yaml`. A window that crosses midnight (`from: "22:00"`, `to: "06:00"`)
+belongs to the day it starts, and a window ending at `23:59` joins one that
+starts at `00:00`. After a daylight-saving change the windows keep their
+clock times. `24:00` is refused: write `23:59`.
+
+`budget.hours` is then the whole campaign's search time, spread over as many
+windows as it takes. At a window's start the study's run starts, carries on
+where the last window stopped it, or, when it finished its plan with search
+time left, gets more time (the smaller of the window and what is left; under
+ten minutes is not started). At the window's end the run stops cleanly,
+unless it is in its final check, which is never cut off: it finishes, and an
+unfinished one is run again in the next window. One study runs at a time in
+the whole library: runs somebody queued by hand go first, then campaigns,
+the oldest first, and nothing is pre-empted. Three sessions in a row that
+fail pause the campaign, and say why.
+
+```
+python -m evolvekit study start depot-a
+scheduled: next window Sat 00:00 (the app, or evolvekit study wait, starts it then)
+```
+
+`study start` arms the campaign and waits for the first window; `--now`
+starts at once, as a session no window's end stops. `study stop` pauses the
+campaign (a person's stop is respected: `study start` resumes it). A start
+after the campaign has finished begins a new one (`scheduled: a new campaign
+(the last one finished); next window …`): its first window starts a new run,
+and the old run stays a past run. When all the search time is spent and the
+final check is done, Home says *Campaign finished*. `study status` says the
+campaign's line (`campaign · next window Sat 00:00`), and `study wait`
+waits for the campaign's answer, not for the first window's stop (exit 0
+with the verdict; 1 when the campaign paused or ended without a finished
+run).
+
+The windows are kept only while the app runs:
+
+```
+python -m evolvekit app --service        # no browser, no console; logs to <home>/app.log
+python -m evolvekit app install-startup  # start it at every logon
+python -m evolvekit app stop             # stop it cleanly
+```
+
+`app install-startup` registers the Windows logon task "evolvekit app"
+(`app uninstall-startup` removes it); on macOS and Linux it prints the
+launchd agent or systemd unit and the commands to install it. It has not yet
+been tried on a real logon. A terminal with `study wait depot-a` also keeps
+the windows. If the app was not running at a window's start, the window is
+not lost — a run starts late, in what is left of it — but one that passed
+with nothing to start it is said on Home and in `study status`: `Campaign ·
+the window of Sat 14 Nov was missed: the app was not running · next window
+Sun 00:00`. `app.log` is private to you (as private as your user folder, and mode 0600
+where the system has modes) and carries no key; a second `evolvekit app` on the same library opens the
+first. A scheduled session keeps the computer from sleeping until its window
+ends, and through a final check that runs past it; a session you started by
+hand does not, and `keep_awake: false` turns it off. [docs/app.md](docs/app.md#the-app-as-a-service)
+has the app as a service, and how to [rehearse a
+campaign](docs/app.md#rehearsing-a-campaign) in half an hour instead of a
+weekend.
+
+**What evolvekit learned.** Every finished study on an application adds to
+what evolvekit knows about it. *What we learned* (Home's links row, and
+beside each application in *Applications*) is one page per application: its
+finished studies, each with its own verdict line, and for every tuned setting
+how strongly its values went with the measure in the searches, the values
+that won, and whether winners moved it up, down or both ways. It claims no
+gain of its own: a winning value comes only from a study whose final check
+said *use it*, and a strength rests on at least five fully evaluated
+combinations or says *not enough tries to tell*. Only studies that tune
+settings count; code studies, bake-offs and per-kind studies are listed with
+their verdicts. A setting the application no longer has, or whose type,
+range, scale or choices changed since, is left out of that study's figures
+with a note.
+
+```
+python -m evolvekit study new "Depot autumn" --harness demo-tour --template tune --warm
+warm start from Depot summer (use): neighbours 12, restart_after 13000
+```
+
+`--warm` starts the new study from what its predecessors found: each tuned
+setting starts from the latest `use` study's winning value (when it lies in
+the study's range), and with a `recommended` template and three finished
+settings studies the tuned settings are those that went most with the
+measure. Each run then draws a share of its combinations around each tuned
+setting's winner: a prior of weight one half, which halves again with every
+other study finished since that winner and is dropped below 0.05 or once four
+have. It is only a prior — it never stops the search from trying any value in
+range, and a bool or a choice is drawn as the winner itself. `study new` says
+what it did on stderr, and `study.yaml` records it as `warm: {from, run, at,
+ranked}`. The warm start changes the starting point the final check compares
+with: the result is judged against the winner's values, not the settings in
+use before, so it suits a planner who uses the winner today. With no `use`
+study it is a plain start, and says so; a template that tunes no setting is
+left as it is. `--warm` needs the library home, not `--dir`, and is a
+command-line option for now.
+
+**Settings per kind of case.** When the cases are of different kinds —
+small depots and large ones, say — one setting for all of them may suit
+none. Cases are put in groups by their features (numbers that describe a
+case before anything solves it: by default each request table's number of
+rows and the mean of each numeric column — never a column the harness marks
+`private`), or by tags you give in the app's Cases list (as `cases/<file>.tags`;
+tags that name the same folder, `Big` and `big`, are one group, and cases
+without a tag are `untagged`):
+
+```
+python -m evolvekit study groups depot-a            # 2 or 3 groups, whichever k-means likes best
+python -m evolvekit study groups depot-a --k 3      # or ask for 3 (2 to 5)
+```
+
+A group needs at least two cases to learn from. `study groups` writes
+`groups.json` (the first time it solves each case once to read its tables;
+it refuses while a run of the study is going). Then `per_group: true` in
+`study.yaml` learns settings for each group:
+
+```yaml
+per_group: true
+```
+
+A start groups the cases itself when `groups.json` is missing or no longer
+matches them. The run searches once per group, one group after another, each
+in a complete run folder of its own, `runs/<id>/groups/<name>/`, under the
+study's time and AI cap split by the groups' cases (a group with half of the
+cases, those to learn from and the held-back ones, gets half of the hours and
+half of the cap); each group has its own final check, on its own held-back
+cases. The verdict's rule: *use* only when every group checked on two or
+more held-back cases says use; with no such group, `single`; else `keep`,
+naming the first group that does not (`Per kind of case: not every group is
+shown to beat today's settings (large: keep).`). `study verdict` prints each
+group's own line under it, and the report has a *Per kind of case* section.
+A finished run writes two files into `runs/<id>/downloads/`:
+`settings_by_group.json`, each group's cases, decision and settings — those
+the search found only where the group's own decision is use, today's
+elsewhere — and `rule.md`, which cases get which settings: for groups by
+features a one-split rule (`If the number of rows in stops is above 51, use
+the settings of group 2; otherwise those of group 1.`), for groups by tags
+one line per tag (`For cases tagged large, use today's settings (large: not
+shown to beat today's).`).
+
+A per-group run cannot be continued, resumed or checked again: start the
+study again instead. It is not offered for compare (each group's verdict is
+on its own page), and `per_group` is refused with a code study, a bake-off
+and a `schedule`.
 
 ### Harness commands
 

@@ -44,7 +44,7 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit harness pack DIR [--out OUT]` | zip a harness to share it; the zip goes next to the harness, or into OUT | |
 | `evolvekit harness install ARCHIVE [--home DIR]` | install a packed harness into the library home | |
 | `evolvekit harness check DIR --app PATH --json` | does the harness work with this application; prints `{"ok", "checks"}` | 0 all pass, 1 warnings only, 2 failures |
-| `evolvekit study new NAME --harness ID [--template T] [--app PATH] [--json]` | a new study folder in the library home from a harness (`--harness` takes ID, or a harness folder) and a template; `--dir PATH` writes a standalone study folder outside the home instead | |
+| `evolvekit study new NAME --harness ID [--template T] [--app PATH] [--warm] [--json]` | a new study folder in the library home from a harness (`--harness` takes ID, or a harness folder) and a template; `--dir PATH` writes a standalone study folder outside the home instead; `--warm` starts from the latest `use` winner of the finished studies on this harness, with a prior around it that halves with every study since | 2 `--warm` with `--dir` |
 | `evolvekit study application SLUG PATH` | say where the study's application is | |
 | `evolvekit study application SLUG --detect` | list the applications found on this computer | |
 | `evolvekit study code SLUG [--repo PATH] [--from REF] [--brief TEXT] [--json]` | a code study: where the source is (default: the harness's own folder), the base it starts from (`HEAD`, a branch, or `working`), and what to improve | 0 set; 1 a relative path, no proposal, no `code:` in the harness, not a git folder, no such ref |
@@ -55,17 +55,22 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study preview SLUG` | solve the smallest training case at the starting values | |
 | `evolvekit study compile SLUG` | prints the plan: rounds, combinations (with AI help, the seconds it assumes for each AI change), the final check, "done around HH:MM" and a note when too few cases are held back for a firm answer, or the thin plan with its three ways out; writes no run folder unless `--run-id ID` is given | 0 a plan; 2 a thin plan or a problem |
 | `evolvekit study run SLUG` | compile, search and run the final check in the foreground | |
-| `evolvekit study start SLUG [--wait [--timeout S]] [--json]` | start the study as the app's Start does (queued while another study runs) | |
+| `evolvekit study start SLUG [--now] [--wait [--timeout S]] [--json]` | start the study as the app's Start does (queued while another study runs). A study with a `schedule` is armed and waits for its first window (`scheduled: next window Sat 00:00`; only a running app keeps the windows); `--now` starts it at once, as a session no window's end stops; after a finished campaign it begins a new one | |
 | `evolvekit study bakeoff SLUG --ref REF [--ref REF] [--wait [--timeout S]] [--json]` | a code study: check given branches against the starting point on the held-back cases, with no search; the verdict's `candidates` hold each branch's own line; needs no AI help | 0 started or queued (with `--wait`, as `study wait`); 2 a settings study, a study not ready, no held-back case, no such ref, a branch outside the open files or one that does not apply on the starting commit |
-| `evolvekit study stop SLUG [--json]` | stop the running run, or take back a queued one | |
+| `evolvekit study stop SLUG [--json]` | stop the running run, or take back a queued one; on a scheduled study it also pauses the campaign (`study start` resumes it) | |
 | `evolvekit study status SLUG [--run ID] [--json]` | where the run is: the state line, or the app's status document | |
 | `evolvekit study watch SLUG [--every S] [--json]` | the status every few seconds until the run ends; starts a queued run | |
-| `evolvekit study wait SLUG [--timeout S] [--json]` | wait until the run has ended | 0 done, 1 stopped or failed, 4 timeout |
+| `evolvekit study wait SLUG [--timeout S] [--json]` | wait until the run has ended; on a scheduled study, until the campaign has its answer | 0 done, 1 stopped or failed (a campaign: paused, or ended without a finished run), 4 timeout |
 | `evolvekit study verdict SLUG [--run ID] [--json]` | the final check's answer: the verdict and what to do about it | |
 | `evolvekit study report SLUG [--run ID] [--markdown \| --json]` | the report of a run: the verdict document, or `--markdown` for people | |
 | `evolvekit study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`; prints its path | 0 written; 2 no `--diff`, a settings study, a run that has not ended, or the starting point stayed the best |
 | `evolvekit study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints the verdict's line (after a final check on fewer than 3 held-back cases, a `note:` line under it, which `pr.md` carries too) and what it will do -- the branch `evolvekit/<slug>-<run>` with the best's change, the push, the PR with `gh` (the report as its body) -- and does it only with `--yes`; ask the engineer first. The commit is the engineer's own (their git identity and hooks); `--base` is the branch the PR goes into (default: the repository's default) | 0 printed or done; 1 the branch exists, a hook of the repository refused the commit, or the push or `gh` failed (with `--json`, `{"ok": false, "error", "state"}`); 2 a settings study, a run that has not ended, the starting point stayed the best, or the change does not apply on `HEAD` |
 | `evolvekit study open SLUG [--no-browser]` | print the study's address in the app (starting the app if none runs) and open it | |
+| `evolvekit app --service [--home DIR]` | the app with no browser or console, logging to `<home>/app.log` (private, no key in it); it keeps the windows of scheduled studies. A second app on the same home opens the first | |
+| `evolvekit app stop [--home DIR]` | stop the app of this home cleanly | 0 stopped, 1 not stopped within 10 s |
+| `evolvekit app install-startup` | start `app --service` at logon: on Windows registers the task "evolvekit app" (untried on a real logon); elsewhere prints the launchd or systemd unit and its commands | 1 refused |
+| `evolvekit app uninstall-startup` | undo it | 1 refused |
+| `evolvekit app --service --clock ISO --clock-speed N` | a rehearsal clock for campaigns (speed 1 to 3600): windows follow it, runs keep real time; ends with `app stop` | 2 a bad clock or speed |
 | `evolvekit skill list` | the skills that ship with evolvekit | |
 | `evolvekit skill install [--dir DIR] [--force]` | write the skills into a project (`.agents/skills`, with a pointer for a tool that reads only its own skills folder) | |
 

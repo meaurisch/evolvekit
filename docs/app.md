@@ -40,6 +40,68 @@ them again when it is back.
 A second `evolvekit app` on the same library opens the first instead of
 starting another.
 
+### The app as a service
+
+A study with a `schedule` (a *campaign*, see the README's
+[Studies over time](../README.md#studies-over-time)) starts, stops and carries
+on at its windows only while the app runs. For that the app can run without a
+browser or a console:
+
+```
+python -m evolvekit app --service
+```
+
+It keeps the windows, and writes what it does to `<home>/app.log` (rotated at
+5 MB, two kept; what the ticker prints goes there too, one line for every
+start, resume, continuation and stop of a campaign). The log is private to
+you (as private as your user folder, and mode 0600 where the system has
+modes) and never holds the key of the launch: it says `the key is in app.json`
+instead. `evolvekit study open NAME` starts the app this way when none runs. A
+second `evolvekit app`, `--service` or not, finds the first and opens it (a
+service says `already running` in the log and ends).
+
+`evolvekit app stop` ends the app of this library cleanly, and exit 1 if it
+did not stop within 10 seconds. To have it at every logon:
+
+```
+python -m evolvekit app install-startup
+python -m evolvekit app uninstall-startup
+```
+
+On Windows the first registers the logon task "evolvekit app" (it starts
+`pythonw.exe`, with no console window; it does not end after 72 hours or stop
+on battery) and prints what it runs; the second removes the task. On macOS and
+Linux they print the launchd agent or systemd unit, and the commands to
+install or remove it. The logon task is untried on a real Windows logon.
+
+A scheduled session keeps the computer from sleeping until its window ends,
+and through a final check that runs past it; `schedule: {keep_awake: false}`
+in `study.yaml` turns that off, and a session you start by hand never does it.
+If the app was not running when a window started, Home says so (*the window
+of Sat 14 Nov was missed: the app was not running*) and the run starts late,
+in what is left of the window.
+
+### Rehearsing a campaign
+
+A weekend takes two days. To see a campaign work, start the app with a
+rehearsal clock:
+
+```
+python -m evolvekit app --service --clock 2026-11-13T17:30 --clock-speed 120
+```
+
+The windows follow a clock that starts on Friday 17:30 and runs 120 times
+faster than real time (`--clock-speed` is 1 to 3600), so Monday 08:00 comes
+about half an hour later. The runs keep real time: they spend real search time
+(it is the windows that are speeded up), and the study's hours are real
+hours. Home says the rehearsal is on (*rehearsal clock: Fri 13 Nov 17:30, 120 ×
+real time*), and each line in `app.log` for a campaign gives both times
+(`2026-11-14T01:10:00+01:00 rehearsal · 2026-11-13T18:12:03+01:00 real · …`).
+Open the app as usual (`python -m evolvekit app`) to look at it: it opens the
+service already running. `evolvekit app stop` ends the service, and the
+clock with it. A clock cannot be set on an app that already runs (stop it
+first), and nothing sets it by accident.
+
 The app answers only to this computer: it listens on 127.0.0.1, refuses
 requests that name another host, accepts changes only from its own page, and
 answers nothing but that page without the key of this launch — so another
@@ -55,6 +117,8 @@ opened again at any time:
   settings.yaml        the AI provider and models, the applications used before
   .env                 API keys: written by the app, never shown again
   app.json             while the app runs: where it is, and the key of this launch
+  app.log              what `app --service` did (no key in it)
+  clock.json           only during a rehearsal (`app --clock`), while that app runs
   harnesses/           harnesses you installed
   studies/<name>/      one folder per study: study.yaml, the pinned harness,
                        cases/, inputs/, preview/, runs/
@@ -178,6 +242,14 @@ opens a drawer on the right (full screen on a phone):
   still going at 1.5 × that + 30 s counts as failed), the total time, runs
   per case, retries, and optional AI search help with a cap. Experts can set
   the combinations per round and the rounds here too.
+- **When it runs** — as soon as you start it, or only in some hours: *Nights,
+  Monday to Friday, 01:00 to 06:00*, *Weekends, all day*, or both, with an
+  optional *Until* date. The study then runs only inside those hours, and only
+  while the app is running then (see [The app as a
+  service](#the-app-as-a-service)). *Start* does not start it but says when it
+  will (*next window Sat 00:00*); the total time under **Time** is then the
+  search time of the whole campaign, spread over as many windows as it takes.
+  Other windows are written in `study.yaml`.
 
 A **code study** — one whose template changes the application's source —
 shows **What may change: code** in place of *What to tune*: the source
