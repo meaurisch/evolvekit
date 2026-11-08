@@ -32,7 +32,7 @@ __all__ = [
     "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError", "applies",
     "apply_in",
     "changed_files", "diff_between", "diff_stat", "git", "git_version", "glob_pattern", "materialise",
-    "normalise_diff", "relative_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "staged_diff",
+    "normalise_diff", "relative_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "staged_diff", "staged_diff_without_strays",
     "touches_only",
     "tree_dir",
 ]
@@ -574,6 +574,28 @@ def staged_diff(made: Tree, base: str) -> str:
     return _git(made.worktree, "diff", "--cached", *_DIFF, base)
 
 
+UNSTAGE_BATCH = 100
+"""Paths per `git rm --cached` call: a command line stays well under Windows' limit."""
+
+
+def staged_diff_without_strays(made: Tree, base: str, open: Sequence[str], *, prefix: str) -> tuple[str, list[str]]:
+    """`staged_diff`, with the files *added* outside `open` left out: `(block, the
+    dropped paths, toplevel-relative)`. For an agent's tree, where a scratch file
+    or a cache it leaves behind is not its change. A tracked file outside `open`
+    that is modified, deleted or has its mode changed stays in the block (a rename
+    is a deletion and an addition: `--no-renames`), so `touches_only` still refuses it."""
+    _git(made.worktree, "add", "-A", "--", ".")
+    listed = _git(made.worktree, "diff", "--cached", "--name-status", "-z", "--no-renames", "--diff-filter=A",
+                  base)
+    parts = [part for part in listed.split("\0") if part]
+    added = parts[1::2]  # -z: the status, then the path
+    dropped = [name for name in added if _outside(name, [_glob(p) for p in open], prefix)]
+    for start in range(0, len(dropped), UNSTAGE_BATCH):
+        _git(made.worktree, "rm", "--cached", "-q", "--", *dropped[start:start + UNSTAGE_BATCH],
+             env={"GIT_LITERAL_PATHSPECS": "1"})
+    return _git(made.worktree, "diff", "--cached", *_DIFF, base), dropped
+
+
 # --- reading diffs -------------------------------------------------------------
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -723,9 +745,12 @@ def touches_only(diff: str, open: Sequence[str], *, prefix: str) -> list[str]:
     A path with a `..` part is always outside, whatever it would match.
     """
     patterns = [_glob(p) for p in open]
-    return [name for name in changed_files(diff)
-            if ".." in name.replace("\\", "/").split("/")
-            or not (name.startswith(prefix) and any(p.fullmatch(name[len(prefix):]) for p in patterns))]
+    return [name for name in changed_files(diff) if _outside(name, patterns, prefix)]
+
+
+def _outside(name: str, patterns: Sequence[re.Pattern[str]], prefix: str) -> bool:
+    return (".." in name.replace("\\", "/").split("/")
+            or not (name.startswith(prefix) and any(p.fullmatch(name[len(prefix):]) for p in patterns)))
 
 
 def diff_stat(diff: str) -> dict[str, Any]:

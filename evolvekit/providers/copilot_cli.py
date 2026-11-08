@@ -58,6 +58,7 @@ from typing import Any, Sequence
 
 from evolvekit.providers.agent_run import agent_env, run_agent
 from evolvekit.providers.base import (
+    AgentError,
     AgentResult,
     Completion,
     Message,
@@ -384,8 +385,9 @@ class CopilotCliProvider:
         cancel: threading.Event | None = None,
     ) -> AgentResult:
         """One agent run in `cwd`; its whole tree ended on `timeout_s` or on
-        `cancel`. One request per call, as `complete` counts it; `max_usd` has
-        no meaning for a plan that counts requests."""
+        `cancel`. One request per call, as `complete` counts it -- a call ended
+        by its time limit or a Stop request too (`AgentError` with
+        `requests=1.0`); `max_usd` has no meaning for a plan that counts requests."""
         del max_usd
         argv = self.build_act_argv(brief, model=model, read_dirs=read_dirs)
         env = agent_env(keep=SIGN_IN)
@@ -395,11 +397,12 @@ class CopilotCliProvider:
             proc = runner(argv, input=None, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
                           errors="replace", stdin=subprocess.DEVNULL, timeout=timeout_s, env=env, cancel=cancel)
         except subprocess.TimeoutExpired as exc:
-            raise CopilotCliError(f"GitHub Copilot CLI timed out after {timeout_s:g}s", "failed") from exc
-        except FileNotFoundError as exc:
+            raise AgentError(f"GitHub Copilot CLI timed out after {timeout_s:g}s", usd=0.0, requests=1.0,
+                             input_tokens=estimate_tokens(brief)) from exc
+        except AgentError as exc:  # a Stop request: the request was made
+            raise AgentError(str(exc), usd=0.0, requests=1.0, input_tokens=estimate_tokens(brief)) from exc
+        except OSError as exc:  # `run_agent` raises OSError when the program cannot start at all
             raise CopilotCliError(MISSING, "missing") from exc
-        except OSError as exc:
-            raise CopilotCliError(f"GitHub Copilot CLI could not be started: {exc}", "failed") from exc
         if proc.returncode != 0:
             raise classify_failure(proc.stdout, proc.stderr)
         text = (proc.stdout or "").strip()

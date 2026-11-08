@@ -23,11 +23,11 @@ from evolvekit.candidate import Candidate
 from evolvekit.config import ConfigError, build_config
 from evolvekit.ledger import read_jsonl
 from evolvekit.providers.agent_run import agent_env, run_agent, without_session
-from evolvekit.providers.base import AgentResult, ProviderError, supports_act
-from evolvekit.providers.claude_cli import ClaudeCliProvider
+from evolvekit.providers.base import AgentError, AgentResult, ProviderError, supports_act
+from evolvekit.providers.claude_cli import ACT_DISALLOWED, ClaudeCliProvider, parse_act_json, parse_cli_json
 from evolvekit.providers.copilot_cli import CopilotCliProvider
 from evolvekit.providers.fake import FakeProvider
-from evolvekit.search.agent_patch import BRIEFS, agent_patch, write_brief
+from evolvekit.search.agent_patch import ACT_MAX_USD, BRIEFS, agent_patch, brief_path, write_brief
 from evolvekit.search.driver import Driver
 from evolvekit.search.operators import OPERATOR_ROLES, TreeContext
 
@@ -54,7 +54,7 @@ class FakeAgentProvider:
     def act(self, brief, *, cwd, model, timeout_s, **options):
         self.calls.append({"prompt": brief, "cwd": Path(cwd), "model": model, "timeout_s": timeout_s, **options})
         if self.error:
-            raise ProviderError(self.error)
+            raise self.error if isinstance(self.error, Exception) else ProviderError(self.error)
         edits = self.edits[min(len(self.calls), len(self.edits)) - 1]
         for rel, text in edits.items():
             (Path(cwd) / rel).write_text(text, encoding="utf-8", newline="\n")
@@ -97,7 +97,9 @@ def _act(agent, *, config, parent, ctx, best=None, worst=None, failures=(), **ex
 
 
 def _brief_path(ctx) -> Path:
-    return ctx.run_dir / "work" / BRIEFS / f"{ctx.draft_id}.md"
+    path = ctx.run_dir / "work" / BRIEFS / ctx.draft_id / "brief.md"
+    assert path == brief_path(ctx.run_dir, ctx.draft_id)
+    return path
 
 
 def test_agent_patch_turns_edits_into_a_diff(ctx, config, parent):
@@ -120,7 +122,8 @@ def test_the_agent_gets_a_short_prompt_naming_the_brief_file(ctx, config, parent
         "the brief is a file (decision 39), never on a command line"
     assert path.is_file() and not str(path).startswith(str(tree.tree_dir(ctx.run_dir, ctx.draft_id))), \
         "outside every tree, so never in the diff"
-    assert agent.calls[0]["read_dirs"] == (path.parent,), "the agent may read the brief's folder"
+    assert agent.calls[0]["read_dirs"] == (path.parent,) and path.parent.name == ctx.draft_id, \
+        "the agent may read this call's brief folder, and no other call's"
 
 
 def test_agent_diff_outside_open_is_refused(ctx, config, parent):
@@ -194,10 +197,104 @@ def test_nothing_changed_and_provider_errors(ctx, config, parent):
 def test_time_and_money_bounds_reach_the_agent(ctx, config, parent):
     agent = FakeAgentProvider({"solver.py": "VALUE = 1\n"})
     stop = threading.Event()
-    _act(agent, config=config, parent=parent, ctx=ctx, time_left_s=120.0, max_usd=0.5, cancel=stop)
-    call = agent.calls[0]
-    assert call["timeout_s"] == 120.0, "the smaller of act_timeout_s and the study's time left (decision 36)"
-    assert call["max_usd"] == 0.5 and call["cancel"] is stop
+    _act(agent, config=config, parent=parent, ctx=ctx, time_left_s=120.0, left_usd=0.3, cancel=stop)
+    _act(agent, config=config, parent=parent, ctx=ctx)
+    first, second = agent.calls
+    assert first["timeout_s"] == 120.0, "the smaller of act_timeout_s and the study's time left (decision 36)"
+    assert first["max_usd"] == 0.3 and first["cancel"] is stop, "never more than what is left of the budget"
+    assert second["max_usd"] == ACT_MAX_USD == 0.50, "act_max_usd, $0.50 when not set"
+    raw = _raw(*_project_of(config))
+    raw["models"]["strong"]["options"] = {"act_max_usd": 2.0}
+    _act(agent, config=build_config(raw, base_dir=config.base_dir), parent=parent, ctx=ctx, left_usd=1.25)
+    assert agent.calls[2]["max_usd"] == 1.25
+
+
+def _project_of(config):
+    tree_cfg = config.problem.tree
+    return Path(tree_cfg.repo).parent, tree_cfg.base
+
+
+# -- what every call is billed -------------------------------------------------
+
+
+def test_a_failed_call_is_billed_as_reported_or_at_its_cap(ctx, config, parent):
+    lost = _act(FakeAgentProvider({}, error=AgentError("timed out", unreported=True)), config=config, parent=parent,
+                ctx=ctx, left_usd=0.4)
+    assert not lost.ok and lost.provider_error and "timed out" in lost.error
+    assert lost.completion.usd == 0.4 and lost.completion.raw["priced_from"] == "cap", "nothing came back: the cap"
+    told = _act(FakeAgentProvider({}, error=AgentError("API down", usd=0.07, input_tokens=9)), config=config,
+                parent=parent, ctx=ctx)
+    assert told.provider_error and told.completion.usd == 0.07 and told.completion.input_tokens == 9
+    assert "priced_from" not in told.completion.raw
+    copilot = _act(FakeAgentProvider({}, error=AgentError("timed out", usd=0.0, requests=1.0)), config=config,
+                   parent=parent, ctx=ctx)
+    assert copilot.completion.requests == 1.0 and copilot.completion.usd == 0.0
+    never = _act(FakeAgentProvider({}, error=ProviderError("could not run claude")), config=config, parent=parent,
+                 ctx=ctx)
+    assert never.provider_error and never.completion is None, "it never started: nothing was spent"
+    silent = _act(FakeAgentProvider({"solver.py": "VALUE = 1\n"}, usd=None, requests=None), config=config,
+                  parent=parent, ctx=ctx)
+    assert silent.ok and silent.completion.usd == ACT_MAX_USD and silent.completion.raw["priced_from"] == "cap"
+
+
+def test_the_token_cap_counts_uncached_input_and_output(ctx, config, parent):
+    payload = {"result": "ok", "total_cost_usd": 0.4, "usage": {
+        "input_tokens": 120, "cache_read_input_tokens": 900_000, "cache_creation_input_tokens": 50_000,
+        "output_tokens": 30}}
+    result = parse_act_json(json.dumps(payload))
+    assert (result.input_tokens, result.cached_input_tokens, result.output_tokens) == (120, 950_000, 30)
+    assert parse_cli_json(json.dumps(payload), fallback_model="m").input_tokens == 950_120, \
+        "a completion still counts its cache tokens"
+
+    class Cached(FakeAgentProvider):
+        def act(self, brief, **options):
+            super().act(brief, **options)
+            return result
+
+    done = _act(Cached({"solver.py": "VALUE = 1\n"}), config=config, parent=parent, ctx=ctx)
+    assert done.completion.total_tokens == 150 and done.completion.raw["cached_input_tokens"] == 950_000
+
+
+def test_failed_calls_reach_the_ledger_and_the_log(project, tmp_path):
+    repo, base = project
+    raw = _raw(repo, base, generations=1)
+    raw["search"]["operators"] = {"agent_patch": 1.0}
+    lines: list[str] = []
+    agent = FakeAgentProvider({}, error=AgentError("claude-cli provider: the agent timed out after 9s",
+                                                   unreported=True))
+    Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run", providers={"strong": agent},
+           log=lines.append).run()
+    usage = list(read_jsonl(tmp_path / "run" / "usage.jsonl"))
+    assert usage and all(u["priced_from"] == "cap" and u["usd"] == 0.5 for u in usage)
+    assert any("the agent's cost was not reported; charged its cap $0.50" in line for line in lines)
+    rows = [r for r in read_jsonl(tmp_path / "run" / "runs.jsonl") if r["generation"] == 1]
+    assert rows and all(r["rejected"] and "timed out" in r["reject_reason"] for r in rows)
+
+
+# -- files the agent adds outside the open files --------------------------------
+
+
+def test_a_stray_file_is_dropped_and_the_change_kept(ctx, config, parent):
+    agent = FakeAgentProvider({"scratch.txt": "notes\n", "solver.py": "VALUE = 1\n"})
+    result = _act(agent, config=config, parent=parent, ctx=ctx)
+    assert result.ok and "+VALUE = 1" in result.block and "scratch.txt" not in result.block
+    assert result.meta["dropped"] == ["app dir/scratch.txt"]
+    only = _act(FakeAgentProvider({"notes [1].md": "x\n"}), config=config, parent=parent, ctx=ctx)
+    assert not only.ok and only.error.startswith("the agent changed nothing (the files it added outside")
+    assert "app dir/notes [1].md" in only.error, "a glob character in a name is a literal path"
+
+
+def test_a_tracked_file_outside_open_still_refuses(ctx, config, parent):
+    class Renames(FakeAgentProvider):
+        def act(self, brief, *, cwd, **options):
+            os.replace(Path(cwd) / "bench.py", Path(cwd) / "bench2.py")
+            return super().act(brief, cwd=cwd, **options)
+
+    renamed = _act(Renames({"solver.py": "VALUE = 1\n"}), config=config, parent=parent, ctx=ctx)
+    assert not renamed.ok and "outside the open files: app dir/bench.py" in renamed.error, \
+        "a rename is a deletion of a tracked file (--no-renames)"
+    edited = _act(FakeAgentProvider({"bench.py": "print('fast')\n"}), config=config, parent=parent, ctx=ctx)
+    assert not edited.ok and "outside the open files: app dir/bench.py" in edited.error
 
 
 # -- the providers ---------------------------------------------------------
@@ -239,11 +336,16 @@ def test_claude_act_argv(tmp_path, monkeypatch):
         "-p", "--output-format", "json", "--max-turns", "30", "--no-session-persistence", "--strict-mcp-config",
         "--disable-slash-commands", "--setting-sources", "project", "--permission-prompts", "none",
         "--model", "m", "--allowedTools", "Edit Write Read Glob Grep Bash",
-        "--disallowedTools", "WebFetch WebSearch Task Agent"]
+        "--disallowedTools", "WebFetch", "WebSearch", "Task", "Agent",
+        "Bash(git push:*)", "Bash(git commit:*)", "Bash(git stash:*)", "Bash(git config:*)", "Bash(git checkout:*)",
+        "Bash(git switch:*)", "Bash(git reset:*)", "Bash(git branch:*)", "Bash(git tag:*)", "Bash(git worktree:*)",
+        "Bash(git remote:*)"]
+    assert list(ACT_DISALLOWED[4:]) == provider.build_act_argv(model="m")[-11:], \
+        "each rule its own argv item: a rule holds a space"
     result = provider.act("read the brief", cwd=tmp_path, model="m", timeout_s=900, read_dirs=(tmp_path / "b",),
                           max_usd=0.75)
     assert seen["cwd"] == str(tmp_path) and seen["input"] == "read the brief" and seen["timeout"] == 900
-    assert seen["argv"][-4:] == ["--add-dir", str(tmp_path / "b"), "--max-budget-usd", "0.75"]
+    assert seen["argv"][-4:] == ["--add-dir", str(tmp_path / "b"), "--max-budget-usd", "0.7500"]
     env = seen["env"]
     assert "CLAUDECODE" not in env and "CLAUDE_CODE_ENTRYPOINT" not in env, "never the launching session's child"
     assert env["CLAUDE_CODE_GIT_BASH_PATH"] == "C:/git/bash.exe" and env["ANTHROPIC_API_KEY"] == "k"
@@ -271,13 +373,25 @@ def test_claude_act_failures(tmp_path):
     assert not result.ok and result.usd == 0.5 and "turn limit" in result.text, "its edits are used as they are"
     budget = json.dumps({"is_error": True, "subtype": "error_max_budget_usd", "total_cost_usd": 1.0})
     assert not _claude({}, stdout=budget).act("b", cwd=tmp_path, model="m", timeout_s=9).ok
-    other = json.dumps({"is_error": True, "subtype": "error_during_execution", "result": "API down"})
-    with pytest.raises(ProviderError, match="API down"):
-        _claude({}, stdout=other).act("b", cwd=tmp_path, model="m", timeout_s=9)
-    with pytest.raises(ProviderError, match="exit 2"):
-        _claude({}, stdout="not json", returncode=2).act("b", cwd=tmp_path, model="m", timeout_s=9)
-    with pytest.raises(ProviderError, match="timed out after 9s"):
+    other = json.dumps({"is_error": True, "subtype": "error_during_execution", "result": "API down",
+                        "total_cost_usd": 0.21, "usage": {"input_tokens": 4, "output_tokens": 2}})
+    with pytest.raises(AgentError, match="API down") as told:
+        _claude({}, stdout=other, returncode=1).act("b", cwd=tmp_path, model="m", timeout_s=9)
+    assert (told.value.usd, told.value.input_tokens, told.value.unreported) == (0.21, 4, False), \
+        "an error the agent reported bills what it reported"
+    for stdout, returncode, message in (("not json", 2, "exit 2"), ("", 0, "not JSON")):
+        with pytest.raises(AgentError, match=message) as crash:
+            _claude({}, stdout=stdout, returncode=returncode).act("b", cwd=tmp_path, model="m", timeout_s=9)
+        assert crash.value.unreported and crash.value.usd is None, "no cost came back: the operator charges the cap"
+    with pytest.raises(AgentError, match="timed out after 9s") as slow:
         _claude({}, raises=subprocess.TimeoutExpired(["claude"], 9)).act("b", cwd=tmp_path, model="m", timeout_s=9)
+    assert slow.value.unreported
+    with pytest.raises(AgentError, match="stopped") as stopped:
+        _claude({}, raises=AgentError("stopped", unreported=True)).act("b", cwd=tmp_path, model="m", timeout_s=9)
+    assert stopped.value.unreported
+    with pytest.raises(ProviderError, match="could not run") as never:
+        _claude({}, raises=OSError("no such file")).act("b", cwd=tmp_path, model="m", timeout_s=9)
+    assert not isinstance(never.value, AgentError), "it never started: nothing to bill"
 
 
 def _copilot(seen):
@@ -304,6 +418,29 @@ def test_copilot_act_argv(tmp_path):
     assert seen["cwd"] == str(tmp_path) and seen["input"] is None and seen["timeout"] == 900
     assert seen["env"]["COPILOT_AUTO_UPDATE"] == "false"
     assert supports_act(provider)
+
+
+def test_copilot_act_failures_charge_a_request(tmp_path):
+    from evolvekit.providers.copilot_cli import MISSING
+
+    for raised in (subprocess.TimeoutExpired(["copilot"], 9), AgentError("stopped", unreported=True)):
+        def runner(argv, _raised=raised, **kwargs):
+            raise _raised
+
+        provider = CopilotCliProvider(runner=runner, executable="copilot", windows=False)
+        provider._resolve = lambda: (["copilot"], False)  # type: ignore[method-assign]
+        with pytest.raises(AgentError) as charged:
+            provider.act("b", cwd=tmp_path, model="m", timeout_s=9)
+        assert (charged.value.requests, charged.value.usd, charged.value.unreported) == (1.0, 0.0, False)
+
+    def missing(argv, **kwargs):
+        raise OSError("[WinError 2] The system cannot find the file specified")
+
+    provider = CopilotCliProvider(runner=missing, executable="copilot", windows=False)
+    provider._resolve = lambda: (["copilot"], False)  # type: ignore[method-assign]
+    with pytest.raises(ProviderError, match="not installed") as gone:
+        provider.act("b", cwd=tmp_path, model="m", timeout_s=9)
+    assert str(gone.value) == MISSING and gone.value.kind == "missing"
 
 
 def test_copilot_act_refuses_a_shim_and_a_long_prompt(tmp_path):
@@ -362,6 +499,7 @@ def test_the_driver_dispatches_agent_patch_and_bills_it(project, tmp_path):
     repo, base = project
     raw = _raw(repo, base, generations=1)
     raw["search"]["operators"] = {"agent_patch": 1.0}
+    raw["budget"] = {"max_usd": 0.6}
     agent = FakeAgentProvider([{"solver.py": SOLVER.replace("VALUE = 5", f"VALUE = {v}")} for v in (3, 2)])
     summary = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run",
                      providers={"strong": agent}).run()
@@ -373,11 +511,11 @@ def test_the_driver_dispatches_agent_patch_and_bills_it(project, tmp_path):
     assert [u["usd"] for u in usage] == [0.12, 0.12] and all(u["priced_from"] == "provider" for u in usage)
     first, second = agent.calls
     assert first["cancel"] is not None and first["timeout_s"] == 1800.0
-    assert first["max_usd"] == pytest.approx(1.0) and second["max_usd"] == pytest.approx(0.88), \
-        "what is left of budget.max_usd (1.0 by default) before each call"
-    assert Path(first["read_dirs"][0]).name == BRIEFS
-    briefs = sorted((tmp_path / "run" / "work" / BRIEFS).glob("*.md"))
-    assert [p.name for p in briefs] == [f"{r['id']}.draft.md" for r in rows], "one brief per call, kept"
+    assert first["max_usd"] == pytest.approx(0.5) and second["max_usd"] == pytest.approx(0.48), \
+        "act_max_usd ($0.50), never more than what is left of budget.max_usd"
+    assert Path(first["read_dirs"][0]).parent.name == BRIEFS
+    briefs = sorted((tmp_path / "run" / "work" / BRIEFS).glob("*/brief.md"))
+    assert [p.parent.name for p in briefs] == [f"{r['id']}.draft" for r in rows], "one brief per call, kept"
     seed = next(read_jsonl(tmp_path / "run" / "runs.jsonl"))["id"]
     assert f"- The best so far: {seed} (value 5)" in briefs[0].read_text(encoding="utf-8")
 

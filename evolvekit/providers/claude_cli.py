@@ -22,14 +22,24 @@ No API key is involved: the CLI carries the subscription's own auth. Set
         --strict-mcp-config --disable-slash-commands [--setting-sources project]
         [--permission-prompts none] [--model <model>]
         --allowedTools "Edit Write Read Glob Grep Bash"
-        --disallowedTools "WebFetch WebSearch Task Agent"
-        [--add-dir <the brief's folder>] [--max-budget-usd <what is left>]
+        --disallowedTools WebFetch WebSearch Task Agent "Bash(git push:*)" ...
+        [--add-dir <the call's brief folder>] [--max-budget-usd <the call's cap>]
 
 The bracketed flags are passed only when the installed CLI's `--help` lists
 them (read once per executable): 2.1.304 lists every one but `--max-turns`.
 The short prompt goes in on stdin, in the folder, with the launching session's
 identity dropped (`agent_run.agent_env`); the whole process tree is ended on
 the time limit or a Stop request (`agent_run.run_agent`).
+
+`--setting-sources project` still loads the repository's own
+`.claude/settings.json` from the draft (a worktree of the engineer's
+repository): its hooks and permission rules apply to the agent.
+
+The folder is a git worktree of the engineer's repository, so `git` there
+reaches the engineer's branches, refs, stash and remotes. `ACT_DISALLOWED`
+denies the git commands that write them (`Bash(git push:*)` and the like);
+that is not airtight -- `git -C . push`, a script that runs git, or an alias
+gets past a prefix rule -- and the brief says not to commit either.
 """
 
 from __future__ import annotations
@@ -46,6 +56,7 @@ from typing import Any, Sequence
 
 from evolvekit.providers.agent_run import agent_env, run_agent
 from evolvekit.providers.base import (
+    AgentError,
     AgentResult,
     Completion,
     Message,
@@ -77,7 +88,14 @@ DISALLOWED_TOOLS = "Bash Edit Write Read Glob Grep WebFetch WebSearch Task"
 # (`Task` is the older name of `Agent`).
 ACT_MAX_TURNS = 30
 ALLOWED_TOOLS = "Edit Write Read Glob Grep Bash"
-ACT_DISALLOWED = "WebFetch WebSearch Task Agent"
+ACT_DISALLOWED = (
+    "WebFetch", "WebSearch", "Task", "Agent",
+    *(f"Bash(git {command}:*)" for command in (
+        "push", "commit", "stash", "config", "checkout", "switch", "reset", "branch", "tag", "worktree", "remote",
+    )),
+)
+"""Each its own argv item (a rule holds a space). The git rules keep the agent
+off the engineer's repository, which its folder is a worktree of: not airtight."""
 ACT_LIMITS = ("error_max_turns", "error_max_budget_usd")
 """`subtype`s of an agent stopped at a limit: its edits are used as they are (D14)."""
 OPTIONAL_ACT_FLAGS = ("--max-turns", "--setting-sources", "--permission-prompts", "--max-budget-usd")
@@ -183,11 +201,11 @@ class ClaudeCliProvider:
             argv += ["--permission-prompts", "none"]
         if model:  # an empty model is the CLI's own default
             argv += ["--model", model]
-        argv += ["--allowedTools", ALLOWED_TOOLS, "--disallowedTools", ACT_DISALLOWED]
+        argv += ["--allowedTools", ALLOWED_TOOLS, "--disallowedTools", *ACT_DISALLOWED]
         for folder in read_dirs:
             argv += ["--add-dir", str(folder)]
         if max_usd is not None and "--max-budget-usd" in flags:
-            argv += ["--max-budget-usd", f"{max(0.0, float(max_usd)):.4g}"]
+            argv += ["--max-budget-usd", f"{max(0.0, float(max_usd)):.4f}"]
         return argv
 
     def act(
@@ -202,24 +220,31 @@ class ClaudeCliProvider:
         cancel: threading.Event | None = None,
     ) -> AgentResult:
         """One agent run in `cwd`, `brief` on stdin; its whole tree ended on
-        `timeout_s` or on `cancel`. `ProviderError` when it cannot run, times
-        out, or fails outright; a run stopped at a limit is `ok=False`."""
+        `timeout_s` or on `cancel`. A run stopped at a limit is `ok=False`.
+        `ProviderError` when it cannot start (nothing spent); `AgentError` when
+        it ran and failed -- with its reported cost, or `unreported` (a
+        timeout, a Stop, a crash, no JSON) so the operator charges the cap."""
         argv = self.build_act_argv(model=model, read_dirs=read_dirs, max_usd=max_usd)
         runner = self._runner if self._runner is not subprocess.run else run_agent
         try:
             proc = runner(argv, input=brief, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
                           timeout=timeout_s, env=agent_env(), cancel=cancel)
         except subprocess.TimeoutExpired as exc:
-            raise ProviderError(f"claude-cli provider: the agent timed out after {timeout_s:g}s") from exc
+            raise AgentError(f"claude-cli provider: the agent timed out after {timeout_s:g}s",
+                             unreported=True) from exc
         except OSError as exc:
             raise ProviderError(f"claude-cli provider: could not run {argv[0]}: {exc}") from exc
         result = parse_act_json(proc.stdout)
         if result is not None and (proc.returncode == 0 or not result.ok):
             return result
-        if proc.returncode == 0:
-            raise ProviderError(f"claude-cli provider: stdout was not JSON: {str(proc.stdout)[:200]!r}")
-        raise ProviderError(
-            f"claude-cli provider: exit {proc.returncode}: {cli_error_message(proc.stdout, proc.stderr)}"
+        if result is None:
+            reason = (f"stdout was not JSON: {str(proc.stdout)[:200]!r}" if proc.returncode == 0
+                      else f"exit {proc.returncode}: {cli_error_message(proc.stdout, proc.stderr)}")
+            raise AgentError(f"claude-cli provider: {reason}", unreported=True)
+        raise AgentError(
+            f"claude-cli provider: exit {proc.returncode}: {cli_error_message(proc.stdout, proc.stderr)}",
+            usd=result.usd, input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+            unreported=result.usd is None,
         )
 
     def complete(
@@ -305,48 +330,56 @@ def cli_error_message(stdout: str | None, stderr: str | None) -> str:
     return (stderr or stdout or "").strip()[-300:] or "no output"
 
 
-def _usage_tokens(payload: dict[str, Any]) -> tuple[int, int]:
+def _split_tokens(payload: dict[str, Any]) -> tuple[int, int, int]:
+    """`(uncached input, cache creation + cache reads, output)` from `usage`."""
     usage = payload.get("usage") or {}
     if not isinstance(usage, dict):
-        return 0, 0
+        return 0, 0, 0
+
+    def count(key: str) -> int:
+        try:
+            return int(usage.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    cached = count("cache_creation_input_tokens") + count("cache_read_input_tokens")
+    return count("input_tokens"), cached, count("output_tokens")
+
+
+def _usage_tokens(payload: dict[str, Any]) -> tuple[int, int]:
     # Cached tokens are still billed (at a different rate); counting them keeps
-    # the token cap honest. total_cost_usd carries the exact money.
-    input_tokens = sum(
-        int(usage.get(key, 0) or 0)
-        for key in (
-            "input_tokens",
-            "cache_creation_input_tokens",
-            "cache_read_input_tokens",
-        )
-    )
-    return input_tokens, int(usage.get("output_tokens", 0) or 0)
+    # the token cap honest for one completion. total_cost_usd carries the exact money.
+    uncached, cached, output = _split_tokens(payload)
+    return uncached + cached, output
 
 
 def parse_act_json(stdout: str | None) -> AgentResult | None:
     """One agent run's `--output-format json` payload as an `AgentResult`;
     `None` when stdout is not a JSON object. A run stopped at a limit
     (`ACT_LIMITS`) is `ok=False`, its edits used as they are; any other
-    `is_error` raises `ProviderError`."""
+    `is_error` raises `AgentError` with the cost it reported. The input tokens
+    are the uncached ones (`AgentResult`); cache reads and creation are apart."""
     try:
         payload = json.loads(stdout or "")
     except (TypeError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
         return None
-    input_tokens, output_tokens = _usage_tokens(payload)
+    input_tokens, cached, output_tokens = _split_tokens(payload)
     cost = payload.get("total_cost_usd")
     usd = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
     ok, text = True, payload.get("result")
     if payload.get("is_error"):
         subtype = payload.get("subtype")
         if subtype not in ACT_LIMITS:
-            raise ProviderError(
-                f"claude-cli provider: the agent reported an error: {cli_error_message(stdout, None)}"
+            raise AgentError(
+                f"claude-cli provider: the agent reported an error: {cli_error_message(stdout, None)}",
+                usd=usd, input_tokens=input_tokens, output_tokens=output_tokens, unreported=usd is None,
             )
         limit = "the turn limit" if subtype == "error_max_turns" else "its spending cap"
         ok, text = False, f"stopped at {limit}; its edits are used as they are"
     return AgentResult(ok=ok, text=text if isinstance(text, str) else "", usd=usd, requests=None,
-                       input_tokens=input_tokens, output_tokens=output_tokens)
+                       input_tokens=input_tokens, output_tokens=output_tokens, cached_input_tokens=cached)
 
 
 def parse_cli_json(

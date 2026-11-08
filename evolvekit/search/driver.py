@@ -1241,7 +1241,8 @@ class Driver:
             role=role,
             inspiration_ids=[i.id for i in inspirations],
         )
-        if outcome.completion is not None:
+        # A failed agent call is billed (it carries a completion) and still counts as a failure.
+        if outcome.completion is not None and not outcome.provider_error:
             self._provider_failures = 0
         elif outcome.provider_error:
             self._provider_failures += 1
@@ -1415,7 +1416,7 @@ class Driver:
             worst=None if worst is None or (best is not None and worst.id == best.id) else worst,
             failures=self._failures(),
             time_left_s=self.run_stop.left_s(),
-            max_usd=max(0.0, left_usd),
+            left_usd=max(0.0, left_usd),
             cancel=self.run_stop.event,
         )
 
@@ -1489,6 +1490,8 @@ class Driver:
             generation=generation,
             operator=operator,
         )
+        if usage.priced_from == "cap":
+            self.log(f"        {candidate_id} the agent's cost was not reported; charged its cap ${usage.usd:.2f}")
         self.budget.spend(usd=usage.usd, tokens=usage.input_tokens + usage.output_tokens)
 
     def _trace(
@@ -1514,6 +1517,7 @@ class Driver:
                 "role": role,
                 "attempt": attempt,
                 **({"params": outcome.meta["params"]} if "params" in outcome.meta else {}),
+                **({"dropped": outcome.meta["dropped"]} if "dropped" in outcome.meta else {}),
             },
         )
 

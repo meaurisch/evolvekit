@@ -27,7 +27,7 @@ import threading
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from evolvekit.providers.base import ProviderError
+from evolvekit.providers.base import AgentError
 
 __all__ = ["KEEP", "SESSION_NAMES", "SESSION_PREFIXES", "agent_env", "from_session", "run_agent",
            "without_session"]
@@ -83,7 +83,7 @@ def run_agent(
     **_like_subprocess_run: Any,
 ) -> subprocess.CompletedProcess:
     """Run one agent call: `input` on stdin, the whole tree ended on `timeout`
-    (`subprocess.TimeoutExpired`) or on `cancel` (`ProviderError`). Shaped like
+    (`subprocess.TimeoutExpired`) or on `cancel` (`AgentError`, unreported). Shaped like
     `subprocess.run`, so a test can stand in for it; its other keywords are ignored.
     A command that cannot start raises `OSError`."""
     from evolvekit.evaluate.process import run_bounded
@@ -100,8 +100,8 @@ def run_agent(
         stdout, stderr = _read(out), _read(err)
     if done.error is not None:
         raise OSError(done.error)
-    if done.cancelled:
-        raise ProviderError("stopped: the study was asked to stop, and the agent was ended")
+    if done.cancelled:  # it ran, and said nothing of what it spent
+        raise AgentError("stopped: the study was asked to stop, and the agent was ended", unreported=True)
     if done.timed_out:
         raise subprocess.TimeoutExpired(list(argv), timeout, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(list(argv), done.returncode, stdout, stderr)
