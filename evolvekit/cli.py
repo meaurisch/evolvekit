@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
+from evolvekit import resources
 from evolvekit.app import AppError
 from evolvekit.harness import HarnessError
 from evolvekit.harness.plan import plan_notes
@@ -755,14 +756,12 @@ def cmd_app(args: argparse.Namespace) -> int:
             print("error: --shortcut writes a Windows .cmd file; elsewhere, start the app with "
                   "`python -m evolvekit app`", file=sys.stderr)
             return 1
-        from evolvekit.resources import APP_EXE, bundle_dir, is_frozen, python_argv
-
         target = _desktop() / "evolvekit.cmd"
-        if is_frozen():  # the app exe is windowless: start it, and this window closes
-            start = f'start "" "{bundle_dir() / APP_EXE}" --home "{home}"\r\n'
+        if resources.is_frozen():  # the app exe is windowless: start it, and this window closes
+            start = f'start "" "{resources.bundle_dir() / resources.APP_EXE}" --home "{home}"\r\n'
             said = "double-click it to start the app"
         else:
-            start = f'"{python_argv()[0]}" -m evolvekit app --home "{home}"\r\npause\r\n'
+            start = f'"{resources.python_argv()[0]}" -m evolvekit app --home "{home}"\r\npause\r\n'
             said = "double-click it to start the app, and keep its window open while you work"
         # UTF-8 and CRLF as written (newline=""): cmd.exe reads a .cmd in the OEM code page unless told (D9)
         target.write_text("@echo off\r\nchcp 65001 >nul\r\ntitle evolvekit\r\n" + start, encoding="utf-8", newline="")
@@ -1346,14 +1345,12 @@ def _study_open(args: argparse.Namespace) -> int:
     from evolvekit.app import detach
     from evolvekit.app.running import read_running
     from evolvekit.dashboard import open_in_browser
-    from evolvekit.resources import app_argv
-
     home = _home(args)
     home.study_root(args.slug)  # no app is started for a study that is not there
     running = read_running(home.root)
     if running is None:
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
-        argv = [*app_argv(), "--home", str(home.root), "--service"]
+        argv = [*resources.app_argv(), "--home", str(home.root), "--service"]
         try:
             detach.spawn_detached(argv, cwd=home.root, env=env, log=home.root / APP_START_LOG)
         except (detach.DetachError, subprocess.TimeoutExpired):

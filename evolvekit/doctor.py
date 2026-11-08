@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from evolvekit import resources
+
 __all__ = ["checks"]
 
 MIN_PYTHON = (3, 11)
@@ -26,12 +28,10 @@ def _check(ok: bool, name: str, message: str, fix: str = "") -> dict:
 
 
 def _python() -> dict:
-    from evolvekit.resources import is_frozen, python_argv
-
     version = ".".join(str(n) for n in sys.version_info[:3])
-    if is_frozen():  # the app's own Python, inside its exe (D11)
+    if resources.is_frozen():  # the app's own Python, inside its exe (D11)
         return _check(True, "python", f"bundled (Python {version})")
-    message = f"{version} at {python_argv()[0]}"
+    message = f"{version} at {resources.python_argv()[0]}"
     wanted = ".".join(str(n) for n in MIN_PYTHON)
     return _check(
         sys.version_info[:2] >= MIN_PYTHON, "python", message,

@@ -16,7 +16,13 @@ python's forms (python's own `-u`, `-B`, `-X OPT`, `-W OPT` before them are
 accepted and ignored); a command of the CLI, `--version`, `-h`, `--help` are
 the CLI (a bare `stop` on `evolvekit-app.exe` is the app's `stop`); anything
 else, nothing included, is the app (`evolvekit app ...`). Frozen, a CLI command
-that would write into the app's own folder is refused.
+that would write into the app's own folder is refused, and so is the app form
+whose library home is inside it: the app's folder unzipped as the default
+home, `<profile>/evolvekit` (`%USERPROFILE%` on Windows), cannot start (the
+README says not to unzip it there).
+
+`evolvekit.cli` is imported for the CLI and the app forms only: python's forms
+(every helper process the app starts) do not pay for it.
 """
 
 from __future__ import annotations
@@ -31,8 +37,7 @@ import runpy
 import sys
 from pathlib import Path
 
-from evolvekit import cli
-from evolvekit.resources import APP_EXE, bundle_dir, exe_name, is_frozen
+from evolvekit import resources
 
 __all__ = ["WRITE_TARGETS", "main", "writes_into_bundle"]
 
@@ -67,7 +72,9 @@ _TARGET_COMMANDS = {command for command, _ in WRITE_TARGETS} | _HOME_COMMANDS
 
 _REFUSED = ("error: this is the app's own folder: run evolvekit-cli.exe from a folder of yours "
             "(its full path works from anywhere)")
-_NO_STDIN = "evolvekit-cli.exe cannot read a program from its input; give a file"
+_HOME_IN_BUNDLE = ("The library home {home} is inside the app's own folder. Move the app's folder somewhere else "
+                   "(for example to Downloads or Desktop), or start it with --home <a folder of yours>.")
+_NO_STDIN ="evolvekit-cli.exe cannot read a program from its input; give a file"
 _PYTHON_USAGE = "[-u] [-B] [-X OPT] [-W OPT] (-m MODULE | -c CODE | --script FILE | FILE.py) [args]"
 _CLI_FLAGS = ("--version", "-h", "--help")
 
@@ -107,11 +114,13 @@ def _targets(args: argparse.Namespace) -> list[Path]:
 
 def writes_into_bundle(argv: list[str]) -> bool:
     """Frozen: would this CLI command write into the app's own folder?"""
-    if not is_frozen() or not argv or argv[0] not in _TARGET_COMMANDS:
+    if not resources.is_frozen() or not argv or argv[0] not in _TARGET_COMMANDS:
         return False
     if any(flag in argv for flag in _CLI_FLAGS):  # parsing would print them, and cli.main again
         return False
-    bundle = bundle_dir().resolve()  # type: ignore[union-attr]
+    from evolvekit import cli
+
+    bundle = resources.bundle_dir().resolve()  # type: ignore[union-attr]
     try:
         with contextlib.redirect_stderr(io.StringIO()):
             args, _ = _relaxed(cli.build_parser()).parse_known_args(argv)
@@ -123,7 +132,7 @@ def writes_into_bundle(argv: list[str]) -> bool:
 
 
 def _is_app_exe() -> bool:
-    return exe_name().lower() == APP_EXE.lower()
+    return resources.exe_name().lower() == resources.APP_EXE.lower()
 
 
 def _frozen_process() -> list[tuple[str, io.TextIOBase]]:
@@ -243,12 +252,13 @@ def _say(text: str, *, windowless: bool) -> None:
 
 def _enter_home(argv: list[str], *, windowless: bool) -> list[str] | int:
     """Frozen, the app form works in its home (D5): `argv` with the home made
-    absolute, or the exit code when the home is inside the app's own folder (2,
-    as the CLI's refusal, D34) or cannot be made or entered (1), said in a
-    message box when windowless."""
+    absolute, or the exit code when the home is inside the app's own folder (2:
+    the default home, `EVOLVEKIT_HOME` or `--home` alike; the app's folder
+    unzipped as `<profile>/evolvekit` is the default home) or cannot be made or
+    entered (1), said in a message box when windowless."""
     home, argv = _with_absolute_home(argv)
-    if _inside(home, bundle_dir().resolve()):  # type: ignore[union-attr]
-        _say(_REFUSED, windowless=windowless)
+    if _inside(home, resources.bundle_dir().resolve()):  # type: ignore[union-attr]
+        _say(_HOME_IN_BUNDLE.format(home=home), windowless=windowless)
         return 2
     try:
         home.mkdir(parents=True, exist_ok=True)
@@ -265,6 +275,8 @@ def _dispatch(argv: list[str], *, frozen: bool, windowless: bool) -> int:
         return _usage(_PYTHON_USAGE)
     if flags or (argv and _is_python_form(argv[0])):
         return _run_python(argv[flags:])
+    from evolvekit import cli  # only now: python's forms never import the CLI
+
     first = argv[0] if argv else ""
     bare_app_stop = argv == ["stop"] and _is_app_exe()
     if (first in cli._COMMANDS or first in _CLI_FLAGS) and not bare_app_stop:
@@ -283,7 +295,7 @@ def _dispatch(argv: list[str], *, frozen: bool, windowless: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Dispatch one start of an exe; a `SystemExit` of what runs passes through."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not is_frozen():
+    if not resources.is_frozen():
         return _dispatch(argv, frozen=False, windowless=False)
     windowless = sys.stdout is None or sys.stderr is None
     opened = _frozen_process()

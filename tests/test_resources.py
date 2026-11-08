@@ -84,13 +84,34 @@ def test_skills_come_from_package_root_when_frozen(tmp_path, monkeypatch):
 
 ALLOWED_EXECUTABLE = {"resources.py", "harness/sdk/evk_harness.py"}   # the SDK runs under the application's Python
 
-def _sys_executable(node) -> bool:
-    return ((isinstance(node, ast.Attribute) and node.attr == "executable" and isinstance(node.value, ast.Name)
-             and node.value.id == "sys")
-            or (isinstance(node, ast.ImportFrom) and node.module == "sys" and any(a.name == "executable" for a in node.names)))
+def _sys_executable_lines(tree: ast.AST) -> list[int]:
+    """Lines reading `sys.executable`: as `sys.executable`, through an alias (`import sys as s; s.executable`),
+    `from sys import executable`, or `getattr(sys, "executable")`."""
+    aliases = {"sys"} | {a.asname for n in ast.walk(tree) if isinstance(n, ast.Import)
+                         for a in n.names if a.name == "sys" and a.asname}
+    def reads(node) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == "executable" and isinstance(node.value, ast.Name) and node.value.id in aliases
+        if isinstance(node, ast.ImportFrom):
+            return node.module == "sys" and any(a.name == "executable" for a in node.names)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2:
+            target, name = node.args[:2]
+            return (isinstance(target, ast.Name) and target.id in aliases
+                    and isinstance(name, ast.Constant) and name.value == "executable")
+        return False
+    return [node.lineno for node in ast.walk(tree) if reads(node)]
+
+def test_the_sys_executable_walk_sees_every_spelling():
+    tree = ast.parse("import sys as s\nfrom sys import executable as e\ns.executable\n"
+                     "getattr(sys, 'executable')\nsys.executable\nx = 'sys.executable'\ngetattr(sys, 'path')\n")
+    assert sorted(_sys_executable_lines(tree)) == [2, 3, 4, 5]
 
 def test_every_sys_executable_use_goes_through_resources():
-    hits = [h for h in _uses(_sys_executable) if h.split(":")[0] not in ALLOWED_EXECUTABLE]
+    hits = []
+    for source in sorted(PACKAGE.rglob("*.py")):
+        name = source.relative_to(PACKAGE).as_posix()
+        if name not in ALLOWED_EXECUTABLE:
+            hits += [f"{name}:{line}" for line in _sys_executable_lines(ast.parse(source.read_text(encoding="utf-8")))]
     assert hits == [], "evolvekit's Python is evolvekit.resources.python_argv()"
 
 def test_python_argv_frozen_and_not(tmp_path, monkeypatch):

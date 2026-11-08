@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from evolvekit import resources
 from evolvekit.app import AppError, assistant, compare, jobs, scheduler, tries, work
 from evolvekit.app.detach import no_window_flags
 from evolvekit.app.detect import detect as detect_applications
@@ -22,7 +23,6 @@ from evolvekit.harness.manifest import Harness
 from evolvekit.harness.plan import plan_notes
 from evolvekit.harness.schedule import PRESETS, when_words
 from evolvekit.harness.study import SettingChoice, save_study
-from evolvekit.resources import python_code_argv
 
 __all__ = ["ROUTES", "describe_harness"]
 
@@ -335,7 +335,7 @@ def pick_file(req: Request) -> dict[str, Any]:
     kind = "folder" if body.get("kind") == "folder" else "file"
     title = str(body.get("title") or ("Choose a folder" if kind == "folder" else "Choose a file"))[:120]
     try:
-        done = subprocess.run([*python_code_argv(_PICK), title, kind], capture_output=True, text=True,
+        done = subprocess.run([*resources.python_code_argv(_PICK), title, kind], capture_output=True, text=True,
                               timeout=PICK_TIMEOUT_S, encoding="utf-8", errors="replace",
                               creationflags=no_window_flags())
     except subprocess.TimeoutExpired:

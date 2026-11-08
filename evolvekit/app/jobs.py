@@ -27,6 +27,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Callable
 
+from evolvekit import resources
 from evolvekit.app import AppError, detach
 from evolvekit.app.prices import price_of
 from evolvekit.app.store import safe_relative
@@ -386,9 +387,7 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys
     env = {**scrubbed_environment(), "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     if with_keys:
         env.update(home.job_environment())
-    from evolvekit.resources import python_module_argv
-
-    argv = [*python_module_argv("evolvekit.app.job"), str(root), run_dir.name, *extra]  # never pythonw (D16)
+    argv = [*resources.python_module_argv("evolvekit.app.job"), str(root), run_dir.name, *extra]  # never pythonw (D16)
     try:
         previous: str | None = (run_dir / LAUNCH).read_text(encoding="utf-8")
     except OSError:

@@ -9,8 +9,9 @@ start finds the first in `app.json` and leaves it be, so two tickers never share
 
 * Windows: a Task Scheduler task, "evolvekit app", from an XML definition (D16): a logon trigger,
   no time limit, never held back or stopped on battery, one instance. It runs `pythonw.exe`, so no
-  console window opens (installed, the windowless `evolvekit-app.exe`); runs are still launched
-  with `python.exe` (`resources.python_argv`).
+  console window opens (installed: the windowless `evolvekit-app.exe`); runs are still launched
+  on a console interpreter, `python.exe` (installed: `evolvekit-cli.exe`), through
+  `resources.python_argv`.
 * macOS and Linux: the launchd agent or systemd user unit is printed, with the commands that
   install it -- nothing is run.
 
@@ -37,6 +38,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 from xml.sax.saxutils import escape, unescape
 
+from evolvekit import resources
 from evolvekit.app.running import APP_FILE, read_running
 from evolvekit.lock import pid_alive
 
@@ -235,9 +237,9 @@ def windowless(python: str) -> str:
 def service_argv(home_root: Path, *, python: str | None = None) -> list[str]:
     """What the logon task runs: the app (`resources.app_argv`, the app exe when installed) or
     `python -m evolvekit app` under the given `python`, windowless, as a service of the home."""
-    from evolvekit.resources import app_argv
-
-    argv = app_argv() if python is None else [python, "-m", "evolvekit", "app"]
+    if python is not None and not python.strip():
+        raise ValueError("service_argv: python is empty; give an interpreter's path, or None for evolvekit's own")
+    argv = resources.app_argv() if python is None else [python, "-m", "evolvekit", "app"]
     return [windowless(argv[0]), *argv[1:], "--service", "--home", str(home_root)]
 
 

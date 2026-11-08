@@ -36,6 +36,7 @@ from typing import Any, Callable
 
 import yaml
 
+from evolvekit import resources
 from evolvekit.config import load_config
 from evolvekit.app.detach import no_window_flags
 from evolvekit.confirm import ConfirmStopped, confirm, decide
@@ -61,7 +62,6 @@ from evolvekit.harness.sql import schema_database, sql_problem
 from evolvekit.harness.study import Study, load_study, load_study_file, require_valid, resolve_kpi
 from evolvekit.leaderboard import rank
 from evolvekit.ledger import _atomic_write, read_jsonl
-from evolvekit.resources import python_script_argv
 from evolvekit.stopping import STOP_REQUEST, RunStop
 
 __all__ = [
@@ -127,7 +127,7 @@ def runner_command(study: Study, harness: Harness, runner: str) -> list[str]:
         raise HarnessError("application: say where the application is first")
     if harness.application.kind == "python":
         return [study.application_path, runner]
-    return [*python_script_argv(runner), "--app", study.application_path]
+    return [*resources.python_script_argv(runner), "--app", study.application_path]
 
 
 def _starting_values(study: Study, base: dict[str, Any]) -> dict[str, Any]:

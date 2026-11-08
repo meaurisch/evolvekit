@@ -206,6 +206,12 @@ def test_uninstall_startup(tmp_path):
         assert words in text and "rm " in text
 
 
+def test_service_argv_refuses_an_empty_python(tmp_path):
+    for empty in ("", "  "):
+        with pytest.raises(ValueError):
+            service.service_argv(tmp_path, python=empty)
+
+
 def test_python_for_runs_is_never_pythonw(tmp_path, monkeypatch):
     (tmp_path / "python.exe").write_bytes(b"")
     (tmp_path / "pythonw.exe").write_bytes(b"")

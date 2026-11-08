@@ -312,10 +312,48 @@ def test_the_app_form_refuses_a_home_in_the_bundle(tmp_path, monkeypatch, capsys
         monkeypatch.setattr(sys, "stdout", None); monkeypatch.setattr(sys, "stderr", None)
     assert entry.main([*given, "--no-browser"]) == 2 and calls == []
     said = boxes if windowless else [capsys.readouterr().err.strip()]
-    assert said == ["error: this is the app's own folder: run evolvekit-cli.exe from a folder of yours "
-                    "(its full path works from anywhere)"]
+    home = (bundle / ("_internal" if "_internal" in given else "")).resolve()
+    assert said == [_home_in_bundle(home)]
     assert boxes == [] or windowless
     assert _snapshot(bundle) == before and os.path.samefile(Path.cwd(), bundle)
+
+
+def _home_in_bundle(home: Path) -> str:
+    return (f"The library home {home} is inside the app's own folder. Move the app's folder somewhere else "
+            "(for example to Downloads or Desktop), or start it with --home <a folder of yours>.")
+
+
+@pytest.mark.parametrize("windowless", [True, False])
+def test_the_app_unzipped_as_the_default_home_is_refused(tmp_path, monkeypatch, capsys, calls, windowless):
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    bundle = fake_bundle(monkeypatch, profile / "evolvekit")        # unzipped as %USERPROFILE%\evolvekit
+    monkeypatch.chdir(bundle)                                       # a double-click
+    before = _snapshot(bundle)
+    boxes = []
+    monkeypatch.setattr(entry, "_message_box", boxes.append)
+    if windowless:
+        monkeypatch.setattr(sys, "stdout", None); monkeypatch.setattr(sys, "stderr", None)
+    assert entry.main([]) == 2 and calls == []
+    said = boxes if windowless else [capsys.readouterr().err.strip()]
+    assert said == [_home_in_bundle(default_home())]
+    assert boxes == [] or windowless
+    assert _snapshot(bundle) == before
+
+def test_an_evolvekit_home_in_the_bundle_is_refused(tmp_path, monkeypatch, capsys, calls):
+    fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    monkeypatch.setenv("EVOLVEKIT_HOME", str(bundle / "library"))
+    before = _snapshot(bundle)
+    assert entry.main(["--no-browser"]) == 2 and calls == []
+    assert capsys.readouterr().err.strip() == _home_in_bundle((bundle / "library").resolve())
+    assert _snapshot(bundle) == before and not (bundle / "library").exists()
+
+def test_pythons_forms_never_import_the_cli(tmp_path):
+    checkout = Path(entry.__file__).resolve().parents[2]
+    code = ("import sys; from evolvekit.app import entry; entry.main(['-c', 'pass']); "
+            "print('evolvekit.cli' in sys.modules)")
+    done = subprocess.run([sys.executable, "-c", code], cwd=checkout, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0 and done.stdout.split() == ["False"], done.stderr
 
 def test_install_startup_names_the_exe_when_frozen(tmp_path, monkeypatch):
     bundle = fake_bundle(monkeypatch, tmp_path / "Zoë Intern" / "evolvekit app")
