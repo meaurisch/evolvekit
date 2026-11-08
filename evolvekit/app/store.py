@@ -615,13 +615,10 @@ class Home:
         if pinned.application.kind == "program" and pinned.code.app:
             from evolvekit.evaluate.stages import render_app
 
-            def same(a: str, b: str) -> bool:
-                return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
-
             # The program this method filled in for the old source follows the
             # source; a program the engineer named by hand stays theirs.
             filled = bool(existing.repo and study.application_path
-                          and same(study.application_path, render_app(pinned.code.app, Path(existing.repo))))
+                          and tree.same_path(study.application_path, render_app(pinned.code.app, Path(existing.repo))))
             if not study.application_path or filled:
                 program = Path(render_app(pinned.code.app, Path(repo)))
                 if program.is_file():

@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -163,6 +164,49 @@ def test_remove_finishes_a_partial_removal(repo, tmp_path):
     assert not kept_git.worktree.exists() and not lost_git.worktree.exists()
     assert not (repo / ".git" / "worktrees").exists() or _entries(repo) == []
     assert list((run_dir / "work" / "trees").iterdir()) == []
+
+
+def _short(path):
+    """Windows: the 8.3 short spelling of an existing folder (skips where the volume makes none)."""
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    if not ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer)):
+        pytest.skip("GetShortPathNameW failed")
+    if buffer.value.lower() == str(path).lower():
+        pytest.skip("this volume makes no 8.3 short names")
+    return Path(buffer.value)
+
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="8.3 short names and \\\\?\\ are Windows's")
+
+
+@windows_only
+def test_remove_drops_the_entry_of_a_tree_made_at_a_short_path(repo, tmp_path):
+    """CI's temporary folder is `C:\\Users\\RUNNER~1\\...`; git records the long name."""
+    (tmp_path / "a run folder with a long name").mkdir()
+    run_dir, r = _short(tmp_path / "a run folder with a long name"), tree.Repo(repo / "app dir")
+    made = tree.materialise(run_dir, repo=r, base=head(repo), diff="", candidate_id="seed")
+    assert _entries(repo) == ["seed"]
+    assert tree.remove(run_dir, "seed") is True
+    assert not made.worktree.exists()
+    assert not (repo / ".git" / "worktrees").exists() or _entries(repo) == [], "the entry is not leaked"
+    assert git(repo, "worktree", "list").count("\n") == 0
+
+
+@windows_only
+def test_same_path_matches_every_spelling_of_one_folder(tmp_path):
+    (tmp_path / "a folder with a long name").mkdir()
+    real = tmp_path / "a folder with a long name"
+    short = _short(real)
+    for there in (real, real / "missing" / ".git"):  # the tree is compared after it is deleted
+        spelt = short / there.relative_to(real)
+        assert tree.same_path(there, spelt)
+        assert tree.same_path(str(there).upper(), str(spelt).lower())
+        assert tree.same_path("\\\\?\\" + str(there), spelt)
+        assert tree.same_path(str(there).replace("\\", "/") + "/", spelt)
+    assert not tree.same_path(real, tmp_path)
+    assert not tree.same_path(real / "missing", real / "elsewhere")
 
 
 def test_diff_of_a_file_that_is_not_utf8_round_trips(repo, tmp_path):
