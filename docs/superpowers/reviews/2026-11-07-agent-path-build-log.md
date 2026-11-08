@@ -354,3 +354,4 @@ Both rounds: the campaign ran only inside the weekend, nothing claimed "better" 
 
 ### PR
 
+[meaurisch/evolvekit#75](https://github.com/meaurisch/evolvekit/pull/75), stacked on #74; opened 2026-11-08 from `agent/4-over-time` (f03ab98 plus the logs).
