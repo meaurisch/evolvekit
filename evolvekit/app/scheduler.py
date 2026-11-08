@@ -80,6 +80,7 @@ session ends; the run keeps the computer awake until then, and through a final c
 (`awake`, D46). `session` is the launch it was written for, so a later session by hand of the same
 run is never kept awake by it."""
 FAILED_PAUSE_LINE = "The campaign is paused: its last three sessions failed ({error}). Start it again when the cause is fixed."
+STUCK_PAUSE_LINE = "The campaign is paused: its last run cannot go on ({error}). Start it again to begin a new run."
 NO_SCHEDULE = "the study has no schedule any more"
 COMPLETE = "the campaign's search time is used"
 ENDED = "its schedule has no window left"
@@ -602,6 +603,9 @@ class _Tick:
             return False
         action = self._action(root, run_dir, job, span)
         if action is None:
+            if _stuck(self.home, root, run_dir, job):
+                reason = STUCK_PAUSE_LINE.format(error=_run_error(job))
+                self.end(root, campaign, "paused", reason, reason)
             return False
         name, args, kwargs, words, refused = action
         campaign["actions"] += 1
@@ -719,6 +723,26 @@ def _next_action(home: Any, root: Path, run_dir: Path | None, job: dict[str, Any
             return None
         return ("continue_run", (home, root, run), {"hours": seconds / 3600.0},
                 f"gave run {run} {_hours(seconds)} more search time", f"could not give run {run} more time")
+    return None
+
+
+def _stuck(home: Any, root: Path, run_dir: Path | None, job: dict[str, Any]) -> bool:
+    """The latest run failed or stopped and nothing of it can go on in any window (its search
+    aborted on the plan's last round, say): armed, the campaign would wait for ever."""
+    return (run_dir is not None and job.get("phase") in ("failed", "stopped")
+            and _next_action(home, root, run_dir, job, None) is None)
+
+
+def _run_error(job: dict[str, Any]) -> str:
+    """Why the run ended, in its own words: its error, else its search's stop reason."""
+    return str(job.get("error") or (job.get("search") or {}).get("stop_reason") or "no error was recorded")
+
+
+def _live_run(root: Path) -> str | None:
+    """The study's latest run with a process or waiting its turn, or None."""
+    for run_dir in reversed(jobs._run_dirs(root)):  # noqa: SLF001 - the runs, oldest first, as jobs lists them
+        if jobs.phase(run_dir).get("phase") in (*jobs.ACTIVE, "queued"):
+            return run_dir.name
     return None
 
 
@@ -962,7 +986,12 @@ def start_campaign(home: Any, root: Path, *, now: datetime, at_once: bool, start
         campaign = read_campaign(root)
         renewed = _finished(root, campaign, schedule, now)
         if not at_once:
-            arm(root, now=now, renew=renewed is not None)
+            run_dir, job = _latest(root, campaign)
+            # A run that cannot go on: the start begins a new run, as a new campaign's.
+            arm(root, now=now, renew=renewed is not None or _stuck(home, root, run_dir, job))
+            live = _live_run(root)
+            if live is not None:  # the person started it (D4): no window's end stops it
+                mark_by_hand(home, root.name, live)
             state = campaign_state(root, study, now=now)
             return {"scheduled": True, "renewed": renewed, "words": scheduled_words(state, now), "campaign": state}
         if jobs.running(root):

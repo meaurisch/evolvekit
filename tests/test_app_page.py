@@ -654,6 +654,20 @@ def test_setup_says_when_it_runs():
     assert "only while the app is running then" in out["weekends"]["sub"]
 
 
+def test_when_it_runs_keeps_a_hand_written_keep_awake():
+    """Saving the drawer (a new Until, say) keeps `keep_awake: false` from study.yaml."""
+    assert "scheduleOf(s, windows, until)" in _page_function(SETUP_PAGE, "whenDrawer")
+    out = _node(_page_function(SETUP_PAGE, "scheduleOf"), """
+      var w = [{days: ["sat"], from: "00:00", to: "06:00"}];
+      process.stdout.write(JSON.stringify([
+        scheduleOf({windows: w, until: "2026-12-31", keep_awake: false}, w, "2027-01-31"),
+        scheduleOf({windows: w, until: "2026-12-31", keep_awake: false}, w, ""),
+        scheduleOf(null, w, "")]));""")
+    w = [{"days": ["sat"], "from": "00:00", "to": "06:00"}]
+    assert out == [{"windows": w, "until": "2027-01-31", "keep_awake": False}, {"windows": w, "keep_awake": False},
+                   {"windows": w}]
+
+
 def test_the_study_page_says_the_campaign():
     notices = _page_function(STUDY_PAGE, "notices")
     assert "campaign" in notices and "camp.line" in notices

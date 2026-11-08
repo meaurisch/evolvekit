@@ -1999,7 +1999,10 @@ unless it is in its final check, which is never cut off: it finishes, and an
 unfinished one is run again in the next window. One study runs at a time in
 the whole library: runs somebody queued by hand go first, then campaigns,
 the oldest first, and nothing is pre-empted. Three sessions in a row that
-fail pause the campaign, and say why.
+fail pause the campaign, and say why. So does a run of which nothing can go
+on (its search aborted on the plan's last round, say): *The campaign is
+paused: its last run cannot go on (provider failing). Start it again to begin
+a new run.*
 
 ```
 python -m evolvekit study start depot-a
@@ -2007,7 +2010,9 @@ scheduled: next window Sat 00:00 (the app, or evolvekit study wait, starts it th
 ```
 
 `study start` arms the campaign and waits for the first window; `--now`
-starts at once, as a session no window's end stops. `study stop` pauses the
+starts at once, as a session no window's end stops. A run already going when
+you arm the campaign is yours the same way: no window's end stops it. `study
+stop` pauses the
 campaign (a person's stop is respected: `study start` resumes it). A start
 after the campaign has finished begins a new one (`scheduled: a new campaign
 (the last one finished); next window …`): its first window starts a new run,
@@ -2027,7 +2032,9 @@ python -m evolvekit app stop             # stop it cleanly
 ```
 
 `app install-startup` registers the Windows logon task "evolvekit app"
-(`app uninstall-startup` removes it); on macOS and Linux it prints the
+(`app uninstall-startup` removes it). It is one task per user, so one library
+starts at logon, the last one installed: installing it for another library
+replaces the first one's task, and says so. On macOS and Linux it prints the
 launchd agent or systemd unit and the commands to install it. It has not yet
 been tried on a real logon. A terminal with `study wait depot-a` also keeps
 the windows. If the app was not running at a window's start, the window is

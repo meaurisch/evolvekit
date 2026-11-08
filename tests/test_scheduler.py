@@ -747,6 +747,75 @@ def test_start_scheduled_only_arms(tmp_path):
     assert scheduler.read_campaign(root)["state"] == "armed"
 
 
+def test_arming_over_a_live_run_never_stops_it(tmp_path):
+    """A run the person started before the campaign was armed is theirs (D4): the next tick outside
+    a window leaves it going."""
+    home, root = campaign_study(tmp_path)
+    (root / scheduler.CAMPAIGN).unlink()
+    write_run(root, "r1", "search", alive=True)
+    rec = Recorder()
+    scheduler.start_campaign(home, root, now=local("2026-11-16 12:00"), at_once=False, **rec.calls_for(LAUNCHERS))
+    assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 1}
+    said = scheduler.tick(home, now=local("2026-11-16 12:00:05"), **rec.calls_for())   # Monday noon: outside
+    assert rec.calls == [] and said == []
+    assert not (root / "runs" / "r1" / STOP_REQUEST).exists()
+    assert scheduler.window_left_s(root, root / "runs" / "r1", now=local("2026-11-14 10:00")) is None
+
+
+def test_a_failed_run_that_cannot_go_on_pauses_the_campaign(tmp_path):
+    """Its search aborted on the plan's last round: nothing of it can go on, so the campaign pauses
+    and says why, and a start begins a new run."""
+    home, root = campaign_study(tmp_path)
+    run_dir = write_run(root, "r1", "failed", generations=6, planned=6, error="provider failing")
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job["search"]["aborted"] = True
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    rec = Recorder()
+    said = scheduler.tick(home, now=local("2026-11-14 00:00:05"), **rec.calls_for())
+    line = "The campaign is paused: its last run cannot go on (provider failing). Start it again to begin a new run."
+    assert rec.calls == [] and said == [f"{root.name}: {line}"]
+    campaign = scheduler.read_campaign(root)
+    assert campaign["state"] == "paused" and campaign["reason"] == line
+    study = load_study(root)
+    assert scheduler.campaign_state(root, study, now=local("2026-11-14 00:05"))["line"] == line
+    assert scheduler.campaign_done(root, study, now=local("2026-11-14 00:05"))
+    scheduler.start_campaign(home, root, now=local("2026-11-14 00:06"), at_once=False, **rec.calls_for(LAUNCHERS))
+    scheduler.tick(home, now=local("2026-11-14 00:07"), **rec.calls_for())
+    assert rec.calls == [("start", (home, root), {})], "started again: a new run"
+
+
+def test_a_first_campaign_over_a_run_that_cannot_go_on_starts_a_new_run(tmp_path):
+    home, root = campaign_study(tmp_path)
+    (root / scheduler.CAMPAIGN).unlink()
+    run_dir = write_run(root, "r1", "failed", generations=6, planned=6, error="provider failing")
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job["search"]["aborted"] = True
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    rec = Recorder()
+    scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=False, **rec.calls_for(LAUNCHERS))
+    scheduler.tick(home, now=local("2026-11-14 00:00:05"), **rec.calls_for())
+    assert rec.calls == [("start", (home, root), {})] and scheduler.read_campaign(root)["state"] == "armed"
+
+
+def test_a_stopped_run_whose_search_aborted_pauses_the_campaign(tmp_path):
+    home, root = campaign_study(tmp_path)
+    run_dir = write_run(root, "r1", "stopped", generations=6, planned=6)
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job["search"].update(aborted=True, stop_reason="the model backend kept failing")
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **Recorder().calls_for())
+    assert scheduler.read_campaign(root)["reason"] == scheduler.STUCK_PAUSE_LINE.format(
+        error="the model backend kept failing")
+
+
+def test_a_window_too_short_to_go_on_does_not_pause(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=6, planned=6, max_hours=1.0, used_s=900, final={"decision": "keep"})
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-15 23:55"), **rec.calls_for())     # five minutes of the window left
+    assert rec.calls == [] and scheduler.read_campaign(root)["state"] == "armed"
+
+
 def test_a_persons_stop_pauses_the_campaign(tmp_path):
     home, root = campaign_study(tmp_path)
     assert scheduler.stop_by_person(home, root, None) == {"paused": True, "stopping": False}

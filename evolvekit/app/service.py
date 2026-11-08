@@ -23,6 +23,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -33,7 +34,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, unescape
 
 from evolvekit.app.running import APP_FILE, read_running
 from evolvekit.lock import pid_alive
@@ -338,17 +339,38 @@ def _schtasks(run: Callable[..., Any], argv: list[str]) -> tuple[bool, str]:
     return done.returncode == 0, _last_line(done)
 
 
+def _registered_home(run: Callable[..., Any]) -> str | None:
+    """The library home the task "evolvekit app" starts now (its `--home`), or None: no such task,
+    or one whose definition cannot be read."""
+    try:
+        done = run(["schtasks", "/Query", "/TN", TASK_NAME, "/XML"], capture_output=True, text=True,
+                   errors="replace")
+    except (OSError, ValueError):
+        return None
+    if getattr(done, "returncode", 1) != 0:
+        return None
+    found = re.search(r"<Arguments>(.*?)</Arguments>", str(getattr(done, "stdout", "") or ""), re.S)
+    home = re.search(r'--home\s+(?:"([^"]*)"|(\S+))', unescape(found.group(1))) if found else None
+    return (home.group(1) if home.group(1) is not None else home.group(2)) if home else None
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
 def install_startup(home_root: Path, *, platform: str = sys.platform, run: Callable[..., Any] = subprocess.run,
                     out: Callable[[str], None] = print, err: Callable[[str], None] = _err,
                     python: str | None = None, user: str | None = None) -> int:
     """Make the service start at logon. Windows: write `<home>/evolvekit-app-task.xml` (UTF-16, with
     a BOM) and register it as the task "evolvekit app" with `schtasks`; 1, with schtasks' own last
-    line and the command to start it by hand, when it refuses. macOS and Linux: print the launchd
+    line and the command to start it by hand, when it refuses. There is one such task per user: one
+    that starts another library's home is replaced, and said so. macOS and Linux: print the launchd
     agent or the systemd user unit and how to install it; nothing is run."""
     home_root = Path(home_root)
     argv = service_argv(home_root, python=python)
     if platform == "win32":
         home_root.mkdir(parents=True, exist_ok=True)
+        before = _registered_home(run)
         path = home_root / TASK_XML
         path.write_bytes(task_xml(argv, user or _user()).encode("utf-16"))
         ok, said = _schtasks(run, ["schtasks", "/Create", "/TN", TASK_NAME, "/XML", str(path), "/F"])
@@ -359,6 +381,9 @@ def install_startup(home_root: Path, *, platform: str = sys.platform, run: Calla
             return 1
         out(f'registered the task "{TASK_NAME}": at logon it runs')
         out(command)
+        if before is not None and not _same_path(before, str(home_root)):
+            out(f"it replaces the task for {before}: there is one logon task per user, so that library "
+                "no longer starts at logon")
         return 0
     if platform == "darwin":
         out(_plist(argv))

@@ -70,7 +70,12 @@ python -m evolvekit app uninstall-startup
 
 On Windows the first registers the logon task "evolvekit app" (it starts
 `pythonw.exe`, with no console window; it does not end after 72 hours or stop
-on battery) and prints what it runs; the second removes the task. On macOS and
+on battery) and prints what it runs; the second removes the task. There is one
+such task per user, so one library starts at logon: the last one installed.
+Installing it for another library replaces the first one's task, and says so
+(*it replaces the task for &lt;the other home&gt;: there is one logon task per
+user, so that library no longer starts at logon*); `uninstall-startup`
+removes the task whichever library it starts. On macOS and
 Linux they print the launchd agent or systemd unit, and the commands to
 install or remove it. The logon task is untried on a real Windows logon.
 
@@ -97,6 +102,12 @@ about half an hour later. The runs keep real time: they spend real search time
 hours. Home says the rehearsal is on (*rehearsal clock: Fri 13 Nov 17:30, 120 ×
 real time*), and each line in `app.log` for a campaign gives both times
 (`2026-11-14T01:10:00+01:00 rehearsal · 2026-11-13T18:12:03+01:00 real · …`).
+A run is given more search time only when ten real minutes of its window are
+left, so windows shorter than ten real minutes never give a run more time: at
+120 × a 01:00–06:00 night lasts 150 real seconds, and its runs start, stop
+and resume but are never continued (a fresh run may stop before its first
+round). Rehearse at a speed where a window lasts at least ten real minutes,
+or rehearse a weekend (its 24-hour windows last 12 real minutes at 120 ×).
 Open the app as usual (`python -m evolvekit app`) to look at it: it opens the
 service already running. `evolvekit app stop` ends the service, and the
 clock with it. A clock cannot be set on an app that already runs (stop it

@@ -677,6 +677,14 @@
   }
 
   // ------------------------------------------------------------------ When it runs
+  // The schedule to save: the study's own (so a hand-written `keep_awake: false` stays), with the
+  // picked windows and the Until (none: taken out).
+  function scheduleOf(s, windows, until) {
+    var out = Object.assign({}, s || {}, { windows: windows });
+    if (until) out.until = until; else delete out.until;
+    return out;
+  }
+
   function whenDrawer(main) {
     var presets = st.doc.schedule_presets || {};
     function body() {
@@ -696,8 +704,7 @@
         var picked = (document.querySelector('input[name="when-preset"]:checked') || {}).value || "now";
         var until = document.getElementById("when-until").value;
         var s = study().schedule, windows = picked === "own" ? (s || {}).windows : presets[picked] && presets[picked].schedule.windows;
-        var change = picked === "now" || !windows ? { schedule: null }
-          : { schedule: Object.assign({ windows: windows }, until ? { until: until } : {}) };
+        var change = picked === "now" || !windows ? { schedule: null } : { schedule: scheduleOf(s, windows, until) };
         return save(change, main).then(function () { EK.closeDrawer(); EK.toast("done", "Saved"); });
       }
     };

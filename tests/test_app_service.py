@@ -94,7 +94,9 @@ def test_install_startup_windows_command(tmp_path):
     code = service.install_startup(home, platform="win32", run=lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
                                    out=printed.append, python=r"C:\Program Files\Py\python.exe")
     assert code == 0
-    assert calls == [["schtasks", "/Create", "/TN", "evolvekit app", "/XML", str(home / "evolvekit-app-task.xml"), "/F"]]
+    assert calls == [["schtasks", "/Query", "/TN", "evolvekit app", "/XML"],
+                     ["schtasks", "/Create", "/TN", "evolvekit app", "/XML", str(home / "evolvekit-app-task.xml"), "/F"]]
+    assert len(printed) == 2, "no task to replace: nothing said of one"
     xml = (home / "evolvekit-app-task.xml").read_bytes().decode("utf-16")
     assert r"<Command>C:\Program Files\Py\python.exe</Command>" in xml   # pythonw.exe when it exists beside it
     assert f'<Arguments>-m evolvekit app --service --home "{home}"</Arguments>' in xml
@@ -102,6 +104,31 @@ def test_install_startup_windows_command(tmp_path):
     assert printed[0] == 'registered the task "evolvekit app": at logon it runs'
     assert printed[1] == subprocess.list2cmdline([r"C:\Program Files\Py\python.exe", "-m", "evolvekit", "app", "--service",
                                                   "--home", str(home)])
+
+
+def _task_of(home: str):
+    """`run` for schtasks: /Query answers with the task that starts `home`, /Create succeeds."""
+    xml = service.task_xml([r"C:\Py\pythonw.exe", "-m", "evolvekit", "app", "--service", "--home", home], r"DESK\norri")
+
+    def run(argv, **kw):
+        out = xml if "/Query" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, out, "")
+    return run
+
+
+def test_install_startup_says_it_replaces_another_librarys_task(tmp_path):
+    home = tmp_path / "my home"
+    home.mkdir()
+    printed = []
+    other = r"C:\Users\pat\other & home"
+    assert service.install_startup(home, platform="win32", run=_task_of(other), out=printed.append,
+                                   python=r"C:\Py\python.exe") == 0
+    assert printed[2] == (f"it replaces the task for {other}: there is one logon task per user, so that library "
+                          "no longer starts at logon")
+    printed.clear()
+    assert service.install_startup(home, platform="win32", run=_task_of(str(home)), out=printed.append,
+                                   python=r"C:\Py\python.exe") == 0
+    assert len(printed) == 2, "its own task again: nothing replaced"
 
 
 def test_the_task_xml_says_everything_d16_asks(tmp_path):
