@@ -22,8 +22,9 @@ A bake-off's document (a run of `study bakeoff`) also holds `candidates`:
 point by the same rule (numbers absent while there is no answer). Its own
 `decision` and `line` are the chosen branch's -- the largest mean among those
 whose decision is `use` -- said as one of N, or `keep` with "None of the N
-branches is shown to beat the starting point." The key exists only on
-bake-off runs.
+branches is shown to beat the starting point." and then no figures, held-back
+rows or changes of its own: no unnamed branch speaks for the run. The key
+exists only on bake-off runs.
 
 The words themselves -- the chance in twentieths, the decision of a run made
 before runs decided, and the sentences of the final check -- live here too.
@@ -405,8 +406,9 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     document["line"], document["advice"] = words.get("line", ""), words.get("advice", "")
     candidates = (_candidates(job, comparison, goal, jobs._what(study), baseline)
                   if job.get("bakeoff") else None)
+    named = True
     if candidates:
-        decision = _bakeoff_headline(document, job, candidates)
+        decision, named = _bakeoff_headline(document, job, candidates)
     candidate = final.get("candidate") or next(iter((comparison or {}).get("per_candidate") or {}), None)
     result = ((comparison or {}).get("per_candidate") or {}).get(candidate) or {}
     levels = _levels(study, harness, result["levels"]) if isinstance(result.get("levels"), dict) else []
@@ -415,10 +417,10 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                            _measure_of(study, harness, goal["kpi"], goal["direction"]))
     seeds = len((comparison or {}).get("seeds") or []) or final.get("seeds") or None
     document["held_back"] = {"cases": len(study.test), "runs_per_case": seeds}
-    if decision not in _NO_ANSWER:
+    if decision not in _NO_ANSWER and named:
         document.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"), "worst_pct": words.get("worst_pct"),
                          "chance": words.get("chance"), "chance_words": words.get("chance_words", "")})
-    if levels:
+    if levels and named:
         document["levels"] = levels
     document["learned_from"] = {"cases": len(study.training), "pct": learned_pct}
     document["rule"] = RULE_WORDS
@@ -432,6 +434,10 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                             "change_pct": row["change_pct"], "outcome": _outcome(row)} for row in held]
     document["changed"] = [{"name": c["name"], "label": c["label"], "from": c["old_text"], "to": c["new_text"]}
                            for c in changed if c["changed"]]
+    if not named:
+        # A bake-off with no branch shown ahead: no unnamed branch speaks for the run. Each branch's
+        # figures are in `candidates`, with its ref.
+        document["by_case"], document["changed"] = [], []
     document["files"] = _files(root, run_dir)
     document.update({"started_at": job.get("started_at") or (facts["started"].isoformat() if facts["started"] else None),
                      "finished_at": facts["finished_at"], "elapsed_s": facts["used_s"],
@@ -466,24 +472,37 @@ def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: di
     return out
 
 
-def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
+                      candidates: list[dict[str, Any]]) -> tuple[str, bool]:
     """Decision 32: a bake-off's own decision and line are those of the branch
-    it chose (the largest mean among those whose own decision is `use`), said as
-    one of N; when none is `use`, the starting point stays (`keep`). A check
-    with no answer by the rule (stopped, pending, one case) keeps its own words.
-    Returns the decision."""
+    it chose (the largest mean among those whose own decision is `use`), said
+    as one of N ("Of 2 branches, <ref>: ..."; "<ref>: ..." for one branch);
+    with one held-back case the chosen branch's own `single` line, named the
+    same way. When no branch is `use` the starting point stays (`keep`, "None of
+    the N branches is shown to beat the starting point.") and no branch's
+    figures speak for the run. A check with no answer yet (stopped, pending)
+    keeps its own words. Returns the decision and whether the run's own figures
+    are those of a branch the line names."""
     count = len(candidates)
     branches = f"{count} branch{'es' if count != 1 else ''}"
     chosen_id = str((job.get("final") or {}).get("candidate") or "")
     chosen = next((c for e, c in zip(job.get("bakeoff") or [], candidates) if str(e.get("id")) == chosen_id), None)
-    if chosen is not None and chosen["decision"] == "use":
-        line = chosen["line"]
-        document["decision"], document["line"] = "use", f"Of {branches}, {chosen['ref']}: {line[:1].lower()}{line[1:]}"
-    elif any(c["decision"] in ("keep", "worse") for c in candidates):
+
+    def named(c: dict[str, Any]) -> str:
+        line = str(c["line"])
+        return (f"{c['ref']}: " if count == 1 else f"Of {branches}, {c['ref']}: ") + line[:1].lower() + line[1:]
+
+    if chosen is not None and chosen["decision"] in ("use", "single"):
+        document["decision"], document["line"] = chosen["decision"], named(chosen)
+        if chosen["decision"] == "use":
+            document["advice"] = f"Use the code of {chosen['ref']}: it is probably better on cases no branch was made for."
+        return str(document["decision"]), True
+    if any(c["decision"] in ("keep", "worse") for c in candidates):
         document["decision"] = "keep"
         document["line"] = (f"None of the {branches} is shown to beat the starting point." if count != 1
-                            else "The branch is not shown to beat the starting point.")
-    return str(document["decision"])
+                            else f"{candidates[0]['ref']} is not shown to beat the starting point.")
+        return "keep", False
+    return str(document["decision"]), True
 
 
 def _best_of(job: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:

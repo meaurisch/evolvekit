@@ -128,6 +128,9 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
                        f"Change in {measure.get('label') or 'the measure'} (mean of the paired runs)", "Outcome"],
                       [[r["name"], _number(r.get("start")), _number(r.get("best")), _change(r.get("change_pct"), direction),
                         _OUTCOME.get(r.get("outcome"), r.get("outcome") or "")] for r in rows])
+    elif candidates and (verdict.get("held_back") or {}).get("runs_per_case"):
+        # A bake-off with no branch shown ahead: each branch's figures are its own row above.
+        out.append("No branch speaks for the run: each branch's result is under Branches compared.")
     else:
         out.append("No cases were checked.")
 
@@ -137,6 +140,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     if changed:
         kind = "Code change" if any(c.get("name") == "code" for c in changed) else "Setting or data change"
         out += _table([kind, "From", "To"], [[c["label"], c["from"], c["to"]] for c in changed])
+    elif candidates and verdict.get("decision") == "keep":
+        out.append("Today's code stays; each branch's change is its own commit, named above.")
     else:
         out.append("Nothing changed.")
 

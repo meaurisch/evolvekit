@@ -398,7 +398,7 @@ def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
     if again:
         study = run_study_of(root, run_dir)
         stored = state.get("plan") or _read_plan(run_dir)
-        checks = int(seeds or stored.get("check_seeds") or DEFAULT_CHECK_SEEDS)
+        checks = max(1, min(int(seeds or stored.get("check_seeds") or DEFAULT_CHECK_SEEDS), len(CHECK_SEEDS)))
         (run_dir / STOP_REQUEST).unlink(missing_ok=True)
         job = Job.resume(run_dir, {**state, "plan": {**stored, "check_seeds": checks}}, "check")
         job.state.pop("final", None)
@@ -438,10 +438,10 @@ def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
         entries = []
         for i, ref in enumerate(checked):
             cid = f"g000-c{i + 2:04d}"
-            ledger.record_run(Candidate(id=cid, generation=0, block=tree.diff_between(repo, base, ref["ref"]), source="",
+            ledger.record_run(Candidate(id=cid, generation=0, block=tree.diff_between(repo, base, ref["commit"]), source="",
                                         operator="given", role="none", parent_id=seed.id, commit=ref["commit"]).to_record())
             entries.append({"ref": ref["ref"], "id": cid, "commit": ref["commit"]})
-        checks = plan.check_seeds
+        checks = max(1, min(int(plan.check_seeds), len(CHECK_SEEDS)))
         job = Job(run_dir, run_id=run_id, study=study.name, plan=plan.to_json(), phase="check", bakeoff=entries)
     try:
         config = load_config(run_dir / CONFIG)
@@ -452,7 +452,7 @@ def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
         stop = RunStop(run_dir)
         stop.start(0.0)
         try:
-            comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:max(1, min(checks, len(CHECK_SEEDS)))]),
+            comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:checks]),
                                  candidates=",".join(ids), instances=[f"{UP}/{case}" for case in study.test],
                                  label="final", log=log, stop=stop.event)
         except ConfirmStopped:

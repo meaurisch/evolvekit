@@ -169,15 +169,20 @@ def test_jobs_start_writes_the_refs_and_launches_with_bakeoff(tmp_path, monkeypa
     assert jobs._kind_of(study) == "code" and jobs._what(study) == "code change"
 
 
-def _as_bakeoff(run_dir: Path) -> None:
+def _as_bakeoff(run_dir: Path, decisions: dict | None = None, *, only: str | None = None) -> None:
     """A finished run made into a bake-off by hand: c1 is the branch `restart` (use), a copy c2 the branch `same`,
-    0.5 % worse (keep), given first."""
+    0.5 % worse (keep), given first. `decisions` replaces the branches' own; `only="c1"` keeps one branch."""
     job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
     job["bakeoff"] = [{"ref": "same", "id": "c2", "commit": "b" * 40}, {"ref": "restart", "id": "c1", "commit": "a" * 40}]
+    if only:
+        job["bakeoff"] = [e for e in job["bakeoff"] if e["id"] == only]
     job["search"] = {"stop_reason": "branches compared: no search", "generations": 0, "best_id": "c1", "aborted": False}
-    job["final"]["decisions"] = {"c1": "use", "c2": "keep"}
+    if job.get("final"):
+        job["final"]["decisions"] = decisions or {"c1": "use", "c2": "keep"}
     (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
     path = run_dir / "confirm" / "final" / "comparison.json"
+    if not path.is_file():
+        return
     comparison = json.loads(path.read_text(encoding="utf-8"))
     comparison["per_candidate"]["c2"] = {"summary": {"n": 2, "mean": -0.5, "ci95": [-1.7, 0.7], "chance": 0.3, "worst": -1.7}}
     path.write_text(json.dumps(comparison), encoding="utf-8")
@@ -224,16 +229,116 @@ def test_compare_page_lists_candidates(tmp_path):
     assert '"Compare branches"' in study_js and '"/bakeoff"' in study_js and "#/compare?run=" in study_js
 
 
+NUMBERS = ("mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words")
+
+
 def test_a_bakeoff_with_no_branch_shown_ahead_keeps_todays(tmp_path):
+    """Review ruling: with no branch `use`, no unnamed branch speaks for the run -- no top-level
+    figures, no held-back "best" rows, no "what changed"; each branch's figures are in `candidates`."""
+    from test_app_results import document_of
+
     root, _ = study_with_runs(tmp_path)
     run_dir = root / "runs" / RUN
     finished_run(run_dir, decision="keep", mean=0.4)
-    _as_bakeoff(run_dir)
-    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
-    job["final"]["decisions"] = {"c1": "keep", "c2": "keep"}
-    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    _as_bakeoff(run_dir, {"c1": "keep", "c2": "keep"})
     verdict = build_verdict(root, RUN)
     assert verdict["decision"] == "keep"
     assert verdict["line"] == "None of the 2 branches is shown to beat the starting point."
     assert [c["decision"] for c in verdict["candidates"]] == ["keep", "keep"]
-    assert all(c["line"].startswith("Not proven") for c in verdict["candidates"])
+    assert all(c["line"].startswith("Not proven") and c["mean_pct"] is not None for c in verdict["candidates"])
+    assert not set(NUMBERS) & set(verdict) and "levels" not in verdict
+    assert verdict["by_case"] == [] and verdict["changed"] == []
+    page = jobs.results(root, RUN, document_of)
+    assert page["final"]["line"] == verdict["line"] and page["final"]["advice"] == verdict["advice"]
+    assert not {"mean", "ci95", "worst_pct", "chance", "chance_words"} & set(page["final"])
+    assert page["by_case"]["held"] == [] and page["changed"] == []
+    assert all(k["test"]["best"] is None for k in page["kpis"])
+    report = render_report(verdict)
+    assert "Chance of a gain" not in report and "Change in" not in report.split("## Branches compared")[0]
+    assert "No branch speaks for the run" in report
+
+
+@pytest.mark.parametrize("decision", ["use", "keep", "single", "pending", "stopped"])
+def test_page_line_equals_verdict_line_on_a_bakeoff(tmp_path, decision):
+    """The page-equals-document rule (design 3.4) holds for a bake-off too."""
+    from test_app_results import document_of
+
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    finished_run(run_dir, decision="use" if decision in ("use", "pending", "stopped") else decision,
+                 check=decision != "pending" and decision != "stopped")
+    if decision == "stopped":
+        job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+        job["final"] = {"stopped": True}
+        (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    _as_bakeoff(run_dir, {"use": None, "keep": {"c1": "keep", "c2": "keep"},
+                          "single": {"c1": "single", "c2": "single"}}.get(decision))
+    verdict = build_verdict(root, RUN)
+    page = jobs.results(root, RUN, document_of)
+    assert verdict["decision"] == decision
+    assert page["final"]["line"] == verdict["line"] and page["final"]["advice"] == verdict["advice"]
+    if decision in ("pending", "stopped"):
+        # Review item 7: no answer yet, so no branch carries figures.
+        assert [c["decision"] for c in verdict["candidates"]] == [decision, decision]
+        assert all(not {"mean_pct", "ci95_pct", "worst_pct", "chance"} & set(c) for c in verdict["candidates"])
+        assert not set(NUMBERS) & set(verdict)
+    if decision == "use":
+        assert verdict["advice"] == "Use the code of restart: it is probably better on cases no branch was made for."
+    if decision == "single":
+        line = next(c["line"] for c in verdict["candidates"] if c["ref"] == "restart")
+        assert verdict["line"] == f"Of 2 branches, restart: {line[0].lower()}{line[1:]}" and line.startswith("Not proven, one")
+
+
+def test_one_branch_is_named_without_of_one(tmp_path):
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    finished_run(run_dir, decision="use")
+    _as_bakeoff(run_dir, {"c1": "use"}, only="c1")
+    verdict = build_verdict(root, RUN)
+    line = verdict["candidates"][0]["line"]
+    assert verdict["line"] == f"restart: {line[0].lower()}{line[1:]}"
+    _as_bakeoff(run_dir, {"c1": "keep"}, only="c1")
+    assert build_verdict(root, RUN)["line"] == "restart is not shown to beat the starting point."
+
+
+def test_a_failed_bakeoff_starts_again_as_itself(tmp_path):
+    """Review item 2: a bake-off that failed before it recorded its branches still knows them
+    (`bakeoff.json`), so "Start it again" posts them to /bakeoff, never /start; its strip says the
+    branches were not compared, and a stopped one says so in its sentence."""
+    from evolvekit.status import build_status
+
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    run_dir.mkdir(parents=True)
+    (run_dir / "bakeoff.json").write_text(json.dumps({"refs": ["same", "restart"]}), encoding="utf-8")
+    (run_dir / "job.json").write_text(json.dumps({"phase": "failed", "error": "HarnessError: x", "pid": 2 ** 22 + 7,
+                                                  "started_at": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
+    status = jobs.status(root, RUN, build_status)
+    assert status["bakeoff_refs"] == ["same", "restart"] and status["can_resume"] is False
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job["phase"] = "stopped"
+    job["search"] = {"stop_reason": "stopped on request before the check began", "generations": 0, "aborted": False}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    assert jobs.status(root, RUN, build_status)["sentence"] == "Stopped before the branches were compared."
+    plain_root, _ = study_with_runs(tmp_path / "plain")
+    finished_run(plain_root / "runs" / RUN)
+    assert jobs.status(plain_root, RUN, build_status)["bakeoff_refs"] is None
+    study_js = (STATIC / "js" / "pages" / "study.js").read_text(encoding="utf-8")
+    restart = study_js[study_js.index("restart: function"):study_js.index('"continue": function')]
+    assert '"/bakeoff"' in restart and "bakeoff_refs" in restart and '"/start"' in restart
+    assert "The branches were not compared" in study_js and "Comparing branches" in study_js
+
+
+def test_outside_files_are_named_relative_to_the_source_folder(tmp_path):
+    """Review item 6: the refusal names files as `open`'s globs do, relative to the source folder."""
+    outer = tmp_path / "outer repo"
+    shutil.copytree(ROOT / "examples" / "cli-solver", outer / "src", ignore=shutil.ignore_patterns("fresh", "__pycache__"))
+    git_init_commit(outer)
+    git(outer, "switch", "-q", "-c", "readme")
+    (outer / "src" / "README.md").write_text("x\n")
+    git(outer, "commit", "-q", "-am", "r")
+    git(outer, "switch", "-q", "main")
+    folder = _code_study(tmp_path, outer / "src")
+    study, harness = load_study(folder), load_harness(folder / "harness")
+    with pytest.raises(AppError, match=r"readme changes files outside the open files: README\.md; widen"):
+        jobs.check_refs(folder, study, harness, ["readme"])

@@ -469,16 +469,18 @@ def check_refs(root: Path, study: Study, harness: Harness, refs: list[str], *,
         for ref in refs:
             commit = tree.resolve_commit(repo, ref)
             diff = tree.diff_between(repo, base, ref)
-            outside = tree.touches_only(diff, open_files, prefix=repo.prefix)
+            prefix = repo.prefix
+
+            def own(name: str) -> str:  # relative to the source folder, as `open`'s globs are
+                return name[len(prefix):] if prefix and name.startswith(prefix) else name
+
+            outside = tree.touches_only(diff, open_files, prefix=prefix)
             if outside:
-                raise AppError(f"{ref} changes files outside the open files: {', '.join(outside)}; "
+                raise AppError(f"{ref} changes files outside the open files: {', '.join(own(f) for f in outside)}; "
                                "widen vary.code.open or the harness's code.open", 409)
             if not tree.applies(repo, base, diff):
                 raise AppError(f"{ref}: does not apply on the base; rebase {ref} onto it", 409)
-            prefix = repo.prefix
-            checked.append({"ref": ref, "commit": commit,
-                            "files": [f[len(prefix):] if prefix and f.startswith(prefix) else f
-                                      for f in tree.changed_files(diff)]})
+            checked.append({"ref": ref, "commit": commit, "files": [own(f) for f in tree.changed_files(diff)]})
     except tree.TreeError as exc:
         raise AppError(str(exc), 409) from None
     return checked
@@ -507,6 +509,16 @@ def _new_run_dir(root: Path) -> Path:
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True)  # new, so no stale stop request can be waiting in it
     return run_dir
+
+
+def bakeoff_refs_of(run_dir: Path, job: dict[str, Any]) -> list[str] | None:
+    """The branches a bake-off run compares: its `job.json`'s, or -- a run that
+    failed before it recorded them -- `bakeoff.json`'s; None for any other run."""
+    if job.get("bakeoff"):
+        return [str(entry.get("ref")) for entry in job["bakeoff"]]
+    asked = _read(run_dir / BAKEOFF)
+    refs = (asked or {}).get("refs")
+    return [str(r) for r in refs] if isinstance(refs, list) and refs else None
 
 
 def _launch_args(run_dir: Path) -> list[str]:
@@ -873,6 +885,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         now_line = ""
 
     waiting = _waiting_for(root) if job.get("phase") == "queued" else ""
+    bakeoff_refs = bakeoff_refs_of(run_dir, job)
     sentences = {
         "queued": f"Waiting for '{waiting}' to finish." if waiting else "Waiting for its turn.",
         "starting": "Starting.",
@@ -882,7 +895,8 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "check": ("Checking each branch against the starting point on the held-back cases." if job.get("bakeoff")
                   else "Checking the best on the cases the search never saw."),
         "done": "Finished.",
-        "stopped": "Stopped." + (f" {job['search'].get('stop_reason')}." if (job.get("search") or {}).get("stop_reason") else ""),
+        "stopped": ("Stopped before the branches were compared." if bakeoff_refs else
+                    "Stopped." + (f" {job['search'].get('stop_reason')}." if (job.get("search") or {}).get("stop_reason") else "")),
         "failed": "It failed: " + str(job.get("error") or "no reason recorded") + ".",
     }
     gated = sum(1 for r in rows if r.get("gated"))
@@ -911,6 +925,7 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
                       "little less than it would alone, so close heavy programs while a study runs." if busy else ""),
         "final": job.get("final"),
         "bakeoff": job.get("bakeoff"),
+        "bakeoff_refs": bakeoff_refs,
         # A run stopped before its search began has a `search` but no runs, and nothing to check.
         "can_check": (bool(job.get("search")) and job.get("phase") in ("stopped", "failed") and bool(study.test)
                       and (run_dir / "runs.jsonl").is_file()),
@@ -1247,6 +1262,13 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
                       ("chance_words", "chance_words")):
         if key in final and name in verdict:
             final[key] = verdict[name]
+        elif key in final and job.get("bakeoff"):
+            final.pop(key)  # a bake-off with no branch shown ahead: no unnamed branch's figure on the page
+    if job.get("bakeoff") and "mean_pct" not in verdict:
+        final.pop("levels", None)
+        by_case["held"], changed = [], []
+        for row in kpis:
+            row["test"] = {"start": row["test"]["start"], "best": None}
     data = {
         "run": run, "phase": job.get("phase"), "study": study.name, "harness": harness.title,
         "headline": headline, "improvement_pct": pct, "learned_pct": learned_pct, "goal": goal, "final": final, "kpis": kpis,

@@ -80,7 +80,8 @@
   }
   /** A code study (vary.code): its runs can compare branches; a bake-off run has its branches side by side. */
   function isCode() { return !!(st.doc.study.vary || {}).code; }
-  function isBakeoff() { return !!(st.status && st.status.bakeoff && st.status.bakeoff.length); }
+  function isBakeoff() { return !!(st.status && st.status.bakeoff_refs && st.status.bakeoff_refs.length); }
+  function branchCount() { return EK.plural(st.status.bakeoff_refs.length, "branch", "branches"); }
   function heldCount() { return ((st.doc.study.cases || {}).test || []).length; }
   function roundWord() {
     var r = st.status.rounds || {}, now = Math.min((r.done || 0) + 1, r.planned || 99);
@@ -121,7 +122,8 @@
         acts: [{ text: "Remove from queue", kind: "secondary", act: "stop" }] });
     } else if (s.phase === "starting") {
       Object.assign(x, { kicker: "Starting", head: "Measuring " + keep.replace(/^Keep /, "").replace("today’s", "today’s"), sub: s.now || "Getting ready.",
-        caption: (s.rounds || {}).planned ? "Then " + EK.plural(s.rounds.planned, "round") + " and the final check" : "Then the search and the final check", acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
+        caption: isBakeoff() ? "Then " + branchCount() + " against it on the held-back cases, with no search"
+          : (s.rounds || {}).planned ? "Then " + EK.plural(s.rounds.planned, "round") + " and the final check" : "Then the search and the final check", acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
     } else if (s.phase === "search") {
       var b = bestPct();
       Object.assign(x, { kicker: (cardState().continued ? "Searching again · " : "Searching · ") + roundWord(), head: b ? "Best so far: " + EK.better(b) : "Nothing better yet",
@@ -129,13 +131,16 @@
         caption: EK.capital(roundWord()) + (s.time && s.time.finish_at ? " · done around " + s.time.finish_at : left ? " · " + left : ""),
         acts: [{ text: "Stop", kind: "secondary", act: "stop" }] });
     } else if (s.phase === "check") {
-      Object.assign(x, { kicker: "Final check" + (ch && ch.planned ? " · " + ch.pairs + " of " + ch.planned + " runs" : ""), head: "No answer yet",
-        sub: "Adding runs on " + EK.plural(heldCount(), "held-back case") + " while time remains.", right: ch && ch.mean != null ? "both" : "timeline",
+      Object.assign(x, { kicker: (isBakeoff() ? "Comparing branches" : "Final check") + (ch && ch.planned ? " · " + ch.pairs + " of " + ch.planned + " runs" : ""), head: "No answer yet",
+        sub: isBakeoff() ? "Running the starting point and " + branchCount() + " on " + EK.plural(heldCount(), "held-back case") + "."
+          : "Adding runs on " + EK.plural(heldCount(), "held-back case") + " while time remains.", right: ch && ch.mean != null ? "both" : "timeline",
         range: ch && ch.mean != null ? [ch.mean, ch.ci95 && ch.ci95[0], ch.ci95 && ch.ci95[1]] : null, caption: "So far, on held-back cases",
         acts: [{ text: "Stop the check", kind: "quiet", act: "stop" }] });
     } else if (s.phase === "failed") {
-      Object.assign(x, { mark: "error", kickerTone: "critical", kicker: "Stopped by an error", head: "The study stopped in " + roundWord().replace(/ of \d+$/, ""),
-        sub: String(s.error || "No reason recorded.").split("\n")[0].slice(0, 140), caption: EK.capital(roundWord()) + (s.time && s.time.used ? " · stopped at " + s.time.used : ""),
+      Object.assign(x, { mark: "error", kickerTone: "critical", kicker: "Stopped by an error",
+        head: isBakeoff() ? "The branches were not compared" : "The study stopped in " + roundWord().replace(/ of \d+$/, ""),
+        sub: String(s.error || "No reason recorded.").split("\n")[0].slice(0, 140),
+        caption: isBakeoff() ? (s.time && s.time.used ? "Stopped at " + s.time.used : "") : EK.capital(roundWord()) + (s.time && s.time.used ? " · stopped at " + s.time.used : ""),
         acts: [s.can_resume ? { text: "Continue where it stopped", act: "resume" } : null, { text: "Start it again", kind: "secondary", act: "restart" }].filter(Boolean) });
     } else if (s.phase === "stopped" && !(f.state === "stopped")) {
       var b2 = bestPct();
@@ -151,7 +156,8 @@
     } else if (d === "keep") {
       Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Keep · final check on " + EK.plural(f.n || heldCount(), "held-back case"), head: verdictHead(f),
         sub: verdictSub(f), right: "range",
-        range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
+        range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null,
+        caption: isBakeoff() && !f.ci95 ? "Each branch’s range is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
         acts: [f.recheck ? { text: "Check with more runs", kind: "secondary", act: "recheck" } : null].filter(Boolean) });
     } else if (d === "worse") {
       Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Worse · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
@@ -583,7 +589,11 @@
         EK.post(EK.studyPath(st.slug, "/final-check" + runQ()), { seeds: r.seeds }).then(function () { EK.toast("done", "Checking again with more runs"); EK.go(EK.studyHref(st.slug)); }).catch(EK.fail);
       },
       resume: function () { EK.post(EK.studyPath(st.slug, "/start"), { resume: st.run }).then(function () { EK.toast("done", "Carrying on"); EK.rerender(); }).catch(EK.fail); },
-      restart: function () { EK.post(EK.studyPath(st.slug, "/start")).then(function (res) { EK.go(EK.studyHref(st.slug, res.run)); }).catch(EK.fail); },
+      restart: function () {
+        // A bake-off starts again as itself: the same branches, never a search.
+        var again = isBakeoff() ? EK.post(EK.studyPath(st.slug, "/bakeoff"), { refs: st.status.bakeoff_refs }) : EK.post(EK.studyPath(st.slug, "/start"));
+        again.then(function (res) { EK.go(EK.studyHref(st.slug, res.run)); }).catch(EK.fail);
+      },
       "continue": function () {
         var hours = (st.doc.study.budget || {}).hours || 1;
         EK.post(EK.studyPath(st.slug, "/continue"), { run: st.run, hours: hours }).then(function (res) { EK.toast("done", "Searching on for " + EK.hours(hours)); EK.go(EK.studyHref(st.slug, res.run)); }).catch(EK.fail);
