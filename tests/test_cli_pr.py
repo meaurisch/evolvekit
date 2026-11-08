@@ -195,6 +195,19 @@ def test_pr_without_a_remote_makes_the_branch_only(tmp_path, capsys, monkeypatch
     assert answer["branch"] == f"evolvekit/{slug}-r1" and git(repo, "rev-parse", answer["branch"]) == answer["commit"]
 
 
+def test_a_pr_tree_that_cannot_be_removed_is_named(tmp_path, capsys, monkeypatch):
+    home, slug, repo = finished_code_run(tmp_path)
+    removed = tree.remove
+    monkeypatch.setattr(tree, "remove", lambda run_dir, cid: False)  # held open by another program
+    assert main(["study", "pr", slug, "--yes", "--json", "--home", str(home)]) == 0
+    said = capsys.readouterr()
+    assert json.loads(said.out)["done"] is True, "the branch is made all the same"
+    folder = tree.tree_dir(home / "studies" / slug / "runs" / "r1", pr.PR_TREE)
+    assert f"{folder} could not be removed: remove it, then run git worktree prune in your repository" in said.err
+    monkeypatch.setattr(tree, "remove", removed)
+    tree.remove(home / "studies" / slug / "runs" / "r1", pr.PR_TREE)
+
+
 def test_pr_after_working_is_made_on_head(tmp_path, capsys, monkeypatch):
     """Decision 35: after `from: working`, the branch is HEAD with the change; the uncommitted files are not in it."""
     working = SOLVER + "# uncommitted\n"

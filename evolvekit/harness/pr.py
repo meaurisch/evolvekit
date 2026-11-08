@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -349,7 +350,9 @@ def open_pr(plan: PrPlan) -> dict[str, Any]:
     except tree.TreeError as exc:
         raise PrFailed(f"the branch {branch} was not made: {exc}", state="none", branch=branch) from None
     finally:
-        tree.remove(plan.run_dir, PR_TREE)
+        if not tree.remove(plan.run_dir, PR_TREE):  # held open by another program: its entry stays too
+            print(f"evolvekit: {tree.tree_dir(plan.run_dir, PR_TREE)} could not be removed: remove it, then run "
+                  "git worktree prune in your repository", file=sys.stderr)
     done: dict[str, Any] = {"branch": branch, "commit": commit, "pushed": False, "url": None, "note": ""}
     if plan.remote:
         try:

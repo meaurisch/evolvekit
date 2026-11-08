@@ -577,8 +577,7 @@ class Driver:
                     # behind stays registered in the engineer's repository.
                     # Best effort: it never hides the real error.
                     try:
-                        best_now = self.best
-                        self._remove_trees(keep={best_now.id} if best_now else set())
+                        self._remove_trees()
                     except Exception as exc:  # noqa: BLE001
                         print(f"evolvekit: the run's trees were not all removed ({exc})", file=sys.stderr)
                 if self.repo is not None and self.config.problem.tree.build:
@@ -848,7 +847,7 @@ class Driver:
     def _finalise(self, summary: RunSummary) -> RunSummary:
         summary.best = self.best
         if self.repo is not None:
-            self._remove_trees(keep={summary.best.id} if summary.best else set())
+            self._remove_trees()
         summary.rejected = sum(1 for c in self.archive if c.rejected)
         summary.no_ops = self.grid.no_ops
         summary.duplicates = self.grid.duplicates
@@ -868,16 +867,19 @@ class Driver:
         self._snapshot_archive()
         return summary
 
-    def _remove_trees(self, *, keep: set[str]) -> None:
-        """Every tree of the run but the best's (design §5.3). A tree still held
-        open by another program stays, and is said so once; never an error."""
+    def _remove_trees(self) -> None:
+        """Every tree of the run, the best's included: the safety net behind
+        `_drop_trees` (a crash, a stop in the middle of a round). The final
+        check makes its own, and `study export --diff` and `study pr` rebuild
+        the change from the recorded block. A tree still held open by another
+        program stays, and is said so once; never an error."""
         from evolvekit import tree
 
-        tree.remove_all(self.ledger.run_dir, keep=keep)
+        tree.remove_all(self.ledger.run_dir)
         root = tree.tree_dir(self.ledger.run_dir, "-").parent
         if not root.is_dir():
             return
-        for folder in sorted(p for p in root.iterdir() if p.is_dir() and p.name not in keep):
+        for folder in sorted(p for p in root.iterdir() if p.is_dir()):
             self.log(f"a combination's folder is still in use and stays: {folder}")
 
     # -- resume: what the run directory has already used up -------------
@@ -1593,10 +1595,12 @@ class Driver:
             results: dict[str, EvalResult] = {}
             for candidate in candidates:
                 results.update(self.cascade.evaluate_generation([candidate], prior))
+                self._drop_trees([candidate])
                 if any(result.abandoned for result in results.values()):
                     return True
         else:
             results = self.cascade.evaluate_generation(candidates, self._archive_scores())
+            self._drop_trees(candidates)
         if any(result.abandoned for result in results.values()):
             return True
         for candidate in candidates:
@@ -1631,15 +1635,19 @@ class Driver:
             if not candidate.rejected:
                 self.novelty.add(candidate.id, candidate.block)
             self._record(candidate)
-        if tree_problem is not None:
-            # A refused or raced-out candidate's tree is of no further use;
-            # the others stay until the run ends (`_finalise`).
-            from evolvekit import tree
-
-            for candidate in candidates:
-                if candidate.rejected or candidate.raced_out:
-                    self._remove_tree(tree, candidate.id)
         return False
+
+    def _drop_trees(self, candidates: Sequence[Candidate]) -> None:
+        """Each candidate's tree, removed once its evaluation has finished: no
+        reader needs it after that (an operator checks the parent out as a
+        draft, the final check makes its own trees, and `study export --diff`
+        and `study pr` rebuild the change from the recorded block)."""
+        if self.repo is None:
+            return
+        from evolvekit import tree
+
+        for candidate in candidates:
+            self._remove_tree(tree, candidate.id)
 
     def _remove_tree(self, tree, candidate_id: str) -> bool:
         if tree.remove(self.ledger.run_dir, candidate_id):

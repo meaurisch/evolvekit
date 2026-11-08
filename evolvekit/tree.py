@@ -176,8 +176,10 @@ def resolve_base(repo: Repo, ref: str) -> str:
 def snapshot_working(repo: Repo) -> str:
     """The working tree as it is, as a commit on HEAD (HEAD itself when nothing changed).
 
-    The commit is made from a temporary index and kept by a `refs/evolvekit/base-*`
-    ref; the engineer's index, working tree and HEAD are not written.
+    The commit is made from a temporary index (`git add -A`: untracked files that
+    are not ignored go into it too) and kept alive for later re-checks by the ref
+    `refs/evolvekit/base-<commit>`; the engineer's index, working tree and HEAD
+    are not written.
     """
     top = repo.toplevel
     head = resolve_commit(repo, "HEAD")
@@ -190,7 +192,9 @@ def snapshot_working(repo: Repo) -> str:
         return head
     commit = _git(top, "commit-tree", snapshot, "-p", head, "-m", "evolvekit: the working tree as it was",
                   identity=True).strip()
-    _git(top, "update-ref", f"refs/evolvekit/base-{time.strftime('%Y%m%d-%H%M%S')}-{commit[:7]}", commit)
+    # Named by the commit: the same files on the same HEAD make the same commit
+    # (fixed author and date), so an identical snapshot reuses its ref.
+    _git(top, "update-ref", f"refs/evolvekit/base-{commit}", commit)
     return commit
 
 
@@ -199,6 +203,13 @@ def materialise(run_dir: Path, *, repo: Repo, base: str, diff: str, candidate_id
 
     The same change on the same base is the same commit (fixed author and date).
     A diff that does not apply raises `TreeError` and leaves no tree behind.
+
+    Every `diff` that reaches here is git's own diff from the base, as
+    `staged_diff` and `diff_between` write it (an operator's or the agent's
+    change, a branch in a bake-off, the seed's empty diff): `diff --git`
+    headers, `a/`/`b/` prefixes, toplevel paths, exact counts and `-U3`
+    context. So `--recount` without `--unidiff-zero` is correct here, and the
+    repairs `apply_in` makes for a model's reply (`_prepare`) are not needed.
     """
     worktree, note = tree_dir(run_dir, candidate_id), _note(run_dir, candidate_id)
     if (worktree.exists() or note.exists()) and not remove(run_dir, candidate_id):  # a crashed earlier attempt

@@ -84,7 +84,7 @@ def test_seed_is_empty_diff_at_base(project, tmp_path):
     seed = _rows(tmp_path / "run")[0]
     assert seed["block"] == "" and seed["commit"] == base and seed["operator"] == "human-seed"
     assert seed["kpis"]["value"] == 5.0 and summary.best.id == seed["id"]
-    assert tree.tree_dir(tmp_path / "run", seed["id"]).is_dir(), "the best's tree stays"
+    assert not tree.tree_dir(tmp_path / "run", seed["id"]).exists(), "no tree stays, the best's included"
 
 
 def test_whitespace_only_diffs_are_duplicates(project, tmp_path, monkeypatch):
@@ -101,13 +101,36 @@ def test_whitespace_only_diffs_are_duplicates(project, tmp_path, monkeypatch):
     assert not any(tree.tree_dir(tmp_path / "run", r["id"]).exists() for r in later)
 
 
-def test_trees_are_removed_except_best(project, tmp_path, monkeypatch):
+def _only_the_main_checkout(repo: Path, run_dir: Path) -> None:
+    listed = git(repo, "worktree", "list", "--porcelain")
+    assert listed.count("worktree ") == 1, f"only the main checkout: {listed}"
+    trees = run_dir / "work" / "trees"
+    assert not trees.exists() or not list(trees.iterdir()), "nothing of ours is left in work/trees"
+
+
+def test_every_tree_goes_the_best_s_included(project, tmp_path, monkeypatch):
     repo, base = project
     scripted(monkeypatch, _values(repo, 3, 4, 2, 6))
     summary = Driver(build_config(_raw(repo, base), base_dir=tmp_path), run_dir=tmp_path / "run").run()
-    left = sorted(p.name for p in (tmp_path / "run" / "work" / "trees").iterdir() if p.is_dir())
-    assert left == [summary.best.id]
-    assert git(repo, "worktree", "list").count("\n") == 1, "the main checkout and the best's tree"
+    assert summary.best.id != _rows(tmp_path / "run")[0]["id"], "a combination won, and its tree went too"
+    _only_the_main_checkout(repo, tmp_path / "run")
+
+
+def test_a_tree_goes_as_soon_as_its_evaluation_ends(project, tmp_path, monkeypatch):
+    repo, base = project
+    scripted(monkeypatch, _values(repo, 3, 4, 2, 6))
+    original = Cascade.evaluate_generation
+    seen: list[list[str]] = []
+
+    def watching(self, candidates, *args, **kwargs):
+        root = tmp_path / "run" / "work" / "trees"
+        seen.append(sorted(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else [])
+        return original(self, candidates, *args, **kwargs)
+
+    monkeypatch.setattr(Cascade, "evaluate_generation", watching)
+    Driver(build_config(_raw(repo, base), base_dir=tmp_path), run_dir=tmp_path / "run").run()
+    assert len(seen) == 3 and seen == [[], [], []], "no earlier candidate's tree when a round starts"
+    _only_the_main_checkout(repo, tmp_path / "run")
 
 
 def test_runs_rows_carry_commit(project, tmp_path, monkeypatch):
@@ -247,6 +270,9 @@ def test_problem_tree_is_validated(project, tmp_path):
          "problem.tree.build_timeout_s: must be > 0"),
         ({"tree": {"repo": str(repo / "app dir"), "base": base, "open": ["solver.py"], "nope": 1}},
          "problem.tree: unknown key(s) ['nope']"),
+        # Each load would take its own snapshot: a run and its final check could start from different files.
+        ({"tree": {"repo": str(repo / "app dir"), "base": "working", "open": ["solver.py"]}},
+         "problem.tree.base: pin a commit; studies do this for you"),
     ):
         raw = _raw(repo, base)
         raw["problem"].update(change_)
@@ -331,21 +357,21 @@ def test_trees_are_removed_when_the_run_crashes(project, tmp_path, monkeypatch):
     scripted(monkeypatch, _values(repo, 3, 4))
     original = Cascade.evaluate_generation
     calls = []
+    made: list[str] = []
 
     def crashing(self, candidates, *args, **kwargs):
         results = original(self, candidates, *args, **kwargs)
         calls.append(len(candidates))
         if len(calls) == 2:  # the first round's children: evaluated, their trees made
+            made.extend(c.id for c in candidates if tree.tree_dir(tmp_path / "run", c.id).is_dir())
             raise RuntimeError("the evaluator fell over")
         return results
 
     monkeypatch.setattr(Cascade, "evaluate_generation", crashing)
     with pytest.raises(RuntimeError, match="fell over"):
         Driver(build_config(_raw(repo, base, generations=1), base_dir=tmp_path), run_dir=tmp_path / "run").run()
-    seed = _rows(tmp_path / "run")[0]
-    left = sorted(p.name for p in (tmp_path / "run" / "work" / "trees").iterdir() if p.is_dir())
-    assert left == [seed["id"]], "only the best's tree stays"
-    assert git(repo, "worktree", "list").count("\n") == 1
+    assert len(made) == 2, "the crash came with two trees made"
+    _only_the_main_checkout(repo, tmp_path / "run")
 
 
 def test_build_and_top_k_are_refused_together(project, tmp_path):
@@ -515,6 +541,8 @@ def test_the_final_check_runs_app_from_each_tree_and_caches_by_commit(project, t
     shutil.copytree(confirm_dir / "one" / "work" / "cache", confirm_dir / "two" / "work" / "cache")
     second = confirm(config, tmp_path / "run", seeds=[101], label="two", log=lambda _m: None)
     assert len(second.runs) == len(first.runs) and all(r["ok"] and r["cached"] for r in second.runs)
+    _only_the_main_checkout(repo, tmp_path / "run")
+    assert not [p for p in confirm_dir.rglob("*") if p.is_dir() and p.name == "trees" and list(p.iterdir())]
 
 
 def test_preflight_runs_app_from_the_starting_point_tree(project, tmp_path):

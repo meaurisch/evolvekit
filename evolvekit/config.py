@@ -197,7 +197,9 @@ class TreeConfig:
 
     `repo` is a folder inside a git repository (absolute); `open` the files a
     candidate may change, as globs relative to it. `base` is a commit by the
-    time a config is loaded: a ref, or `working`, is resolved once, here.
+    time a config is loaded: a ref is resolved once, here. `working` is
+    refused: a snapshot per load would let a run and its final check start
+    from different files; a study pins it when it writes the run (`write_run`).
     """
 
     repo: Path
@@ -242,8 +244,11 @@ class TreeConfig:
             located = tree.Repo(repo)
         except tree.TreeError as exc:
             raise ConfigError(f"{path}.repo: {exc}") from None
+        if base.strip() == "working":
+            # A snapshot per load: a run and its final check could start from different files.
+            raise ConfigError(f"{path}.base: pin a commit; studies do this for you")
         try:
-            base = tree.resolve_base(located, base)
+            base = tree.resolve_commit(located, base)
         except tree.TreeError as exc:
             raise ConfigError(f"{path}.base: {exc}") from None
         return TreeConfig(repo=Path(repo), base=base, open=open_, build=build.strip(),

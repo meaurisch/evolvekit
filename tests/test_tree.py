@@ -232,8 +232,11 @@ def test_working_base_commits_a_snapshot_without_touching_the_tree(repo):
     assert git(repo, "show", f"{commit}:app dir/solver.py") == "VALUE = 7"
     assert git(repo, "show", f"{commit}:app dir/new.py") == "x = 1"
     assert git(repo, "rev-parse", f"{commit}^") == before
-    refs = git(repo, "for-each-ref", "--format=%(refname)").splitlines()
-    assert any(ref.startswith("refs/evolvekit/base-") for ref in refs)
+    refs = git(repo, "for-each-ref", "--format=%(refname)", "refs/evolvekit/").splitlines()
+    assert refs == [f"refs/evolvekit/base-{commit}"], "the ref keeps the starting commit alive, named by it"
+    assert tree.resolve_base(tree.Repo(repo / "app dir"), "working") == commit, "the same files, the same commit"
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/evolvekit/").splitlines() == refs, \
+        "an identical snapshot reuses its ref"
     assert (repo / "app dir" / "solver.py").read_text(encoding="utf-8") == "VALUE = 7\n"
 
 
