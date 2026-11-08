@@ -168,7 +168,8 @@ def test_every_route_the_old_page_used_is_still_reachable():
     """Everything the app could do stays reachable: each API route has a caller in the page."""
     from evolvekit.app import api
 
-    unused = {"/api/harnesses/{}"}  # read by tests and tools, never by the page (as before the redesign)
+    unused = {"/api/harnesses/{}",  # read by tests and tools, never by the page (as before the redesign)
+              "/api/shutdown"}  # `evolvekit app stop`'s, never the page's
     for method, pattern, _ in api.ROUTES:
         literal = re.sub(r"\(\?P<\w+>\[\^/\]\+\)", "{}", pattern.pattern)
         if literal in unused:
@@ -674,3 +675,9 @@ def test_a_scheduled_start_says_when_in_the_servers_words():
 def test_home_chooses_its_poll_again_after_every_answer():
     poll = _page_function(HOME_PAGE, "poll")
     assert "EK.later(live ? 10000 : 30000" in poll and "poll(main, query, gen)" in poll.split("EK.later", 1)[1]
+
+
+def test_home_shows_the_rehearsal_clock():
+    draw = _page_function(HOME_PAGE, "draw")
+    assert "data.clock" in draw and 'EK.notice("warning", data.clock.line)' in draw
+    assert draw.index("data.clock") < draw.index("cards(active)"), "above the cards"

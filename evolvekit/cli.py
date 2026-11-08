@@ -10,6 +10,7 @@ import shutil
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
@@ -399,9 +400,18 @@ def build_parser() -> argparse.ArgumentParser:
                             help='print {"application", "settings", "notes"} for a script or an AI coding tool')
 
     p_app = sub.add_parser("app", help="the app: set up, run and read studies in the browser")
+    p_app.add_argument("action", nargs="?", choices=["install-startup", "uninstall-startup", "stop"],
+                       help="install-startup: start the app at logon (Windows: the task \"evolvekit app\"; macOS, "
+                            "Linux: prints the unit); uninstall-startup: undo it; stop: stop the app of this library")
     p_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     p_app.add_argument("--port", type=int, default=None, help="first port to try (default 8780)")
     p_app.add_argument("--no-browser", action="store_true", help="print the address; do not open a browser")
+    p_app.add_argument("--service", action="store_true",
+                       help="no browser and no console: log to <home>/app.log and keep the campaigns' windows")
+    p_app.add_argument("--clock", metavar="ISO",
+                       help="a rehearsal clock for campaigns, starting at this time (a time without a zone is local)")
+    p_app.add_argument("--clock-speed", metavar="N", type=float, default=None,
+                       help="with --clock: how many times faster than real time it runs (1 to 3600, default 1)")
     p_app.add_argument("--shortcut", action="store_true",
                        help="write evolvekit.cmd to the Windows desktop, which starts the app with a double-click")
 
@@ -687,14 +697,46 @@ def _desktop() -> Path:
     return home
 
 
+CLOCK_SPEEDS = (1.0, 3600.0)
+"""The rehearsal clock's speed, at least and at most (`app --clock-speed`)."""
+
+
+def _app_clock(args: argparse.Namespace) -> tuple[datetime | None, float] | None:
+    """`--clock` and `--clock-speed`, read: `(start or None, speed)`; None (said on stderr) when wrong."""
+    if args.clock is None:
+        if args.clock_speed is not None:
+            print("error: --clock-speed needs --clock (the rehearsal clock's start)", file=sys.stderr)
+            return None
+        return None, 1.0
+    try:
+        start = datetime.fromisoformat(args.clock.strip())
+    except ValueError:
+        print(f"error: --clock {args.clock!r} is not a time such as 2026-11-13T17:30", file=sys.stderr)
+        return None
+    speed = 1.0 if args.clock_speed is None else float(args.clock_speed)
+    if not CLOCK_SPEEDS[0] <= speed <= CLOCK_SPEEDS[1]:
+        print(f"error: --clock-speed {speed:g}: from {CLOCK_SPEEDS[0]:g} to {CLOCK_SPEEDS[1]:g}", file=sys.stderr)
+        return None
+    return (start if start.tzinfo is not None else start.astimezone()), speed
+
+
 def cmd_app(args: argparse.Namespace) -> int:
-    """Serve the app for a library home until Ctrl+C. Runs started from it
-    carry on when it stops."""
+    """Serve the app for a library home until Ctrl+C (or `app stop`). Runs started from it carry
+    on when it stops. One app per home: a second start opens the first. `--service`: no browser and
+    no console, a log in the home. `install-startup`, `uninstall-startup`, `stop`: `app.service`."""
+    from evolvekit.app import scheduler, service
+    from evolvekit.app.running import read_running
     from evolvekit.app.server import DEFAULT_PORT, AppServer
     from evolvekit.dashboard import open_in_browser
     from evolvekit.harness.library import default_home
 
     home = Path(args.home).expanduser().resolve() if args.home else default_home()
+    if args.action == "stop":
+        return service.stop_app(home)
+    if args.action == "install-startup":
+        return service.install_startup(home)
+    if args.action == "uninstall-startup":
+        return service.uninstall_startup(home)
     if args.shortcut:
         if os.name != "nt":
             print("error: --shortcut writes a Windows .cmd file; elsewhere, start the app with "
@@ -709,18 +751,86 @@ def cmd_app(args: argparse.Namespace) -> int:
         )
         print(f"wrote {target}: double-click it to start the app, and keep its window open while you work")
         return 0
+    clock = _app_clock(args)
+    if clock is None:
+        return 2
+    running = read_running(home)
+    if running is not None:  # one app per home: two tickers never share one
+        if args.service:
+            logger = service.start_logging(home)
+            logger.info("already running at %s", running.get("url"))
+            service.stop_logging(logger)
+            return 0
+        print(f"the app is already running for this library: {running.get('url')}", flush=True)
+        if not args.no_browser:
+            open_in_browser(str(running.get("url")))
+        return 0
+    if args.service:
+        return _serve_service(home, args.port or DEFAULT_PORT, clock)
     server = AppServer(home, port=args.port or DEFAULT_PORT)
-    print(f"evolvekit app : {server.url_with_token}  (open it in your browser, as printed: the address carries this launch's key)", flush=True)
-    print(f"library home  : {server.home.root}", flush=True)
-    print("Keep this window open while you work. Runs carry on when it closes; Ctrl+C stops the app.", flush=True)
-    if not args.no_browser:
-        open_in_browser(server.url_with_token)
     try:
+        _set_clock(home, clock)
+        print(f"evolvekit app : {server.url_with_token}  (open it in your browser, as printed: the address carries this launch's key)", flush=True)
+        print(f"library home  : {server.home.root}", flush=True)
+        if clock[0] is not None:
+            print(scheduler.clock_of(home).words(), flush=True)
+        print("Keep this window open while you work. Runs carry on when it closes; Ctrl+C stops the app.", flush=True)
+        if not args.no_browser:
+            open_in_browser(server.url_with_token)
         server.serve_forever()
     except KeyboardInterrupt:
         print()
     finally:
+        scheduler.clear_clock(home)
         server.stop()
+    return 0
+
+
+def _set_clock(home: Path, clock: tuple[datetime | None, float]) -> None:
+    """The rehearsal clock of this app, or none: a `clock.json` left by an app that ended without
+    its `finally` is not this one's."""
+    from evolvekit.app import scheduler
+
+    start, speed = clock
+    if start is None:
+        scheduler.clear_clock(home)
+    else:
+        scheduler.write_clock(home, start, speed)
+
+
+def _serve_service(home: Path, port: int, clock: tuple[datetime | None, float]) -> int:
+    """`app --service`: what it says, and the ticker's lines and tracebacks, go to `<home>/app.log`;
+    no browser, no console. It ends on `app stop` (or a service manager's SIGTERM), cleanly."""
+    import signal
+
+    from evolvekit.app import scheduler, service
+    from evolvekit.app.server import AppServer
+
+    logger = service.start_logging(home, redirect=True)
+    try:
+        server = AppServer(home, port=port)
+    except Exception:  # noqa: BLE001 - said in the log: there is no console to say it on
+        logger.exception("the app could not start")
+        service.stop_logging(logger)
+        return 1
+    try:
+        _set_clock(home, clock)
+        logger.info("evolvekit app : %s", server.url_with_token)
+        logger.info("library home  : %s", server.home.root)
+        if clock[0] is not None:
+            logger.info("%s", scheduler.clock_of(home).words())
+        try:  # systemd's or launchd's stop ends it as `app stop` does
+            signal.signal(signal.SIGTERM, lambda *_: server.request_shutdown())
+        except (ValueError, OSError, AttributeError):
+            pass
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        scheduler.clear_clock(home)
+        server.stop()
+        logger.info("stopped")
+        service.stop_logging(logger)
     return 0
 
 
@@ -1191,8 +1301,9 @@ def _say_verdict(document: dict) -> None:
 
 OPEN_WAIT_S = 15.0
 """How long `study open` waits for an app it started to say it is running."""
-APP_LOG = "app.log"
-"""Where the output of an app that `study open` started goes, in the home."""
+APP_START_LOG = "app-start.log"
+"""Where the launcher's output of the app that `study open` starts goes, in the home: the service
+writes `app.log` itself, and rotation cannot rename a file another handle holds on Windows."""
 
 
 def _study_open(args: argparse.Namespace) -> int:
@@ -1209,9 +1320,9 @@ def _study_open(args: argparse.Namespace) -> int:
     running = read_running(home.root)
     if running is None:
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
-        argv = [sys.executable, "-m", "evolvekit", "app", "--home", str(home.root), "--no-browser"]
+        argv = [detach.python_for_runs(), "-m", "evolvekit", "app", "--home", str(home.root), "--service"]
         try:
-            detach.spawn_detached(argv, cwd=home.root, env=env, log=home.root / APP_LOG)
+            detach.spawn_detached(argv, cwd=home.root, env=env, log=home.root / APP_START_LOG)
         except (detach.DetachError, subprocess.TimeoutExpired):
             pass  # the wait below says so
         deadline = time.monotonic() + OPEN_WAIT_S

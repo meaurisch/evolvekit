@@ -129,8 +129,18 @@ def home(req: Request) -> dict[str, Any]:
                           "built_in": entry.built_in, "templates": _templates(h),
                           "application": {"kind": h.application.kind, "label": h.application.label}})
     settings = req.home.settings()
-    return {"home": str(req.home.root), "studies": studies, "harnesses": harnesses, "keys": req.home.keys(),
-            "provider": settings["provider"], "trash": req.home.trash()}
+    out = {"home": str(req.home.root), "studies": studies, "harnesses": harnesses, "keys": req.home.keys(),
+           "provider": settings["provider"], "trash": req.home.trash()}
+    clock = scheduler.clock_of(req.home)
+    if clock.simulated:  # a rehearsal (`app --clock`): windows follow it, runs keep real time
+        out["clock"] = {"line": clock.words()}
+    return out
+
+
+def shutdown(req: Request) -> dict[str, bool]:
+    """`evolvekit app stop`: the app ends cleanly (its clock and `app.json` removed), after this answer."""
+    req.server.request_shutdown()
+    return {"stopping": True}
 
 
 def _templates(harness: Harness) -> list[dict[str, Any]]:
@@ -709,6 +719,7 @@ def compare_runs(req: Request) -> dict[str, Any]:
 
 ROUTES = [
     route("GET", "/api/home")(home),
+    route("POST", "/api/shutdown")(shutdown),
     route("GET", "/api/compare")(compare_runs),
     route("GET", "/api/settings")(get_settings),
     route("PUT", "/api/settings")(put_settings),

@@ -789,3 +789,67 @@ def test_a_persons_resume_continue_and_check_again_are_by_hand(tmp_path, monkeyp
         assert (root / scheduler.CAMPAIGN).read_text(encoding="utf-8") == before
     finally:
         server.stop()
+
+
+# -- keep-awake: the span file a scheduled session keeps the computer awake for (D46)
+
+
+def test_tick_writes_the_span_file(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    real = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
+    scheduler.tick(home, now=local("2026-11-15 23:29"), speed=60.0, real_now=real, **Recorder().calls_for())
+    span = json.loads((root / "runs" / "r1" / scheduler.SPAN).read_text(encoding="utf-8"))
+    assert datetime.fromisoformat(span["until_real"]) == real + timedelta(minutes=30) / 60, "30 rehearsal minutes at 60 x"
+    assert span["session"] == 2, "the resume is the run's second launch"
+
+
+def test_the_span_file_of_a_new_run_follows_its_start(tmp_path):
+    home, root = campaign_study(tmp_path)
+    real = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
+
+    def start(home_, root_, **kwargs):
+        (root_ / "runs" / "r9").mkdir(parents=True)
+        return {"run": "r9"}
+
+    scheduler.tick(home, now=local("2026-11-15 22:59"), real_now=real, start=start)
+    span = json.loads((root / "runs" / "r9" / scheduler.SPAN).read_text(encoding="utf-8"))
+    assert datetime.fromisoformat(span["until_real"]) == real + timedelta(hours=1)
+    scheduler.tick(home, now=local("2026-11-15 22:59"), real_now=real, start=lambda *a, **k: {"run": "gone"})
+    assert not (root / "runs" / "gone").exists(), "never a run folder made for the file"
+
+
+def test_the_span_file_for_a_recheck_and_a_continuation(tmp_path):
+    home, root = campaign_study(tmp_path)
+    real = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
+    write_run(root, "r1", "stopped", generations=6, planned=6, final={"stopped": True}, check=True)
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 23:00"), real_now=real, **rec.calls_for())
+    assert rec.names() == ["recheck"] and (root / "runs" / "r1" / scheduler.SPAN).is_file()
+    (root / "runs" / "r1" / scheduler.SPAN).unlink()
+    write_run(root, "r1", "done", generations=6, planned=6, max_hours=2.0, used_s=1200, final={"decision": "use"})
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-15 12:00"), real_now=real, **rec.calls_for())
+    assert rec.names() == ["continue_run"] and (root / "runs" / "r1" / scheduler.SPAN).is_file()
+
+
+def test_no_span_file_without_keep_awake(tmp_path):
+    home, root = campaign_study(tmp_path)
+    study = load_study(root)
+    study.schedule = replace(study.schedule, keep_awake=False)
+    save_study(study, root)
+    run_dir = write_run(root, "r1", "stopped", generations=2, planned=6)
+    (run_dir / scheduler.SPAN).write_text('{"until_real": "2026-11-08T10:00:00+00:00"}', encoding="utf-8")
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-15 23:29"), **rec.calls_for())
+    assert rec.names() == ["start"] and rec.calls[0][2] == {"resume": "r1"}
+    assert not (run_dir / scheduler.SPAN).exists()
+
+
+def test_a_session_by_hand_has_no_span_file(tmp_path):
+    home, root = campaign_study(tmp_path)
+    run_dir = write_run(root, "r1", "stopped", generations=2, planned=6)
+    scheduler.tick(home, now=local("2026-11-15 23:29"), **Recorder().calls_for())
+    assert (run_dir / scheduler.SPAN).is_file(), "the last scheduled session's"
+    scheduler.mark_by_hand(home, root.name, "r1")
+    assert not (run_dir / scheduler.SPAN).exists()

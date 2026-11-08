@@ -1651,7 +1651,10 @@ run. The windows are kept only while the app runs then — `evolvekit
 app --service`, or a terminal with `study wait depot-a`, which waits until
 the campaign has its answer, not for the first window's stop. `study status`
 says the campaign's line (`campaign · next window Sat 00:00`); the app's Set
-up offers the same windows under *When it runs*.
+up offers the same windows under *When it runs*. By default a scheduled
+session keeps the computer from sleeping until its window ends, and through a
+final check that runs past it; a session started by hand does not.
+`keep_awake: false` under `schedule:` turns that off.
 
 The AI spend stays within its cap, give or take one call. Every claude call,
 a reply or a coding agent's run, is told what is left (`--max-budget-usd`, when
@@ -1694,7 +1697,12 @@ Every command:
 | `study report SLUG [--run ID] [--markdown \| --json]` | the report: Markdown for people, else the verdict document |
 | `study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`, and its path; exit 2 for a settings study, or when the starting point stayed the best |
 | `study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints what it will do; with `--yes` makes the branch, pushes it and opens the PR. Exit 0 printed or done, 1 failed while doing it, 2 refused |
-| `study open SLUG [--no-browser]` | prints the study's address in the app, starting the app when none runs, and opens it |
+| `study open SLUG [--no-browser]` | prints the study's address in the app, starting the app (`app --service`) when none runs, and opens it |
+| `app [--home DIR] [--port N] [--no-browser]` | the app in the browser ([The app](#the-app)); a second `app` on the same library opens the first |
+| `app --service` | the app with no browser or console: it logs to `<home>/app.log` (rotated at 5 MB, two kept) and keeps campaigns' windows |
+| `app stop [--home DIR]` | stops the app of this library cleanly; exit 1 when it did not stop within 10 s |
+| `app install-startup` / `app uninstall-startup` | start `app --service` at logon, or no longer. Windows: registers (or removes) the logon task "evolvekit app" and prints what it runs; macOS and Linux: prints the launchd agent or systemd unit to install, and the commands. On Windows this is not yet tried on a real logon |
+| `app --clock ISO --clock-speed N` | a rehearsal clock for campaigns, from `ISO` (local when it has no zone) at `N` times real time (1 to 3600): windows follow it, runs keep real time; Home says so |
 | `study preview \| compile \| run FOLDER-OR-SLUG` | one solve at the starting values; the plan into `runs/<id>/`; the whole study in the foreground |
 | `harness discover (--program PATH \| --python PATH --module NAME) [--json]` | what an application exposes, before a harness exists ([Harness commands](#harness-commands)) |
 | `skill list` / `skill install [--dir DIR] [--force]` | the skills that ship with evolvekit ([For coding agents](#for-coding-agents)) |
@@ -1744,7 +1752,7 @@ What `study.yaml` can say:
 | `goal.levels` | one KPI; or up to four in order of importance, each but the last with `equal_within` (`"1 %"` or a number), as in [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels); or one weighted KPI |
 | `guardrails` | `{kpi, max}` or `{kpi, min}`: a candidate that breaks one is out of the running, as a [gate](#gates-conditions-every-candidate-has-to-meet-evaluategates) |
 | `inputs` | the extra files a harness asks for, such as PyVRP's `solver_settings` to start from |
-| `schedule` | `{windows: [{days, from, to}], until}`: the hours the study may run in, local wall-clock time; `budget.hours` is then the whole campaign's search time ([run it in windows](#a-study-from-the-command-line)) |
+| `schedule` | `{windows: [{days, from, to}], until, keep_awake}`: the hours the study may run in, local wall-clock time; `budget.hours` is then the whole campaign's search time; `keep_awake: false`: a scheduled session lets the computer sleep ([run it in windows](#a-study-from-the-command-line)) |
 
 **The comparability trap.** A data change that alters what the solver *sees*
 — costs, weights, penalties — also alters every KPI computed from what it

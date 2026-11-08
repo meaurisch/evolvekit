@@ -32,6 +32,13 @@ them again when it is back.
 | `--port N` | the first port to try (default 8780) |
 | `--no-browser` | print the address instead of opening a browser |
 | `--shortcut` | Windows: put `evolvekit.cmd` on the desktop, which starts the app with a double-click |
+| `--service` | no browser or console: the app logs to `<home>/app.log` (rotated at 5 MB, two kept) and keeps campaigns' windows; `study open` starts it this way |
+| `stop` | `evolvekit app stop`: stops the app of this library cleanly (exit 1 when it did not stop within 10 s) |
+| `install-startup` / `uninstall-startup` | start `app --service` at logon, or no longer. Windows: registers (or removes) the logon task "evolvekit app" and prints what it runs; macOS and Linux: prints the launchd agent or systemd unit to install, and the commands. On Windows this is not yet tried on a real logon |
+| `--clock ISO --clock-speed N` | a rehearsal clock for campaigns, from `ISO` (local when it has no zone) at `N` times real time (1 to 3600): windows follow it, runs keep real time; Home says so |
+
+A second `evolvekit app` on the same library opens the first instead of
+starting another.
 
 The app answers only to this computer: it listens on 127.0.0.1, refuses
 requests that name another host, accepts changes only from its own page, and
@@ -428,7 +435,10 @@ The page uses nothing but a JSON API (`evolvekit/app/api.py`), so a server
 can take the app's place later. Every request to it, and to a run's dashboard,
 carries the key of this launch — the `token` in the address the app printed —
 in an `X-Evolvekit-Token` header or a `?token=` query; without it the answer
-is 403, sent before the body is read. The routes: `/api/home`, `/api/settings`,
+is 403, sent before the body is read. The routes: `/api/home` (with
+`clock: {line}` while a rehearsal clock is on), `POST /api/shutdown` (what
+`evolvekit app stop` sends: it answers `{"stopping": true}` and the app ends
+cleanly), `/api/settings`,
 `/api/harnesses`, `POST /api/detect?study=` (looks for installed copies of the
 application: it searches the machine, so it is not a `GET`), `/api/studies/{name}` and its `application`, `cases`,
 `import`, `samples`, `split`, `inputs`, `preview`, `kpis/try`, `choices`,

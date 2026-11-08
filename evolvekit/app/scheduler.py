@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from evolvekit.app import AppError, jobs
-from evolvekit.app.running import read_running
+from evolvekit.app.running import APP_FILE, read_running
 from evolvekit.events import read_events
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import read_job
@@ -45,7 +45,7 @@ from evolvekit.stopping import STOP_REQUEST, active_seconds
 
 __all__ = [
     "ACTIONS_PER_WINDOW", "BY_YOU", "CAMPAIGN", "CLOCK_FILE", "Clock", "FAILED_PAUSE_LINE", "FAILURES_TO_PAUSE", "LOCK",
-    "MIN_SESSION_S", "NO_SCHEDULE", "SPAN_FILE", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_run",
+    "MIN_SESSION_S", "NO_SCHEDULE", "SPAN", "SPAN_FILE", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_run",
     "campaign_state", "clear_clock",
     "clock_of", "launch_queued", "mark_by_hand", "pause", "read_campaign", "search_left_s", "session_of",
     "scheduled_words", "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
@@ -74,8 +74,12 @@ LOCK_LIVE_STALE_S = 600.0
 (up to `detach.LAUNCH_TIMEOUT_S`) keeps it, and refreshes it before each launch."""
 CLOCK_FILE = "clock.json"
 """In the home: the rehearsal clock (D15), honoured while the app that wrote it runs."""
-SPAN_FILE = "campaign-span.json"
-"""In a run folder: the span a scheduled session keeps the computer awake for (Task 4, D46)."""
+SPAN = "campaign-span.json"
+"""In a run folder: `{"until_real": iso, "session": n}`, the real moment the window of a scheduled
+session ends; the run keeps the computer awake until then, and through a final check past it
+(`awake`, D46). `session` is the launch it was written for, so a later session by hand of the same
+run is never kept awake by it."""
+SPAN_FILE = SPAN
 FAILED_PAUSE_LINE = "The campaign is paused: its last three sessions failed ({error}). Start it again when the cause is fixed."
 NO_SCHEDULE = "the study has no schedule any more"
 COMPLETE = "the campaign's search time is used"
@@ -164,11 +168,14 @@ def clear_clock(home_root: Path) -> None:
 
 def clock_of(home: Any) -> Clock:
     """The rehearsal clock while the app whose pid `clock.json` names still runs (`read_running`),
-    else the real clock; a `clock.json` whose process is gone is removed."""
+    else the real clock. A `clock.json` whose process is gone is removed, and so is one beside an
+    `app.json` whose app is gone (its writing app ended without its `finally`). One whose process
+    lives with no `app.json` yet is kept: an app writes its clock just before it starts serving."""
     root = _home_root(home)
     doc = _read(root / CLOCK_FILE)
     if doc is None:
         return Clock()
+    had_app = (root / APP_FILE).is_file()
     app = read_running(root)
     if app is not None and app.get("pid") == doc.get("pid"):
         start = _moment(doc.get("start"))
@@ -183,7 +190,7 @@ def clock_of(home: Any) -> Clock:
         gone = not pid_alive(int(doc.get("pid") or 0))
     except (TypeError, ValueError):
         gone = True
-    if gone:
+    if gone or (had_app and app is None):
         clear_clock(root)
     return Clock()
 
@@ -398,6 +405,15 @@ def mark_by_hand(home: Any, slug: str, run_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _next_session(run_dir: Path) -> int:
+    """The number the run's next launch will have (`jobs._launch_number`, from its `launch.json`)."""
+    try:
+        previous: str | None = (run_dir / jobs.LAUNCH).read_text(encoding="utf-8")
+    except OSError:
+        previous = None
+    return jobs._launch_number(previous)  # noqa: SLF001 - the one rule of a session's number
+
+
 def _window_words(span: tuple[datetime, datetime]) -> str:
     start, end = span
     return (f"{DAY_WORDS[start.weekday()]} {start.hour:02d}:{start.minute:02d} – "
@@ -591,8 +607,11 @@ class _Tick:
         campaign["actions"] += 1
         _write_campaign(root, campaign)  # counted before the call: a launch that crashes the tick still counts
         self.held = _refresh(self.lock, self.held)  # a slow launcher must not make the lock look stale
+        fresh = name == "start" and not kwargs.get("resume")
+        if not fresh and run_dir is not None:  # the session's span, before it starts: it reads the file
+            self.span_file(run_dir, span, schedule.keep_awake, _next_session(run_dir))
         try:
-            self.calls[name](*args, **kwargs)
+            answer = self.calls[name](*args, **kwargs)
         except (AppError, HarnessError) as exc:
             if jobs.active_run(self.home) is not None:
                 # Another run took the computer between this tick's look and the launch: not a
@@ -603,8 +622,27 @@ class _Tick:
             self.failed(root, campaign, f"launch:{_iso(self.now)}", str(exc))
             return True
         campaign["missed"] = None  # a session of the campaign launched
+        new_run = answer.get("run") if fresh and isinstance(answer, dict) else None
+        if new_run and jobs._RUN.match(str(new_run)):  # noqa: SLF001 - a run's name, as jobs judges it
+            new_dir = root / "runs" / str(new_run)
+            self.span_file(new_dir, span, schedule.keep_awake, max(1, session_of(new_dir)))
         self.say(root, f"{words} (window {_window_words(span)})")
         return True
+
+    def span_file(self, run_dir: Path, span: tuple[datetime, datetime], keep_awake: bool, session: int) -> None:
+        """`<run>/campaign-span.json`: the real moment this session's window ends (under the rehearsal
+        clock, `real_now + (end - now) / speed`), so the run keeps the computer awake till then (D46),
+        and the session it is for; removed when the study's `keep_awake` is off. Only into a run
+        folder that exists."""
+        path = run_dir / SPAN
+        if not keep_awake:
+            path.unlink(missing_ok=True)
+            return
+        if not run_dir.is_dir():
+            return
+        seconds = (span[1].timestamp() - self.now.timestamp()) / self.speed
+        until = self.real_now + timedelta(seconds=max(0.0, seconds))
+        _atomic_write(path, json.dumps({"until_real": until.isoformat(), "session": session}) + "\n")
 
     def _by_hand(self, root: Path, campaign: dict[str, Any]) -> dict[str, Any] | None:
         """The campaign's session by hand while it lasts; cleared once it has ended (its run not

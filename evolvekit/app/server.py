@@ -459,6 +459,12 @@ class AppServer:
             self._ticker.join(timeout=TICK_S + 5)
             self._ticker = None
 
+    def request_shutdown(self) -> None:
+        """End `serve_forever` (or the thread `start` serves from), so its caller's `finally` runs:
+        `POST /api/shutdown`. `shutdown` waits for the serving loop to end, so it runs on a thread of
+        its own -- never the handler's, which that loop would be waiting on."""
+        threading.Thread(target=self._server.shutdown, name="evolvekit-app-shutdown", daemon=True).start()
+
     def stop(self) -> None:
         self._stop_ticker()
         if self._thread is not None:

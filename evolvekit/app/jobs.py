@@ -20,7 +20,6 @@ import re
 import shutil
 import socket
 import sqlite3
-import sys
 import threading
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -378,7 +377,7 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys
     env = {**scrubbed_environment(), "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     if with_keys:
         env.update(home.job_environment())
-    argv = [sys.executable, "-m", "evolvekit.app.job", str(root), run_dir.name, *extra]
+    argv = [detach.python_for_runs(), "-m", "evolvekit.app.job", str(root), run_dir.name, *extra]  # never pythonw (D16)
     try:
         previous: str | None = (run_dir / LAUNCH).read_text(encoding="utf-8")
     except OSError:

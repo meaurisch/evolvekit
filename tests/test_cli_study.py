@@ -857,7 +857,7 @@ def test_open_starts_an_app_when_none_runs(tmp_path, monkeypatch, capsys):
     try:
         assert main(["study", "open", "depot-a", "--no-browser", "--home", str(home)]) == 0
         assert recorded.wait(10)
-        assert len(calls) == 1 and calls[0][-4:] == ["app", "--home", str(home), "--no-browser"]
+        assert len(calls) == 1 and calls[0][-4:] == ["app", "--home", str(home), "--service"]
         assert capsys.readouterr().out == servers[0].url_with_token + "#/study/depot-a\n"
     finally:
         if calls:

@@ -143,3 +143,17 @@ def test_an_edge_in_the_repeated_autumn_hour_is_its_first_occurrence(zone):
     first = at(zone, "2026-10-25 02:30")
     assert start.timestamp() == first.timestamp() and first.fold == 0
     assert start.utcoffset() == timedelta(hours=2), "CEST, the first 02:30"
+
+
+def test_keep_awake_parses():
+    assert Schedule.parse({"windows": [WEEKEND]}).keep_awake is True
+    off = Schedule.parse({"windows": [WEEKEND], "keep_awake": False})
+    assert off.keep_awake is False and off.to_yaml()["keep_awake"] is False
+    assert "keep_awake: false" in yaml.safe_dump(off.to_yaml())
+    assert Schedule.parse(off.to_yaml()) == off
+    on = Schedule.parse({"windows": [WEEKEND], "keep_awake": True})
+    assert "keep_awake" not in on.to_yaml(), "the default is not written"
+    with pytest.raises(HarnessError, match="schedule.keep_awake: true or false"):
+        Schedule.parse({"windows": [WEEKEND], "keep_awake": "no"})
+    for preset in PRESETS.values():
+        assert Schedule.parse(preset["schedule"]).keep_awake is True

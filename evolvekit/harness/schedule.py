@@ -124,12 +124,15 @@ class Window:
 class Schedule:
     windows: tuple[Window, ...]
     until: date | None = None
+    keep_awake: bool = True
+    """A scheduled session keeps the computer from sleeping until its window ends, and through a
+    final check that runs past it (D46); `keep_awake: false` turns that off."""
 
     @staticmethod
     def parse(raw: Any, path: str = "schedule") -> "Schedule":
         if not isinstance(raw, Mapping):
             raise HarnessError(f"{path}: expected a mapping with windows, got {type(raw).__name__}")
-        _known(raw, {"windows", "until"}, path)
+        _known(raw, {"windows", "until", "keep_awake"}, path)
         listed = raw.get("windows")
         if not isinstance(listed, (list, tuple)) or not listed:
             raise HarnessError(f"{path}.windows: name at least one window")
@@ -147,12 +150,17 @@ class Schedule:
                 until = None
             if until is None:
                 raise HarnessError(f"{path}.until: a date such as 2026-12-31 (got {raw['until']!r})")
-        return Schedule(windows, until)
+        keep_awake = raw.get("keep_awake", True)
+        if not isinstance(keep_awake, bool):
+            raise HarnessError(f"{path}.keep_awake: true or false")
+        return Schedule(windows, until, keep_awake)
 
     def to_yaml(self) -> dict[str, Any]:
         out: dict[str, Any] = {"windows": [w.to_yaml() for w in self.windows]}
         if self.until is not None:
             out["until"] = self.until
+        if not self.keep_awake:
+            out["keep_awake"] = False
         return out
 
     # -- reading the clock -------------------------------------------------

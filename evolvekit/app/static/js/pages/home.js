@@ -90,11 +90,13 @@
     var active = data.studies.filter(function (s) { return !s.archived; });
     var archived = data.studies.filter(function (s) { return s.archived; });
     var trash = data.trash || [];
+    // A rehearsal clock (`evolvekit app --clock`): the campaigns' windows follow it, runs keep real time.
+    var clock = data.clock ? html`<div class="home-clock">${EK.notice("warning", data.clock.line)}</div>` : "";
     companion(active);
     var newBtn = EK.button("New study", { act: "new", icon: EK.gl("plus", 18) });
     var body;
     if (!data.studies.length && !trash.length) {
-      body = html`<div class="hero"><div aria-hidden="true">${EK.pepper("egg", EK.isPhone() ? 200 : 280)}</div>
+      body = html`${clock}<div class="hero"><div aria-hidden="true">${EK.pepper("egg", EK.isPhone() ? 200 : 280)}</div>
         <h1 class="type-display" id="page-title" tabindex="-1">No studies yet</h1>
         <p class="type-body ink-2">Start one in a few steps. Pepper, the butterfly, follows it.</p>
         <div class="actions" style="justify-content:center;margin-top:8px">${newBtn}${EK.button("Open a study zip", { kind: "secondary", act: "pick-zip" })}</div></div>
@@ -108,7 +110,7 @@
         <div class="phone-only">${newBtn}</div>
         <nav class="tabs-row" aria-label="Which studies">${tabs.map(function (t) {
           return html`<a href="#/${t[0] === "active" ? "" : "?show=" + t[0]}"${EK.attrs({ "aria-current": t[0] === show ? "page" : null })}>${t[1]}${t[2] ? " (" + t[2] + ")" : ""}</a>`;
-        })}</nav><div class="home-cards">${list}</div>${links()}`;
+        })}</nav>${clock}<div class="home-cards">${list}</div>${links()}`;
     }
     EK.mount(main, html`<div class="page"><div class="page-inner">${body}</div>
       <input type="file" accept=".zip" class="sr-only" id="zip-file" tabindex="-1" aria-hidden="true" data-change="zip-picked"></div>`, acts(main, query));
