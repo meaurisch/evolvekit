@@ -43,6 +43,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from evolvekit.app import AppError
 from evolvekit.app.running import clear_running, write_running
 from evolvekit.app.store import MAX_UPLOAD, Home
+from evolvekit.resources import package_root
 
 __all__ = ["AppServer", "DEFAULT_PORT", "FileResponse", "PAGE", "Request"]
 
@@ -51,7 +52,7 @@ PORT_ATTEMPTS = 20
 TICK_S = 5.0
 """How often the server looks for a queued run to launch (`jobs.launch_queued`)
 and at the campaigns (`scheduler.tick`)."""
-PAGE = Path(__file__).with_name("static") / "app.html"
+PAGE = package_root() / "app" / "static" / "app.html"
 CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 TOKEN_HEADER = "X-Evolvekit-Token"
 TOKEN_QUERY = "token"

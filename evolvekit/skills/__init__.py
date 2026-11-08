@@ -9,17 +9,18 @@ from __future__ import annotations
 
 import json
 import re
-from importlib import resources
 from pathlib import Path
 
 import yaml
+
+from evolvekit.resources import package_root
 
 SHARED = "shared"
 REFERENCE = "evolvekit.md"
 
 
-def _root():
-    return resources.files("evolvekit.skills")
+def _root() -> Path:
+    return package_root() / "skills"
 
 
 def available() -> list[str]:

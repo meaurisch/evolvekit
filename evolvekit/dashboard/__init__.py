@@ -37,6 +37,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from evolvekit.resources import package_root
 from evolvekit.status import build_status, candidate_detail, candidate_details
 
 __all__ = ["DashboardServer", "export_html", "DEFAULT_PORT", "PAGE"]
@@ -46,7 +47,7 @@ PORT_ATTEMPTS = 20
 """`--port` is where the search for a free port starts, not a demand: two runs
 on one machine should both get a dashboard."""
 
-PAGE = Path(__file__).with_name("index.html")
+PAGE = package_root() / "dashboard" / "index.html"
 
 REBUILD_AFTER_S = 1.0
 LOG_SUFFIXES = {".log", ".json", ".jsonl", ".py", ".md", ".txt"}
