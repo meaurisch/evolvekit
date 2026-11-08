@@ -1,0 +1,11 @@
+title: Higher scores by changing the prompt
+summary: Let the search change the system prompt and check on held-back items whether the scores rise.
+vary:
+  code:
+    from: HEAD
+    brief: Make the answers score higher on the evaluation items.
+kpis:
+  score: {from: harness}
+goal:
+  levels:
+    - {kpi: score, direction: higher}
