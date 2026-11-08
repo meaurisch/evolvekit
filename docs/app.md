@@ -101,7 +101,8 @@ about half an hour later. The runs keep real time: they spend real search time
 (it is the windows that are speeded up), and the study's hours are real
 hours. Home says the rehearsal is on (*Rehearsal clock: Fri 13 Nov 17:30, 120 ×
 real time. Times of the windows follow this clock; other dates are the real
-time.* — a run's *today 17:19* is real time), and each line in `app.log` for a campaign gives both times
+time.* — a run's *today 17:19* is real time; the Study page says it too, above
+its notices), and each line in `app.log` for a campaign gives both times
 (`2026-11-14T01:10:00+01:00 rehearsal · 2026-11-13T18:12:03+01:00 real · …`).
 A run is given more search time only when ten real minutes of its window are
 left, so windows shorter than ten real minutes never give a run more time: at
@@ -274,9 +275,13 @@ opens a drawer on the right (full screen on a phone):
   The plan bar then says when it would end on the windows (*starts Sat 00:00;
   about 18 min of search; done around Sat 00:18*), and when the total time is
   less than one week of the windows gives, *Search through the whole window
-  (48 h)* sets the total time to that week's hours (`schedule_hours`); under a
-  rehearsal clock it names both times, *(48 h on the rehearsal clock, 24 min of
-  real time)*, and sets the real one.
+  (about 47 h; done around Sun 22:54)* sets the total time to the plan's
+  `whole_window` hours: the week's window hours less the time its final check
+  needs, so the search and the final check end inside the windows, at the time
+  it names; under a rehearsal clock it names both times, *(about 47 h on the
+  rehearsal clock, 23 min of real time; done around Sun 22:54)*, and sets the
+  real one. *Save* says what it saved at once (*Saved: Weekends, all day*, or
+  *Saved: your own windows*) and is disabled until the answer; the plan follows.
   Other windows are written in `study.yaml`.
 
 A **code study** — one whose template changes the application's source —
@@ -671,7 +676,8 @@ outlives the app.
 
 Any study's document also has `clock: {"line", "speed"}` while a rehearsal
 clock is on, so Set up can say a week of windows on both clocks (*Search
-through the whole window (48 h on the rehearsal clock, 24 min of real time)*).
+through the whole window (about 47 h on the rehearsal clock, 23 min of real
+time; done around Sun 22:54)*) and the Study page shows the rehearsal notice.
 
 `plan` then has `window`: `{"line", "starts", "done"}`, the plan on the
 windows from the home's clock (a rehearsal's too), spreading the plan's hours —
@@ -680,7 +686,12 @@ it, the campaign's search time left and a final check — *starts Sat 00:00; abo
 18 min of search; done around Sat 00:18* (*starts now* inside a window; *…:
 more than its windows give before its Until (30 Nov)* and no `done` when they
 give less; *its schedule has no window left*) — and its `summary` ends with
-that line instead of *done around 17:34*. `start` arms the campaign
+that line instead of *done around 17:34*. While that line spreads the study's
+own hours and they are less than the windows give, `plan` also has
+`whole_window`: `{"hours", "done", "done_words"}` — the real hours of the
+windows that end within the week less the final check the plan makes for them
+(never more than the week's hours), and where the plan line would then end
+(*Sun 22:54*); absent when the study's hours are already that much. `start` arms the campaign
 (`{"scheduled": true, "renewed", "words", "campaign"}`), or with
 `{"now": true}` starts a session at once, by hand. `continue` raises the
 campaign's search time by H hours (the study's hours when not said;

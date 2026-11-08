@@ -23,6 +23,7 @@ real time. The whole tick holds `<home>/scheduler.lock` (D13).
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -1270,6 +1271,34 @@ def schedule_hours(schedule: Schedule, *, now: datetime, speed: float = 1.0) -> 
     by `speed` (a weekend at 120 x is 24 real minutes). Up to `until`."""
     now = now if now.tzinfo is not None else now.astimezone()
     return round(schedule.week_seconds(now) / 3600.0 / float(speed), 4)
+
+
+def whole_window(schedule: Schedule, hours: float, check_s: Callable[[float], float], *, now: datetime,
+                 speed: float = 1.0) -> dict[str, Any] | None:
+    """Set up's offer to search through one week of the windows (persona p4 round 2, I1), leaving
+    room for the final check: `{"hours", "done": iso, "done_words": "Sun 22:54"}`, where `hours`
+    (real) is the hours of the windows that end within the week less the plan's final check for them
+    (`check_s(hours)`, real seconds), so the plan's search and its final check end inside that week's
+    windows -- `done` is where the plan line then says it ends. Never more than the week's hours;
+    None when that is no more than the study's `hours` already, or no window is left."""
+    now = now if now.tzinfo is not None else now.astimezone()
+    # The windows that end within the week: read inside a window, the rest of it, never the start of
+    # the same window a week on (that would put the answer a week later again).
+    seconds = schedule.week_seconds(now, whole=True) or schedule.week_seconds(now)
+    week = seconds / 3600.0 / float(speed)
+    offer = week
+    for _ in range(6):  # the check grows with the hours: a few steps down until both fit
+        fits = week - max(0.0, float(check_s(offer))) / 3600.0
+        if fits >= offer - 1e-9:
+            break
+        offer = fits
+    offer = math.floor(max(0.0, min(week, offer)) * 10000.0) / 10000.0  # never rounded past the week
+    if offer <= float(hours) + 1e-4:
+        return None
+    found = schedule.reach(now, offer * 3600.0 * float(speed))
+    if found is None or found[1] is None:
+        return None
+    return {"hours": offer, "done": _iso(found[1]), "done_words": when_words(found[1], now)}
 
 
 def stop_by_person(home: Any, root: Path, run: str | None) -> dict[str, Any]:

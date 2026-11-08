@@ -74,6 +74,13 @@
     return res && res.renewed ? "Scheduled a new campaign: the last one " + res.renewed + " · " + words : "Scheduled: " + words;
   };
 
+  /** The rehearsal notice (`evolvekit app --clock`), on Home and on the Study page (persona p4, H3;
+      round 2, I5): "Rehearsal clock: Mon 16 Nov 08:39, 120 × real time. Times of the windows follow
+      this clock; other dates are the real time." `clock` is the API's `{line}`. */
+  EK.rehearsalWords = function (clock) {
+    return EK.capital(clock.line) + ". Times of the windows follow this clock; other dates are the real time.";
+  };
+
   /** The name of the Set up row a study's first problem belongs to (`missing`: its step and key):
       "What to tune", "What may change: code", "Data changes", "Goal", "Time", "When it runs"; "Cases"
       before Set up; "the plan" for anything else. */

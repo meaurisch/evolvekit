@@ -450,7 +450,7 @@ def plan(req: Request) -> dict[str, Any]:
         if hours is not None and hours > study.budget.hours:
             fixes.append({"kind": "time", "hours": hours, "label": f"Allow {_hours_words(hours)} in total",
                           "detail": f"About {GOOD * tunables} combinations for all {tunables}."})
-    window = None
+    window = whole = None
     if study.schedule is not None and not chosen.blocked:
         # A scheduled study ends on its windows, not "done around 17:34" from now (persona p4, H1).
         clock = scheduler.clock_of(req.home)
@@ -458,9 +458,27 @@ def plan(req: Request) -> dict[str, Any]:
         # A campaign with a finished run goes on with what is left of its search time (m9).
         hours = scheduler.campaign_plan_hours(root, study, chosen.hours, chosen.final_check_s, now=now)
         window = scheduler.plan_window(study.schedule, hours, now=now, speed=clock.speed)
+        if hours == chosen.hours:  # the line spreads the study's own hours: the offer's done time is the line's
+            whole = _whole_window(study, pinned, timing, models, now=now, speed=clock.speed)
     return {"summary": chosen.summary(when=window["line"] if window else None), "estimated": estimated,
             "warning": warning, "fixes": fixes, "tunables": tunables, **chosen.to_json(),
-            **({"window": window} if window else {})}
+            **({"window": window} if window else {}), **({"whole_window": whole} if whole else {})}
+
+
+def _whole_window(study: Any, harness: Any, timing: dict[str, Any], models: dict[str, Any] | None, *,
+                  now: Any, speed: float) -> dict[str, Any] | None:
+    """Set up's "Search through the whole window" (persona p4 round 2, I1): the hours one week of the
+    windows gives less the final check the plan makes for them, so both end inside the windows."""
+    import dataclasses
+
+    def check_s(hours: float) -> float:
+        trial = dataclasses.replace(study, budget=dataclasses.replace(study.budget, hours=hours))
+        return plan_for(trial, harness, timing, models=models).final_check_s
+
+    try:
+        return scheduler.whole_window(study.schedule, study.budget.hours, check_s, now=now, speed=speed)
+    except (HarnessError, ValueError, ZeroDivisionError):
+        return None
 
 
 THIN, GOOD = 6, 10

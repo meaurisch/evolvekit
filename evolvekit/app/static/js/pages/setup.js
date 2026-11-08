@@ -158,6 +158,13 @@
     var id = presetOf(s), label = presets[id] ? presets[id].label : "In the windows written in study.yaml";
     return { kicker: "When it runs", value: label + (s.until ? ", until " + untilWords(s.until) : ""), sub: "It runs only inside these hours, and only while the app is running then.", action: "Change", act: "when" };
   }
+  /** What a saved When it runs is called in its toast (I2): the preset's label ("Weekends, all day",
+      ", until 31 Dec"), "your own windows", or "as soon as you start it". */
+  function whenSaved(s) {
+    if (!s) return "as soon as you start it";
+    var presets = st.doc.schedule_presets || {}, id = presetOf(s);
+    return (presets[id] ? presets[id].label : "your own windows") + (s.until ? ", until " + untilWords(s.until) : "");
+  }
   function codeSummary() {
     var h = st.h.code, c = vary().code;
     if (!h || !c) return null;
@@ -178,6 +185,8 @@
   }
 
   function planBlock() {
+    // Just saved When it runs: the old plan's times are not shown while the new one is worked out (I2).
+    if (st.planPending) return html`${EK.notice("info", "Working out the plan for these hours…")}`;
     if (!st.plan) return html`${EK.notice("warning", st.planError || "No plan yet.")}`;
     var p = st.plan, tunables = p.tunables || 0;
     if (p.blocked) {
@@ -211,15 +220,19 @@
       ${ai}${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}${notes}`;
   }
 
-  /** On a study with a schedule whose time is less than one week of its windows (`schedule_hours`,
-      real hours): the offer to search through them (persona p4, H1). On a rehearsal clock it says the
-      window's hours on that clock and in real time. */
+  /** On a study with a schedule whose time is less than one week of its windows: the offer to search
+      through them (persona p4, H1) -- the plan's `whole_window`, the week's hours less the plan's final
+      check, so the search and the final check end inside the windows; it says when it would be done
+      (round 2, I1). On a rehearsal clock it says the hours on that clock and in real time. */
   function wholeWindow() {
-    var week = st.doc.schedule_hours, hours = (study().budget || {}).hours, speed = (st.doc.clock || {}).speed;
-    if (!study().schedule || !(week > 0) || !(hours < week - 1e-4)) return "";
-    var label = "Search through the whole window (" + (speed && speed !== 1 ? EK.hours(week * speed) + " on the rehearsal clock, " + EK.hours(week) + " of real time" : EK.hours(week)) + ")";
-    return html`<div class="actions">${EK.button(label, { kind: "secondary", act: "whole-window", describedby: "whole-window-what" })}</div>
-      <p class="type-small ink-2" id="whole-window-what">It searches for as long as the windows give in one week; the final check runs at the end.</p>`;
+    var offer = st.plan && st.plan.whole_window, speed = (st.doc.clock || {}).speed;
+    if (!study().schedule || !offer || !(offer.hours > ((study().budget || {}).hours || 0) + 1e-4)) return "";
+    var h = offer.hours;
+    var size = speed && speed !== 1 ? "about " + EK.duration(h * speed * 3600) + " on the rehearsal clock, " + EK.duration(h * 3600) + " of real time"
+      : "about " + EK.duration(h * 3600);
+    var label = "Search through the whole window (" + size + "; done around " + offer.done_words + ")";
+    return html`<div class="actions">${EK.button(label, { kind: "secondary", act: "whole-window", describedby: "whole-window-what", cls: "btn-wraps" })}</div>
+      <p class="type-small ink-2" id="whole-window-what">It searches for as long as the windows give in one week, less the time its final check needs, so the final check runs at the end, inside the windows.</p>`;
   }
 
   function testRun() {
@@ -260,7 +273,7 @@
     var head = missing ? EK.plural(missing, "thing") + " missing" : blocked ? "Not ready: the plan cannot work" : failed ? "Not ready: the test run failed"
       : st.plan && st.plan.warning ? "Ready, but the plan is thin" : "Ready to start?";
     var why = missing ? problems[0].text : blocked ? "Fix the plan first." : failed ? "Fix the test run first." : t.state === "running" ? "Start works while the test runs." : "";
-    var can = !missing && !blocked && !failed;
+    var can = !missing && !blocked && !failed && !st.planPending;  // never a Start on the old plan (I2)
     var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary(), whenSummary()].filter(Boolean);
     var c = study().cases || {}, rules = (study().constraints || []).length, measures = Object.keys(study().kpis || {}).length;
     var lim = study().limits || {}, ai = ((study().budget || {}).ai || {}).enabled;
@@ -308,9 +321,10 @@
         }
       },
       "whole-window": function () {
-        var week = st.doc.schedule_hours;
-        return save({ budget: Object.assign({}, study().budget, { hours: week }) }, main).then(function () {
-          if ((study().budget || {}).hours === week) EK.toast("done", "It searches through the whole window");  // not after a refusal
+        var offer = st.plan && st.plan.whole_window;
+        if (!offer) return;
+        return save({ budget: Object.assign({}, study().budget, { hours: offer.hours }) }, main).then(function () {
+          if ((study().budget || {}).hours === offer.hours) EK.toast("done", "It searches through the whole window");  // not after a refusal
         });
       },
       test: function () {
@@ -725,19 +739,37 @@
       if (on === "own") options.push({ id: "own", label: "The windows written in study.yaml" });
       return html`<form class="sub-section" data-submit="save-when">
         <fieldset class="field"><legend class="field-label">When it runs</legend>
-          ${options.map(function (o) { return html`<label class="check-line"><input type="radio" name="when-preset" value="${o.id}"${EK.attrs({ checked: o.id === on })}> ${o.label}</label>`; })}</fieldset>
+          <div class="choice-lines">${options.map(function (o) { return html`<label class="check-line choice-line"><input type="radio" name="when-preset" value="${o.id}"${EK.attrs({ checked: o.id === on })}> <span>${o.label}</span></label>`; })}</div></fieldset>
         <div class="field"><label class="field-label" for="when-until">Until (optional)</label>
           <input class="input" type="date" id="when-until" value="${(s && s.until) || ""}" style="width:200px"></div>
         <p class="type-small ink-2">It runs only inside these hours, and only while the app is running then.</p>
         <div class="actions">${EK.button("Save", { type: "submit" })}${EK.button("Cancel", { kind: "quiet", act: "drawer-close" })}</div></form>`;
     }
     var dacts = {
-      "save-when": function () {
+      "save-when": function (form) {
+        // One save at a time, and the answer shows at once (persona p4 round 2, I2: the summary kept the
+        // old words for seconds while the plan was worked out, so Save was clicked twice): Save stays
+        // disabled until the answer; then the page is drawn with the new windows, the drawer closes and
+        // a toast names them; the plan follows when it is worked out.
+        if (st.savingWhen) return;
         var picked = (document.querySelector('input[name="when-preset"]:checked') || {}).value || "now";
         var until = document.getElementById("when-until").value;
         var s = study().schedule, windows = picked === "own" ? (s || {}).windows : presets[picked] && presets[picked].schedule.windows;
         var change = picked === "now" || !windows ? { schedule: null } : { schedule: scheduleOf(s, windows, until) };
-        return save(change, main).then(function () { EK.closeDrawer(); EK.toast("done", "Saved"); });
+        var button = form && form.querySelector && form.querySelector('button[type="submit"]');
+        var mine = st;
+        st.savingWhen = true;
+        if (button) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
+        return EK.patch(EK.studyPath(st.slug), change).then(function (doc) {
+          st.doc = doc; st.planPending = true;
+          draw(main);
+          EK.closeDrawer();
+          EK.toast("done", "Saved: " + whenSaved(doc.study.schedule));
+          return loadPlan().then(function () { st.planPending = false; draw(main); });
+        }, function (err) {
+          if (button) { button.disabled = false; button.removeAttribute("aria-busy"); }
+          EK.fail(err);
+        }).then(function () { mine.savingWhen = false; });
       }
     };
     EK.openDrawer({ kind: "when", title: "When it runs", sub: "Whenever you start it, or only in some hours", body: body(), acts: dacts, backLabel: "Back to Set up" });

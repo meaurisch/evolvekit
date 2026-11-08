@@ -837,6 +837,9 @@
   function runStartedAt() { var r = (st.doc.runs || []).filter(function (x) { return x.id === st.run; })[0]; return r ? r.started_at : ""; }
   function notices() {
     var s = st.status, out = [];
+    // A rehearsal clock: which times follow it, as on Home (the header's "today 19:41" is the real
+    // time; persona p4 round 2, I5).
+    if (st.doc.clock && st.doc.clock.line) out.push(EK.notice("warning", EK.rehearsalWords(st.doc.clock)));
     // A study with a schedule: its campaign's line under the header (the next window, a pause, a missed window).
     var camp = (st.doc.state || {}).campaign;
     // A paused campaign is resumed from here: Start arms it again (D4: a person's stop pauses it).

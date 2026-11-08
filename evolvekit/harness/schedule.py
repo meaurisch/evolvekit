@@ -225,13 +225,17 @@ class Schedule:
     def past_until(self, now: datetime, *, tz: tzinfo | None = None) -> bool:
         return self.until is not None and self.next_edge(now, tz=tz) is None
 
-    def week_seconds(self, now: datetime, *, tz: tzinfo | None = None) -> float:
+    def week_seconds(self, now: datetime, *, tz: tzinfo | None = None, whole: bool = False) -> float:
         """The seconds the windows give in the week from `now` (`now` to seven days on), up to
-        `until`: 47 h 59 min for weekends, 25 h for weeknights."""
+        `until`: 47 h 59 min for weekends, 25 h for weeknights. `whole`: only windows that end
+        within the week -- read on a Saturday morning, this weekend's rest and not next Saturday's
+        morning (0 when every window runs past the week)."""
         begin = _aware(now, tz).astimezone(_UTC)
         end = begin + timedelta(days=7)
         total = 0.0
         for start, stop in self._spans_utc(now, tz):
+            if whole and stop > end:
+                continue
             low, high = max(start, begin), min(stop, end)
             if high > low:
                 total += (high - low).total_seconds()

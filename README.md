@@ -2027,9 +2027,11 @@ offered while the campaign is armed or a new campaign waits to start a fresh
 run. Set up's plan of a scheduled
 study says when it would end on its windows (*starts Sat 00:00; about 18 min
 of search; done around Sat 00:18*), and when the study's hours are less than a
-week of its windows give it offers *Search through the whole window (48 h)*:
-it sets `budget.hours` to that week's hours, so the search runs as long as the
-windows give and the final check runs at the end. The campaign keeps when each session ran,
+week of its windows give it offers *Search through the whole window (about
+47 h; done around Sun 22:54)*: it sets `budget.hours` to that week's window
+hours less the time the plan's final check needs, so the search runs as long as
+the windows give and the final check still ends inside them (read inside a
+window, the week is the rest of it, never the same window a week on). The campaign keeps when each session ran,
 on the clock the windows follow (`sessions` in the study's `campaign.json`),
 and says it: *Ran in its windows: Sat 00:04 – Sun 09:27* — on the Study page
 beside the campaign's line and under the verdict, and in *Past runs*. `study status` says the

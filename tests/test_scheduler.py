@@ -1129,6 +1129,74 @@ def test_a_scheduled_plan_says_when_it_ends_on_its_windows():
         "real hours of search: at 120 x a weekend is 24 real minutes"
 
 
+@pytest.mark.parametrize("speed", [1.0, 120.0])
+def test_the_whole_window_leaves_room_for_the_final_check(speed):
+    """Persona p4 round 2, I1: "Search through the whole window" set the study's hours to the whole
+    weekend, and the plan said done next Saturday. Its hours are the week's window hours less the
+    plan's final check (one that grows with the hours, as the plan's does), so the plan ends inside
+    the weekend; never fewer than the hours the study has, never more than the week's."""
+    from evolvekit.harness.schedule import PRESETS, Schedule
+
+    weekend = Schedule.parse(PRESETS["weekends"]["schedule"])
+    friday = local("2026-11-13 17:30")
+    week = (47 + 59 / 60) / speed  # real hours: Sat 00:00 - Sun 23:59
+
+    def check(hours):  # real seconds of the final check for a study of `hours`
+        return 30.0 + 0.02 * hours * 3600.0
+
+    offer = scheduler.whole_window(weekend, 0.3 / speed, check, now=friday, speed=speed)
+    assert offer is not None
+    hours = offer["hours"]
+    assert hours + check(hours) / 3600.0 <= week, "the search and its final check fit in the weekend"
+    assert hours == pytest.approx(week - check(week) / 3600.0, abs=0.001)
+    done = datetime.fromisoformat(offer["done"])
+    assert local("2026-11-15 22:00") < done <= local("2026-11-15 23:59"), offer
+    assert offer["done_words"] == scheduler.when_words(done, friday) and offer["done_words"].startswith("Sun ")
+    after = scheduler.plan_window(weekend, hours, now=friday, speed=speed)
+    assert after["done"] == offer["done"] and after["line"].endswith("done around " + offer["done_words"]), \
+        "the plan line after the click says the offer's done time"
+    assert scheduler.whole_window(weekend, hours, check, now=friday, speed=speed) is None, "nothing more to offer"
+    assert scheduler.whole_window(weekend, week, check, now=friday, speed=speed) is None, "never fewer hours"
+    bare = scheduler.whole_window(weekend, 0.3 / speed, lambda hours: 0.0, now=friday, speed=speed)
+    assert bare["hours"] <= week and datetime.fromisoformat(bare["done"]) <= local("2026-11-15 23:59"), \
+        "never more than the week's hours"
+    saturday = scheduler.whole_window(weekend, 0.1 / speed, check, now=local("2026-11-14 10:00"), speed=speed)
+    assert local("2026-11-15 20:00") < datetime.fromisoformat(saturday["done"]) <= local("2026-11-15 23:59"), \
+        "read inside the window: the rest of this weekend, not next Saturday's morning as well"
+    rest = (37 + 59 / 60) / speed  # Sat 10:00 - Sun 23:59
+    assert saturday["hours"] == pytest.approx(rest - check(rest) / 3600.0, abs=0.001)
+
+
+@pytest.mark.parametrize("speed", [1.0, 120.0])
+def test_the_plan_offers_the_whole_window_that_ends_inside_it(tmp_path, speed):
+    """I1 through the API: the plan of a weekend study on Friday 17:30 offers `whole_window` (hours,
+    done); after the hours are saved, the plan's own line ends at that time, inside the weekend."""
+    from test_app_server import call
+
+    home, root = campaign_study(tmp_path)
+    scheduler.write_clock(home.root, local("2026-11-13 17:30"), speed)
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        status, plan = call(server, "GET", f"/api/studies/{root.name}/plan")
+        assert status == 200 and "whole_window" in plan, plan
+        offer = plan["whole_window"]
+        week = (47 + 59 / 60) / speed
+        assert load_study(root).budget.hours < offer["hours"] < week
+        status, document = call(server, "GET", f"/api/studies/{root.name}")
+        budget = {**document["study"]["budget"], "hours": offer["hours"]}
+        status, document = call(server, "PATCH", f"/api/studies/{root.name}", {"budget": budget})
+        assert status == 200 and document["study"]["budget"]["hours"] == pytest.approx(offer["hours"])
+        status, after = call(server, "GET", f"/api/studies/{root.name}/plan")
+        assert offer["hours"] + after["final_check_s"] / 3600.0 <= week, "room for the final check"
+        assert after["window"]["done"] == offer["done"], (after["window"], offer)
+        assert "done around Sun " in after["window"]["line"], after["window"]["line"]
+        assert datetime.fromisoformat(after["window"]["done"]) <= local("2026-11-15 23:59")
+        assert "whole_window" not in after, "already the whole window"
+    finally:
+        server.stop()
+
+
 def test_the_plan_and_the_study_of_a_scheduled_study_carry_the_window_clock(tmp_path):
     from test_app_server import call
 
