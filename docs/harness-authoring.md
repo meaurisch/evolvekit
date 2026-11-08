@@ -388,7 +388,11 @@ source folder each study then names.
    step never writes your folder; the restore build runs in it);
    `code.build` — that checkout builds within `build_timeout_s`;
    `code.samples` — the first sample solves from it (a
-   warning when there are no samples). With a build, `code.restore` warns
+   warning when there are no samples); `code.settings` — that sample solves
+   again with no settings at all, since a code study passes only the settings
+   it fixes, so `solve` must read each one with a fallback
+   (`settings.get(name, default)`); it adds no line when it passes. With a
+   build, `code.restore` warns
    when building your own folder back into the application's Python failed,
    and a passing line says `code studies on this harness try one combination
    at a time`: a note, which leaves the exit code as it is.

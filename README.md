@@ -1561,7 +1561,19 @@ plan: automatic (budget 0.1 h)
 ```
 
 With a manual plan it says the rounds and combinations instead, e.g.
-`plan: 2 rounds × 2 combinations, budget 0.05 h`.
+`plan: 2 rounds × 2 combinations, budget 0.05 h`. With fewer than three
+held-back cases (but at least one) it adds a note, which leaves the exit code
+as it is:
+
+```
+note: With 2 held-back cases a 'use' is unlikely: the worst case stays wide. Hold back more cases for a firmer answer.
+```
+
+Three is the number [examples/cli-solver](examples/cli-solver/README.md#4-find-out-whether-it-is-real)
+gives: with two, "not distinguishable" is the likely answer even for a real
+gain. `study compile` ends its plan line with the same note, and the app
+shows it before the start and on the Study page (`notes` in the study's and
+the run's status documents).
 
 On a fresh study, before either, it says:
 
@@ -1600,9 +1612,16 @@ the app does, so closing the terminal does not stop it. While another study
 runs, it is queued: it says `queued behind <name>`, and the app, `study
 wait` or `study watch` starts it when that study finishes. `study watch
 depot-a` prints the state line each time it changes; `study status depot-a`
-prints it once; `study stop depot-a` asks the run to stop. `study verdict`
-prints the verdict's own sentence and its advice, nothing more; `--json`
-prints the whole verdict document (see [docs/app.md](docs/app.md#for-developers)).
+prints it once; `study stop depot-a` asks the run to stop. While a study with
+AI help searches, `study status` also says what its AI has spent (`AI: $0.42
+of $1.00`), and after the first round, when the time will not buy every
+planned round, how many will run (`At this pace about 2 of the 11 planned
+rounds will run.`). `study verdict` prints the verdict's own sentence and its
+advice, then how much of the plan ran when less of it did, and for a study
+with AI help what its AI spent (`AI: $0.87 of $1.00`, from the run's
+`usage.jsonl`; `AI: 14 requests` for a provider that counts requests); the
+report's *How it ran* says the same. Nothing else; `--json` prints the whole
+verdict document (see [docs/app.md](docs/app.md#for-developers)).
 
 `study preview`, `study compile` and `study run` take a study folder or a
 study's name: a value that is a folder on disk is a folder, anything else is
@@ -1649,7 +1668,12 @@ stops `wait` and `watch`, never the run.
   and keeps its tables (`preview/tables.sqlite`, with `orig_*` copies of the
   request tables) and its timing.
 - **The automatic plan** turns that timing and `budget.hours` into rounds and
-  combinations per round, keeping back the time the final check needs. When
+  combinations per round, keeping back the time the final check needs. With
+  AI help, each round also pays the time the AI takes to write its changes,
+  one after another: the plan assumes about 10 s for a reply (`diff`,
+  `rewrite`) and 30 s for a change by the coding agent (`agent_patch`), and
+  its line says what it assumes per change (`about 3 rounds, about 21
+  combinations tried (assumes about 20 s for each AI change), …`). When
   the hours buy fewer than three rounds it says so, with three concrete ways
   out: fewer cases, a shorter time limit, or more hours.
   `plan: {auto: false, children: 4, generations: 6}` overrides it.
@@ -1830,8 +1854,9 @@ that does not exist, a branch that changes files outside the open files
 (widen `vary.code.open` or the harness's `code.open`), or one that does not
 apply on the starting commit (rebase it onto it). `study verdict --json` then
 holds `candidates`: one entry per branch in the order given, `{ref, commit,
-decision, line, mean_pct, ci95_pct, worst_pct, chance}`, each with its own
-line. The run's own line names the branch with the largest mean among those
+decision, line, mean_pct, ci95_pct, worst_pct, chance, by_case}`, each with
+its own line and its own figures per held-back case (`by_case`, as the
+verdict's own), which the report's *Branches compared* table shows too. The run's own line names the branch with the largest mean among those
 whose decision is `use`, as `Of 2 branches, nearest-first: …`; when none is,
 it says `None of the 2 branches is shown to beat the starting point.`, the
 decision is `keep`, and today's code stays. The report says how many were
