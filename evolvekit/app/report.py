@@ -85,12 +85,38 @@ def _table(head: list[str], rows: list[list[Any]]) -> list[str]:
 _OUTCOME = {"better": "toward the goal", "worse": "away from the goal", "same": "the same", "failed": "did not finish"}
 
 
+_NOTHING = ("No cases were checked.", "Nothing changed.", "No files yet.")
+"""What a section says when it has nothing to say: a PR's body leaves such a section out."""
+
+
+def _without_empty(lines: list[str]) -> list[str]:
+    """`lines` without the `## ` sections whose only text is one of `_NOTHING`."""
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("## "):
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].startswith("## ")), len(lines))
+            body = [line for line in lines[i + 1:end] if line.strip()]
+            if len(body) == 1 and body[0] in _NOTHING:
+                while out and not out[-1].strip():
+                    out.pop()  # the blank line before the section goes with it
+                i = end
+                continue
+        out.append(lines[i])
+        i += 1
+    return out
+
+
 def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None,
-                  root: Path | str | None = None) -> str:
+                  root: Path | str | None = None, *, notes: list[str] | tuple[str, ...] = (),
+                  drop_empty: bool = False) -> str:
     """The report as Markdown: the verdict, the held-back cases, what changed,
     how it ran, the rule and the files. `results` (the page's document) adds
     the study's name and the application; `root`, the study folder, says
-    where the files' paths start."""
+    where the files' paths start. `notes` follow the verdict's own sentences,
+    each "Note: …" (a PR's body: a thin final check, `plan.check_notes`);
+    `drop_empty` leaves out a section that would only say there is nothing
+    (a PR's body)."""
     results = results or {}
     measure = verdict.get("measure") or {}
     direction = measure.get("direction") or "lower"
@@ -98,6 +124,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     out = [f"# {name}" + (f" - {application}" if application else ""), "", "## Verdict", "", verdict.get("line", "")]
     if verdict.get("advice"):
         out += ["", verdict["advice"]]
+    for note in notes:
+        out += ["", f"Note: {note}"]
     facts = []
     if verdict.get("ci95_pct"):
         low, high = verdict["ci95_pct"]
@@ -189,4 +217,6 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     out += ["", "## Files" + (f", in the study folder {Path(root).resolve()}" if root is not None else ""), ""]
     files = verdict.get("files") or []
     out += [f"- {path}" for path in files] if files else ["No files yet."]
+    if drop_empty:
+        out = _without_empty(out)
     return "\n".join(out) + "\n"

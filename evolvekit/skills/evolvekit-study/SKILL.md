@@ -117,7 +117,8 @@ When the request asks to change the application's code (its source, or a file it
   It exits 2 with a sentence when the study or a branch is refused (files outside the open files, a change that does not apply); relay it and stop.
   There is no plan line: say how many branches it compares, run `evolvekit study open SLUG`, give the address, and wait as in step 5 when asked.
 - A pull request: run `evolvekit study pr SLUG` first (add `--base BRANCH` when the engineer names the branch it goes into). It prints the verdict's line and what it would do, and does nothing.
-  Show those lines as they are. Only after the engineer's yes run `evolvekit study pr SLUG --yes`; a yes in the request counts once the lines are shown.
+  Show those lines as they are. When it prints a `note:` line (a final check on too few held-back cases), repeat that note in your reply, word for word, before any `--yes`.
+  Only after the engineer's yes run `evolvekit study pr SLUG --yes`; a yes in the request counts once the lines are shown.
   It exits 1 when part of it failed: say the sentence it printed, and what it says was made.
 - Report as in step 6: the verdict's line and its advice, and nothing more; after `--yes`, also the PR's address it printed.
 - Never push, and never open a pull request, any other way.

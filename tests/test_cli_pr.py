@@ -117,8 +117,58 @@ def test_pr_without_yes_only_prints(tmp_path, capsys, monkeypatch):
     # Review ruling: a PR is read on another computer -- no local path (it carries the account's name).
     root = home / "studies" / slug
     assert str(home) not in body and str(root.resolve()) not in body and str(tmp_path) not in body
-    assert "\n## Files\n" in body
+    assert "## Files" not in body and "No files yet." not in body, "persona round 3, E6: no empty section in a PR"
     assert git(repo, "status", "--porcelain") == ""
+
+
+THIN = ("note: The final check had only 1 held-back case: its worst case stays wide, so this answer is thin. "
+        "Hold back more cases for a firmer answer.")
+
+
+def test_pr_says_again_that_a_final_check_on_few_cases_is_thin(tmp_path, capsys, monkeypatch):
+    """Persona round 3, E3: the plan said a 'use' on 2 held-back cases was unlikely; `study pr` and the
+    PR's body say it again, under the verdict, before anything is pushed."""
+    home, slug, _ = finished_code_run(tmp_path)  # one held-back case
+    monkeypatch.setattr(pr, "push_branch", lambda *a, **k: pytest.fail("no remote"))
+    assert main(["study", "pr", slug, "--home", str(home)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("the verdict: ") and lines[1] == THIN, "under the verdict, before the plan"
+    assert lines[2].startswith("branch: ")
+    body = (home / "studies" / slug / "runs" / "r1" / "pr.md").read_text(encoding="utf-8")
+    verdict = body.split("## Verdict", 1)[1].split("\n## ", 1)[0]
+    assert THIN.replace("note: ", "Note: ") in verdict, "pr.md carries it under the verdict"
+    assert main(["study", "pr", slug, "--yes", "--home", str(home)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    made = next(i for i, line in enumerate(lines) if line.startswith("made the branch"))
+    assert lines[1] == THIN and made > 1, "with --yes too, before it is done"
+
+
+def test_pr_on_three_held_back_cases_has_no_thin_note(tmp_path, capsys):
+    home, slug, _ = finished_code_run(tmp_path)
+    run_dir = home / "studies" / slug / "runs" / "r1"
+    Home(home).split(slug, 3)
+    shutil.copyfile(home / "studies" / slug / "study.yaml", run_dir / "study.yaml")  # the run's own copy
+    assert main(["study", "pr", slug, "--json", "--home", str(home)]) == 0
+    assert json.loads(capsys.readouterr().out)["notes"] == []
+    assert main(["study", "pr", slug, "--home", str(home)]) == 0
+    assert "note: " not in capsys.readouterr().out
+    assert "Note: " not in (run_dir / "pr.md").read_text(encoding="utf-8")
+
+
+def test_a_prs_body_keeps_the_sections_that_have_something_to_say(tmp_path, capsys):
+    """E6: the body leaves out a section that would only say there is nothing; the report keeps them all."""
+    home, slug, _ = finished_code_run(tmp_path)
+    run_dir = home / "studies" / slug / "runs" / "r1"
+    (run_dir / "downloads").mkdir()
+    (run_dir / "downloads" / "settings.json").write_text("{}", encoding="utf-8")
+    assert main(["study", "pr", slug, "--home", str(home)]) == 0
+    capsys.readouterr()
+    body = (run_dir / "pr.md").read_text(encoding="utf-8")
+    assert "\n## Files\n" in body and "runs/r1/downloads/settings.json" in body
+    assert all(empty not in body for empty in ("No files yet.", "No cases were checked.", "Nothing changed."))
+    (run_dir / "downloads" / "settings.json").unlink()
+    assert main(["study", "report", slug, "--markdown", "--home", str(home)]) == 0
+    assert "No files yet." in capsys.readouterr().out, "the report itself keeps every section"
 
 
 def test_pr_creates_branch_from_commit(tmp_path, capsys, monkeypatch):

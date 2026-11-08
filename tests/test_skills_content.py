@@ -585,3 +585,16 @@ def test_the_study_skill_says_the_thin_check_note_with_the_plan_and_may_quote_th
     section = _section(_text(REFERENCE), "The verdict document")
     candidates = next(line for line in section.splitlines() if line.startswith("| `candidates`"))
     assert "`by_case`" in candidates
+
+
+PR_NOTE = ("When it prints a `note:` line (a final check on too few held-back cases), repeat that note in your "
+           "reply, word for word, before any `--yes`.")
+
+
+def test_the_study_skill_repeats_study_prs_thin_check_note():
+    """Persona round 3, E3: a 'use' on 2 held-back cases went to a PR without the note said again."""
+    section = _section(_body(STUDY), "Code studies")
+    assert PR_NOTE in section and section.index(PR_NOTE) > section.index("evolvekit study pr SLUG")
+    commands = _section(_text(REFERENCE), "Commands")
+    row = next(line for line in commands.splitlines() if line.startswith("| `evolvekit study pr SLUG"))
+    assert "a `note:` line under it" in row, "the reference's row says when study pr prints a note"

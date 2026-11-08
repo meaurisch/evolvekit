@@ -97,6 +97,17 @@ def plan_notes(test_cases: int) -> list[str]:
             "stays wide. Hold back more cases for a firmer answer."]
 
 
+def check_notes(test_cases: int) -> list[str]:
+    """`plan_notes` said again after the final check, where the answer is acted
+    on (`study pr` and the PR's body): with fewer than THIN_CHECK_CASES
+    held-back cases (but some), that the answer is thin. A fact about the check,
+    not a claim about the change."""
+    if not 0 < test_cases < THIN_CHECK_CASES:
+        return []
+    return [f"The final check had only {test_cases} held-back case{'s' if test_cases != 1 else ''}: its worst case "
+            "stays wide, so this answer is thin. Hold back more cases for a firmer answer."]
+
+
 @dataclass(frozen=True)
 class Plan:
     workers: int

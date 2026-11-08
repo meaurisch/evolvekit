@@ -1883,7 +1883,9 @@ python -m evolvekit study pr shorter-tours              # what it would do; noth
 python -m evolvekit study pr shorter-tours --yes        # do it
 ```
 
-`study pr` first prints the verdict's line, then the branch
+`study pr` first prints the verdict's line (and, when the final check had
+fewer than 3 held-back cases, a `note:` line under it: the answer is thin, the
+same sentence the body carries under the verdict), then the branch
 `evolvekit/<slug>-<run>` and the repository it goes in, the change (`+N −M
 lines in solver.py`), where it pushes and the PR, and the body's file, and
 ends with `nothing was done: run it again with --yes to do this`. With `--yes`
@@ -1894,7 +1896,8 @@ remote), and opens the PR with `gh` when the remote is on GitHub and `gh` is
 installed; otherwise it says where the branch is and where the body is.
 `--base BRANCH` is the branch the PR goes into (default: the repository's
 default branch), `--draft` opens it as a draft. The body is the run's report,
-as `study report --markdown` writes it, under a header that names the change;
+as `study report --markdown` writes it, under a header that names the change,
+without a section that would only say there is nothing (no files, say);
 it names no folder of your computer. After `from: working` the branch is made
 on `HEAD` with the change only (your uncommitted files are not in it); a
 change that does not apply on `HEAD` is refused with the path of
@@ -1914,7 +1917,11 @@ that repository while it exists (`git worktree list` shows it under
 combination's evaluation has finished, the final check's when the check
 ends, and any left (after a crash) when the run ends, the best's included:
 no folder stays. `study export --diff` and `study pr` rebuild the change from
-the run's recorded diff. evolvekit deletes only its own entries: it never
+the run's recorded diff. A folder holds its commit's files as committed; a
+combination's change is recorded with your repository's own line-ending rules
+(`core.autocrlf`, `.gitattributes`), as your git would commit it, and a file a
+change rewrites keeps the line endings it had (a coding agent that writes a
+whole file with CRLF does not turn two changed lines into a rewrite). evolvekit deletes only its own entries: it never
 runs `git worktree prune`, which would also drop yours. A folder another
 program still holds open stays, and the run's log (or `study pr`) names it:
 remove it, then run `git worktree prune` in your repository. Deleting a study

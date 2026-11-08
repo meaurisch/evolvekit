@@ -21,7 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +69,9 @@ class PrPlan:
     """The study started `from: working`: the branch is made on HEAD (decision 35)."""
     why_not: str = ""
     """Why no PR is opened (no remote, not on GitHub, no gh); empty when one is."""
+    notes: list[str] = field(default_factory=list)
+    """Said under the verdict's line, here and in the body: a final check on too few
+    held-back cases for a firm answer (`plan.check_notes`)."""
 
     def to_json(self) -> dict[str, Any]:
         out = {k: str(v) if isinstance(v, Path) else v for k, v in asdict(self).items()}
@@ -182,15 +185,18 @@ def _remote(toplevel: Path) -> tuple[str | None, str | None]:
     return remote, url
 
 
-def _body(run: _Run, document: dict[str, Any], ref: str | None, base: str, from_head: bool) -> str:
-    """The report as `study report --markdown` writes it, with a header that says what the PR is.
-    It names files relative to the study folder only (`root=None`): a PR is read on another
-    computer, and the folder's absolute path carries the account's name."""
+def _body(run: _Run, document: dict[str, Any], ref: str | None, base: str, from_head: bool,
+          notes: list[str]) -> str:
+    """The report as `study report --markdown` writes it, with a header that says what the PR is,
+    `notes` under the verdict, and no section that would only say there is nothing. It names
+    files relative to the study folder only (`root=None`): a PR is read on another computer,
+    and the folder's absolute path carries the account's name."""
     from evolvekit.app import jobs
     from evolvekit.app.report import render_report
     from evolvekit.status import build_status
 
-    report = render_report(document, jobs.results(run.root, run.run, build_status), root=None)
+    report = render_report(document, jobs.results(run.root, run.run, build_status), root=None, notes=notes,
+                           drop_empty=True)
     where = f"HEAD ({base[:12]})" if from_head else base[:12]
     if ref is not None:
         header = (f"This PR holds the branch `{ref}` as the bake-off {run.run} of the evolvekit study "
@@ -207,6 +213,7 @@ def plan_pr(root: Path, run: str | None, *, base: str | None = None, draft: bool
     """What `study pr` would do; writes `runs/<id>/pr.md` and touches nothing else."""
     from evolvekit import tree
     from evolvekit.app.verdict import build_verdict
+    from evolvekit.harness.plan import check_notes
 
     found = _Run(root, run)
     if found.stayed:
@@ -228,6 +235,7 @@ def plan_pr(root: Path, run: str | None, *, base: str | None = None, draft: bool
         raise HarnessError(f"vary.code.repo: {exc}") from None
     document = build_verdict(found.root, found.run)
     line = str(document.get("line") or "")
+    notes = check_notes(int((document.get("held_back") or {}).get("cases") or 0))
     ref = found.ref()
     remote, url = _remote(repo.toplevel)
     gh_found = shutil.which("gh") is not None
@@ -238,20 +246,21 @@ def plan_pr(root: Path, run: str | None, *, base: str | None = None, draft: bool
     title = (f"{name}: the branch {ref} from evolvekit study {found.root.name}" if ref is not None
              else f"{name}: the change of evolvekit study {found.root.name}")
     body_path = found.dir / BODY
-    body_path.write_text(_body(found, document, ref, base_commit, from_head), encoding="utf-8", newline="\n")
+    body_path.write_text(_body(found, document, ref, base_commit, from_head, notes), encoding="utf-8",
+                         newline="\n")
     stat = tree.diff_stat(found.block)
     return PrPlan(toplevel=repo.toplevel, branch=f"evolvekit/{found.root.name}-{found.run}", base_commit=base_commit,
                   best_id=found.best_id, files=list(stat["files"]), added=int(stat["added"]),
                   removed=int(stat["removed"]), remote=remote, remote_url=url, gh=not why_not, title=title,
                   body_path=body_path, base_branch=base, draft=draft, run_dir=found.dir, repo_path=repo.path,
-                  block=found.block, line=line, ref=ref, from_head=from_head, why_not=why_not)
+                  block=found.block, line=line, ref=ref, from_head=from_head, why_not=why_not, notes=notes)
 
 
 def describe(plan: PrPlan) -> list[str]:
     """What `study pr` will do, one line each; the verdict's line first (decision 29)."""
     where = f"HEAD ({plan.base_commit[:12]})" if plan.from_head else plan.base_commit[:12]
     what = f"the branch {plan.ref} (combination {plan.best_id})" if plan.ref is not None else f"combination {plan.best_id}"
-    lines = [f"the verdict: {plan.line}",
+    lines = [f"the verdict: {plan.line}", *(f"note: {note}" for note in plan.notes),
              f"branch: {plan.branch} in {plan.toplevel}",
              f"from: {where} with {what}: +{plan.added} −{plan.removed} lines in {', '.join(plan.files)}"]
     if plan.from_head:
