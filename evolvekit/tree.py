@@ -30,8 +30,10 @@ from typing import Any
 
 __all__ = [
     "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError", "applies",
+    "apply_in",
     "changed_files", "diff_between", "diff_stat", "git", "git_version", "glob_pattern", "materialise",
-    "normalise_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "touches_only",
+    "normalise_diff", "remove", "remove_all", "resolve_base", "resolve_commit", "snapshot_working", "staged_diff",
+    "touches_only",
     "tree_dir",
 ]
 
@@ -348,6 +350,52 @@ def applies(repo: Repo, base: str, diff: str) -> bool:
                 raise
             return False
     return True
+
+
+def _sides_prefixed(diff: str) -> bool:
+    """Whether the diff's file headers carry git's `a/` and `b/` (else `-p0`)."""
+    names = [_side_raw(text[4:]) for kind, text in _lines(diff)
+             if kind == "h" and text.startswith(("--- ", "+++ "))]
+    names = [name for name in names if name != "/dev/null"]
+    return not names or any(name[:2] in ("a/", "b/") for name in names)
+
+
+def _side_raw(path: str) -> str:
+    if path.startswith('"'):
+        return _unquote(_quoted_prefix(path)[0])
+    return path.split("\t")[0].strip()
+
+
+def apply_in(made: Tree, diff: str, *, directory: str = "") -> None:
+    """Apply a diff (an operator's reply) to a tree's worktree and its index.
+
+    Paths are relative to `directory` (the repo's folder, `Repo.prefix`), with
+    or without git's `a/`/`b/`. Hunk counts are recounted and a hunk without
+    context lines is accepted (`--unidiff-zero`): models write both. Raises
+    `TreeError("the diff does not apply: …")`; the tree may then hold part of it.
+    """
+    args = ["apply", "--index", "--whitespace=nowarn", "--recount", "--unidiff-zero"]
+    if directory:
+        args.append(f"--directory={directory}")
+    if not _sides_prefixed(diff):
+        args.append("-p0")
+    with tempfile.TemporaryDirectory(prefix="evolvekit-reply-") as scratch:
+        patch = Path(scratch) / "reply.patch"
+        patch.write_text(diff if diff.endswith("\n") else diff + "\n", encoding="utf-8",
+                         errors="surrogateescape", newline="\n")
+        try:
+            _git(made.worktree, *args, str(patch))
+        except TreeError as exc:
+            if str(exc) == _MISSING:
+                raise
+            raise TreeError(f"the diff does not apply: {exc}") from None
+
+
+def staged_diff(made: Tree, base: str) -> str:
+    """Everything the tree's worktree now holds against `base`, as a candidate's block
+    (cumulative, toplevel paths with `a/`/`b/`): `git add -A`, then the index's diff."""
+    _git(made.worktree, "add", "-A", "--", ".")
+    return _git(made.worktree, "diff", "--cached", *_DIFF, base)
 
 
 # --- reading diffs -------------------------------------------------------------

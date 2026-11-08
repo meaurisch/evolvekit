@@ -31,7 +31,17 @@ from typing import Any, Iterable, Sequence
 from evolvekit.candidate import Candidate
 from evolvekit.config import ArchiveConfig, DescriptorConfig
 
-__all__ = ["Archive", "Axis", "Cell", "Placement", "descriptor_value", "sigmoid"]
+__all__ = ["Archive", "Axis", "Cell", "Placement", "descriptor_value", "diff_complexity", "sigmoid"]
+
+
+def diff_complexity(diff: str) -> int:
+    """A diff's size: the lines it adds plus the lines it removes (0 for the empty diff)."""
+    if not diff.strip():
+        return 0
+    from evolvekit.tree import diff_stat  # only for a tree problem
+
+    stat = diff_stat(diff)
+    return int(stat["added"]) + int(stat["removed"])
 
 
 def sigmoid(x: float) -> float:
@@ -42,15 +52,17 @@ def sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def descriptor_value(candidate: Candidate, kpi: str) -> float:
+def descriptor_value(candidate: Candidate, kpi: str, *, tree: bool = False) -> float:
     """The candidate's value on one descriptor axis.
 
     KPIs come from the evaluator. `complexity` is special only in that the
-    candidate can compute it from its own block when no stage has run yet.
+    candidate can compute it from its own block when no stage has run yet: the
+    block's AST size for a skeleton, and for a tree problem (`tree`), where the
+    block is a diff, the number of lines it adds and removes.
     """
     value = candidate.kpis.get(kpi)
     if value is None and kpi == "complexity":
-        value = float(candidate.complexity)
+        value = float(diff_complexity(candidate.block) if tree else candidate.complexity)
     try:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -152,19 +164,23 @@ class Archive:
     """Children the similarity gate flagged. Unlike the two above they were
     still evaluated, so this is a note about prompt quality, not wasted
     evaluator time."""
+    tree: bool = False
+    """A tree problem: a block is a diff, and its `complexity` is its size
+    (`diff_complexity`), so differently sized changes spread over the grid."""
 
     # -- construction ----------------------------------------------------
 
     @staticmethod
-    def from_config(config: ArchiveConfig) -> "Archive":
+    def from_config(config: ArchiveConfig, *, tree: bool = False) -> "Archive":
         return Archive(
             axes=[Axis.from_config(d) for d in config.descriptors],
             top_k=config.top_k,
+            tree=tree,
         )
 
     @staticmethod
     def from_records(
-        records: Iterable[dict[str, Any]], config: ArchiveConfig
+        records: Iterable[dict[str, Any]], config: ArchiveConfig, *, tree: bool = False
     ) -> "Archive":
         """Rebuild the grid from `runs.jsonl` -- the resume path.
 
@@ -172,7 +188,7 @@ class Archive:
         the log means a run that died between the last append and the last
         snapshot still comes back consistent.
         """
-        archive = Archive.from_config(config)
+        archive = Archive.from_config(config, tree=tree)
         for record in records:
             candidate = Candidate.from_record(record)
             if candidate.parent_id:
@@ -190,7 +206,7 @@ class Archive:
 
     def coord_for(self, candidate: Candidate) -> tuple[int, ...]:
         return tuple(
-            axis.index(descriptor_value(candidate, axis.kpi)) for axis in self.axes
+            axis.index(descriptor_value(candidate, axis.kpi, tree=self.tree)) for axis in self.axes
         )
 
     def cell_label(self, coord: Sequence[int]) -> str:
@@ -216,7 +232,7 @@ class Archive:
 
         widened = False
         for axis in self.axes:
-            widened |= axis.observe(descriptor_value(candidate, axis.kpi))
+            widened |= axis.observe(descriptor_value(candidate, axis.kpi, tree=self.tree))
         self.members[candidate.id] = candidate
         if widened:
             # The re-bin places every member, this one included; doing the

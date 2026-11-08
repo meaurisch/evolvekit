@@ -23,6 +23,7 @@ from evolvekit.evaluate.types import EvalResult
 __all__ = [
     "build_messages",
     "system_prompt",
+    "problem_sections",
     "user_prompt",
     "Inspiration",
     "OPERATOR_INSTRUCTIONS",
@@ -54,7 +55,9 @@ class Inspiration:
     Only `crossover` carries `block`; every other operator sees the delta
     summary alone. That is the proposal's rule -- "what changed and why, not
     the code" -- with the one exception that crossover cannot be performed
-    without seeing both sides.
+    without seeing both sides. On a tree problem the block is a diff, and it
+    is what "what changed" is, so there every operator is given it
+    (`tree_prompts`).
     """
 
     id: str
@@ -176,6 +179,24 @@ def _parameter_section(config: Config) -> str:
 
 def system_prompt(config: Config, skeleton_prefix: str, skeleton_suffix: str) -> str:
     """The cache-friendly half. Identical for every call in a run."""
+    return f"""\
+You are an optimisation engineer evolving a single heuristic.
+
+{problem_sections(config)}
+## The fixed skeleton (you may NOT change this)
+```python
+{skeleton_prefix.rstrip()}
+    ...your block goes here...
+{skeleton_suffix.rstrip()}
+```
+
+## Protocol
+{_PROTOCOL}"""
+
+
+def problem_sections(config: Config) -> str:
+    """The problem's own sections of the system prompt (`## Problem` to `## Scoring`),
+    without the skeleton: what a tree problem's prompt shares with a skeleton's."""
     problem = config.problem
     description = problem.description.strip() or (
         "Improve the evolve block so the evaluator's score goes up."
@@ -199,8 +220,6 @@ def system_prompt(config: Config, skeleton_prefix: str, skeleton_suffix: str) ->
         or "- none"
     )
     return f"""\
-You are an optimisation engineer evolving a single heuristic.
-
 ## Problem
 {description}
 {tools}{constraints}{novelty}{parameters}
@@ -209,16 +228,7 @@ Objective KPI: `{objective.objective}` ({direction}). Reported score is always \
 maximised, so a larger reported score is always better.
 Penalties (violations lower the score, they never invalidate a candidate):
 {penalties}
-
-## The fixed skeleton (you may NOT change this)
-```python
-{skeleton_prefix.rstrip()}
-    ...your block goes here...
-{skeleton_suffix.rstrip()}
-```
-
-## Protocol
-{_PROTOCOL}"""
+"""
 
 
 def _score_breakdown(result: EvalResult | None, parent: Candidate) -> str:

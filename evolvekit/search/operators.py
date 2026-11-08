@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from evolvekit.candidate import Candidate
+from evolvekit.candidate import Candidate, splice_block
 from evolvekit.config import Config
 from evolvekit.diffs import DiffError, apply_response
 from evolvekit.evaluate.types import EvalResult
@@ -27,8 +29,14 @@ from evolvekit.search.params import param_variant
 from evolvekit.search.tuning import Observation, propose_tpe
 from evolvekit.space import CONSTRAINT_ATTEMPTS, ParameterSpace
 
+if TYPE_CHECKING:  # `evolvekit.tree` is imported only when a tree problem is handled
+    from evolvekit.tree import Repo
+    from evolvekit.tree_prompts import Refusal
+
 __all__ = [
     "OperatorResult",
+    "TREE_OPERATORS",
+    "TreeContext",
     "run_operator",
     "param_lhs",
     "param_lhs_typed",
@@ -68,6 +76,25 @@ class OperatorResult:
         return self.block is not None
 
 
+TREE_OPERATORS = ("diff",)
+"""The LLM operators that work on a tree problem (decision 37): `rewrite`,
+`crossover` and `big_step` are not compiled for trees, and refused here."""
+
+
+@dataclass(frozen=True)
+class TreeContext:
+    """What an operator on a tree problem needs beyond a skeleton's: where the
+    parent's tree is checked out (`<run>/work/trees/<draft_id>`, removed again),
+    its base, the open files' globs, and the run's last refused changes."""
+
+    run_dir: Path
+    repo: "Repo"
+    base: str
+    open: tuple[str, ...]
+    draft_id: str
+    refusals: "tuple[Refusal, ...]" = ()
+
+
 def run_operator(
     operator: str,
     *,
@@ -82,8 +109,13 @@ def run_operator(
     inspirations: "list[Inspiration] | tuple[Inspiration, ...]" = (),
     scratchpad: str | None = None,
     extra_instruction: str | None = None,
+    tree: TreeContext | None = None,
 ) -> OperatorResult:
-    """One LLM call, one apply attempt."""
+    """One LLM call, one apply attempt. With `tree`, on the parent's tree (`_on_tree`)."""
+    if tree is not None:
+        return _on_tree(operator, config=config, provider=provider, model_role=model_role, parent=parent,
+                        parent_result=parent_result, best_score=best_score, inspirations=inspirations,
+                        scratchpad=scratchpad, extra_instruction=extra_instruction, ctx=tree)
     model_cfg = config.models.by_role(model_role)
     messages = build_messages(
         config,
@@ -125,6 +157,87 @@ def run_operator(
         block=block,
         mode=mode,
     )
+
+
+def _on_tree(
+    operator: str,
+    *,
+    config: Config,
+    provider: Provider,
+    model_role: str,
+    parent: Candidate,
+    parent_result: EvalResult | None,
+    best_score: float | None,
+    inspirations: "list[Inspiration] | tuple[Inspiration, ...]",
+    scratchpad: str | None,
+    extra_instruction: str | None,
+    ctx: TreeContext,
+) -> OperatorResult:
+    """The parent's tree checked out as a draft; the open files (or their one
+    marked block) shown; the reply applied to the draft; the child is the
+    draft's diff against the base (cumulative). A reply that does not apply,
+    changes nothing, or changes a file outside `open` is a format failure."""
+    if operator not in TREE_OPERATORS:
+        return OperatorResult(
+            operator=operator, messages=[],
+            error=(f"the {operator} operator does not work on a source tree; "
+                   f"a code study uses {', '.join(TREE_OPERATORS)}"),
+        )
+    from evolvekit import tree as trees
+    from evolvekit.tree_prompts import marked_block, open_files, parse_diff_response, tree_messages
+
+    problem = config.problem
+    model_cfg = config.models.by_role(model_role)
+    messages: list[dict[str, str]] = []
+    completion: Completion | None = None
+
+    def failed(error: str) -> OperatorResult:
+        return OperatorResult(operator=operator, messages=messages, completion=completion, error=error)
+
+    try:
+        draft = trees.materialise(ctx.run_dir, repo=ctx.repo, base=ctx.base, diff=parent.block,
+                                  candidate_id=ctx.draft_id)
+    except trees.TreeError as exc:
+        return failed(f"the parent's change could not be checked out: {exc}")
+    try:
+        files = open_files(draft, ctx.open)
+        block = marked_block(files, problem.block_start, problem.block_end)
+        messages = tree_messages(
+            config, parent=parent, result=parent_result, operator=operator, files=files,
+            best_score=best_score, inspirations=inspirations, scratchpad=scratchpad,
+            extra_instruction=extra_instruction, block=block, refusals=ctx.refusals,
+        )
+        try:
+            completion = provider.complete(
+                messages, model=model_cfg.model, max_tokens=model_cfg.max_tokens,
+                temperature=model_cfg.temperature,
+            )
+        except ProviderError as exc:
+            return OperatorResult(operator=operator, messages=messages, error=str(exc), provider_error=True)
+        try:
+            if block is not None:
+                path, old = block
+                new, mode = apply_response(old, completion.text)
+                target = draft.path / path
+                text = target.read_bytes().decode("utf-8", errors="surrogateescape")
+                spliced = splice_block(text, new, problem.block_start, problem.block_end)
+                target.write_bytes(spliced.encode("utf-8", errors="surrogateescape"))
+            else:
+                mode = "diff"
+                trees.apply_in(draft, parse_diff_response(completion.text),
+                               directory=ctx.repo.prefix.rstrip("/"))
+            child = trees.staged_diff(draft, ctx.base)
+        except (DiffError, trees.TreeError) as exc:
+            return failed(f"could not apply response: {exc}")
+        if not child.strip():
+            return failed("could not apply response: the reply changed nothing")
+        outside = trees.touches_only(child, ctx.open, prefix=ctx.repo.prefix)
+        if outside:
+            return failed(f"changes files outside the open files: {', '.join(outside)} "
+                          f"(only {', '.join(ctx.open)} may change)")
+        return OperatorResult(operator=operator, messages=messages, completion=completion, block=child, mode=mode)
+    finally:
+        trees.remove(ctx.run_dir, ctx.draft_id)
 
 
 def param_lhs(parent: Candidate, *, seed: int, n_variants: int = 6) -> OperatorResult:

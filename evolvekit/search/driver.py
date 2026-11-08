@@ -56,6 +56,7 @@ from evolvekit.search.novelty import NoveltyIndex, NoveltyVerdict, build_near_ba
 from evolvekit.search.operators import (
     OPERATOR_ROLES,
     OperatorResult,
+    TreeContext,
     param_cross,
     param_lhs,
     param_lhs_typed,
@@ -210,7 +211,7 @@ class Driver:
             )
             self.skeleton_source = skeleton
         self.archive: list[Candidate] = []
-        self.grid = Archive.from_config(config.search.archive)
+        self.grid = Archive.from_config(config.search.archive, tree=self.repo is not None)
         near_cfg = config.search.novelty.near
         self._embed_context: tuple[str, int] = ("startup", 0)
         self.novelty = NoveltyIndex(
@@ -491,7 +492,7 @@ class Driver:
         rows = [self._settle_competes(row) for row in self.ledger.runs()]
         if not rows:
             return 0
-        self.grid = Archive.from_records(rows, self.config.search.archive)
+        self.grid = Archive.from_records(rows, self.config.search.archive, tree=self.repo is not None)
         last_generation = 0
         for row in rows:
             candidate = Candidate.from_record(row)
@@ -1138,7 +1139,8 @@ class Driver:
                 id=c.id,
                 summary=self._summary_of(c),
                 score_line=self._score_line(c),
-                block=c.block if operator == "crossover" else None,
+                # On a tree an inspiration is shown as its change (a diff), for every operator.
+                block=c.block if operator == "crossover" or self.repo is not None else None,
             )
             for c in picks
         ]
@@ -1307,7 +1309,7 @@ class Driver:
         attempts = 0
         self._embed_context = (candidate_id, generation)
         hint = self._compose_hint(parent)
-        outcome = self._invoke(operator, parent, inspirations, role, hint)
+        outcome = self._invoke(operator, parent, inspirations, role, hint, candidate_id)
         attempts += 1
         self._bill(outcome, candidate_id, generation, operator, role)
         self._trace(outcome, candidate_id, parent, operator, role, attempt=attempts)
@@ -1326,7 +1328,7 @@ class Driver:
         # One re-prompt, ever. The first real run showed the small model
         # handing back the same program three times; asking twice is worth the
         # cheap call, asking a third time is how v1 built its token bill.
-        retry = self._invoke(operator, parent, inspirations, role, verdict.retry_hint)
+        retry = self._invoke(operator, parent, inspirations, role, verdict.retry_hint, candidate_id)
         attempts += 1
         self._bill(retry, candidate_id, generation, operator, role)
         self._trace(retry, candidate_id, parent, operator, role, attempt=attempts)
@@ -1347,6 +1349,7 @@ class Driver:
         inspirations: list[Inspiration],
         role: str,
         hint: str | None,
+        candidate_id: str,
     ) -> OperatorResult:
         if operator == "param_lhs":
             seed = self.rng.randrange(1 << 30)
@@ -1376,7 +1379,40 @@ class Driver:
             inspirations=inspirations,
             scratchpad=self.scratchpad.text or None,
             extra_instruction=hint,
+            tree=self._tree_context(candidate_id),
         )
+
+    def _tree_context(self, candidate_id: str) -> TreeContext | None:
+        """For a tree problem: where the operator checks the parent out (a draft
+        beside the candidate's own tree), and the run's last refused changes."""
+        if self.repo is None:
+            return None
+        problem = self.config.problem.tree
+        assert problem is not None
+        return TreeContext(self.ledger.run_dir, self.repo, problem.base, tuple(problem.open),
+                           f"{candidate_id}.draft", refusals=self._refusals())
+
+    def _refusals(self) -> tuple:
+        """The most recent candidates the build or the static check refused, oldest
+        first: a refused candidate is never a parent, so without this its build's
+        stderr would never reach the model."""
+        from evolvekit.tree_prompts import REFUSALS_SHOWN, Refusal
+
+        hard = {s.id for s in self.config.evaluate.stages if s.kind in ("builtin-static", "builtin-build")}
+        found: list[Refusal] = []
+        for candidate in reversed(self.archive):
+            failure = candidate.last_failure or ""
+            if not candidate.rejected or not failure.startswith("stage "):
+                continue
+            head, _, rest = failure.partition("\n")
+            stage = head[len("stage "):].split(":", 1)[0]
+            if stage not in hard:
+                continue
+            tail = (candidate.feedback or {}).get(stage) or rest
+            found.append(Refusal(candidate.id, candidate.reject_reason or head, tail))
+            if len(found) == REFUSALS_SHOWN:
+                break
+        return tuple(reversed(found))
 
     def _bill(
         self,
