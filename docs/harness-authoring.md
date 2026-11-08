@@ -271,6 +271,43 @@ query is stopped after 2 seconds. Good tables:
 declaration: a missing table, a column that is not declared, one that is
 declared and never produced.
 
+## `features:`
+
+`study groups` puts alike cases together, so that a study can learn settings
+per kind of case. It tells cases apart by their features: numbers that
+describe a case before anything solves it. The top-level key `features:`
+declares them, one SQL value per case over the **request tables** alone (a
+solution table is refused when the harness loads: `features.<name>.sql: no
+such table: ...`):
+
+```yaml
+features:
+  stops:
+    sql: "SELECT COUNT(*) FROM stops"
+    describe: the number of stops
+  spread_km:
+    sql: "SELECT MAX(x) - MIN(x) FROM stops"
+    describe: how far the stops spread east to west
+```
+
+Each query's first value is the feature (`NULL` counts as 0). `describe` is
+the words a study's `rule.md` names the feature with (`If <describe> is above
+<value> ...`); without it, the name. Choose a few features that change what
+good settings are: the size of a case, how tight its limits are, how spread
+out it is.
+
+Without `features:` the defaults are every request table's row count
+(`rows_<table>`) and the mean of every `int` or `float` request column that
+is not `private` (`mean_<table>_<column>`). A declared query may read a
+private column, but its value is written into `groups.json` and the rule, so
+keep coordinates out of it. A feature that is the same in every case is not
+used to tell cases apart.
+
+To read the request tables, `study groups` solves each case once at the
+starting values with the preview's time limit (`solve --tables-out`), and
+keeps them in `<study>/groups/tables/` until the case or the application
+changes.
+
 ## `runner.py`
 
 ```python

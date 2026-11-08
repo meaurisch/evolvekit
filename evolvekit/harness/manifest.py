@@ -15,7 +15,8 @@ application:
 Loading refuses, one sentence per mistake naming its key path: unknown keys,
 a setting whose default is outside its range, a lever on a table or column the
 harness does not declare, KPI and template SQL that does not compile against
-the declared tables, and a study template that does not compile.
+the declared tables, a feature's SQL that does not run on the request tables
+alone, and a study template that does not compile.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ __all__ = [
     "Column",
     "Defaults",
     "Export",
+    "Feature",
     "Harness",
     "InputSpec",
     "Kpi",
@@ -615,6 +617,26 @@ class Export:
 
 
 @dataclass(frozen=True)
+class Feature:
+    """One number per case that tells cases apart (`features:`): SQL over the
+    request tables alone, its first value. `describe` is the words a rule
+    says it in ("If <describe> is above ...")."""
+
+    name: str
+    sql: str
+    describe: str = ""
+
+    @staticmethod
+    def parse(name: Any, raw: Any) -> "Feature":
+        path = f"features.{name}"
+        _name(name, path)
+        data = _mapping(raw, path)
+        _known(data, {"sql", "describe"}, path)
+        return Feature(name=name, sql=_text(_required(data, "sql", path), f"{path}.sql"),
+                       describe=_text(data.get("describe"), f"{path}.describe", empty=True))
+
+
+@dataclass(frozen=True)
 class Defaults:
     time_per_case_s: float = 60.0
     retries: int = 1
@@ -669,6 +691,9 @@ class Harness:
     """Study templates, by id (the file's stem): partial `study.yaml` documents."""
     code: Code | None = None
     """The source a code study may change (`code:`), or `None`."""
+    features: dict[str, Feature] = field(default_factory=dict)
+    """What tells one case from another (`features:`); none: every request
+    table's row count and the mean of each numeric request column that is not private."""
 
     @property
     def key(self) -> str:
@@ -715,6 +740,18 @@ def _check_sql(harness: Harness) -> None:
                             f"kpi_templates.{name}.params.{param.name}.from: does not run against the "
                             f"declared tables: {problem}"
                         )
+    finally:
+        db.close()
+    if not harness.features:
+        return
+    # A feature describes the case before anything solves it: the request tables alone.
+    request = {name: columns for name, columns in harness.declared().items() if name in harness.request_tables}
+    db = schema_database(request, harness.request_tables)
+    try:
+        for name, feature in harness.features.items():
+            problem = sql_problem(db, feature.sql)
+            if problem:
+                raise HarnessError(f"features.{name}.sql: {problem}")
     finally:
         db.close()
 
@@ -784,7 +821,8 @@ def _load_harness(root: Path, *, check_templates: bool = True) -> Harness:
     _known(
         data,
         {"harness", "id", "version", "title", "summary", "application", "cases", "inputs", "time_limit",
-         "seeds", "settings", "tables", "levers", "kpis", "kpi_templates", "exports", "defaults", "code"},
+         "seeds", "settings", "tables", "levers", "kpis", "kpi_templates", "exports", "defaults", "code",
+         "features"},
         "<root>",
     )
     if data.get("harness") != FORMAT:
@@ -821,6 +859,7 @@ def _load_harness(root: Path, *, check_templates: bool = True) -> Harness:
         defaults=Defaults.parse(data.get("defaults")),
         templates=_templates(root),
         code=Code.parse(data["code"], application.kind) if data.get("code") is not None else None,
+        features={name: Feature.parse(name, spec) for name, spec in _mapping(data.get("features"), "features").items()},
     )
     for name, kpi in harness.kpis.items():
         if kpi.guard is not None and kpi.guard["kpi"] not in harness.kpis:

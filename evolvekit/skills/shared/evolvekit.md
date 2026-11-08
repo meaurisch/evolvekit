@@ -50,6 +50,7 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study code SLUG [--repo PATH] [--from REF] [--brief TEXT] [--json]` | a code study: where the source is (default: the harness's own folder), the base it starts from (`HEAD`, a branch, or `working`), and what to improve | 0 set; 1 a relative path, no proposal, no `code:` in the harness, not a git folder, no such ref |
 | `evolvekit study list [--json]` | the studies in the library home | |
 | `evolvekit study cases SLUG --add FILE... [--hold-back N] [--json]` | add cases and hold some back for the final check | |
+| `evolvekit study groups SLUG [--k N] [--json]` | group the cases by their features (or by the tags given in the app's Cases list) into `groups.json`; a group needs at least two cases to learn from | 2 when `--k` is outside 2 to 5 |
 | `evolvekit study check SLUG` | name what is still missing before the study can run | 0 ready, 2 problems |
 | `evolvekit study preview SLUG` | solve the smallest training case at the starting values | |
 | `evolvekit study compile SLUG` | prints the plan: rounds, combinations (with AI help, the seconds it assumes for each AI change), the final check, "done around HH:MM" and a note when too few cases are held back for a firm answer, or the thin plan with its three ways out; writes no run folder unless `--run-id ID` is given | 0 a plan; 2 a thin plan or a problem |

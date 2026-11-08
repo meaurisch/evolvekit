@@ -681,3 +681,13 @@ def test_home_shows_the_rehearsal_clock():
     draw = _page_function(HOME_PAGE, "draw")
     assert "data.clock" in draw and 'EK.notice("warning", data.clock.line)' in draw
     assert draw.index("data.clock") < draw.index("cards(active)"), "above the cards"
+
+
+START_PAGE = (STATIC / "js" / "pages" / "start.js").read_text(encoding="utf-8")
+
+
+def test_the_cases_drawer_edits_a_tag():
+    drawer = _page_function(START_PAGE, "casesDrawer")
+    assert "<th>Kind</th>" in drawer and 'act: "tag"' in drawer
+    assert 'EK.put(EK.studyPath(st.slug, "/cases/" + EK.q(name) + "/tag")' in drawer
+    assert "c.group" in drawer and "c.tag" in drawer, "the tag in its field, the group of groups.json beside it"

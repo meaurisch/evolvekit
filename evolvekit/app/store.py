@@ -31,6 +31,7 @@ from evolvekit.app.detach import no_window_flags
 from evolvekit.env import parse_env
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import runner_command
+from evolvekit.harness.groups import TAGS, read_groups, read_tag, write_tag
 from evolvekit.harness.library import ORIGIN, HarnessEntry, create_study, find_harnesses, install_harness, slugify
 from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
 from evolvekit.harness.probe import probe_application
@@ -578,7 +579,25 @@ class Home:
     def case_names(self, slug: str) -> list[str]:
         root = self.study_root(slug)
         folder = root / "cases"
-        return sorted(p.name for p in folder.iterdir() if p.is_file() and not p.name.startswith(".")) if folder.is_dir() else []
+        # A `.tags` file is a case's tag (`groups.write_tag`), not a case.
+        return sorted(p.name for p in folder.iterdir()
+                      if p.is_file() and not p.name.startswith(".") and not p.name.endswith(TAGS)) if folder.is_dir() else []
+
+    def set_tag(self, slug: str, name: str, tag: str) -> dict[str, Any]:
+        """Say what kind of case `name` is (`""` takes the tag away); as soon as
+        one case has a tag, tags decide its groups (`study groups`). The answer
+        is the study document."""
+        root, _, _ = self.load(slug)
+        filename = safe_name(name)
+        if not (root / "cases" / filename).is_file():
+            raise AppError(f"there is no case {filename!r} in this study", 404)
+        if not isinstance(tag, str):
+            raise AppError("tag: the words for what kind of case it is, or empty to take the tag away")
+        try:
+            write_tag(root, f"cases/{filename}", tag)
+        except HarnessError as exc:
+            raise AppError(str(exc)) from None
+        return self.document(slug)
 
     def put_case(self, slug: str, filename: str, data: bytes) -> dict[str, Any]:
         root, study, harness = self.load(slug)
@@ -688,7 +707,11 @@ class Home:
         trash = root / TRASH / "cases"
         trash.mkdir(parents=True, exist_ok=True)
         (trash / name).unlink(missing_ok=True)
+        (trash / (name + TAGS)).unlink(missing_ok=True)
         shutil.move(str(target), str(trash / name))
+        tag = root / "cases" / (name + TAGS)
+        if tag.is_file():  # the tag leaves with its case, and comes back with it
+            shutil.move(str(tag), str(trash / (name + TAGS)))
         relative = f"cases/{name}"
         study.training = [c for c in study.training if c != relative]
         study.test = [c for c in study.test if c != relative]
@@ -706,6 +729,8 @@ class Home:
             raise AppError(f"there is a case {name!r} in the study again already", 409)
         target.parent.mkdir(exist_ok=True)
         shutil.move(str(waiting), str(target))
+        if (waiting.parent / (name + TAGS)).is_file():
+            shutil.move(str(waiting.parent / (name + TAGS)), str(target.parent / (name + TAGS)))
         relative = f"cases/{name}"
         if relative not in study.training and relative not in study.test:
             study.training.append(relative)
@@ -862,6 +887,9 @@ class Home:
         with _lock(str(root)):
             cache = self._inspected(root)
         listed = []
+        grouped = read_groups(root, study) or {}
+        group_of = {case: group for group, sides in (grouped.get("groups") or {}).items()
+                    for side in ("training", "test") for case in sides.get(side) or []}
         for name in self.case_names(slug):
             relative = f"cases/{name}"
             stat = (root / relative).stat()
@@ -871,6 +899,7 @@ class Home:
                 "name": name, "bytes": stat.st_size,
                 "set": "test" if relative in study.test else "training" if relative in study.training else "",
                 "inspected": cached.get("result") if current else None,
+                "tag": read_tag(root, relative), "group": group_of.get(relative, ""),
             })
         return listed
 

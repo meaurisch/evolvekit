@@ -345,6 +345,14 @@ def restore_case(req: Request) -> dict[str, Any]:
     return _document(req, slug)
 
 
+def put_tag(req: Request) -> dict[str, Any]:
+    """JSON `{tag}`: what kind of case it is (`""` takes the tag away); tags
+    decide the groups of `study groups` as soon as one case has one."""
+    slug = req.params["slug"]
+    req.home.set_tag(slug, req.params["name"], req.json().get("tag", ""))
+    return _document(req, slug)
+
+
 def import_cases(req: Request) -> dict[str, Any]:
     slug = req.params["slug"]
     if jobs.running(req.home.study_root(slug)):
@@ -744,6 +752,7 @@ ROUTES = [
     route("PUT", "/api/studies/{slug}/cases/{name}")(put_case),
     route("DELETE", "/api/studies/{slug}/cases/{name}")(delete_case),
     route("POST", "/api/studies/{slug}/cases/{name}/restore")(restore_case),
+    route("PUT", "/api/studies/{slug}/cases/{name}/tag")(put_tag),
     route("POST", "/api/studies/{slug}/samples")(use_samples),
     route("POST", "/api/studies/{slug}/import")(import_cases),
     route("POST", "/api/studies/{slug}/inspect")(inspect_cases),

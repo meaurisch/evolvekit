@@ -257,6 +257,8 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .case-table th { text-align: left; font: var(--type-label); letter-spacing: .12em; text-transform: uppercase; color: var(--ink-2); padding: 6px 8px 6px 0; }
 .case-table td { padding: 6px 8px 6px 0; border-top: 1px solid var(--line-rule); vertical-align: middle; }
 .case-table .mono { font: var(--type-data); font-size: 13px; overflow-wrap: anywhere; }
+.case-table .case-tag { width: 9.5em; min-height: 36px; padding: 0 8px; font: var(--type-small); }
+@media (max-width: 599px) { .case-table .case-tag { width: 5em; } }
 
 /* ------------------------------------------------------------------ Set up */
 .summary-rows { display: flex; flex-direction: column; gap: 10px; }

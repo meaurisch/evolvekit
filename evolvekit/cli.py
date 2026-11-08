@@ -534,6 +534,13 @@ def build_parser() -> argparse.ArgumentParser:
     s_pr.add_argument("--yes", action="store_true", help="do it: make the branch, push it, open the PR")
     s_pr.add_argument("--home", help=home_help)
     s_pr.add_argument("--json", action="store_true", help="print the plan (and with --yes what was done) as JSON")
+    s_groups = study.add_parser("groups", help="group the cases by their features (or by the tags given in the app's "
+                                               "Cases list) and write groups.json")
+    s_groups.add_argument("slug", help="the study's name in the library home")
+    s_groups.add_argument("--k", type=int, help="this many groups, 2 to 5 (default: 2 or 3, whichever tells the "
+                                                "cases apart best)")
+    s_groups.add_argument("--home", help=home_help)
+    s_groups.add_argument("--json", action="store_true", help="print groups.json")
     s_open = study.add_parser("open", help="print the study's address in the app (starting the app if none runs) and open it")
     s_open.add_argument("slug", help="the study's name in the library home")
     s_open.add_argument("--no-browser", action="store_true", help="only print the address")
@@ -1822,6 +1829,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _change_command(command, args)
     if command == "open":
         return _study_open(args)
+    if command == "groups":
+        return _study_groups(args)
     folder = _study_root(args.directory, args)
     if command == "preview":
         result = execute.preview(folder)
@@ -1872,6 +1881,38 @@ def cmd_study(args: argparse.Namespace) -> int:
     elif final.get("skipped"):
         print(f"final check: {final['skipped']}")
     return 0 if job["phase"] in ("done", "stopped") else 1
+
+
+def _study_groups(args: argparse.Namespace) -> int:
+    """`study groups SLUG [--k N] [--json]`: the groups of the study's cases, into groups.json."""
+    from evolvekit.harness import groups
+
+    if args.k is not None and not 2 <= args.k <= 5:
+        print(f"--k: 2 to 5 groups, got {args.k}", file=sys.stderr)
+        return 2
+    root = _home(args).study_root(args.slug)
+    doc = groups.compute(root, k=args.k)
+    if args.json:
+        print(json.dumps(doc))
+        return 0
+
+    def cases(n: int) -> str:
+        return f"{n} case" + ("" if n == 1 else "s")
+
+    count = len(doc["groups"])
+    if doc["method"] == "features":
+        print(f"{count} groups by the cases' features (silhouette {doc['silhouette']:.2f}):")
+    elif doc["method"] == "tags":
+        print(f"{count} groups by the cases' tags:")
+    else:
+        print("1 group:")
+    for name, group in doc["groups"].items():
+        training, test = len(group["training"]), len(group["test"])
+        print(f"  {name}: {cases(training + test)} ({training} to learn from, {test} held back)")
+    print(f"wrote {groups.GROUPS}", flush=True)
+    for note in doc["notes"]:  # why it is one group, a feature that tells nothing apart
+        print(f"note: {note}", file=sys.stderr)
+    return 0
 
 
 def _study_models(args: argparse.Namespace, study, *, keys: bool = False) -> dict | None:
