@@ -13,8 +13,9 @@ built the same way for any harness:
 * a try's own number is the mean over the cases of the furthest stage it
   reached: a *full look* when that is the run's last stage (every study
   case), a *quick look* otherwise;
-* the best-so-far line counts full looks only, so a lucky quick look on a few
-  cases never sets it;
+* the best-so-far line counts finished full looks only, so a lucky quick look
+  on a few cases, or a full look half done, never sets it; the status strip's
+  one figure is `verdict.best_so_far`, not this line;
 * the final check's numbers, as far as it got, come from its own event log
   with `confirm.paired_summary`, the same summary the verdict uses;
 * in a code study (a run whose `evolvekit.yaml` has `problem.tree`) each
@@ -213,7 +214,9 @@ def _build(run_dir: Path) -> dict[str, Any]:
     if base_combo:
         best.append({"h": base_combo["end_h"], "pct": 0.0, "id": base})
     for c in combos:
-        if c["base"] or not c["full"] or c["pct"] is None or c["pct"] <= top:
+        # Only a full look that finished every case (its row is in runs.jsonl): a look half done is the
+        # mean of the cases it has, which falls as the others come in, and the line must never fall.
+        if c["base"] or not c["full"] or c["id"] not in rows or c["pct"] is None or c["pct"] <= top:
             continue
         top = c["pct"]
         best.append({"h": c["end_h"], "pct": c["pct"], "id": c["id"]})

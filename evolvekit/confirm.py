@@ -62,7 +62,7 @@ if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
 
 __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
-    "t_cdf", "decide", "USE_CHANCE", "USE_MARGIN_PCT", "WORSE_CHANCE", "RULE_WORDS",
+    "t_cdf", "decide", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT", "WORSE_CHANCE", "RULE_WORDS",
 ]
 
 BASELINE = "baseline"
@@ -618,6 +618,32 @@ _PAIR_COUNTS = ("finished_pairs", "candidate_failed_pairs", "baseline_failed_pai
                 "zero_baseline_pairs")
 
 
+def identical_runs(runs: Sequence[dict[str, Any]], candidate: str, kpis: Sequence[str],
+                   instances: Sequence[str], seeds: Sequence[int], baseline: str = BASELINE) -> bool:
+    """Whether every planned (instance, seed) pair gave exactly the baseline's
+    result: both sides finished it, and every one of `kpis` is equal. Such a
+    candidate measured nothing but the baseline again -- its change was never
+    exercised (a fixed setting can override changed code) -- so no interval
+    or chance can say anything about it. `runs` are a comparison's (or its
+    `results.json`): configuration, instance, seed, ok, kpis."""
+    if not kpis or not instances or not seeds:
+        return False
+    found: dict[tuple[str, str, int], dict[str, Any]] = {}
+    for run in runs:
+        if run.get("ok") and run.get("configuration") in (candidate, baseline):
+            found[(str(run["configuration"]), str(run.get("instance")), int(run.get("seed") or 0))] = run.get("kpis") or {}
+    for instance in instances:
+        for seed in seeds:
+            base, mine = found.get((baseline, str(instance), int(seed))), found.get((candidate, str(instance), int(seed)))
+            if base is None or mine is None:
+                return False
+            for kpi in kpis:
+                a, b = base.get(kpi), mine.get(kpi)
+                if not isinstance(a, (int, float)) or not isinstance(b, (int, float)) or float(a) != float(b):
+                    return False
+    return True
+
+
 def _analyse(comparison: Comparison) -> None:
     """Per candidate: the per-instance improvements and their summary.
 
@@ -637,6 +663,7 @@ def _analyse(comparison: Comparison) -> None:
         if run["ok"] and objective in run["kpis"]:  # a retry that went through replaces the failure before it
             table.setdefault(run["configuration"], {})[(str(run["instance"]), int(run["seed"]))] = float(run["kpis"][objective])
     base = table.get(BASELINE, {})
+    kpis = list(dict.fromkeys([objective, *(str(level["kpi"]) for level in comparison.levels)]))
 
     def gain(key: tuple[str, int], mine: dict[tuple[str, int], float]) -> float:
         return 100.0 * sign * (base[key] - mine[key]) / abs(base[key])
@@ -696,6 +723,8 @@ def _analyse(comparison: Comparison) -> None:
             "pairs_planned": planned,
             "failed_runs": failed,
             **totals,
+            # Every run gave exactly the baseline's result: the change was not exercised.
+            "identical": identical_runs(comparison.runs, cid, kpis, comparison.instances, comparison.seeds),
         }
         if comparison.levels:
             comparison.per_candidate[cid]["levels"] = _analyse_levels(comparison, cid)
@@ -853,6 +882,10 @@ def render_markdown(comparison: Comparison) -> str:
         if s["mean"] is None:
             lines += ["No pair of runs finished for both configurations.", "", counted, ""]
             continue
+        if result.get("identical"):
+            lines += ["**Every run gave exactly the baseline's result**, on every instance and seed: the "
+                      "candidate's change may not be exercised by these runs, so the interval below says "
+                      "nothing about it.", ""]
         interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]" if s.get("ci95") else "n/a"
         p = s["wilcoxon"]["p"]
         verdict = s["verdict"].capitalize()

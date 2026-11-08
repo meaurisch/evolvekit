@@ -697,7 +697,11 @@ def _read_plan(run_dir: Path) -> dict[str, Any]:
 
 def _decision(result: dict[str, Any]) -> str:
     """What one candidate's comparison says: by the levels when the study
-    scores by levels, else by `decide` on the paired summary."""
+    scores by levels, else by `decide` on the paired summary. A candidate
+    whose every run gave exactly the starting point's result is `keep`: its
+    change was not exercised, so there is nothing to decide on."""
+    if result.get("identical"):
+        return "keep"
     if "levels" in result:
         return "use" if result["levels"]["confirmed"] else "keep"
     return decide(result["summary"])
@@ -722,7 +726,9 @@ def _extend_check(
         comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:seeds]), instances=instances, label="final",
                              log=log, stop=stop)
         (_cid, result), = comparison.per_candidate.items()
-        if _decision(result) != "keep" or seeds >= len(CHECK_SEEDS) or time_left_s() < seed_cost_s or stop.is_set():
+        # A change every run of which gave exactly today's result: more runs cannot open the answer.
+        if (_decision(result) != "keep" or result.get("identical") or seeds >= len(CHECK_SEEDS)
+                or time_left_s() < seed_cost_s or stop.is_set()):
             return comparison, seeds
         seeds += 1
         log(f"final check: the answer is still open, adding a run per case ({seeds} so far)")

@@ -439,7 +439,7 @@ def _plan_line(root: Path, study: Study, harness: Harness) -> str:
     measured = read_preview(root)
     timing = measured if measured and measured.get("ok") else {"overhead_s": 0.0, "wall_s": study.limits.time_per_case_s}
     try:
-        return plan_for(study, harness, timing).summary()
+        return plan_for(study, harness, timing).summary(ai=study.budget.ai_enabled)
     except (HarnessError, ValueError, ZeroDivisionError):
         return ""
 

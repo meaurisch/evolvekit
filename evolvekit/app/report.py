@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from evolvekit.app.verdict import number_text
+
 
 def _number(value: Any) -> str:
     """A measure value as people write it: 1,248,920 and 12.35, never 1.2e+06."""
@@ -42,12 +44,13 @@ def _change(pct: Any, direction: str) -> str:
 
 
 def _between(low: float, high: float, direction: str) -> str:
+    """A 95 % range in the words of the goal's direction; a bound that rounds to zero has no sign."""
     toward, away = _lower(direction)
     if low > 0:
-        return f"between {low:.1f} % and {high:.1f} % {toward}"
+        return f"between {number_text(low)} % and {number_text(high)} % {toward}"
     if high < 0:
-        return f"between {-high:.1f} % and {-low:.1f} % {away}"
-    return f"between {-low:.1f} % {away} and {high:.1f} % {toward}"
+        return f"between {number_text(-high)} % and {number_text(-low)} % {away}"
+    return f"between {number_text(-low)} % {away} and {number_text(high)} % {toward}"
 
 
 def _duration(seconds: Any) -> str:
@@ -153,6 +156,10 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         # `combinations` counts the starting point too: say the plan's number, and the start beside it.
         tried = f"{tried - 1}, plus today's settings"
     rounds = verdict.get("rounds")
+    if verdict.get("how_it_ran"):
+        # Fewer rounds ran than the plan said: the sentence says how many of how many, and why.
+        ran.append(verdict["how_it_ran"].rstrip("."))
+        rounds = tried = None
     if candidates:
         # No search, so nothing was learned from: the branches are the candidates, and the more there are, the
         # likelier one looks ahead by chance.

@@ -840,7 +840,10 @@ def status(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     rounds = {"done": max(0, int(done_rounds)) if isinstance(done_rounds, int) else 0,
               "planned": int(plan.get("rounds") or 0)}
     improvement = (progress.get("improvement") or {})
-    pct, verdict = improvement.get("pct"), improvement.get("verdict")
+    verdict = improvement.get("verdict")
+    # The best so far is one figure everywhere (`verdict.best_so_far`): on the cases learned from, as
+    # the verdict's learned-from figure says it -- not the status document's, which is on another base.
+    pct = verdict_doc.best_so_far(run_dir, goal, rows, job)["pct"] if document else None
     better = _better_word(goal["direction"])
     seed, _ = _seed_and_best(run_dir, document, rows) if document else (None, None)
     start_words = f"the starting point ({_baseline(study, harness, seed)})"
@@ -1528,8 +1531,11 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
     (done, planned), `what` (settings, data or both), and by state
     `finish_at`, `left_s`, `hours`, `continued`, `best_pct`, `check`,
     `waiting_for`; for a finished run its `decision` (use, keep, worse,
-    single, skipped) with `mean`, `ci95`, `chance` and `n` held-back cases;
-    `check_stopped` for a final check stopped before it decided."""
+    single, skipped) with `mean`, `ci95`, `chance` and `n` held-back cases,
+    and `same` (no figures: "finished · no difference in any run") when every
+    run gave exactly the starting point's result -- for a bake-off, every
+    branch's; `check_stopped` for a final check stopped before it decided.
+    `best_pct` is `verdict.best_so_far`'s figure."""
     job = phase(run_dir)
     state = job.get("phase")
     try:
@@ -1547,7 +1553,8 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
                              "goal": {"says": goal.get("says"), "label": goal.get("label"), "direction": goal.get("direction")},
                              "rounds": {"done": max(0, int(last)) if isinstance(last, int) else 0,
                                         "planned": int(plan.get("rounds") or 0)}}
-    pct = ((document.get("progress") or {}).get("improvement") or {}).get("pct")
+    # The best so far as `study status`, the status document and the app's strip all say it.
+    pct = verdict_doc.best_so_far(run_dir, goal, job=job)["pct"] if document else None
     if isinstance(pct, (int, float)):
         facts["best_pct"] = pct
     if state == "queued":
@@ -1590,14 +1597,23 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
             reason = str(final["skipped"]).split(":")[0].split(",")[0]  # "the starting point stayed the best"
             return _with_verdict(root, run_dir, document_of, {"kind": "finished", "run": run_dir.name,
                                                               "line": f"finished · {reason}", **facts, "decision": "skipped"})
-        comparison = _read(run_dir / final["comparison"]) if final.get("comparison") else None
-        summary = (((comparison or {}).get("per_candidate") or {}).get(final.get("candidate") or "") or {}).get("summary") or {}
+        comparison = verdict_doc._check_of(run_dir, final)[0]  # marks a change no run told from today's
+        results = (comparison or {}).get("per_candidate") or {}
+        own = results.get(final.get("candidate") or "") or {}
+        summary = own.get("summary") or {}
+        # Every run gave exactly today's result -- for a bake-off, every branch's: no figure, no range.
+        same = (bool(results) and all(r.get("identical") for r in results.values()) if job.get("bakeoff")
+                else bool(own.get("identical")))
         mean = summary.get("mean")
         decision = _decision_of(final, summary) if summary else ("use" if final.get("confirmed") else "keep")
         facts.update({"decision": decision, "mean": mean if isinstance(mean, (int, float)) else None,
                       "ci95": summary.get("ci95"), "chance": _chance_of(summary) if summary else None,
                       "n": int(summary.get("n") or 0)})
-        if decision == "use":
+        if same:
+            facts.update({"decision": "keep", "mean": None, "ci95": None, "chance": None, "same": True})
+            card = {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · no difference in any run",
+                    **facts}
+        elif decision == "use":
             amount = f": {_pct(mean)} {_better_word(goal['direction'])} {goal['says']}" if isinstance(mean, (int, float)) else ""
             card = {"kind": "finished", "run": run_dir.name, "line": "finished · probably better" + amount, **facts}
         elif decision == "worse":
@@ -1615,7 +1631,8 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
 def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, card: dict[str, Any]) -> dict[str, Any]:
     """A finished card with the verdict's own words beside it (design 3.4): `verdict` holds the
     document's `decision`, `line` and `advice`, and `says`, the decision in the state line's words
-    ("not proven on the held-back cases", "probably better"). Only with `document_of`, as the card
+    ("not proven on the held-back cases", "probably better"), and when the document has them its
+    `how_it_ran` and, for a bake-off, `candidates` (each branch's `ref` and `line`). Only with `document_of`, as the card
     asks for it: a list of runs need not pay for a verdict per run; a run whose verdict cannot be
     read keeps its card without one."""
     if document_of is None:
@@ -1625,8 +1642,14 @@ def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, car
     except Exception:  # noqa: BLE001 - a card must render even for a damaged run
         return card
     says = str(card["line"]).removeprefix("finished · ").split(":")[0]
-    return {**card, "verdict": {"decision": document.get("decision"), "line": document.get("line", ""),
-                                "advice": document.get("advice", ""), "says": says}}
+    verdict = {"decision": document.get("decision"), "line": document.get("line", ""),
+               "advice": document.get("advice", ""), "says": says}
+    if document.get("how_it_ran"):
+        verdict["how_it_ran"] = document["how_it_ran"]
+    if document.get("candidates"):
+        # A bake-off: each branch's own line, by its ref.
+        verdict["candidates"] = [{"ref": c.get("ref"), "line": c.get("line", "")} for c in document["candidates"]]
+    return {**card, "verdict": verdict}
 
 
 def next_study(home: Any, root: Path, run: str, name: str = "") -> str:

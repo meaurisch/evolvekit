@@ -27,7 +27,8 @@ PLACEHOLDERS = {"SLUG": "gate-study", "NAME": "Gate", "ID": "demo-tour", "T": "t
 GROUPS = ("study", "harness", "skill")
 VERDICT_KEYS = ("schema", "study", "run", "phase", "decision", "reason", "line", "advice", "measure", "held_back",
                 "mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words", "levels", "learned_from", "rule",
-                "by_case", "changed", "files", "started_at", "finished_at", "elapsed_s", "rounds", "combinations")
+                "by_case", "changed", "files", "started_at", "finished_at", "elapsed_s", "rounds", "combinations",
+                "planned", "how_it_ran")
 REPORTING_RULE = "Report only the verdict's line and its advice, word for word, and add no sentence that claims more."
 PRE_VERDICT_RULE = 'Until the verdict exists, write no "better", "improved", "faster" or "cheaper", and no percentage.'
 SDK_RULE = "Never edit `evk_harness.py`"

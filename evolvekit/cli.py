@@ -1154,10 +1154,16 @@ def _plan_line(study) -> str:
 
 
 def _say_verdict(document: dict) -> None:
-    """The verdict's sentence, then what to do about it, one per line."""
+    """The verdict's sentence, then what to do about it, one per line; for a
+    bake-off each branch's own line by its ref; then how much of the plan
+    ran when the run ran less of it than planned."""
     print(document["line"])
+    for candidate in document.get("candidates") or []:
+        print(f"  {candidate.get('ref')}: {candidate.get('line', '')}")
     if document.get("advice"):
         print(document["advice"])
+    if document.get("how_it_ran"):
+        print(document["how_it_ran"])
 
 
 OPEN_WAIT_S = 15.0
@@ -1404,10 +1410,14 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         return 0
     if args.json:
         print(json.dumps(jobs.status(root, _run_of(root, args.run), build_status)))
-    elif args.run:
-        print(jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status)["line"])  # noqa: SLF001
     else:
-        print(jobs.state_line(root, study, build_status)["line"])
+        card = (jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status) if args.run  # noqa: SLF001
+                else jobs.state_line(root, study, build_status))
+        print(card["line"])
+        verdict = card.get("verdict") or {}
+        if verdict.get("line"):
+            # A finished run: the verdict's own words under the card's, each branch's for a bake-off.
+            _say_verdict(verdict)
     return 0
 
 

@@ -390,6 +390,10 @@ def test_a_running_run_says_how_far_it_got_only_when_asked(tmp_path, monkeypatch
     (run_dir / "job.json").write_text(json.dumps({"phase": "search", "pid": os.getpid(), "started_at": now.isoformat(),
                                                    "plan": {"hours": 1.0}}), encoding="utf-8")
     (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    # The best so far is read from the rows of the finished combinations (`verdict.best_so_far`): 4.2 % here.
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"id": "seed", "operator": "human-seed", "score": -100.0, "kpis": {"tour_length": 100.0}},
+        {"id": "c1", "operator": "mutate", "score": -95.8, "kpis": {"tour_length": 95.8}}]) + "\n", encoding="utf-8")
     monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
     study = load_study(root)
     plain = jobs.run_line(root, study, run_dir)

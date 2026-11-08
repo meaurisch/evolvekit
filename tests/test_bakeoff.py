@@ -99,6 +99,52 @@ def test_bakeoff_two_refs_on_demo_tour(tmp_path):
     assert git(top, "status", "--porcelain") == "" and "trees" not in git(top, "worktree", "list")
 
 
+@pytest.mark.slow
+def test_a_branch_that_changes_only_a_default_is_measured_with_it(tmp_path, capsys):
+    """Persona round 1, B1 and B2: `nearest-first` changed only `--init`'s default, the study passed
+    `--init random` (the harness's default) and every run of it gave exactly the starting point's
+    result -- reported as an ordinary "not proven" with a chance and a range. Each branch now runs with
+    its own code's defaults: a branch that changes a default differs from the starting point; a branch
+    that changes nothing says "No difference in any run", with no figures, in the verdict and the CLI."""
+    top = _solver_repo(tmp_path)
+    git(top, "switch", "-q", "-c", "nearest")
+    path = top / "solver.py"
+    text = path.read_text(encoding="utf-8")
+    old = 'p.add_argument("--init", choices=("random", "nearest"), default="random")'
+    assert old in text
+    path.write_text(text.replace(old, old.replace('default="random"', 'default="nearest"')), encoding="utf-8", newline="\n")
+    git(top, "commit", "-q", "-am", "nearest first")
+    git(top, "switch", "-q", "main")
+    folder = _code_study(tmp_path, top)
+    (folder / "runs" / "b1").mkdir(parents=True)
+    (folder / "runs" / "b1" / "bakeoff.json").write_text(json.dumps({"refs": ["same", "nearest"]}), encoding="utf-8")
+    job = run_bakeoff(folder, "b1", log=lambda _m: None)
+    assert job["phase"] == "done"
+    study_run = json.loads((folder / "runs" / "b1" / "study-run.json").read_text(encoding="utf-8"))
+    assert study_run["settings"]["base"] == {}, "no setting the study does not fix reaches the program"
+    ids = {b["ref"]: b["id"] for b in job["bakeoff"]}
+    results = json.loads((folder / "runs" / "b1" / "confirm" / "final" / "results.json").read_text(encoding="utf-8"))
+    value = {(r["configuration"], r["instance"], r["seed"]): r["kpis"]["tour_length"] for r in results if r["ok"]}
+    pairs = [(v, value.get((ids["nearest"], i, s))) for (c, i, s), v in value.items() if c == "baseline"]
+    assert pairs and any(base != mine for base, mine in pairs), "nearest's runs differ from the starting point's"
+    comparison = json.loads((folder / "runs" / "b1" / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
+    assert comparison["per_candidate"][ids["same"]]["identical"] is True
+    assert comparison["per_candidate"][ids["nearest"]]["identical"] is False
+    verdict = build_verdict(folder, "b1")
+    same = next(c for c in verdict["candidates"] if c["ref"] == "same")
+    assert same["decision"] == "keep" and same["same"] is True and "chance" not in same and "mean_pct" not in same
+    assert same["line"] == ("No difference in any run: every run of this change gave exactly today's result, so the "
+                            "study may not exercise it (a fixed setting can override changed code).")
+    nearest = next(c for c in verdict["candidates"] if c["ref"] == "nearest")
+    assert not nearest.get("same") and nearest["line"] != same["line"]
+    assert same["line"] in render_report(verdict)
+    home = tmp_path / "home"
+    shutil.copytree(folder, home / "studies" / "branches")
+    capsys.readouterr()
+    assert main(["study", "status", "branches", "--home", str(home)]) == 0
+    assert f"  same: {same['line']}" in capsys.readouterr().out.splitlines()
+
+
 def test_bakeoff_refuses_on_settings_study(tmp_path, capsys):
     home = str(tmp_path)
     main(["study", "new", "Tune", "--harness", "demo-tour", "--template", "tune", "--home", home])

@@ -92,8 +92,10 @@ class Plan:
             round_s=1.0, check_seeds=3, hours=1.0,
         )
 
-    def summary(self, now: datetime | None = None) -> str:
-        """The plan in words, for the study's Limits step."""
+    def summary(self, now: datetime | None = None, *, ai: bool = False) -> str:
+        """The plan in words, for the study's Limits step. With `ai` (the study
+        lets a model take part) the rounds may be fewer: the plan does not
+        count the time the AI's replies take, so the line says so."""
         if self.blocked:
             return self.blocked
         moment = (now or datetime.now()) + timedelta(hours=self.hours)
@@ -104,7 +106,7 @@ class Plan:
         )
         return (
             f"about {self.rounds} round{'s' if self.rounds != 1 else ''}, about {self.combinations} combinations "
-            f"tried, {check}; done around {moment:%H:%M}."
+            f"tried{' (fewer if the AI is slow)' if ai else ''}, {check}; done around {moment:%H:%M}."
         )
 
     def to_json(self) -> dict[str, Any]:

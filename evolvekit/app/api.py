@@ -394,7 +394,7 @@ def plan(req: Request) -> dict[str, Any]:
         if hours is not None and hours > study.budget.hours:
             fixes.append({"kind": "time", "hours": hours, "label": f"Allow {_hours_words(hours)} in total",
                           "detail": f"About {GOOD * tunables} combinations for all {tunables}."})
-    return {"summary": chosen.summary(), "estimated": estimated, "warning": warning, "fixes": fixes,
+    return {"summary": chosen.summary(ai=study.budget.ai_enabled), "estimated": estimated, "warning": warning, "fixes": fixes,
             "tunables": tunables, **chosen.to_json()}
 
 

@@ -92,17 +92,19 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `rule` | the fixed rule in words |
 | `by_case` | one row per held-back case, with `name`, `start`, `best`, `change_pct`, `outcome` |
 | `changed` | the settings and data changes of the best combination: from, to |
-| `candidates` | only on a `study bakeoff` run: one entry per branch in the order given (`ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance`); the run's own `line` names the chosen branch as one of N, or says none is shown to beat the starting point |
+| `candidates` | only on a `study bakeoff` run: one entry per branch in the order given (`ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, or `same: true` and no figures when every run of the branch gave exactly today's result); the run's own `line` names the chosen branch as one of N, or says none is shown to beat the starting point |
 | `files` | the exports that exist in `runs/<id>/downloads/` |
 | `started_at`, `finished_at`, `elapsed_s` | when and how long |
 | `rounds`, `combinations` | how much the search tried |
+| `planned` | `rounds`, `combinations`: what the plan said the search would try (not on a bake-off) |
+| `how_it_ran` | only when the search stopped on time with fewer rounds than planned: the sentence that says how much of the plan ran, and why |
 
 The `decision` values:
 
 | Value | Means |
 |---|---|
 | `use` | the new settings (or the change to the code) pass the rule: use them |
-| `keep` | the final check did not show a gain: keep today's settings (or code) |
+| `keep` | the final check did not show a gain: keep today's settings (or code); with no figures and a `line` that starts "No difference in any run" when every run gave exactly today's result, so the study may not exercise the change |
 | `worse` | the best combination is worse than the starting point |
 | `none` | nothing beat the starting point, so it stayed the best |
 | `single` | only one held-back case, too few to decide |
@@ -110,7 +112,8 @@ The `decision` values:
 | `stopped` | the final check was stopped |
 | `skipped` | the final check was skipped (such as no held-back cases); see `reason` |
 
-`line` and `advice` are the only sentences an agent repeats.
+`line` and `advice` are the only sentences an agent repeats. `how_it_ran`, when there is one, claims nothing:
+pass it on when the plan's rounds did not all run.
 
 ## Rules
 

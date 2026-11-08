@@ -13,13 +13,21 @@ are a held-back case's means over the final check's runs and `change_pct` is
 the paired mean of the runs' changes (the statistic of `mean_pct`), so the two
 need not agree with each other. `combinations` counts every combination the
 search measured, the starting point among them: a plan of 2 combinations a
-round for 2 rounds gives 5. The page (`jobs.results`), the
-command line and the report all render from it, so they cannot disagree.
+round for 2 rounds gives 5. `planned` holds the plan's `rounds` and
+`combinations`; `how_it_ran`, only when the search stopped on time with fewer
+rounds than planned, says so in a sentence (`how_it_ran`). The page
+(`jobs.results`), the command line and the report all render from it, so they
+cannot disagree.
+
+A change every paired run of which gave exactly the starting point's result
+(`confirm.identical_runs`) is `keep` with `no_difference_line` and no figures
+at all: no range or chance can say anything about a change no run exercised.
 
 A bake-off's document (a run of `study bakeoff`) also holds `candidates`:
 `[{"ref", "commit", "decision", "line", "mean_pct", "ci95_pct", "worst_pct",
 "chance"}]`, one per branch in the order given, each against the starting
-point by the same rule (numbers absent while there is no answer). Its own
+point by the same rule (numbers absent while there is no answer, and for a
+branch that changed no run, which has `same: true` instead). Its own
 `decision` and `line` are the chosen branch's -- the largest mean among those
 whose decision is `use` -- said as one of N, or `keep` with "None of the N
 branches is shown to beat the starting point." and then no figures, held-back
@@ -37,9 +45,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, t_cdf
+from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, t_cdf
 
-__all__ = ["DECISIONS", "SCHEMA", "build_verdict"]
+__all__ = ["DECISIONS", "SCHEMA", "best_so_far", "build_verdict", "how_it_ran", "no_difference_line", "number_text"]
 
 SCHEMA = 1
 """Bumped when a key of the document changes meaning."""
@@ -66,13 +74,20 @@ def _better_word(direction: str) -> str:
     return "lower" if direction == "lower" else "higher"
 
 
+def number_text(value: float, digits: int = 1) -> str:
+    """`value` to `digits` places, never "-0.0": a value that rounds to zero
+    has no sign."""
+    text = f"{value:.{digits}f}"
+    return text[1:] if text.startswith("-") and float(text) == 0 else text
+
+
 def _span(low: float, high: float) -> str:
     """A 95 % interval of an improvement in percent, in words."""
     if low > 0:
-        return f"likely between {low:.1f} % and {high:.1f} % better"
+        return f"likely between {number_text(low)} % and {number_text(high)} % better"
     if high < 0:
-        return f"likely between {-high:.1f} % and {-low:.1f} % worse"
-    return f"somewhere between {-low:.1f} % worse and {high:.1f} % better"
+        return f"likely between {number_text(-high)} % and {number_text(-low)} % worse"
+    return f"somewhere between {number_text(-low)} % worse and {number_text(high)} % better"
 
 
 def _chance_words(p: float | None) -> str:
@@ -103,6 +118,34 @@ def _chance_of(summary: dict[str, Any]) -> float | None:
     if sd > 0:
         return t_cdf(mean / (sd / math.sqrt(n)), n - 1)
     return 1.0 if mean > 0 else 0.0 if mean < 0 else 0.5
+
+
+_NOT_REACHED = {
+    "code change": "a fixed setting can override changed code",
+    "settings": "the setting may not reach the program",
+    "data changes": "the data change may not reach the program",
+}
+
+
+def no_difference_line(what: str) -> str:
+    """The line of a change every paired run of which gave exactly today's
+    result: no chance or range, and why the study may not exercise it --
+    for a code study, for settings, for data changes (`jobs._what`)."""
+    why = _NOT_REACHED.get(what, "the change may not reach the program")
+    return ("No difference in any run: every run of this change gave exactly today's result, "
+            f"so the study may not exercise it ({why}).")
+
+
+def _identical(comparison: dict[str, Any], runs: list[dict[str, Any]]) -> None:
+    """Mark each candidate of a comparison written before `confirm` said so
+    (`identical`), from the check's own runs (`results.json`)."""
+    kpis = [str(comparison.get("objective") or "")] + [str(level.get("kpi")) for level in comparison.get("levels") or []
+                                                         if isinstance(level, dict)]
+    kpis = [k for k in dict.fromkeys(kpis) if k]
+    for cid, result in (comparison.get("per_candidate") or {}).items():
+        if isinstance(result, dict) and "identical" not in result:
+            result["identical"] = identical_runs(runs, cid, kpis, list(comparison.get("instances") or []),
+                                                 list(comparison.get("seeds") or []))
 
 
 def _decision_of(final: dict[str, Any], summary: dict[str, Any]) -> str:
@@ -159,6 +202,12 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "decision": decision, "chance": chance,
             "chance_words": _chance_words(chance), "worst_pct": worst, "rule": RULE_WORDS}
     use_advice = f"Use {new}: {they} probably better on cases the search never saw."
+    if result.get("identical"):
+        # Every paired run gave exactly today's result: no range or chance can say anything about a
+        # change that was never exercised, so the line gives none.
+        return {**base, "mean": None, "ci95": None, "chance": None, "chance_words": "", "worst_pct": None,
+                "decision": "keep", "state": "same", "line": no_difference_line(what),
+                "advice": f"{keep} for now: nothing in these runs tells the change from today's."}
     if "levels" in result:
         levels = result["levels"]
         decision = final.get("decision") or ("use" if levels.get("confirmed") else "keep")
@@ -215,7 +264,10 @@ def _check_of(run_dir: Path, final: dict[str, Any]) -> tuple[dict[str, Any] | No
     if not final.get("comparison"):
         return None, []
     path = run_dir / final["comparison"]
-    return jobs._read(path), jobs._read_list(path.parent / "results.json")
+    comparison, runs = jobs._read(path), jobs._read_list(path.parent / "results.json")
+    if isinstance(comparison, dict):
+        _identical(comparison, runs)
+    return comparison, runs
 
 
 def _run_facts(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
@@ -317,7 +369,7 @@ def _decision_word(words: dict[str, Any], final: dict[str, Any]) -> str:
         return str(words.get("decision") or "use")
     if state == "skipped":
         return "none" if _STAYED_BEST in str(final.get("skipped") or "") else "skipped"
-    return {"unclear": "keep", "missing": "pending", "stopped": "stopped", "single": "single",
+    return {"unclear": "keep", "same": "keep", "missing": "pending", "stopped": "stopped", "single": "single",
             "worse": "worse"}.get(str(state), "pending")
 
 
@@ -417,10 +469,12 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                            _measure_of(study, harness, goal["kpi"], goal["direction"]))
     seeds = len((comparison or {}).get("seeds") or []) or final.get("seeds") or None
     document["held_back"] = {"cases": len(study.test), "runs_per_case": seeds}
-    if decision not in _NO_ANSWER and named:
+    # A change every run of which gave exactly today's result has no figures: no range, no chance.
+    same = words.get("state") == "same"
+    if decision not in _NO_ANSWER and named and not same:
         document.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"), "worst_pct": words.get("worst_pct"),
                          "chance": words.get("chance"), "chance_words": words.get("chance_words", "")})
-    if levels and named:
+    if levels and named and not same:
         document["levels"] = levels
     # A bake-off with no branch shown ahead names no branch: no figure of an unnamed one here either.
     document["learned_from"] = {"cases": len(study.training), "pct": learned_pct if named else None}
@@ -443,9 +497,37 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     document.update({"started_at": job.get("started_at") or (facts["started"].isoformat() if facts["started"] else None),
                      "finished_at": facts["finished_at"], "elapsed_s": facts["used_s"],
                      "rounds": (job.get("search") or {}).get("generations"), "combinations": facts["tried"]})
+    plan = jobs._plan(run_dir, job)
+    if not job.get("bakeoff"):
+        document["planned"] = {"rounds": plan.get("rounds"), "combinations": plan.get("combinations")}
+    ran = how_it_ran(job, plan, facts["tried"], bool(study.budget.ai_enabled))
+    if ran:
+        document["how_it_ran"] = ran
     if candidates is not None:
         document["candidates"] = candidates
     return _clean(document)
+
+
+def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool) -> str:
+    """When a search stopped on time with fewer rounds than its plan said, the
+    sentence that says so: "Ran 2 of the 11 planned rounds (25 combinations,
+    about 132 planned): the time ran out; the AI's replies took longer than the
+    plan assumed." Empty when the plan happened, for a bake-off (no search),
+    and for a run continued with more time (its plan is the continuation's)."""
+    search = job.get("search") or {}
+    done, planned = search.get("generations"), plan.get("rounds")
+    if job.get("bakeoff") or job.get("continued_at") or not isinstance(done, int) or not isinstance(planned, int):
+        return ""
+    if done >= planned or not str(search.get("stop_reason") or "").startswith("time limit"):
+        return ""
+    combinations = []
+    if isinstance(tried, int):
+        combinations.append(f"{tried} combination{'s' if tried != 1 else ''}")
+    if isinstance(plan.get("combinations"), int):
+        combinations.append(f"about {plan['combinations']} planned")
+    why = "the AI's replies took longer than the plan assumed" if ai else "the rounds took longer than the plan assumed"
+    return (f"Ran {done} of the {planned} planned round{'s' if planned != 1 else ''}"
+            + (f" ({', '.join(combinations)})" if combinations else "") + f": the time ran out; {why}.")
 
 
 def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str,
@@ -466,7 +548,9 @@ def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: di
         decision = _decision_word(words, own)
         row: dict[str, Any] = {"ref": entry.get("ref"), "commit": entry.get("commit"), "decision": decision,
                                "line": words.get("line", "")}
-        if decision not in _NO_ANSWER:
+        if words.get("state") == "same":
+            row["same"] = True  # every run gave exactly today's result: no figures
+        elif decision not in _NO_ANSWER:
             row.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"),
                         "worst_pct": words.get("worst_pct"), "chance": words.get("chance")})
         out.append(row)
@@ -502,6 +586,9 @@ def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
         document["decision"] = "keep"
         document["line"] = (f"None of the {branches} is shown to beat the starting point." if count != 1
                             else f"{candidates[0]['ref']} is not shown to beat the starting point.")
+        if chosen is not None and chosen.get("same") and not all(c.get("same") for c in candidates):
+            # The chosen branch changed nothing in any run, the others did: its advice is not the run's.
+            document["advice"] = "Keep today's code for now: the gain is not proven."
         return "keep", False
     return str(document["decision"]), True
 
@@ -519,6 +606,34 @@ def _best_of(job: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] 
     return next((r for r in rows if r.get("id") == best_id), None) if best_id else None
 
 
+def best_so_far(run_dir: Path, goal: dict[str, Any], rows: list[dict[str, Any]] | None = None,
+                job: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The search's best so far as one figure, `{"id", "pct"}`: by how many
+    percent the best beats the starting point on the cases the search learns
+    from, in the base and the sign of the verdict's `learned_from.pct` -- which
+    is this figure once the run is done. `study status`, the status document
+    (`jobs.status`'s `best.pct`) and the app's status strip all take it from
+    here. While the run is live the best is the search's ranking's first (the
+    one the final check will check), else the one the run checked. The figure
+    comes from the best's own row in `runs.jsonl`, written once its
+    evaluation finished on every case, so it never moves while the best stays
+    the same. `pct` is None before there is a starting point and a best to
+    compare; 0.0 while the starting point is the best. `goal` is `jobs._goal`'s;
+    `rows` and `job` are the run's when the caller read them already."""
+    from evolvekit.app import jobs
+    from evolvekit.leaderboard import rank
+
+    rows = jobs._rows(run_dir) if rows is None else rows
+    job = jobs.phase(run_dir) if job is None else job
+    seed = next((r for r in rows if r.get("operator") == "human-seed"), None)
+    if job.get("phase") in jobs.ACTIVE:
+        ranked = rank(rows, 1)
+        best = ranked[0] if ranked else None
+    else:
+        best = _best_of(job, rows)
+    return {"id": (best or {}).get("id"), "pct": _learned_pct(seed, best, goal)}
+
+
 def _learned_pct(seed: dict[str, Any] | None, best: dict[str, Any] | None, goal: dict[str, Any]) -> float | None:
     """By how many percent the best beat the starting point on the cases the search learned from."""
     from evolvekit.app import jobs
@@ -527,9 +642,9 @@ def _learned_pct(seed: dict[str, Any] | None, best: dict[str, Any] | None, goal:
         measured = (row or {}).get("kpis") or {}
         return measured.get(f"{goal['kpi']}_raw", measured.get(goal["kpi"]))
 
-    if seed is None or best is None or not goal["kpi"]:
+    if seed is None or best is None or not goal.get("kpi"):
         return None
-    return jobs._improvement(value(seed), value(best), goal["direction"])
+    return jobs._improvement(value(seed), value(best), goal.get("direction") or "lower")
 
 
 def build_verdict(root: Path, run: str | None = None) -> dict[str, Any]:
