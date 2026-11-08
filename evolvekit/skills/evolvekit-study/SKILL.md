@@ -5,7 +5,7 @@ description: "Runs an evolvekit study from a problem description: asks only what
 
 Read `references/evolvekit.md` first: its words, commands and rules hold here.
 Its sections are "Words", "Where things live", "Commands", "The verdict document" and "Rules"; this file does not repeat them.
-Placeholders, each with one meaning: NAME the study's name, SLUG its short name, PATH the application, T a template, H the held-back cases, N the combinations, R the rounds, K the settings tuned, HH:MM the time the plan is done, <url> the study's address, <name> the study it is queued behind.
+Placeholders, each with one meaning: NAME the study's name, SLUG its short name, PATH the application, T a template, H the held-back cases, N the combinations, R the rounds, K the settings tuned, HH:MM the time the plan is done, <url> the study's address, <name> the study it is queued behind, REPO the source folder of a code study, A and B branches of it, BRANCH the branch a pull request goes into.
 Use the app's words with the engineer (study, case, held-back case, measure, goal, combination, round, final check).
 
 ## 1. Ground
@@ -98,6 +98,26 @@ evolvekit study application SLUG PATH
 - The gain on the cases it learned from is said only when asked, and named so.
 - An interpretation, if any, is one sentence below the line and the advice, marked as yours, and claims nothing the line does not.
 - A later request to report on the study starts here: `evolvekit study status SLUG` says whether it has ended. When it has not, say where it is and hand over as in step 5.
+
+## Code studies
+
+When the request asks to change the application's code (its source, or a file it reads such as a prompt), steps 1–6 hold with these changes.
+
+- Pick a template whose `vary` has `code` (demo-tour's `faster`); the interview's line on settings and data does not apply, since a study changes code or settings, not both.
+- After `study new`, say where the source is, with the brief in the engineer's own words: `evolvekit study code SLUG --repo REPO --brief "…"`.
+  Add `--from working` only when the engineer says to start from their uncommitted files; the default is the commit checked out.
+  For a program harness it also sets the application when none is set.
+- A code study searches with AI help: write `budget.ai.enabled: true` and `budget.ai.max_usd` (the dollars the request allows) in `study.yaml`.
+  A request that names no money gets one more question: the most the AI help may spend. Never chosen by you.
+- Then check, preview, show the plan line and start as in steps 3–5.
+- "Compare these branches": run `evolvekit study bakeoff SLUG --ref A --ref B` (one `--ref` per branch, in the engineer's order). It needs the source and held-back cases, not AI help: a `budget.ai` line alone from `study check` does not stop it.
+  It exits 2 with a sentence when the study or a branch is refused (files outside the open files, a change that does not apply); relay it and stop.
+  There is no plan line: say how many branches it compares, run `evolvekit study open SLUG`, give the address, and wait as in step 5 when asked.
+- A pull request: run `evolvekit study pr SLUG` first (add `--base BRANCH` when the engineer names the branch it goes into). It prints the verdict's line and what it would do, and does nothing.
+  Show those lines as they are. Only after the engineer's yes run `evolvekit study pr SLUG --yes`; a yes in the request counts once the lines are shown.
+  It exits 1 when part of it failed: say the sentence it printed, and what it says was made.
+- Report as in step 6: the verdict's line and its advice, and nothing more; after `--yes`, also the PR's address it printed.
+- Never push, and never open a pull request, any other way.
 
 ## When it goes wrong
 

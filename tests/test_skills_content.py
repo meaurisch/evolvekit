@@ -183,7 +183,7 @@ SAMPLES = sorted((ROOT / "harnesses" / "demo-tour" / "samples").glob("*.json"))
 VENDORS = ("claude", "anthropic", "copilot", "github", "openai", "codex", "cursor", "gemini", "chatgpt",
            "microsoft", "azure", "openrouter")
 STUDY_STEPS = ["1. Ground", "2. Interview", "3. Make the study", "4. Show the plan", "5. Start and hand over",
-               "6. Report the verdict", "When it goes wrong"]
+               "6. Report the verdict", "Code studies", "When it goes wrong"]
 COMPLETENESS = (
     "Ask only what the request did not say.",
     "A request that answers every question is complete: go on without asking.",

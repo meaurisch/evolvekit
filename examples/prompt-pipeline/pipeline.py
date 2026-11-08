@@ -14,6 +14,8 @@ names another): it needs no network and no key, and scores by hashing the
 prompt with the input, so the same prompt always gets the same score and a
 changed prompt gets another one. It stands in for a real model and a real
 grader; the evolvekit tests use it.
+
+The fake score is a hash, not a measure of prompt quality.
 """
 
 import argparse

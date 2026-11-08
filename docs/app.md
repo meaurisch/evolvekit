@@ -122,7 +122,8 @@ saved as you go.
    this computer*; *Other* lists what it found, browses, or takes a pasted
    path.
 2. **Kind of study** — the harness's templates (better settings, better
-   data), or blank.
+   data, or a change to the application's code, such as the demo's
+   *Shorter tours by changing the solver*), or blank.
 3. **Cases** — the requests to work on: drop files or a folder, choose
    them, give a folder's path, or use the harness's samples. Every file is read
    at once; one that cannot be read is named and left out. A few cases are
@@ -155,6 +156,22 @@ opens a drawer on the right (full screen on a phone):
   still going at 1.5 × that + 30 s counts as failed), the total time, runs
   per case, retries, and optional AI search help with a cap. Experts can set
   the combinations per round and the rounds here too.
+
+A **code study** — one whose template changes the application's source —
+shows **What may change: code** in place of *What to tune*: the source
+folder and the commit it starts from, the files the search may change, and
+the brief. Its drawer asks three things: the **source folder** (proposed from
+the harness's own folder while the folder the study was made from still has
+it; *Choose the folder*, or paste the full path of a folder inside a git
+repository), **Start from** (a branch, a tag or a commit, or `working` for
+the files as they are now, uncommitted changes included — nothing in the
+folder is written), and **What the search should improve**, in your words.
+The search may change those files and nothing else. A code study needs AI
+search help (under **Time**): the model proposes each change, and with a
+coding agent as the provider (Settings: *Claude Code here* or *GitHub
+Copilot CLI*) the
+agent also edits the files itself. A study changes code or tunes settings,
+not both yet.
 
 Under them the **plan bar** shows what the time buys — the rounds of search,
 then the final check, and when it will be done. When that is thin for what
@@ -219,6 +236,16 @@ settings — are marked on the Tries plot. *Details* shows one combination in
 full: every setting it changed, its result case by case, and for a run that
 failed, what it printed and how it was started.
 
+In a code study a combination is a change to the source. Its card's last
+line says how big it is — *+3 −1 lines in solver.py*, or *No change: today's
+code* for the starting point — and *Details* shows the change itself under
+*What it changed*: the diff as it is, in monospace, added lines on a green
+tint and removed ones on a red one. The verdict's answer for a code study
+speaks of the code (*Keep today's code …*), and the change is taken away
+from the command line: `study export SLUG --diff` writes it as a patch, and
+`study pr SLUG` makes a branch and a pull request of it (only with `--yes`;
+see the README's [Code studies](../README.md#code-studies)).
+
 Every figure for a combination is written as the report writes it: one
 decimal and the measure's own direction, never *better* — the chosen
 combination's chip reads *Combination 2 · 7.5 % lower on the cases it
@@ -254,6 +281,21 @@ by label: the goal, the answer, the likely range, the held-back cases they
 share (one dot per side on one axis), what changed and the set-up. Two
 studies with different goals are shown, but not ranked; a side without a
 final check says its number may not hold on new cases.
+
+**Compare branches.** Once a run of a code study has ended, its Study page
+offers *Compare branches*: a drawer that takes the names of your own
+branches (or tags, or commits), one per line, and checks each against the
+starting point on the held-back cases, with no search and no AI — as
+`study bakeoff SLUG --ref A --ref B` does. Only the open files may differ: a
+branch that changes another file, or whose change does not apply on the
+starting commit, is refused with a sentence saying what to do. When that run
+ends, *See the branches side by side* opens the Compare page for it: the
+starting point's column (*Today's code*), then one column per branch with its
+commit, its mark, its own verdict line word for word and its likely range,
+and the rule each was judged by. The headline is the run's own verdict: the
+branch with the largest gain among those that pass the rule, named as one of
+the branches compared, or *None of the 2 branches is shown to beat the
+starting point.*, and today's code stays.
 
 ## The assistant
 
@@ -348,14 +390,19 @@ fates folded in), `assistant/cancel`, `assistant/cards` (what became of a
 card: `{turn, index, state}`), `cards` (`{card}` adds one and refuses it
 with the reason; `{cards: [...], turn}` adds a whole answer in the right
 order and answers with every card's `ok` and `problem`, recording the applied
-ones by their `index` in the turn), `plan`, `tune-only`, `test-run`, `start` (with
+ones by their `index` in the turn), `plan`, `tune-only`, `test-run`, `code`
+(a `POST` with `{repo, from, brief}`: a code study's `vary.code`, answered with
+`{code: {ok, message, …}, study}`), `bakeoff` (a `POST` with `{refs: [...]}`:
+the branches compared with no search; 409 with the sentence when one is
+refused), `start` (with
 `{"resume": RUN}`: that run goes on where it stopped; while another study
 runs, the run is queued and the server starts it later), `stop` (on a queued
 run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,
 with N runs per case), `continue` (`{"run": RUN, "hours": H}`: a finished
 run searches on for H hours more, at most 48, then checks again; 409 while
 anything runs), `status`, `results`, `tries` (every try of a run, digested for the
-Study page's three views: `evolvekit/app/tries.py`), `download/{export}`
+Study page's three views: `evolvekit/app/tries.py`; in a code study each
+carries `diff_stat`, and `tries/{combination}` its `diff`), `download/{export}`
 (`download/report?view=1` opens the report in the browser; `download/study`
 is the study as a zip) and `next`; and each run's dashboard at
 `/studies/{name}/runs/{run}/dashboard/`. Managing studies: `DELETE
@@ -393,6 +440,7 @@ names:
 | `rule` | the fixed rule, in words |
 | `by_case` | one row per held-back case: `name`, `start`, `best`, `change_pct`, `outcome` (`better`, `worse`, `same`, `failed`) |
 | `changed` | the settings and data changes of the best combination: `name`, `label`, `from`, `to` |
+| `candidates` | only on a bake-off's run (`study bakeoff`): one entry per branch in the order given, `ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance` — each against the starting point by the same rule |
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
 

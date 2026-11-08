@@ -1460,12 +1460,13 @@ file; a **study** is one such set of choices, in a folder of its own.
 `evolvekit study run` compiles a study into an ordinary run directory, so
 everything in this README applies to it.
 
-Two harnesses come with evolvekit:
+Three harnesses come with evolvekit:
 
 | Harness | Application | Study templates |
 |---|---|---|
 | [`pyvrp`](harnesses/pyvrp/README.md) | PyVRP 0.14: the Python that has it installed | Tune solver settings · Route cost sets → deliveries per hour |
-| [`demo-tour`](harnesses/demo-tour/README.md) | `examples/cli-solver/solver.py` | Tune solver settings · Stop weights → a shorter real tour |
+| [`demo-tour`](harnesses/demo-tour/README.md) | `examples/cli-solver/solver.py` | Tune solver settings · Stop weights → a shorter real tour · Shorter tours by changing the solver ([a code study](#code-studies)) |
+| [`prompt-tune`](harnesses/prompt-tune/README.md) | `examples/prompt-pipeline/pipeline.py` | Higher scores by changing the prompt (a code study whose "code" is a prompt file) |
 
 A harness shows every case, and every solution, as **tables** — for PyVRP
 `tasks`, `vehicle_types`, `routes`, `visits` and a few more — and everything a
@@ -1498,10 +1499,13 @@ python -m evolvekit doctor
 ✓ home: C:\Users\you\evolvekit, writable
 ✓ app: not running (start it with: evolvekit app)
 ✓ provider: openrouter, key set
-✓ harnesses: demo-tour, pyvrp
+✓ harnesses: demo-tour, prompt-tune, pyvrp
+✓ git: git 2.50.1.windows.1
 ```
 
-It never prints a key. `--app PATH` also asks every harness whether that
+It never prints a key. The git line is for [code studies](#code-studies)
+only: without git it says `not found: only code studies need it` and is
+still ✓. `--app PATH` also asks every harness whether that
 application is its own; `--json` prints the checks as a list of `{"ok",
 "name", "message", "fix"}`. Exit 0 when every line is ✓, else 1.
 
@@ -1616,16 +1620,20 @@ Every command:
 | `doctor [--app PATH] [--json]` | is this computer ready: Python, evolvekit, the library home, the app, the AI provider, the harnesses |
 | `study new NAME --harness ID [--template T] [--app PATH] [--dir DIR] [--json]` | a new study in the library home; prints its short name (`--json`: `{"slug", "root"}`); `--dir` writes a standalone folder instead |
 | `study application SLUG PATH` / `study application SLUG --detect` (`--json`) | where the study's application is, checked by the harness; or the ones found on this computer |
+| `study code SLUG [--repo PATH] [--from REF] [--brief TEXT] [--json]` | a code study: where the source is (default: the harness's own folder, while it is there), the commit it starts from (`working`: the files as they are), what to improve; exit 1 when the folder or the ref is not found |
 | `study list [--json]` | every study in the library home: its name, harness and the state line its card shows (`draft · step 3 of 7`, `running · round 2 of 6`, …) |
 | `study cases SLUG --add FILE... [--hold-back N] [--json]` | copies cases into the study, refuses the files the harness cannot read, and holds `N` back for the final check |
 | `study check SLUG` | what is still missing; exit 2 while anything is |
 | `study start SLUG [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running |
+| `study bakeoff SLUG --ref REF [--ref REF ...] [--wait [--timeout S]] [--json]` | a code study: each branch against the starting point on the held-back cases, with no search; exit 2 when a branch or the study is refused |
 | `study stop SLUG [--json]` | asks the running run to stop, or takes a queued one out of the line |
 | `study status SLUG [--run ID] [--json]` | the state line; `--json` the document the app's Running screen reads |
 | `study watch SLUG [--every S] [--json]` | the status every `S` seconds (default 5) until the run ends; starts a queued run |
 | `study wait SLUG [--timeout S] [--json]` | returns when the run has ended: exit 0 with the verdict when it is done, 1 when it stopped or failed, 4 on timeout; starts a queued run |
 | `study verdict SLUG [--run ID] [--json]` | the verdict and what to do about it; `--json` the verdict document |
 | `study report SLUG [--run ID] [--markdown \| --json]` | the report: Markdown for people, else the verdict document |
+| `study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`, and its path; exit 2 for a settings study, or when the starting point stayed the best |
+| `study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints what it will do; with `--yes` makes the branch, pushes it and opens the PR. Exit 0 printed or done, 1 failed while doing it, 2 refused |
 | `study open SLUG [--no-browser]` | prints the study's address in the app, starting the app when none runs, and opens it |
 | `study preview \| compile \| run FOLDER-OR-SLUG` | one solve at the starting values; the plan into `runs/<id>/`; the whole study in the foreground |
 | `harness discover (--program PATH \| --python PATH --module NAME) [--json]` | what an application exposes, before a harness exists ([Harness commands](#harness-commands)) |
@@ -1665,6 +1673,7 @@ What `study.yaml` can say:
 |---|---|
 | `vary.settings` | per setting: `tune` (within the harness's range), `{tune: true, low, high, start}`, `{fixed: value}`, or `default` |
 | `vary.data` | data changes: `{lever, column, where, mode: scale \| set \| add, low, high, start}` |
+| `vary.code` | a change to the application's source: `{repo, from, open, brief}` ([code studies](#code-studies)) |
 | `constraints` | `{says, expr}` over the tuned values (`truck_per_km >= van_per_km`), which the search never breaks; `{says, sql}` over the changed request, checked on every case before solving |
 | `kpis` | `{from: harness}`, `{template, params}`, `{sql, direction}`, or `{weighted: {kpi: weight}}` |
 | `goal.levels` | one KPI; or up to four in order of importance, each but the last with `equal_within` (`"1 %"` or a number), as in [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels); or one weighted KPI |
@@ -1677,6 +1686,179 @@ saw. The harness marks those KPIs (`changes_with_levers`: PyVRP's
 `solver_cost`), and a study that varies data must judge success by a KPI of
 the untouched request instead (`real_cost`, `deliveries_per_hour`).
 `harness check` warns when a study template gets this wrong.
+
+### Code studies
+
+**What a code study is.** A settings study tries values; a code study tries
+changes to the application's source. Each combination is a change on top of
+a starting commit: a unified diff, applied in a folder of its own (a git
+worktree at `runs/<id>/work/trees/<id>`), committed there, built when the
+harness says how, and run from there. The starting point is the starting
+commit as it is. The final check and the verdict work as for settings: the
+best change against the starting commit on the held-back cases, by the same
+fixed rule. "Code" is any text the application reads: the `prompt-tune`
+harness changes a prompt file.
+
+**The harness's `code:` section** says what a code study may change, beside
+the settings and data the same harness declares (one harness per
+application; a study picks what it varies). demo-tour's:
+
+```yaml
+code:
+  label: The solver's source          # what the app calls it
+  repo: ../../examples/cli-solver     # a folder inside a git repository: relative to the harness folder, or absolute
+  open: [solver.py]                   # what a study may change: globs relative to repo ("lib/**/*.py")
+  app: "{tree}/solver.py"             # a program harness: the program inside a combination's folder
+```
+
+A `python` harness gives `build` instead of `app`, such as `build: "{python}
+-m pip install -q -e {tree}"`: run in each combination's folder (`{tree}`)
+before it is used, it installs that folder into the application's Python
+(`{python}`), within `build_timeout_s` (default 600). `repo` is only a
+default: a study records its own absolute path, and the copy of the harness
+pinned in a study never resolves it. [docs/harness-authoring.md](docs/harness-authoring.md#the-code-section)
+has the details.
+
+**The study's `vary.code`** says where the source is on this computer, where
+the search starts and what it should improve:
+
+```yaml
+vary:
+  code:
+    repo: C:/work/solver    # absolute: the folder the harness's code.repo names, on this computer
+    from: HEAD              # the starting commit: a branch, tag or commit, or `working`
+    open: [solver.py]       # optional: some of the harness's open files
+    brief: Shorter tours in the same time; change the local search in solver.py so that it finds them.
+```
+
+`study code SLUG --repo PATH [--from REF] [--brief TEXT]` writes it and
+checks that the folder is in a git repository and that the ref exists.
+Without `--repo` it proposes the harness's own `code.repo`, while the folder
+the study was made from still has the harness. For a program harness it also
+sets the study's application to the program in that folder when none is set.
+`from: working` starts from the files as they are, uncommitted changes
+included: evolvekit records them as a commit of its own on top of `HEAD` and
+writes nothing to your working tree, index or branches. The open files are
+shown to the model whole, at most 2000 lines in all (`study check` refuses
+more; narrow `vary.code.open`). A study varies code or tunes settings, not
+both yet: `study check` refuses the mix, and settings can stay as fixed
+values.
+
+**Running one** takes the steps of
+[a study from the command line](#a-study-from-the-command-line), with a code
+template and `study code`:
+
+```
+python -m evolvekit study new "Shorter tours" --harness demo-tour --template faster
+python -m evolvekit study code shorter-tours --repo C:/work/solver --brief "Shorter tours in the same time"
+python -m evolvekit study cases shorter-tours --hold-back 2 --add "harnesses/demo-tour/samples/*.json"
+python -m evolvekit study check shorter-tours
+python -m evolvekit study start shorter-tours
+python -m evolvekit study wait shorter-tours
+python -m evolvekit study verdict shorter-tours
+```
+
+A code study searches with an AI model, so `study check` asks for AI search
+help (`budget.ai: a code study searches with an AI model; turn AI search help
+on, or compare branches with study bakeoff`). In `study.yaml`:
+
+```yaml
+budget:
+  hours: 0.167                      # ten minutes, the final check included
+  ai: {enabled: true, max_usd: 1.0} # the provider is the library home's (the app's Settings)
+```
+
+The model is shown the open files as they are after the parent's change,
+with line numbers, and answers with a diff; a diff that does not apply counts
+as a failed answer. When the strong model's provider is `claude-cli` (Claude
+Code) or `copilot-cli` (Copilot CLI), half of the changes come from
+`agent_patch` instead: the coding agent edits a combination's folder itself,
+from a brief file (the brief, the open files, the parent's change, the best
+and worst so far, the last failures, and the rule to change only the open
+files and not to run the benchmark), and its edits are the change. Each of
+its calls has a time limit (1800 s by default, never past the study's time
+left) and a spending cap ($0.50 a call by default, never more than what is
+left of `budget.ai.max_usd`), passed to the tool; every call counts toward
+the budget as the tool reports it (dollars, or requests for Copilot CLI), and
+a call that reports nothing (a timeout, a Stop, a crash) is counted at its
+cap. Any change that touches a file outside the open files is refused before
+it is run, whoever made it (a new file the agent leaves outside them, such as
+a cache, is left out of its change instead). With a `build`, combinations are
+tried one at a time, and a build that names `{python}` is run once more on
+your own folder at the end, so the application's Python points at your
+source again (a failure there is a warning in the run's log). `study compile` writes this into the run's
+`evolvekit.yaml` as `problem.tree` and, with a build, a `builtin-build` stage
+right after the static one; a hand-written `evolvekit.yaml` with
+`problem.tree.build` needs that stage too.
+
+**Comparing branches.** Changes you made yourself are checked without a
+search:
+
+```
+python -m evolvekit study bakeoff shorter-tours --ref nearest-first --ref restart-sooner
+```
+
+Each branch's own change (from where it left the starting commit, `git diff
+start...branch`) is run against the starting commit on the held-back cases,
+paired, by the same rule; no AI is needed. It is refused before anything
+runs, exit 2, for a settings study, a study with no held-back case, a ref
+that does not exist, a branch that changes files outside the open files
+(widen `vary.code.open` or the harness's `code.open`), or one that does not
+apply on the starting commit (rebase it onto it). `study verdict --json` then
+holds `candidates`: one entry per branch in the order given, `{ref, commit,
+decision, line, mean_pct, ci95_pct, worst_pct, chance}`, each with its own
+line. The run's own line names the branch with the largest mean among those
+whose decision is `use`, as `Of 2 branches, nearest-first: …`; when none is,
+it says `None of the 2 branches is shown to beat the starting point.`, the
+decision is `keep`, and today's code stays. The report says how many were
+compared, because the more are compared, the likelier one looks ahead by
+chance. In the app, a code study's page offers *Compare branches* once a run
+has ended, and the Compare page shows the branches side by side.
+
+**The result is a change:**
+
+```
+python -m evolvekit study export shorter-tours --diff   # writes runs/<id>/best.patch and prints its path
+python -m evolvekit study pr shorter-tours              # what it would do; nothing is done
+python -m evolvekit study pr shorter-tours --yes        # do it
+```
+
+`study pr` first prints the verdict's line, then the branch
+`evolvekit/<slug>-<run>` and the repository it goes in, the change (`+N −M
+lines in solver.py`), where it pushes and the PR, and the body's file, and
+ends with `nothing was done: run it again with --yes to do this`. With `--yes`
+it makes one fresh commit with the best change on the starting commit, with
+your own git identity, hooks and signing (never evolvekit's internal commit),
+makes the branch there, pushes it to `origin` (else the repository's first
+remote), and opens the PR with `gh` when the remote is on GitHub and `gh` is
+installed; otherwise it says where the branch is and where the body is.
+`--base BRANCH` is the branch the PR goes into (default: the repository's
+default branch), `--draft` opens it as a draft. The body is the run's report,
+as `study report --markdown` writes it, under a header that names the change;
+it names no folder of your computer. After `from: working` the branch is made
+on `HEAD` with the change only (your uncommitted files are not in it); a
+change that does not apply on `HEAD` is refused with the path of
+`best.patch`. `study pr` does not refuse a verdict that says to keep today's
+code: it prints that line first, so read it before `--yes`. It refuses, exit
+2, a settings study (`this study changed settings, not code; the settings
+file is at …`), a run whose starting point stayed the best, and a run that
+has not ended; exit 1 is a failure while doing it (the branch exists, a hook
+refused the commit, the push or `gh` failed), with what was made so far.
+
+**What git must be.** git on `PATH`, 2.30 or later; `doctor` lists it.
+Settings studies need no git. The source folder must be inside a git
+repository that has the starting commit; `study code` and `harness check`
+say so when it is not. Each combination's folder is a worktree registered in
+that repository while it exists (`git worktree list` shows it under
+`runs/<id>/work/trees/`). evolvekit removes each when it is done with it —
+the refused and the dropped at the end of each round, the final check's when
+the check ends, all but the best's at the end of the search — and deletes
+only its own entries: it never runs `git worktree prune`, which would also
+drop yours. The best combination's folder stays in its run, to look at; when
+the study is deleted, `git worktree prune` in your repository clears its
+entry. evolvekit's own commits are made in those folders with the author
+`evolvekit <evolvekit@localhost>`, skip your hooks, are on no branch and are
+never pushed. Nothing is pushed without `--yes`.
 
 ### Harness commands
 

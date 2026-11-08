@@ -9,3 +9,8 @@ kpis:
 goal:
   levels:
     - {kpi: score, direction: higher}
+# A demo is quick: six minutes in all, and at most half a dollar of AI search
+# help once it is turned on (a code study needs it).
+budget:
+  hours: 0.1
+  ai: {enabled: false, max_usd: 0.5}
