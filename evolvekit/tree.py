@@ -279,8 +279,30 @@ def _entry_of(worktree: Path) -> Path | None:
     return Path(os.path.abspath(entry if entry.is_absolute() else worktree / entry))
 
 
-def _same(a: Path, b: Path) -> bool:
-    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+def same_path(a: str | os.PathLike[str], b: str | os.PathLike[str]) -> bool:
+    """Whether `a` and `b` name the same file or folder, however each is spelled.
+
+    Windows spells one folder many ways: long or 8.3 short names
+    (`C:\\Users\\RUNNER~1`), any case, a `\\\\?\\` prefix, either slash, a trailing
+    separator. git records a worktree by its long name while a temporary folder
+    may be short, so a plain comparison of the two misses (and an entry leaks).
+    Either path may be gone already (a tree is compared after it is deleted):
+    `realpath` resolves what still exists and keeps the rest as written.
+    """
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):  # one of them is missing: compare how they are spelled
+        return _canonical(a) == _canonical(b)
+
+
+def _canonical(path: str | os.PathLike[str]) -> str:
+    text = os.fspath(path)
+    if sys.platform == "win32":  # realpath keeps a `\\?\` prefix it was given; drop it first
+        if text.startswith("\\\\?\\UNC\\"):
+            text = "\\\\" + text[len("\\\\?\\UNC\\"):]
+        elif text.startswith("\\\\?\\"):
+            text = text[len("\\\\?\\"):]
+    return os.path.normcase(os.path.realpath(text))
 
 
 def _drop_entry(entry: Path, worktree: Path) -> None:
@@ -293,7 +315,7 @@ def _drop_entry(entry: Path, worktree: Path) -> None:
         named = Path((entry / "gitdir").read_text(encoding="utf-8").strip())
     except OSError:
         return  # gone already, or not a worktree entry: nothing of ours to delete
-    if _same(named if named.is_absolute() else entry / named, worktree / ".git"):
+    if same_path(named if named.is_absolute() else entry / named, worktree / ".git"):
         _rmtree(_long(entry))
 
 
