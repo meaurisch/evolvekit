@@ -4,7 +4,7 @@ A window names days, a start and an end ("mon-fri 01:00-06:00"); an end at or
 before the start straddles midnight and belongs to the day it started on.
 Occurrences are built from local dates and wall-clock times, so a daylight
 saving change moves nothing: the window is 01:00-06:00 on that day too, an hour
-shorter or longer in elapsed time. Spans are returned in UTC, compared in UTC.
+shorter or longer in elapsed time. Spans are compared and merged in UTC and returned in the local zone.
 """
 
 from __future__ import annotations
@@ -38,19 +38,13 @@ def _known(data: Mapping[str, Any], known: set[str], path: str) -> None:
 
 def _parse_time(raw: Any, path: str) -> time:
     """`"H:MM"`, or an int of minutes: unquoted `01:00` is read by YAML 1.1 as 60."""
-    if isinstance(raw, bool):
-        minutes = None
-    elif isinstance(raw, int):
+    minutes = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
         minutes = raw
     elif isinstance(raw, str):
         match = _CLOCK.match(raw.strip())
-        minutes = 60 * int(match[1]) + int(match[2]) if match and int(match[2]) < 60 else None
-        if match and int(match[1]) == 24 and int(match[2]) == 0:
-            minutes = 1440
-        elif match and int(match[1]) > 23:
-            minutes = None
-    else:
-        minutes = None
+        if match and int(match[2]) < 60:
+            minutes = 60 * int(match[1]) + int(match[2])
     if minutes == 1440:
         raise HarnessError(f"{path}: use 23:59 for the end of the day")
     if minutes is None or not 0 <= minutes < 1440:
@@ -63,8 +57,25 @@ def _clock(value: time) -> str:
 
 
 def _at(day: date, clock: time, tz: tzinfo | None) -> datetime:
+    """The wall-clock moment on `day`. One in the hour a spring-forward change
+    skips moves to the first moment that exists after it; one in the repeated
+    autumn hour is its first occurrence (fold=0)."""
     naive = datetime.combine(day, clock)
-    return naive.replace(tzinfo=tz) if tz is not None else naive.astimezone()
+    if tz is None:
+        return naive.astimezone()
+    before = naive.replace(tzinfo=tz)
+    early = before.astimezone(_UTC)
+    if early.astimezone(tz).replace(tzinfo=None) == naive:
+        return before
+    later = naive.replace(tzinfo=tz, fold=1)
+    moment = later.astimezone(_UTC)
+    while moment.astimezone(tz).utcoffset() != later.utcoffset():
+        moment += timedelta(minutes=1)
+    return moment
+
+
+def _local(moment: datetime, tz: tzinfo | None) -> datetime:
+    return moment.astimezone(tz) if tz is not None else moment.astimezone()
 
 
 def _aware(moment: datetime, tz: tzinfo | None) -> datetime:
@@ -162,7 +173,7 @@ class Schedule:
         found.sort(key=lambda item: (item[0], item[1]))
         return found
 
-    def spans(self, around: datetime, *, tz: tzinfo | None = None) -> list[tuple[datetime, datetime]]:
+    def _spans_utc(self, around: datetime, tz: tzinfo | None) -> list[tuple[datetime, datetime]]:
         merged: list[tuple[datetime, datetime]] = []
         for start, end, _ in self._occurrences(around, tz):
             if merged and (start - merged[-1][1]).total_seconds() <= JOIN_GAP_S:
@@ -171,11 +182,18 @@ class Schedule:
                 merged.append((start, end))
         return merged
 
+    def spans(self, around: datetime, *, tz: tzinfo | None = None) -> list[tuple[datetime, datetime]]:
+        """Every span from two days before `around`'s date to eight days after, as aware
+        datetimes in the local zone (`tz`, else the computer's). Compute durations on
+        `.astimezone(timezone.utc)` or `.timestamp()`: two datetimes in one zone subtract
+        by wall clock."""
+        return [(_local(a, tz), _local(b, tz)) for a, b in self._spans_utc(around, tz)]
+
     def span_at(self, now: datetime, *, tz: tzinfo | None = None) -> tuple[datetime, datetime] | None:
         moment = _aware(now, tz).astimezone(_UTC)
-        for start, end in self.spans(now, tz=tz):
+        for start, end in self._spans_utc(now, tz):
             if start <= moment < end:
-                return start, end
+                return _local(start, tz), _local(end, tz)
         return None
 
     def in_window(self, now: datetime, *, tz: tzinfo | None = None) -> Window | None:
@@ -186,13 +204,14 @@ class Schedule:
         return None
 
     def next_edge(self, now: datetime, *, tz: tzinfo | None = None) -> tuple[datetime, str] | None:
-        held = self.span_at(now, tz=tz)
-        if held is not None:
-            return held[1], "end"
         moment = _aware(now, tz).astimezone(_UTC)
-        for start, _ in self.spans(now, tz=tz):
+        spans = self._spans_utc(now, tz)
+        for start, end in spans:
+            if start <= moment < end:
+                return _local(end, tz), "end"
+        for start, _ in spans:
             if start > moment:
-                return start, "start"
+                return _local(start, tz), "start"
         return None
 
     def past_until(self, now: datetime, *, tz: tzinfo | None = None) -> bool:

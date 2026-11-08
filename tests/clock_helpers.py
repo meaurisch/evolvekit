@@ -20,6 +20,8 @@ class Amsterdam2026(tzinfo):
         end = _UTC_END + _CEST  # 03:00 wall: after the repeated hour
         if wall < start:
             return _CET
+        if wall < start + timedelta(hours=1):  # skipped hour: PEP 495, fold=0 keeps the old offset
+            return _CEST if dt.fold else _CET
         if wall < end - timedelta(hours=1):
             return _CEST
         if wall < end:

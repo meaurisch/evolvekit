@@ -83,9 +83,10 @@ def test_adjacent_windows_merge():
 def test_dst_change_keeps_wall_clock(zone):
     s = Schedule.parse({"windows": [{"days": list(DAYS), "from": "01:00", "to": "06:00"}]})
     spring = s.span_at(at(zone, "2026-03-29 03:30"), tz=zone)
-    assert spring[0].astimezone(zone).strftime("%H:%M") == "01:00" and spring[1] - spring[0] == timedelta(hours=4)
+    assert spring[0].strftime("%H:%M") == "01:00" and spring[1].strftime("%H:%M") == "06:00"
+    assert (spring[1].timestamp() - spring[0].timestamp()) == timedelta(hours=4).total_seconds()
     autumn = s.span_at(at(zone, "2026-10-25 04:00"), tz=zone)
-    assert autumn[1] - autumn[0] == timedelta(hours=6)
+    assert (autumn[1].timestamp() - autumn[0].timestamp()) == timedelta(hours=6).total_seconds()
     assert s.next_edge(at(zone, "2026-03-28 23:00"), tz=zone) == (at(zone, "2026-03-29 01:00"), "start")
 
 
@@ -109,3 +110,36 @@ def test_when_words():
 def test_presets_parse():
     for preset in PRESETS.values():
         Schedule.parse(preset["schedule"])
+
+
+def test_when_words_on_a_next_edge_across_midnight():
+    s = Schedule.parse({"windows": [{"days": ["sun"], "from": "00:00", "to": "06:00"}]})
+    now = at(TZ, "2026-11-10 07:00")
+    edge = s.next_edge(now, tz=TZ)[0]
+    assert edge.utcoffset() == timedelta(hours=1), "returned in the local zone, not UTC"
+    assert when_words(edge, now) == "Sun 00:00"
+
+
+def test_int_and_sexagesimal_times_parse():
+    window = Schedule.parse({"windows": [{"days": ["sat"], "from": 60, "to": "06:00"}]}).windows[0]
+    assert window.start == time(1, 0)
+    raw = yaml.safe_load("windows:\n  - {days: [sat], from: 1:00, to: 6:00}\n")
+    assert raw["windows"][0]["from"] == 60
+    assert Schedule.parse(raw).windows[0] == Window(frozenset({5}), time(1, 0), time(6, 0))
+
+
+@pytest.mark.parametrize("zone", ZONES)
+def test_an_edge_in_the_skipped_spring_hour_moves_to_the_first_moment_after(zone):
+    s = Schedule.parse({"windows": [{"days": list(DAYS), "from": "02:30", "to": "05:00"}]})
+    start, end = s.span_at(at(zone, "2026-03-29 04:00"), tz=zone)
+    assert start == at(zone, "2026-03-29 03:00")
+    assert start.strftime("%H:%M") == "03:00"
+
+
+@pytest.mark.parametrize("zone", ZONES)
+def test_an_edge_in_the_repeated_autumn_hour_is_its_first_occurrence(zone):
+    s = Schedule.parse({"windows": [{"days": list(DAYS), "from": "02:30", "to": "05:00"}]})
+    start, end = s.span_at(at(zone, "2026-10-25 04:00"), tz=zone)
+    first = at(zone, "2026-10-25 02:30")
+    assert start.timestamp() == first.timestamp() and first.fold == 0
+    assert start.utcoffset() == timedelta(hours=2), "CEST, the first 02:30"
