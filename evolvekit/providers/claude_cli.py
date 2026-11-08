@@ -153,8 +153,10 @@ class ClaudeCliProvider:
         )
 
     def build_argv(
-        self, *, model: str, system: str = "", system_file: str | None = None
+        self, *, model: str, system: str = "", system_file: str | None = None, max_usd: float | None = None
     ) -> list[str]:
+        """`claude -p` for one reply; with `max_usd`, `--max-budget-usd` when this
+        CLI's `--help` lists it (what is left of the run's budget)."""
         argv = [self._resolve(), *BASE_FLAGS]
         if model:  # an empty model is the CLI's own default
             argv += ["--model", model]
@@ -166,6 +168,8 @@ class ClaudeCliProvider:
             argv += ["--system-prompt-file", system_file]
         elif system:
             argv += ["--system-prompt", system]
+        if max_usd is not None and "--max-budget-usd" in self.act_flags():
+            argv += ["--max-budget-usd", f"{max(0.0, float(max_usd)):.4f}"]
         return argv
 
     # -- act: the coding agent (design §5.4) --------------------------------
@@ -187,7 +191,8 @@ class ClaudeCliProvider:
 
     def act_cap_note(self) -> str | None:
         """What a run's log says once when this CLI cannot be given a cap per
-        call (its `--help` lists no `--max-budget-usd`); None when it can."""
+        call, a reply or an agent run (its `--help` lists no `--max-budget-usd`);
+        None when it can."""
         if "--max-budget-usd" in self.act_flags():
             return None
         return "this claude has no spending limit per call; the study's budget is checked between calls"
@@ -265,7 +270,10 @@ class ClaudeCliProvider:
         max_tokens: int,
         temperature: float,
         response_format: dict[str, Any] | None = None,
+        max_usd: float | None = None,
     ) -> Completion:
+        # `max_usd`: the most this reply may spend (`build_argv`). A reply stopped
+        # there raises `ProviderError` with what it cost (`parse_cli_json`).
         # max_tokens/temperature/response_format have no CLI equivalent; the
         # loop's output bound is enforced by the prompt instead. Recorded here
         # so the signature stays honest across backends.
@@ -284,7 +292,7 @@ class ClaudeCliProvider:
             with handle:
                 handle.write(system)
             system_file = handle.name
-        argv = self.build_argv(model=model, system_file=system_file)
+        argv = self.build_argv(model=model, system_file=system_file, max_usd=max_usd)
         try:
             proc = self._runner(
                 argv,
@@ -307,9 +315,11 @@ class ClaudeCliProvider:
                 except OSError:
                     pass
         if proc.returncode != 0:
+            spent = _stopped_at_cap(proc.stdout, model=model, provider=self.name)
             raise ProviderError(
                 f"claude-cli provider: exit {proc.returncode}: "
-                f"{cli_error_message(proc.stdout, proc.stderr)}"
+                f"{cli_error_message(proc.stdout, proc.stderr)}",
+                completion=spent,
             )
         return parse_cli_json(proc.stdout, fallback_model=model, provider=self.name)
 
@@ -392,6 +402,22 @@ def parse_act_json(stdout: str | None) -> AgentResult | None:
                        input_tokens=input_tokens, output_tokens=output_tokens, cached_input_tokens=cached)
 
 
+def _stopped_at_cap(stdout: str | None, *, model: str, provider: str) -> Completion | None:
+    """A reply the CLI stopped at `--max-budget-usd` (`error_max_budget_usd`), as
+    what it is billed: its reported cost and tokens, no text. None otherwise."""
+    try:
+        payload = json.loads(stdout or "")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("subtype") != "error_max_budget_usd":
+        return None
+    cost = payload.get("total_cost_usd")
+    input_tokens, output_tokens = _usage_tokens(payload)
+    return Completion(text="", input_tokens=input_tokens, output_tokens=output_tokens, model=model,
+                      provider=provider, usd=float(cost) if isinstance(cost, (int, float)) else None,
+                      raw={"failed": True, "stopped_at": "error_max_budget_usd"})
+
+
 def parse_cli_json(
     stdout: str, *, fallback_model: str, provider: str = "claude-cli"
 ) -> Completion:
@@ -406,7 +432,8 @@ def parse_cli_json(
         raise ProviderError("claude-cli provider: expected a JSON object on stdout")
     if payload.get("is_error"):
         raise ProviderError(
-            f"claude-cli provider: CLI reported an error: {cli_error_message(stdout, None)}"
+            f"claude-cli provider: CLI reported an error: {cli_error_message(stdout, None)}",
+            completion=_stopped_at_cap(stdout, model=fallback_model, provider=provider),
         )
     text = payload.get("result")
     if not isinstance(text, str) or not text.strip():

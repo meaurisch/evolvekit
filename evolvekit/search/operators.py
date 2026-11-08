@@ -137,9 +137,9 @@ def run_operator(
             max_tokens=model_cfg.max_tokens,
             temperature=model_cfg.temperature,
         )
-    except ProviderError as exc:
+    except ProviderError as exc:  # billed what it cost, when it ran and said so
         return OperatorResult(
-            operator=operator, messages=messages, error=str(exc), provider_error=True
+            operator=operator, messages=messages, error=str(exc), provider_error=True, completion=exc.completion
         )
 
     try:
@@ -229,8 +229,9 @@ def _on_tree(
                 messages, model=model_cfg.model, max_tokens=model_cfg.max_tokens,
                 temperature=model_cfg.temperature,
             )
-        except ProviderError as exc:
-            return OperatorResult(operator=operator, messages=messages, error=str(exc), provider_error=True)
+        except ProviderError as exc:  # billed what it cost, when it ran and said so
+            return OperatorResult(operator=operator, messages=messages, error=str(exc), provider_error=True,
+                                  completion=exc.completion)
         try:
             if block is not None:
                 path, old = block

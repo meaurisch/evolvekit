@@ -1623,6 +1623,15 @@ with AI help what its AI spent (`AI: $0.87 of $1.00`, from the run's
 report's *How it ran* says the same. Nothing else; `--json` prints the whole
 verdict document (see [docs/app.md](docs/app.md#for-developers)).
 
+The AI spend stays within its cap. Every claude call, a reply or a coding
+agent's run, is told what is left (`--max-budget-usd`, when the installed
+claude lists it in its `--help`), and before each AI call the run checks that
+what is left covers the largest call it has seen so far ($0.05 before the
+first). When it does not, the run writes no more AI changes: the round ends,
+the run goes to its final check, and its log and *How it ran* say "the AI
+budget was used up". A single call can overspend only when the installed
+claude has no per-call limit; the run's log then says so once.
+
 `study preview`, `study compile` and `study run` take a study folder or a
 study's name: a value that is a folder on disk is a folder, anything else is
 a study in the library home. `study compile` writes the automatic plan into a
@@ -1823,7 +1832,8 @@ is left of `budget.ai.max_usd`); a study uses the defaults, and a
 hand-written `evolvekit.yaml` can set them. The cap reaches claude only when
 the installed claude lists `--max-budget-usd` in its `--help`; otherwise the
 run's log says once that this claude has no spending limit per call, and the
-study's budget is checked between calls. Every call is billed what claude
+study's budget is checked between calls: no call starts when what is left
+would not cover the largest call so far. Every call is billed what claude
 reports; a call that reports no cost (a timeout, a Stop, a crash) is charged
 its cap. The run's token cap (`budget.max_tokens` in `evolvekit.yaml`,
 1,000,000 by default) counts uncached input and output; cache reads are not
@@ -2114,7 +2124,9 @@ manual.
    does*, not how well it scores. `complexity` comes free; the second one is
    worth emitting from your evaluator specifically for this.
 6. **Set a budget.** `budget.max_usd`, `budget.max_tokens` and
-   `budget.max_full_evals_per_day` are hard stops, not warnings. So is
+   `budget.max_full_evals_per_day` are hard stops, not warnings; the search
+   ends before a model call when what is left of `budget.max_usd` would not
+   cover the largest call so far ($0.05 before the first). So is
    `budget.max_consecutive_provider_errors` (default 3): a rate limit, a
    subscription session cap or an outage halts the run with the backend's own
    message instead of breeding children into a dead provider. With

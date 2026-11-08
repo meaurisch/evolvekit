@@ -105,6 +105,6 @@ class Scratchpad:
                 max_tokens=model_cfg.max_tokens,
                 temperature=model_cfg.temperature,
             )
-        except ProviderError as exc:
-            return self.text, None, messages, str(exc)
+        except ProviderError as exc:  # billed what it cost, when it ran and said so
+            return self.text, exc.completion, messages, str(exc)
         return self.store(completion.text, generation), completion, messages, None

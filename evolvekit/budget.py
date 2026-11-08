@@ -22,7 +22,12 @@ from datetime import date, datetime, timezone
 from evolvekit.config import BudgetConfig, StopConfig
 from evolvekit.economics import GenerationPoint
 
-__all__ = ["BudgetGuard", "BudgetState", "StopPolicy", "StopDecision"]
+__all__ = ["AI_USED_UP", "FIRST_CALL_USD", "BudgetGuard", "BudgetState", "StopPolicy", "StopDecision"]
+
+AI_USED_UP = "the AI budget was used up"
+"""How a run's log and its stop reason start when the next AI call could overspend `budget.max_usd`."""
+FIRST_CALL_USD = 0.05
+"""What is left must cover before a run's first AI call, when no call has said what one costs."""
 
 
 @dataclass
@@ -30,6 +35,8 @@ class BudgetState:
     usd: float = 0.0
     tokens: int = 0
     calls: int = 0
+    largest_usd: float = 0.0
+    """The most one call of the run has cost."""
     full_evals: dict[str, int] = field(default_factory=dict)
 
 
@@ -61,7 +68,23 @@ class BudgetGuard:
             )
         return BudgetVerdict(True)
 
+    def room_for_a_call(self) -> BudgetVerdict:
+        """`check`, and then whether what is left of `max_usd` covers one more AI
+        call: the largest call the run has seen, or `FIRST_CALL_USD` before any.
+        The reason, when not, starts with `AI_USED_UP`."""
+        verdict = self.check()
+        if not verdict.allowed:
+            return verdict
+        left = self.config.max_usd - self.state.usd
+        need = self.state.largest_usd if self.state.calls else FIRST_CALL_USD
+        if left >= need:
+            return BudgetVerdict(True)
+        what = (f"the largest call so far cost {_usd(need)}" if self.state.calls
+                else f"a first call is allowed {_usd(need)}")
+        return BudgetVerdict(False, f"{AI_USED_UP}: {_usd(left)} of {_usd(self.config.max_usd)} left, and {what}")
+
     def spend(self, *, usd: float, tokens: int) -> None:
+        self.state.largest_usd = max(self.state.largest_usd, float(usd))
         self.state.usd += float(usd)
         self.state.tokens += int(tokens)
         self.state.calls += 1
@@ -104,6 +127,11 @@ class BudgetGuard:
             "calls": float(self.state.calls),
             "full_evals_today": float(self.full_evals_today()),
         }
+
+
+def _usd(amount: float) -> str:
+    """Dollars to the cent, or to a hundredth of a cent below one cent."""
+    return f"${amount:.2f}" if amount >= 0.01 or amount <= 0 else f"${amount:.4f}"
 
 
 @dataclass(frozen=True)

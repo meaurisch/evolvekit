@@ -15,7 +15,8 @@ need not agree with each other. `combinations` counts every combination the
 search measured, the starting point among them: a plan of 2 combinations a
 round for 2 rounds gives 5. `planned` holds the plan's `rounds` and
 `combinations`; `how_it_ran`, only when the search stopped on time with fewer
-rounds than planned, says so in a sentence (`how_it_ran`). `spent`, on a run
+rounds than planned or its AI budget was used up, says so in a sentence
+(`how_it_ran`). `spent`, on a run
 with AI, is what its AI spent (`ai_spent`): `{usd, cap_usd, line}`, or
 `{requests, line}` for a provider that counts requests. The page
 (`jobs.results`), the command line and the report all render from it, so they
@@ -531,26 +532,39 @@ def _held_rows(result: dict[str, Any], held: list[dict[str, Any]]) -> list[dict[
              "outcome": _outcome(row)} for row in rows]
 
 
+AI_BUDGET_STOPS = ("the AI budget was used up", "budget.max_usd reached")
+"""How a search's stop reason starts when its AI budget ended it (`budget.AI_USED_UP`, `BudgetGuard.check`)."""
+
+
 def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool) -> str:
     """When a search stopped on time with fewer rounds than its plan said, the
     sentence that says so: "Ran 2 of the 11 planned rounds (25 combinations,
     about 132 planned): the time ran out; the AI's replies took longer than the
-    plan assumed." Empty when the plan happened, for a bake-off (no search),
-    and for a run continued with more time (its plan is the continuation's)."""
+    plan assumed." When its AI budget ended it: "Ran 2 of the 3 planned rounds
+    (…): the AI budget was used up.", or "The AI budget was used up in round 4
+    (…)." when no planned round was left out. Empty when the plan happened, for
+    a bake-off (no search), and for a run continued with more time (its plan is
+    the continuation's)."""
     search = job.get("search") or {}
     done, planned = search.get("generations"), plan.get("rounds")
     if job.get("bakeoff") or job.get("continued_at") or not isinstance(done, int) or not isinstance(planned, int):
         return ""
-    if done >= planned or not str(search.get("stop_reason") or "").startswith("time limit"):
-        return ""
+    reason = str(search.get("stop_reason") or "")
     combinations = []
     if isinstance(tried, int):
         combinations.append(f"{tried} combination{'s' if tried != 1 else ''}")
     if isinstance(plan.get("combinations"), int):
         combinations.append(f"about {plan['combinations']} planned")
+    counts = f" ({', '.join(combinations)})" if combinations else ""
+    rounds = f"Ran {done} of the {planned} planned round{'s' if planned != 1 else ''}"
+    if reason.startswith(AI_BUDGET_STOPS):
+        if done < planned:
+            return f"{rounds}{counts}: the AI budget was used up."
+        return f"The AI budget was used up in round {done}{counts}."
+    if done >= planned or not reason.startswith("time limit"):
+        return ""
     why = "the AI's replies took longer than the plan assumed" if ai else "the rounds took longer than the plan assumed"
-    return (f"Ran {done} of the {planned} planned round{'s' if planned != 1 else ''}"
-            + (f" ({', '.join(combinations)})" if combinations else "") + f": the time ran out; {why}.")
+    return f"{rounds}{counts}: the time ran out; {why}."
 
 
 COUNTS_REQUESTS = ("copilot-cli",)

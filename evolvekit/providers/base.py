@@ -6,6 +6,8 @@ the loop does not need (streaming, tools, session ids) stops here.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -14,6 +16,7 @@ __all__ = [
     "Completion",
     "AgentError",
     "AgentResult",
+    "CallCapped",
     "Provider",
     "EmbeddingProvider",
     "ProviderError",
@@ -21,13 +24,20 @@ __all__ = [
     "estimate_tokens",
     "embedding_tokens",
     "supports_act",
+    "supports_call_cap",
 ]
 
 Message = dict[str, str]
 
 
 class ProviderError(RuntimeError):
-    """A backend failed to produce a usable completion."""
+    """A backend failed to produce a usable completion. `completion`, when the
+    call ran and said what it cost (a reply stopped at its spending cap): what
+    the failed call is billed."""
+
+    def __init__(self, *args: Any, completion: Completion | None = None) -> None:
+        super().__init__(*args)
+        self.completion = completion
 
 
 @dataclass(frozen=True)
@@ -131,6 +141,29 @@ def supports_act(provider: object) -> bool:
     folders `read_dirs` names, spends at most `max_usd` when the tool can be
     told so, and is ended (its whole process tree) when `cancel` is set."""
     return callable(getattr(provider, "act", None))
+
+
+def supports_call_cap(provider: object) -> bool:
+    """Whether the provider's `complete` takes `max_usd`, the most one call may
+    spend (claude-cli, which passes it on when the installed CLI can take it)."""
+    try:
+        return "max_usd" in inspect.signature(provider.complete).parameters  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+class CallCapped:
+    """`provider` with every completion told the most it may spend, `left()` --
+    what is left of `budget.max_usd`. Everything else is the provider's own."""
+
+    def __init__(self, provider: Any, left: Callable[[], float]) -> None:
+        self._provider, self._left = provider, left
+
+    def complete(self, messages: list[Message], **kwargs: Any) -> Completion:
+        return self._provider.complete(messages, max_usd=max(0.0, float(self._left())), **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
 
 
 @runtime_checkable

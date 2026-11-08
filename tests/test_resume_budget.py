@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from evolvekit import budget
+from evolvekit.budget import AI_USED_UP
 from evolvekit.config import load_config
 from evolvekit.providers.fake import FakeProvider
 from evolvekit.search.driver import Driver
@@ -38,16 +40,17 @@ def _config(**budget):
     )
 
 
-def test_a_run_stopped_by_max_usd_stays_stopped_when_it_is_run_again(tmp_path):
+def test_a_run_stopped_by_max_usd_stays_stopped_when_it_is_run_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(budget, "FIRST_CALL_USD", 0.0)  # the fake's calls cost under a tenth of a cent
     config = _config(max_usd=0.002)
     first = Driver(config, run_dir=tmp_path / "run").run()
-    assert "max_usd" in first.stop_reason
+    assert first.stop_reason.startswith(AI_USED_UP)
     spent = first.totals["usd"]
     calls = first.totals["calls"]
-    assert spent >= 0.002
+    assert 0 < spent <= 0.002, "within the cap: the next call could have overspent it (persona round 3, E2)"
 
     second = Driver(config, run_dir=tmp_path / "run").run()
-    assert "max_usd" in second.stop_reason
+    assert second.stop_reason.startswith(AI_USED_UP), "what the directory spent and its largest call are restored"
     assert second.generations == 0, "a generation ran on a budget already spent"
     assert second.totals["calls"] == calls
     assert second.totals["usd"] == pytest.approx(spent)

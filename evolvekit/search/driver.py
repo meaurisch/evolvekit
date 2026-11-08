@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from evolvekit import __version__
-from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
+from evolvekit.budget import AI_USED_UP, BudgetGuard, StopDecision, StopPolicy
 from evolvekit.candidate import (
     SEED_OPERATOR,
     BlockError,
@@ -50,6 +50,7 @@ from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration
 from evolvekit.providers import Provider, build_provider
+from evolvekit.providers.base import CallCapped, supports_call_cap
 from evolvekit.search.archive import Archive
 from evolvekit.search.breadth import AdaptiveBreadth
 from evolvekit.search.novelty import NoveltyIndex, NoveltyVerdict, build_near_backend
@@ -232,7 +233,9 @@ class Driver:
         self._provider_halt: str | None = None
         self._dead_ends: list[str] = []
         self._told: set[str] = set()
-        """The run-log notes said once per run (`_agent_patch`)."""
+        """The run-log notes said once per run (`_agent_patch`, `_calling`)."""
+        self._ai_out: str | None = None
+        """Why no more AI changes are written (`_ai_room`): the search ends after its round."""
         self._parent_notes: dict[str, str] = {}
         """One artefact per parent that bred a behavioural twin, spent on that
         parent's next prompt. The parent's children counter has already been
@@ -421,6 +424,34 @@ class Driver:
                 self.config.models.by_role(role), base_dir=self.config.base_dir
             )
         return self._providers[role]
+
+    def _calling(self, role: str) -> Provider:
+        """`provider(role)` for a call: a provider that can be told the most one
+        reply may spend (claude-cli) is told what is left of `budget.max_usd`
+        with every reply (`CallCapped`); one whose CLI cannot take it is named
+        once in the run's log."""
+        provider = self.provider(role)
+        if not supports_call_cap(provider):
+            return provider
+        note_for = getattr(provider, "act_cap_note", None)
+        note = note_for() if callable(note_for) else None
+        if note and note not in self._told:  # once per run, not per call
+            self._told.add(note)
+            self.log(f"warning: {note}")
+        return CallCapped(provider, lambda: self.budget.config.max_usd - self.budget.state.usd)
+
+    def _ai_room(self) -> bool:
+        """Whether one more AI call fits in what is left of `budget.max_usd`
+        (`BudgetGuard.room_for_a_call`). The first time it does not, the run's
+        log says so and the search ends after its round: no more AI changes are
+        written, and the run goes to its final check."""
+        verdict = self.budget.room_for_a_call()
+        if verdict.allowed:
+            return True
+        if self._ai_out is None and (verdict.reason or "").startswith(AI_USED_UP):
+            self._ai_out = verdict.reason
+            self.log(f"{verdict.reason}; no more AI changes: the round ends and the run goes to its final check")
+        return False
 
     def _bill_embedding(self, tokens: int, texts: int) -> None:
         """Charge one embedding call to whichever child provoked it."""
@@ -693,6 +724,9 @@ class Driver:
             if not verdict.allowed:
                 summary.stop_reason = verdict.reason or "budget exhausted"
                 break
+            if self.config.search.uses_llm and not self._ai_room() and self._ai_out:
+                summary.stop_reason = self._ai_out
+                break
             if decision.stop:
                 summary.stop_reason = decision.reason or "stop policy"
                 break
@@ -767,6 +801,9 @@ class Driver:
                     f"since-improvement=${point.usd_since_improvement:.4f}  "
                     f"window({point.window})={point.gain_line}"
                 )
+            if self._ai_out:
+                summary.stop_reason = self._ai_out
+                break
             if decision.stop:
                 summary.stop_reason = decision.reason or "stop policy"
                 break
@@ -1202,6 +1239,8 @@ class Driver:
         for slot, operator in enumerate(plan):
             if not self.budget.check().allowed or self._provider_is_dead() or self.run_stop.triggered:
                 break
+            if _role_of(operator) != "none" and not self._ai_room():
+                break  # what is left could not pay for this call: the round ends here
             # A big step is an escape from the *front* of the search, so it
             # starts from the best candidate rather than from a sampled cell.
             parent = (best or pool[0]) if operator == "big_step" else pool[slot % len(pool)]
@@ -1221,7 +1260,7 @@ class Driver:
             # Nothing to cross with yet: one cell, or one elite. Mutate instead
             # of pretending, and say so in the record.
             operator = "rewrite"
-        role = "strong" if operator == "big_step" else OPERATOR_ROLES.get(operator, "small")
+        role = _role_of(operator)
 
         outcome, verdict, attempts = self._propose(
             operator, parent, inspirations, candidate_id, generation, role
@@ -1330,7 +1369,7 @@ class Driver:
         if operator == "agent_patch":
             # A whole agent run is not re-asked for a duplicate: the next round's brief shows it.
             return outcome, verdict, attempts
-        if not self.budget.check().allowed:
+        if not self._ai_room():
             return outcome, verdict, attempts
 
         # One re-prompt, ever. The first real run showed the small model
@@ -1379,7 +1418,7 @@ class Driver:
         return run_operator(
             operator,
             config=self.config,
-            provider=self.provider(role),
+            provider=self._calling(role),
             model_role=role,
             parent=parent,
             parent_result=self.results.get(parent.id),
@@ -1409,7 +1448,7 @@ class Driver:
         competing = [c for c in self.archive if _competes(c) and c.fitness is not None]
         worst = min(competing, key=lambda c: (c.fitness, c.id)) if competing else None
         left_usd = self.budget.config.max_usd - self.budget.state.usd
-        provider = self.provider(role)
+        provider = self._calling(role)
         note_for = getattr(provider, "act_cap_note", None)
         note = note_for() if callable(note_for) else None
         if note and note not in self._told:  # once per run, not per call
@@ -1536,7 +1575,7 @@ class Driver:
     def _maybe_refresh_scratchpad(self, generation: int) -> None:
         if not self.config.search.uses_llm:
             return  # the scratchpad is written by the small model
-        if not self.scratchpad.due(generation) or not self.budget.check().allowed:
+        if not self.scratchpad.due(generation) or not self._ai_room():
             return
         elites = self.grid.elites()[:8]
         if not elites:
@@ -1548,7 +1587,7 @@ class Driver:
         ]
         text, completion, messages, error = self.scratchpad.refresh(
             config=self.config,
-            provider=self.provider("small"),
+            provider=self._calling("small"),
             entries=entries,
             generation=generation,
         )
@@ -1687,6 +1726,11 @@ class Driver:
         self.archive.append(candidate)
         self.by_id[candidate.id] = candidate
         self.ledger.record_run(candidate.to_record())
+
+
+def _role_of(operator: str) -> str:
+    """The model role an operator calls ("none": it calls no model)."""
+    return "strong" if operator == "big_step" else OPERATOR_ROLES.get(operator, "small")
 
 
 def _fmt(value: float | None) -> str:
