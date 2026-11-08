@@ -315,7 +315,9 @@ def test_every_run_of_a_study_has_its_line_and_kind(tmp_path):
     last = jobs.run_line(root, study, root / "runs" / "20260103-000000")
     assert last["decision"] == "keep" and last["mean"] == 0.4
     assert [r["decision"] for r in listed] == ["use", "keep", "keep"]
-    assert jobs.state_line(root, study) == jobs.run_line(root, study, root / "runs" / "20260103-000000")
+    state = jobs.state_line(root, study)
+    assert state.pop("earlier")["run"] == "20260101-000000", "persona round 3, E4: a later keep names the earlier use"
+    assert state == jobs.run_line(root, study, root / "runs" / "20260103-000000")
     assert jobs.state_line(root, study)["run"] == "20260103-000000"
 
 

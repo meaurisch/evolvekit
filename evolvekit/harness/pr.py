@@ -17,6 +17,7 @@ found -- a "keep today's" verdict included (decision 29).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -337,6 +338,16 @@ def _refused(exc: Exception) -> str:
     return f"the commit was refused by the repository's hook: {said}"
 
 
+def _record(plan: PrPlan, done: dict[str, Any]) -> None:
+    """What was made so far, in the run's folder (`jobs.PR_RECORD`): the Study page and `study status`
+    say "Branch <name> pushed to <remote>" or "made, not pushed" from it."""
+    from evolvekit.app.jobs import PR_RECORD
+
+    record = {"branch": done["branch"], "commit": done["commit"], "remote": plan.remote if done["pushed"] else None,
+              "pushed": bool(done["pushed"]), "url": done.get("url")}
+    (plan.run_dir / PR_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+
 def open_pr(plan: PrPlan) -> dict[str, Any]:
     """Make the branch, push it, open the PR: `{"branch", "commit", "pushed", "url", "note"}`.
     Raises `PrFailed` with how far it got."""
@@ -363,6 +374,7 @@ def open_pr(plan: PrPlan) -> dict[str, Any]:
             print(f"evolvekit: {tree.tree_dir(plan.run_dir, PR_TREE)} could not be removed: remove it, then run "
                   "git worktree prune in your repository", file=sys.stderr)
     done: dict[str, Any] = {"branch": branch, "commit": commit, "pushed": False, "url": None, "note": ""}
+    _record(plan, done)
     if plan.remote:
         try:
             push_branch(top, plan.remote, branch)
@@ -370,10 +382,12 @@ def open_pr(plan: PrPlan) -> dict[str, Any]:
             raise PrFailed(f"the branch {branch} is made here ({commit[:12]}), but pushing it to "
                            f"{plan.remote} failed: {exc}", state="branch", branch=branch, commit=commit) from None
         done["pushed"] = True
+        _record(plan, done)
     if plan.gh:
         try:
             done["url"] = create_pr(top, base=plan.base_branch, branch=branch, title=plan.title,
                                     body_path=plan.body_path, draft=plan.draft)
+            _record(plan, done)
         except HarnessError as exc:
             raise PrFailed(f"the branch {branch} is pushed to {plan.remote}, but gh pr create failed: {exc}; "
                            f"the body is at {plan.body_path}", state="pushed", branch=branch, commit=commit) from None

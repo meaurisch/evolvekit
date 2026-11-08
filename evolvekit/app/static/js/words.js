@@ -125,6 +125,8 @@
       c.sub = s.line || "";
       c.pepper = null;
     }
+    // A later run must not hide an earlier use: "An earlier run (<id>) says use: <its verdict line>".
+    if (s.earlier && s.earlier.says) c.note = s.earlier.says;
     if (s.archived) c.kicker = "Archived · " + c.kicker.charAt(0).toLowerCase() + c.kicker.slice(1);
     if (!c.href) c.href = s.kind === "broken" ? "#/" : EK.studyHref(s.slug, null);
     return c;

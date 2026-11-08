@@ -235,7 +235,8 @@
         ${c.menu ? html`<div class="menu-wrap">${EK.iconButton("more", "More for " + c.name, { act: "menu", arg: menuId, haspopup: "menu", expanded: "false", cls: "card-more" })}
           ${EK.menu("Study", c.menu, menuId)}</div>` : ""}</div>
       <div class="card-mid"><div class="card-words"><p class="type-body card-head">${EK.figures(c.head || "")}</p>
-        ${c.sub ? html`<p class="type-small ink-2">${c.sub}</p>` : ""}</div>
+        ${c.sub ? html`<p class="type-small ink-2">${c.sub}</p>` : ""}
+        ${c.note ? html`<p class="type-small card-note">${EK.figures(c.note)}</p>` : ""}</div>
         ${c.pepper ? html`<div class="card-pepper">${EK.pepper(c.pepper, 48)}</div>` : ""}</div>${vis}${actions}</article>`;
   };
 

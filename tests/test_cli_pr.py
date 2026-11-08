@@ -233,6 +233,11 @@ def test_pr_without_a_github_remote_says_where_the_branch_is(tmp_path, capsys, m
     out = capsys.readouterr().out
     body = home / "studies" / slug / "runs" / "r1" / "pr.md"
     assert "the remote is not on GitHub: open the PR there from" in out and str(body) in out
+    # Persona round 3, E4: the run's folder keeps what was made, and the study's status says it.
+    record = json.loads((home / "studies" / slug / "runs" / "r1" / "pr.json").read_text(encoding="utf-8"))
+    assert record["branch"] == branch and record["pushed"] is True and record["remote"] == "origin"
+    assert main(["study", "status", slug, "--home", str(home)]) == 0
+    assert f"Branch {branch} pushed to origin" in capsys.readouterr().out.splitlines()
 
 
 def test_pr_without_a_remote_makes_the_branch_only(tmp_path, capsys, monkeypatch):
@@ -243,6 +248,8 @@ def test_pr_without_a_remote_makes_the_branch_only(tmp_path, capsys, monkeypatch
     answer = json.loads(capsys.readouterr().out)
     assert answer["done"] is True and answer["pushed"] is False and answer["url"] is None
     assert answer["branch"] == f"evolvekit/{slug}-r1" and git(repo, "rev-parse", answer["branch"]) == answer["commit"]
+    assert main(["study", "status", slug, "--home", str(home)]) == 0
+    assert f"Branch evolvekit/{slug}-r1 made, not pushed" in capsys.readouterr().out.splitlines()
 
 
 def test_a_pr_tree_that_cannot_be_removed_is_named(tmp_path, capsys, monkeypatch):

@@ -627,7 +627,9 @@ def runs_of(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
     listed = jobs.runs(root)
     live = any(r.get("phase") in (*jobs.ACTIVE, "queued") for r in listed)
-    return {"runs": listed, "latest": jobs.latest_run(root), "poll_s": RUNS_POLL_LIVE_S if live else RUNS_POLL_IDLE_S}
+    earlier = jobs.earlier_use(root, listed[-1]) if listed else None  # the header's "An earlier run … says use"
+    return {"runs": listed, "latest": jobs.latest_run(root), "poll_s": RUNS_POLL_LIVE_S if live else RUNS_POLL_IDLE_S,
+            "earlier": earlier}
 
 
 def tries_of(req: Request) -> dict[str, Any]:

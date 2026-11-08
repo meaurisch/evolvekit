@@ -59,7 +59,9 @@
     return now && was && now !== was && shown === was ? now : null;
   }
   /** What the header, the notices and the runs drawer show of the runs: when it changes, they follow. */
-  function runsKey(runs) { return runs.map(function (r) { return r.id + "\u0001" + r.kind + "\u0001" + r.line; }).join("\u0002"); }
+  function runsKey(runs) {
+    return runs.map(function (r) { return r.id + "\u0001" + r.kind + "\u0001" + r.line + "\u0001" + ((r.branch || {}).line || ""); }).join("\u0002");
+  }
   /** Ask for the study's runs as they are now; follow a new run, or bring the header, the notices and
       an open runs drawer up to date (a run that ended, a run that started while another was shown). */
   function watchRuns() {
@@ -70,9 +72,11 @@
       st.runsAt = asked + runsDelay(d, !!st.status && isLive());
       var old = st.doc.runs || [], fresh = d.runs || [];
       var to = newerRun(old, fresh, st.run);
+      var said = JSON.stringify((st.doc.state || {}).earlier || null), says = JSON.stringify(d.earlier || null);
       st.doc.runs = fresh;
+      if ("earlier" in d) st.doc.state = Object.assign({}, st.doc.state, { earlier: d.earlier || null });
       if (to) { follow(to); return; }
-      if (runsKey(old) === runsKey(fresh)) return;
+      if (runsKey(old) === runsKey(fresh) && said === says) return;
       var head = document.getElementById("study-head");
       if (head) head.innerHTML = String(header());
       var n = document.getElementById("study-notices");
@@ -680,8 +684,21 @@
     var runs = st.doc.runs || [];
     // A code study changes code: its header counts no settings (its fixed ones are not tuned).
     var sub = (tuned && !isCode() ? EK.plural(tuned, "setting") + " · " : "") + EK.plural(cases, "study case") + " · " + heldCount() + " held back";
+    var lines = headLines(runs, st.run, (st.doc.state || {}).earlier || null);
     return html`${EK.titleBlock("Study · " + EK.when(runStartedAt()), st.doc.study.name, sub,
-      html`<div class="actions">${EK.link("Past runs (" + runs.length + ")", { act: "runs" })}${EK.link("Set up", { href: "#/setup/" + EK.q(st.slug) })}</div>`)}`;
+      html`<div class="actions">${EK.link("Past runs (" + runs.length + ")", { act: "runs" })}${EK.link("Set up", { href: "#/setup/" + EK.q(st.slug) })}</div>`)}${lines.map(function (line) {
+        return html`<p class="type-small head-note">${EK.figures(line)}</p>`;
+      })}`;
+  }
+  /** The header's lines under the title: the shown run's branch, when `study pr` made one for it
+      ("Branch … pushed to origin"); and on the latest run's page, when it does not say use and an
+      earlier run did, "An earlier run (<id>) says use: <its verdict line>" (`earlier`, the server's). */
+  function headLines(runs, run, earlier) {
+    var out = [], shown = runs.filter(function (r) { return r.id === run; })[0] || runs[runs.length - 1];
+    if (shown && shown.branch && shown.branch.line) out.push(shown.branch.line);
+    var latest = runs[runs.length - 1];
+    if (earlier && earlier.says && shown && latest && shown.id === latest.id) out.push(earlier.says);
+    return out;
   }
   function runStartedAt() { var r = (st.doc.runs || []).filter(function (x) { return x.id === st.run; })[0]; return r ? r.started_at : ""; }
   function notices() {

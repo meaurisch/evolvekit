@@ -237,8 +237,9 @@ its facts.
 
 Below the strip three linked views:
 
-- **Tries** — every combination by when it finished and how much better
-  than today; the orange line is the best so far, on full looks only (all
+- **Tries** — every combination by when it finished and its change against
+  today, on the cases it learned from (its axis: *% change vs today, on the
+  cases it learned from (not checked)*); the orange line is the best so far, on full looks only (all
   study cases), so a lucky quick look on a few cases never sets it; rings at
   *now* are tries still running. The line averages each case's change, so its
   legend says so: it can differ by a few tenths from the strip's figure,
@@ -299,7 +300,12 @@ output; a search that ran fewer rounds than planned says so there, and a
 finished run's best so far is said as past (*The search's best was … The
 final check's verdict is the answer on the cases the search never saw.*, or
 *It was not checked …*). *Past
-runs* lists every run of the study with its verdict. The page keeps up with
+runs* lists every run of the study with its verdict. When the latest run
+does not say use and an earlier run of the study did, the header (on the
+latest run's page), Home's card and `study status` add one line: *An earlier
+run (<id>) says use: <its verdict line>*. A run `study pr` made a branch for
+says so in its header and in `study status`: *Branch <name> pushed to
+<remote>*, or *made, not pushed* (from `runs/<id>/pr.json`). The page keeps up with
 the study while it is open: a run started elsewhere (a bake-off from the
 terminal) is shown as soon as it starts, when the page showed the newest run,
 and *Past runs* and its list follow every run that starts or ends. It asks
@@ -449,10 +455,11 @@ anything runs), `status` (its `best` is the best so far as `study status` says i
 rounds the pace so far buys when fewer than planned, `writing` how many of a
 round's changes the AI has written, and `notes` what to hear besides the plan,
 each with its `line` or sentences as the strip shows them), `runs` (every run
-as it is now and the newest, `{runs, latest, poll_s}`: the open Study page asks
+as it is now and the newest, `{runs, latest, poll_s, earlier}`: the open Study page asks
 it again after `poll_s` seconds, 5 while a run is live and 10 when none is, so a
 run started elsewhere, such as a bake-off from the terminal, or a run that
-ended shows without a reload),
+ended shows without a reload; a run's `branch` is what `study pr` made for it,
+and `earlier` the newest earlier run that said use when the latest does not),
 `results`, `tries` (every try of a run, digested for the
 Study page's three views: `evolvekit/app/tries.py`; in a code study each
 carries `diff_stat`, and `tries/{combination}` its `diff`), `download/{export}`

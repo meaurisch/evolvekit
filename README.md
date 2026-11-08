@@ -1616,7 +1616,10 @@ prints it once; `study stop depot-a` asks the run to stop. While a study with
 AI help searches, `study status` also says what its AI has spent (`AI: $0.42
 of $1.00`), and after the first round, when the time will not buy every
 planned round, how many will run (`At this pace about 2 of the 11 planned
-rounds will run.`). `study verdict` prints the verdict's own sentence and its
+rounds will run.`). When the latest run does not say use and an earlier run
+did, `study status` adds `An earlier run (<id>) says use: <its verdict
+line>`, and for a run `study pr` made a branch for, `Branch <name> pushed to
+<remote>` (or `made, not pushed`). `study verdict` prints the verdict's own sentence and its
 advice, then how much of the plan ran when less of it did, and for a study
 with AI help what its AI spent (`AI: $0.87 of $1.00`, from the run's
 `usage.jsonl`; `AI: 14 requests` for a provider that counts requests); the

@@ -56,11 +56,14 @@ from evolvekit.ledger import _atomic_write, read_jsonl
 from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
-__all__ = ["active_run", "can_continue", "can_resume", "continue_run", "download", "latest_run", "launch_queued",
+__all__ = ["active_run", "branch_of", "can_continue", "can_resume", "continue_run", "download", "earlier_use",
+           "latest_run", "launch_queued",
            "check_refs", "next_study", "phase", "report_html", "results", "resume_final_check", "run_alive", "run_line",
            "running", "runs",
            "start", "state_line", "status", "stop"]
 
+PR_RECORD = "pr.json"
+"""What `study pr` made for a run, in its folder: `{"branch", "commit", "remote", "pushed", "url"}`."""
 LAUNCH = "launch.json"
 MODELS = "models.json"
 QUEUED = "queued.json"
@@ -229,7 +232,54 @@ def runs(root: Path) -> list[dict[str, Any]]:
         listed.append({"id": run_dir.name, "phase": job.get("phase"), "started_at": job.get("started_at"),
                        "finished_at": job.get("finished_at"), "kind": line["kind"], "line": line["line"],
                        "tone": line.get("tone"), "decision": line.get("decision")})
+        if line.get("branch"):
+            listed[-1]["branch"] = line["branch"]  # what `study pr` made for it
     return listed
+
+
+def branch_of(run_dir: Path) -> dict[str, Any] | None:
+    """What `study pr` made for the run (`PR_RECORD`): `{"name", "remote", "pushed", "line"}`, the line
+    "Branch <name> pushed to <remote>" or "Branch <name> made, not pushed"; None when it made nothing."""
+    record = _read(run_dir / PR_RECORD)
+    if not record or not record.get("branch"):
+        return None
+    name, remote, pushed = str(record["branch"]), record.get("remote"), bool(record.get("pushed"))
+    line = f"Branch {name} pushed to {remote}" if pushed and remote else f"Branch {name} made, not pushed"
+    return {"name": name, "remote": remote, "pushed": pushed, "line": line}
+
+
+_EARLIER_LINES: dict[tuple[Any, ...], str] = {}
+"""An earlier run's verdict line, by `_finished_key`: Home asks for every study while a run is live."""
+
+
+def earlier_use(root: Path, latest: dict[str, Any]) -> dict[str, Any] | None:
+    """When the latest run's card (`latest`) does not say use and an earlier run of the study decided
+    use, the newest such run: `{"run", "line", "says"}` (`says`: "An earlier run (<id>) says use:
+    <its verdict line>"), and its `branch` when `study pr` made one for it. None otherwise: a later
+    run must not hide an earlier use (persona round 3, E4)."""
+    if latest.get("decision") == "use":
+        return None
+    for run_dir in reversed(_run_dirs(root)[:-1]):
+        job = phase(run_dir)
+        if job.get("phase") != "done" or run_line(root, None, run_dir).get("decision") != "use":
+            continue
+        key = _finished_key(run_dir, job)
+        line = _EARLIER_LINES.get(key)
+        if line is None:
+            try:
+                line = str(verdict_doc.build_verdict(root, run_dir.name).get("line") or "")
+            except Exception:  # noqa: BLE001 - a card must render even for a damaged run
+                line = ""
+            if len(_EARLIER_LINES) >= _FINISHED_MAX:
+                _EARLIER_LINES.clear()
+            _EARLIER_LINES[key] = line
+        found: dict[str, Any] = {"run": run_dir.name, "line": line,
+                                 "says": f"An earlier run ({run_dir.name}) says use" + (f": {line}" if line else ".")}
+        branch = branch_of(run_dir)
+        if branch:
+            found["branch"] = branch
+        return found
+    return None
 
 
 def latest_run(root: Path) -> str | None:
@@ -1506,7 +1556,11 @@ def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) 
     if not dirs:
         return {"kind": "draft", "line": f"draft · step {max(1, min(study.step, 7))} of 7",
                 "step": max(1, min(study.step, 7)), "what": _kind_of(study)}
-    return run_line(root, study, dirs[-1], document_of)
+    card = run_line(root, study, dirs[-1], document_of)
+    earlier = earlier_use(root, card)  # a later run must not hide an earlier use
+    if earlier is not None:
+        card["earlier"] = earlier
+    return card
 
 
 def _kind_of(study: Study | None) -> str:
@@ -1655,7 +1709,7 @@ def _finished_key(run_dir: Path, job: dict[str, Any]) -> tuple[Any, ...]:
     comparison = run_dir / str(final["comparison"]) if final.get("comparison") else None
     return (str(run_dir), json.dumps(job, sort_keys=True, default=str), _stamp(comparison),
             _stamp(comparison.parent / "results.json") if comparison is not None else None,
-            _stamp(run_dir / "study.yaml"))
+            _stamp(run_dir / "study.yaml"), _stamp(run_dir / PR_RECORD))
 
 
 def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None) -> dict[str, Any]:
@@ -1693,7 +1747,8 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
     single, skipped) with `mean`, `ci95`, `chance` and `n` held-back cases,
     and `same` (no figures: "finished · no difference in any run") when every
     run gave exactly the starting point's result -- for a bake-off, every
-    branch's; `check_stopped` for a final check stopped before it decided.
+    branch's; `branch`, what `study pr` made for it (`branch_of`); `check_stopped` for a final check
+    stopped before it decided.
     `best_pct` is `verdict.best_so_far`'s figure, `best_says` that figure in words."""
     state = job.get("phase")
     try:
@@ -1759,6 +1814,9 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
         return {"kind": "running", "run": run_dir.name, "line": line, **facts}
     if state == "done":
         final = job.get("final") or {}
+        branch = branch_of(run_dir)
+        if branch is not None:
+            facts["branch"] = branch  # what `study pr` made for this run
         if final.get("skipped"):
             reason = str(final["skipped"]).split(":")[0].split(",")[0]  # "the starting point stayed the best"
             return _with_verdict(root, run_dir, document_of, {"kind": "finished", "run": run_dir.name,

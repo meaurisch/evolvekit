@@ -1432,6 +1432,13 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         if verdict.get("line"):
             # A finished run: the verdict's own words under the card's, each branch's for a bake-off.
             _say_verdict(verdict)
+        if (card.get("branch") or {}).get("line"):
+            print(card["branch"]["line"])  # what `study pr` made for this run
+        earlier = card.get("earlier") or {}
+        if earlier.get("says"):
+            print(earlier["says"])  # a later run must not hide an earlier use
+            if (earlier.get("branch") or {}).get("line"):
+                print(earlier["branch"]["line"])
     return 0
 
 

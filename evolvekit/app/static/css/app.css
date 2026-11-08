@@ -198,6 +198,8 @@ textarea.input { padding: 10px 12px; min-height: 88px; line-height: 1.4; resize:
 .card-mid { display: flex; gap: 12px; align-items: flex-end; }
 .card-words { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .card-head { font-weight: 600; }
+.card-note, .head-note { overflow-wrap: anywhere; }
+.head-note { margin: 4px 0 0; }
 .card-pepper { flex: none; margin: -6px -4px 0 0; }
 .card-vis { padding-top: 4px; }
 .card-vis .interval-strip { max-width: 100% !important; }
