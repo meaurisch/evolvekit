@@ -34,6 +34,7 @@ import sys
 import threading
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -48,7 +49,8 @@ __all__ = ["AppServer", "DEFAULT_PORT", "FileResponse", "PAGE", "Request"]
 DEFAULT_PORT = 8780
 PORT_ATTEMPTS = 20
 TICK_S = 5.0
-"""How often the server looks for a queued run to launch (`jobs.launch_queued`)."""
+"""How often the server looks for a queued run to launch (`jobs.launch_queued`)
+and at the campaigns (`scheduler.tick`)."""
 PAGE = Path(__file__).with_name("static") / "app.html"
 CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 TOKEN_HEADER = "X-Evolvekit-Token"
@@ -398,16 +400,39 @@ class AppServer:
             self._status_cache[key] = (stamp, document)
         return document
 
-    def _tick(self) -> None:
-        """Every `TICK_S`, launch the run that waits longest if nothing is
-        active (one study at a time); a fault in one tick is logged, not fatal."""
-        from evolvekit.app import jobs
+    def tick_once(self) -> None:
+        """One tick: launch the run that waits longest if nothing is active
+        (one study at a time), then the scheduler's look at the campaigns
+        (`scheduler.tick`, on the rehearsal clock while one is on). A fault in
+        either is printed to stderr with its traceback, never raised; every
+        line the scheduler says is printed to stdout -- the service's log --
+        with the time it happened: `<rehearsal> rehearsal · <real> real · <line>`
+        under the rehearsal clock, `<real> · <line>` otherwise."""
+        from evolvekit.app import jobs, scheduler
 
-        while not self._stopping.wait(TICK_S):
+        try:
+            jobs.launch_queued(self.home)
+        except Exception:  # noqa: BLE001 - the ticker must outlive a bad run directory
+            traceback.print_exc(file=sys.stderr)
+        try:
+            clock = scheduler.clock_of(self.home)
+            now = clock.now()
+            said = scheduler.tick(self.home, now=now, speed=clock.speed)
+        except Exception:  # noqa: BLE001 - nor a bad study or campaign
+            traceback.print_exc(file=sys.stderr)
+            return
+        real = datetime.now().astimezone().isoformat(timespec="seconds")
+        for line in said:
+            when = f"{now.isoformat(timespec='seconds')} rehearsal · {real} real" if clock.simulated else real
             try:
-                jobs.launch_queued(self.home)
-            except Exception:  # noqa: BLE001 - the ticker must outlive a bad run directory
+                print(f"{when} · {line}", flush=True)
+            except (UnicodeEncodeError, OSError):  # a console that cannot say it: the tick still happened
                 traceback.print_exc(file=sys.stderr)
+
+    def _tick(self) -> None:
+        """Every `TICK_S`, `tick_once`."""
+        while not self._stopping.wait(TICK_S):
+            self.tick_once()
 
     def _start_ticker(self) -> None:
         if self._ticker is None or not self._ticker.is_alive():

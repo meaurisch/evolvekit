@@ -399,7 +399,7 @@ def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys
         else:
             (run_dir / LAUNCH).write_text(previous, encoding="utf-8")
         raise
-    _record_launch(run_dir, pid, argv)
+    _record_launch(run_dir, pid, argv, previous)
     return pid
 
 
@@ -425,11 +425,31 @@ def _spawn(env: dict[str, str], argv: list[str], root: Path, run_dir: Path) -> i
         raise AppError(f"the run could not be started: {exc}", 500) from None
 
 
-def _record_launch(run_dir: Path, pid: int, argv: list[str]) -> None:
+def _record_launch(run_dir: Path, pid: int, argv: list[str], previous: str | None = None) -> None:
     """The real launch over the pending marker, in one step (a temp file
-    replaced): a reader sees the marker or the launch, never nothing."""
+    replaced): a reader sees the marker or the launch, never nothing.
+
+    `"launch": n` counts the run's launches -- its sessions: one more than
+    the launch `previous` (the `launch.json` text `_launch` kept) records,
+    1 for the first (or a claimed queued run, whose previous text is the
+    claim's marker)."""
     _atomic_write(run_dir / LAUNCH, json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
-                                               "host": socket.gethostname(), "argv": argv[1:]}, indent=2))
+                                               "host": socket.gethostname(), "argv": argv[1:],
+                                               "launch": _launch_number(previous)}, indent=2))
+
+
+def _launch_number(previous: str | None) -> int:
+    try:
+        doc = json.loads(previous) if previous else None
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict) or doc.get("pending"):
+        return 1
+    number = doc.get("launch")
+    if isinstance(number, int) and not isinstance(number, bool) and number > 0:
+        return number + 1
+    # A launch written before launches were counted was the run's first.
+    return 2 if doc.get("pid") else 1
 
 
 def _wants_keys(root: Path, run_dir: Path) -> bool:

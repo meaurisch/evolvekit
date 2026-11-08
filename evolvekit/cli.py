@@ -1092,13 +1092,20 @@ def _tick_queue(home) -> None:
     """Launch the run that waits longest when nothing is active, as the app's
     ticker does, so a queued study starts with no app open. A launch that
     fails -- any study's, for any reason -- is said in one line and the wait
-    goes on, as the app's ticker does: the next tick tries again."""
-    from evolvekit.app import jobs
+    goes on, as the app's ticker does: the next tick tries again. Then the
+    scheduler looks at the campaigns, as the app's ticker does, on the
+    rehearsal clock while the app that set one runs."""
+    from evolvekit.app import jobs, scheduler
 
     try:
         jobs.launch_queued(home)
     except Exception as exc:  # noqa: BLE001 - a fault in another study's launch does not end this wait
         print(f"could not start a queued run: {exc}", file=sys.stderr)
+    try:
+        clock = scheduler.clock_of(home)
+        scheduler.tick(home, now=clock.now(), speed=clock.speed)
+    except Exception as exc:  # noqa: BLE001 - nor a fault in a campaign
+        print(f"could not look at the campaigns: {exc}", file=sys.stderr)
 
 
 def _gone(run_dir: Path, state: str | None) -> bool:
