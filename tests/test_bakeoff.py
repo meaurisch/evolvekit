@@ -37,7 +37,7 @@ RUN = "20260101-000000"
 
 def _solver_repo(tmp_path) -> Path:
     """examples/cli-solver as a repository of its own, with two branches: one that changes nothing, one that
-    restarts four times sooner."""
+    restarts four times sooner and accepts a worse move now and then (restarts matter only then)."""
     top = tmp_path / "solver repo"
     shutil.copytree(ROOT / "examples" / "cli-solver", top, ignore=shutil.ignore_patterns("fresh", "__pycache__"))
     git_init_commit(top)
@@ -48,8 +48,10 @@ def _solver_repo(tmp_path) -> Path:
     path = top / "solver.py"
     text = path.read_text(encoding="utf-8")
     assert "if stalled >= a.restart_after:" in text
-    path.write_text(text.replace("if stalled >= a.restart_after:", "if stalled >= a.restart_after // 4:"),
-                    encoding="utf-8", newline="\n")
+    text = text.replace("if stalled >= a.restart_after:", "if stalled >= a.restart_after // 4:")
+    slack = 'p.add_argument("--accept-worse", type=float, default=0.0,'
+    assert slack in text
+    path.write_text(text.replace(slack, slack.replace("default=0.0", "default=0.01")), encoding="utf-8", newline="\n")
     git(top, "commit", "-q", "-am", "restart sooner")
     git(top, "switch", "-q", "main")
     return top
@@ -92,9 +94,9 @@ def test_bakeoff_two_refs_on_demo_tour(tmp_path):
         assert verdict["decision"] == "use" and verdict["line"] == f"Of 2 branches, {chosen}: {own['line'][0].lower()}{own['line'][1:]}"
     else:
         assert verdict["decision"] == "keep"
-        # C1: when no run of either branch differed from today's, the headline says that instead.
-        assert verdict["line"] == (NO_DIFFERENCE_N if all(c.get("same") for c in verdict["candidates"])
-                                   else "None of the 2 branches is shown to beat the starting point.")
+        assert verdict["line"] == "None of the 2 branches is shown to beat the starting point."
+    assert verdict["line"] != NO_DIFFERENCE_N
+    assert not next(c for c in verdict["candidates"] if c["ref"] == "restart").get("same")
     assert verdict["advice"].startswith(("Use", "Keep today's code"))
     report = render_report(verdict)
     assert "2 branches were compared; the more are compared, the likelier one looks ahead by chance." in report
