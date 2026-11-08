@@ -478,11 +478,20 @@ def can_resume(run_dir: Path, job: dict[str, Any]) -> bool:
 def can_continue(run_dir: Path, job: dict[str, Any]) -> bool:
     """Whether a run can go on with more time (`continue_run`): it ended --
     done, or stopped -- with a search on record that was not aborted, on a
-    directory that still holds the compiled study and the runs."""
-    if job.get("phase") not in ("done", "stopped") or job.get("bakeoff"):  # a bake-off has no search to go on with
+    directory that still holds the compiled study and the runs. A run that
+    failed outside its final check with every round of its plan done (a
+    continuation whose process died, say) goes on too: its search is on
+    record, and going on keeps the archive and the history one run."""
+    if job.get("bakeoff"):  # a bake-off has no search to go on with
         return False
     search = job.get("search") or {}
     if not search or search.get("aborted") or search.get("generations") is None:
+        return False
+    if job.get("phase") == "failed":
+        planned = int(_plan(run_dir, job).get("generations") or 0)
+        if "check" in job or planned <= 0 or int(search.get("generations") or 0) < planned:
+            return False
+    elif job.get("phase") not in ("done", "stopped"):
         return False
     return (run_dir / "runs.jsonl").is_file() and (run_dir / CONFIG).is_file()
 

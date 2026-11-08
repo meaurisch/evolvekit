@@ -614,7 +614,9 @@ def continue_study(
     models: dict[str, Any] | None = None,
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
-    """A run that finished -- `done`, or `stopped` with its search on record
+    """A run that finished -- `done`, or `stopped` with its search on record,
+    or a session of it whose process died with the plan's search on record
+    (`failed`, or still `search` in `job.json`; `jobs.can_continue` says which)
     -- searched on for `hours` more on the same directory, then checked
     again. The extra time buys as many rounds as the plan would give a
     study of `hours` with this run's measured numbers (at least one), and the
@@ -638,7 +640,9 @@ def continue_study(
     run_dir = root / "runs" / run_id
     state = read_job(run_dir) or {}
     search = state.get("search") or {}
-    if (state.get("phase") not in ("done", "stopped") or not search or search.get("aborted")
+    # `failed` or `search`: a session (a continuation, say) whose process died after the search
+    # of its plan was on record -- the app launches one only when no process has the run.
+    if (state.get("phase") not in ("done", "stopped", "failed", "search") or not search or search.get("aborted")
             or not (run_dir / CONFIG).is_file() or not (run_dir / "runs.jsonl").is_file()):
         raise HarnessError(f"runs/{run_id}: the search has not finished, so there is nothing to continue from")
     hours = float(hours)

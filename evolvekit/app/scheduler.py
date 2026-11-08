@@ -400,18 +400,27 @@ def _archived(run_dir: Path) -> bool:
         return False
 
 
-def _check_unfinished(run_dir: Path, job: dict[str, Any]) -> bool:
-    """The search is done and its latest session has no verdict: the final check was stopped or
-    its process died, or the session (a continuation, say) ended -- stopped by its window, or
-    its process gone -- with no rounds of the plan left. A final check again gives it one;
-    without it such a campaign would wait for ever (D7)."""
+def _ended_with_search(job: dict[str, Any]) -> bool:
     search = job.get("search") or {}
-    if job.get("phase") not in ("stopped", "failed") or not search or search.get("aborted"):
+    return job.get("phase") in ("stopped", "failed") and bool(search) and not search.get("aborted")
+
+
+def _check_unfinished(run_dir: Path, job: dict[str, Any]) -> bool:
+    """The search is done and the final check was stopped, or its process died: it is run
+    again (D7)."""
+    if not _ended_with_search(job):
         return False
-    if (job.get("final") or {}).get("stopped") or "check" in job or (read_job(run_dir) or {}).get("phase") == "check":
-        return True
-    if (job.get("final") or {}).get("decision"):
+    return bool((job.get("final") or {}).get("stopped") or "check" in job
+                or (read_job(run_dir) or {}).get("phase") == "check")
+
+
+def _no_verdict(run_dir: Path, job: dict[str, Any]) -> bool:
+    """The latest session (a continuation, say) ended -- stopped by its window, or its process
+    gone -- with no rounds of the plan left and no verdict. It goes on while the campaign has
+    search time; else its final check is run again, so the campaign never waits for ever."""
+    if not _ended_with_search(job) or (job.get("final") or {}).get("decision"):
         return False
+    search = job.get("search") or {}
     try:
         planned = int((jobs._plan(run_dir, job) or {}).get("generations") or 0)  # noqa: SLF001 - the run's plan, as can_resume reads it
         done = int(search.get("generations") or 0)
@@ -602,6 +611,11 @@ class _Tick:
                     f"could not start the final check of run {run} again")
         if jobs.can_resume(run_dir, job):
             return "start", (home, root), {"resume": run}, f"resumed run {run}", f"could not resume run {run}"
+        # No verdict and no rounds left: it goes on while there is search time, else checked again.
+        if _no_verdict(run_dir, job) and (search_left_s(run_dir) < MIN_SESSION_S
+                                          or not jobs.can_continue(run_dir, job)):
+            return ("recheck", (home, root, run), {}, f"started the final check of run {run} again",
+                    f"could not start the final check of run {run} again")
         if jobs.can_continue(run_dir, job):
             left = search_left_s(run_dir)
             window_s = (span[1].timestamp() - self.now.timestamp()) / self.speed

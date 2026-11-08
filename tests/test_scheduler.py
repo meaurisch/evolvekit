@@ -393,6 +393,15 @@ def test_every_armed_campaign_is_stamped_after_a_launch(tmp_path):
     assert _stamp(b) == local("2026-11-14 10:00").isoformat(timespec="seconds"), "B waited, and was looked at"
 
 
+def test_a_continuation_stopped_by_its_window_goes_on_while_there_is_search_time(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=8, planned=6, used_s=1200)
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
+    assert rec.calls == [("continue_run", (home, root, "r1"), {"hours": pytest.approx(2400 / 3600)})], \
+        "40 minutes of search left: the same run goes on, no check in between"
+
+
 def test_a_continuation_stopped_by_its_window_is_checked_again(tmp_path):
     home, root = campaign_study(tmp_path)
     write_run(root, "r1", "stopped", generations=8, planned=6, used_s=3480)
@@ -404,14 +413,29 @@ def test_a_continuation_stopped_by_its_window_is_checked_again(tmp_path):
     assert len(rec.calls) == 1 and scheduler.read_campaign(root)["state"] == "complete", "not left armed for ever"
 
 
-def test_a_continuation_whose_process_died_is_checked_again(tmp_path):
+def test_a_continuation_whose_process_died_goes_on_or_is_checked_again(tmp_path):
     home, root = campaign_study(tmp_path)
-    write_run(root, "r1", "failed", generations=6, planned=6, used_s=1200,
-              error="the run's process ended without finishing: the computer restarted")
+    run_dir = write_run(root, "r1", "failed", generations=6, planned=6, used_s=1200,
+                        error="the run's process ended without finishing: the computer restarted")
+    assert jobs.can_continue(run_dir, jobs.phase(run_dir)), "its plan's search is on record"
     rec = Recorder()
     scheduler.tick(home, now=local("2026-11-14 10:00"), **rec.calls_for())
-    assert rec.calls == [("recheck", (home, root, "r1"), {})]
+    assert rec.calls == [("continue_run", (home, root, "r1"), {"hours": pytest.approx(2400 / 3600)})]
     assert scheduler.read_campaign(root)["failed_sessions"] == ["r1:1"]
+    write_run(root, "r1", "failed", generations=6, planned=6, used_s=3480, error="the computer restarted", launch=2)
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-15 10:00"), **rec.calls_for())
+    assert rec.calls == [("recheck", (home, root, "r1"), {})], "two minutes left: checked again"
+
+
+def test_a_failed_run_goes_on_only_with_its_plan_searched(tmp_path):
+    _, root = campaign_study(tmp_path)
+    run_dir = write_run(root, "r1", "failed", generations=6, planned=6)
+    job = jobs.phase(run_dir)
+    assert jobs.can_continue(run_dir, job)
+    assert not jobs.can_continue(run_dir, {**job, "search": {**job["search"], "generations": 4}}), "rounds left: resumed"
+    assert not jobs.can_continue(run_dir, {**job, "check": {"seeds": 1}}), "its final check died: checked again"
+    assert not jobs.can_continue(run_dir, {**job, "search": {**job["search"], "aborted": True}})
 
 
 def test_a_launch_lost_to_another_run_is_not_a_failure(tmp_path):
