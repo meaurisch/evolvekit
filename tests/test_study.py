@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import time
 from pathlib import Path
 
 import pytest
 
 from evolvekit.harness import HarnessError
 from evolvekit.harness.manifest import load_harness
+from evolvekit.harness.schedule import Schedule
 from evolvekit.harness.study import (
     Study,
     load_study,
@@ -184,3 +186,11 @@ def test_equal_within_is_relative_or_absolute(text, expected):
 def test_equal_within_refuses_what_is_no_tolerance(text):
     with pytest.raises(ValueError):
         parse_within(text)
+
+
+def test_study_yaml_keeps_its_schedule():
+    nights = {"days": ["mon", "tue", "wed", "thu", "fri"], "from": "01:00", "to": "06:00"}
+    study = Study.parse({**EXAMPLE, "schedule": {"windows": [nights]}})
+    assert study.schedule.windows[0].start == time(1, 0)
+    assert study.to_yaml()["schedule"] == Schedule.parse({"windows": [nights]}).to_yaml()
+    assert "schedule" not in Study.parse(EXAMPLE).to_yaml()

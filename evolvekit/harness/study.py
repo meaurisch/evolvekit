@@ -27,6 +27,7 @@ from evolvekit.config import MAX_LEVELS
 from evolvekit.expressions import Expression, ExpressionError
 from evolvekit.harness import HarnessError
 from evolvekit.harness.manifest import Harness
+from evolvekit.harness.schedule import Schedule
 from evolvekit.harness.sql import sql_problem, where_problem
 
 __all__ = [
@@ -368,6 +369,8 @@ class Study:
     plan: dict[str, Any] = field(default_factory=lambda: {"auto": True})
     step: int = 1
     """The wizard step the study was last saved on (the app's "draft · step 4 of 7")."""
+    schedule: Schedule | None = None
+    """When the study may run, in local wall-clock time; `None` for a study that runs when started."""
 
     # -- reading and writing -----------------------------------------------
 
@@ -377,7 +380,7 @@ class Study:
         _known(
             data,
             {"study", "name", "harness", "template", "application", "cases", "inputs", "vary", "constraints",
-             "kpis", "goal", "guardrails", "limits", "budget", "plan", "step"},
+             "kpis", "goal", "guardrails", "limits", "budget", "plan", "step", "schedule"},
             "<study>",
         )
         if data.get("study") != STUDY_FORMAT:
@@ -450,6 +453,7 @@ class Study:
             ),
             plan=_mapping(data.get("plan"), "plan") or {"auto": True},
             step=int(_number(data.get("step", 1), "step")),
+            schedule=Schedule.parse(data["schedule"]) if data.get("schedule") is not None else None,
         )
 
     def to_yaml(self) -> dict[str, Any]:
@@ -482,6 +486,7 @@ class Study:
             "budget": {"hours": self.budget.hours, "ai": {"enabled": self.budget.ai_enabled, "max_usd": self.budget.ai_max_usd}},
             "plan": dict(self.plan),
             "step": self.step,
+            **({"schedule": self.schedule.to_yaml()} if self.schedule is not None else {}),
         }
 
     # -- what the study tunes ------------------------------------------------
