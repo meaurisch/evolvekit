@@ -109,6 +109,7 @@ When the request asks to change the application's code (its source, or a file it
   For a program harness it also sets the application when none is set.
 - A code study searches with AI help: write `budget.ai.enabled: true` and `budget.ai.max_usd` (the dollars the request allows) in `study.yaml`.
   A request that names no money gets one more question: the most the AI help may spend. Never chosen by you.
+  With a provider whose coding agent edits files, that agent runs shell commands in a git worktree of REPO: git there reaches the engineer's branches and remotes (the commands that write them are denied, not airtight), and the repository's own agent settings and hooks apply. Its limits per call are `models.strong.options.act_timeout_s` (1800 s) and `act_max_usd` ($0.50). Tell the engineer this with the plan line when they have not heard it.
 - Then check, preview, show the plan line and start as in steps 3–5.
 - "Compare these branches": run `evolvekit study bakeoff SLUG --ref A --ref B` (one `--ref` per branch, in the engineer's order). It needs the source and held-back cases, not AI help: a `budget.ai` line alone from `study check` does not stop it.
   It exits 2 with a sentence when the study or a branch is refused (files outside the open files, a change that does not apply); relay it and stop.

@@ -373,9 +373,10 @@ source folder each study then names.
    `code.repo` — the folder is inside a git repository with a commit;
    `code.open` — every glob matches a file committed at `HEAD` (a staged
    file is not enough); `code.checkout` — a clean checkout of `HEAD`, as a
-   worktree in a scratch folder that is removed afterwards (your own folder
-   is never written); `code.build` — that checkout builds within
-   `build_timeout_s`; `code.samples` — the first sample solves from it (a
+   worktree in a scratch folder that is removed afterwards (the checkout
+   step never writes your folder; the restore build runs in it);
+   `code.build` — that checkout builds within `build_timeout_s`;
+   `code.samples` — the first sample solves from it (a
    warning when there are no samples). With a build, `code.restore` warns
    when building your own folder back into the application's Python failed,
    and a passing line says `code studies on this harness try one combination

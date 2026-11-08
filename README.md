@@ -1737,8 +1737,10 @@ Without `--repo` it proposes the harness's own `code.repo`, while the folder
 the study was made from still has the harness. For a program harness it also
 sets the study's application to the program in that folder when none is set.
 `from: working` starts from the files as they are, uncommitted changes
-included: evolvekit records them as a commit of its own on top of `HEAD` and
-writes nothing to your working tree, index or branches. The open files are
+included: evolvekit records them as a commit of its own on top of `HEAD`
+(untracked files that are not ignored go into it too), kept by a ref under
+`refs/evolvekit/` (see *What git must be* below), and writes nothing to
+your working tree, index or branches. The open files are
 shown to the model whole, at most 2000 lines in all (`study check` refuses
 more; narrow `vary.code.open`). A study varies code or tunes settings, not
 both yet: `study check` refuses the mix, and settings can stay as fixed
@@ -1771,17 +1773,39 @@ budget:
 The model is shown the open files as they are after the parent's change,
 with line numbers, and answers with a diff; a diff that does not apply counts
 as a failed answer. When the strong model's provider is `claude-cli` (Claude
-Code) or `copilot-cli` (Copilot CLI), half of the changes come from
-`agent_patch` instead: the coding agent edits a combination's folder itself,
-from a brief file (the brief, the open files, the parent's change, the best
-and worst so far, the last failures, and the rule to change only the open
-files and not to run the benchmark), and its edits are the change. Each of
-its calls has a time limit (1800 s by default, never past the study's time
-left) and a spending cap ($0.50 a call by default, never more than what is
-left of `budget.ai.max_usd`), passed to the tool; every call counts toward
-the budget as the tool reports it (dollars, or requests for Copilot CLI), and
-a call that reports nothing (a timeout, a Stop, a crash) is counted at its
-cap. Any change that touches a file outside the open files is refused before
+Code), half of the changes come from `agent_patch` instead: the coding agent
+edits a combination's folder itself, from a brief file (the brief, the open
+files, the parent's change, the best and worst so far, the last failures, and
+the rule to change only the open files and not to run the benchmark), and its
+edits are the change. `copilot-cli` (Copilot CLI) is not available for
+`agent_patch` yet: its code study searches with the diff prompt alone, and a
+hand-written config that names `agent_patch` with it is refused.
+
+What the agent can reach: it runs shell commands under your account, in a
+combination's folder, which is a git worktree of your repository, so git
+there reaches your branches, refs, stash and remotes. The git commands that
+write them (`git push`, `commit`, `checkout`, `branch`, `stash`, `reset`,
+`config`, `remote`, `worktree` and the like) are denied, but those rules
+match the start of a command and are not airtight (`git -C . push`, or a
+script that runs git, gets past them); `GH_TOKEN`, `GITHUB_TOKEN` and the
+enterprise tokens are not in its environment. Your repository's own
+`.claude` settings and hooks apply to it, as they do when you run Claude
+Code there.
+
+Its limits: each call has a time limit, `models.strong.options.act_timeout_s`
+(1800 s by default, never past the study's time left), and a spending cap,
+`models.strong.options.act_max_usd` ($0.50 by default, never more than what
+is left of `budget.ai.max_usd`); a study uses the defaults, and a
+hand-written `evolvekit.yaml` can set them. The cap reaches claude only when
+the installed claude lists `--max-budget-usd` in its `--help`; otherwise the
+run's log says once that this claude has no spending limit per call, and the
+study's budget is checked between calls. Every call is billed what claude
+reports; a call that reports no cost (a timeout, a Stop, a crash) is charged
+its cap. The run's token cap (`budget.max_tokens` in `evolvekit.yaml`,
+1,000,000 by default) counts uncached input and output; cache reads are not
+counted.
+
+Any change that touches a file outside the open files is refused before
 it is run, whoever made it (a new file the agent leaves outside them, such as
 a cache, is left out of its change instead). With a `build`, combinations are
 tried one at a time, and a build that names `{python}` is run once more on
@@ -1812,8 +1836,9 @@ whose decision is `use`, as `Of 2 branches, nearest-first: …`; when none is,
 it says `None of the 2 branches is shown to beat the starting point.`, the
 decision is `keep`, and today's code stays. The report says how many were
 compared, because the more are compared, the likelier one looks ahead by
-chance. In the app, a code study's page offers *Compare branches* once a run
-has ended, and the Compare page shows the branches side by side.
+chance. In the app, a code study's page offers *Compare branches* whenever no
+run is live (and Set up offers it before the study's first run), and the
+Compare page shows the branches side by side.
 
 **The result is a change:**
 
@@ -1850,15 +1875,33 @@ Settings studies need no git. The source folder must be inside a git
 repository that has the starting commit; `study code` and `harness check`
 say so when it is not. Each combination's folder is a worktree registered in
 that repository while it exists (`git worktree list` shows it under
-`runs/<id>/work/trees/`). evolvekit removes each when it is done with it —
-the refused and the dropped at the end of each round, the final check's when
-the check ends, all but the best's at the end of the search — and deletes
-only its own entries: it never runs `git worktree prune`, which would also
-drop yours. The best combination's folder stays in its run, to look at; when
-the study is deleted, `git worktree prune` in your repository clears its
-entry. evolvekit's own commits are made in those folders with the author
-`evolvekit <evolvekit@localhost>`, skip your hooks, are on no branch and are
-never pushed. Nothing is pushed without `--yes`.
+`runs/<id>/work/trees/`). evolvekit removes each as soon as that
+combination's evaluation has finished, the final check's when the check
+ends, and any left (after a crash) when the run ends, the best's included:
+no folder stays. `study export --diff` and `study pr` rebuild the change from
+the run's recorded diff. evolvekit deletes only its own entries: it never
+runs `git worktree prune`, which would also drop yours. A folder another
+program still holds open stays, and the run's log (or `study pr`) names it:
+remove it, then run `git worktree prune` in your repository. Deleting a study
+removes its runs' folders first. evolvekit's own commits are made in those
+folders with the author `evolvekit <evolvekit@localhost>`, skip your hooks,
+are on no branch and are never pushed. Nothing is pushed without `--yes`.
+
+`from: working` adds one ref, `refs/evolvekit/base-<commit>`, to your
+repository: it keeps the starting commit alive, so the final check and later
+re-checks start from the same files (the same files on the same `HEAD` reuse
+it). `git add -A` makes that commit, so untracked files that are not ignored
+are in it. To delete the refs, in Git Bash or a Unix shell:
+
+```
+git for-each-ref --format="%(refname)" refs/evolvekit/ | xargs -n1 git update-ref -d
+```
+
+and in PowerShell:
+
+```
+git for-each-ref --format="%(refname)" refs/evolvekit/ | ForEach-Object { git update-ref -d $_ }
+```
 
 ### Harness commands
 

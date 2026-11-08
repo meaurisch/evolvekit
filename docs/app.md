@@ -167,10 +167,11 @@ repository), **Start from** (a branch, a tag or a commit, or `working` for
 the files as they are now, uncommitted changes included — nothing in the
 folder is written), and **What the search should improve**, in your words.
 The search may change those files and nothing else. A code study needs AI
-search help (under **Time**): the model proposes each change, and with a
-coding agent as the provider (Settings: *Claude Code here* or *GitHub
-Copilot CLI*) the
-agent also edits the files itself. A study changes code or tunes settings,
+search help (under **Time**): the model proposes each change, and with
+*Claude Code here* as the provider (Settings) the coding agent also edits
+the files itself, with shell access to a worktree of your repository (the
+README's *Code studies* says what it can reach). With *GitHub Copilot CLI*
+the model proposes each change only: its agent is not verified yet. A study changes code or tunes settings,
 not both yet.
 
 Under them the **plan bar** shows what the time buys — the rounds of search,
@@ -282,8 +283,9 @@ share (one dot per side on one axis), what changed and the set-up. Two
 studies with different goals are shown, but not ranked; a side without a
 final check says its number may not hold on new cases.
 
-**Compare branches.** Once a run of a code study has ended, its Study page
-offers *Compare branches*: a drawer that takes the names of your own
+**Compare branches.** A code study's Study page offers *Compare branches*
+whenever no run is live (a run that is done, stopped or failed), and Set up
+offers it beside *Start* before the study's first run: a drawer that takes the names of your own
 branches (or tags, or commits), one per line, and checks each against the
 starting point on the held-back cases, with no search and no AI — as
 `study bakeoff SLUG --ref A --ref B` does. Only the open files may differ: a
