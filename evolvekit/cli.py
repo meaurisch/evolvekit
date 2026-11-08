@@ -1515,16 +1515,18 @@ def cmd_study(args: argparse.Namespace) -> int:
         return 0
     study, harness = load_study(folder), execute.study_harness(folder)
     require_valid(study, harness, root=folder)
+    models = _study_models(args, study, keys=command == "run")
     if command == "compile":
         plan = execute.plan_for(study, harness, execute.measured(folder))
-        run_dir = write_run(study, harness, plan, folder, args.run_id or datetime.now().strftime("%Y%m%d-%H%M%S"))
-        print(f"compiled into {run_dir}: {plan.summary()}")
+        run_dir = write_run(study, harness, plan, folder, args.run_id or datetime.now().strftime("%Y%m%d-%H%M%S"),
+                            models=models)
+        print(f"compiled into {run_dir}: {plan.summary(ai=study.budget.ai_enabled)}")
         if not Path(args.directory).is_dir():  # a name in the library home: start it as the skills say
             _say_next(args, f"study start {args.directory}")
             return 0
         print(f"run it with  python -m evolvekit run --config {run_dir / 'evolvekit.yaml'} --run-dir {run_dir}")
         return 0
-    job = execute.run_study(folder, args.run_id)
+    job = execute.run_study(folder, args.run_id, models=models)
     print(f"study run {job.get('run_id')}: {job['phase']}"
           + (f" -- {job.get('error')}" if job.get("error") else ""))
     final = job.get("final") or {}
@@ -1534,6 +1536,26 @@ def cmd_study(args: argparse.Namespace) -> int:
     elif final.get("skipped"):
         print(f"final check: {final['skipped']}")
     return 0 if job["phase"] in ("done", "stopped") else 1
+
+
+def _study_models(args: argparse.Namespace, study, *, keys: bool = False) -> dict | None:
+    """The models a study with AI search help is compiled with: the ones
+    `study start` takes from Settings in the library home; None without AI.
+    With `keys` (`study run`, which searches in this process) the home's keys
+    go into the environment, where the providers read them. No key for the
+    chosen provider is refused in the words `study start` uses."""
+    if not study.budget.ai_enabled:
+        return None
+    from evolvekit.app import jobs
+
+    home = _home(args)
+    models = jobs.ai_models(home)
+    if models is None:
+        raise HarnessError("budget.ai: AI search help is on, and there is no key for it: add one in Settings, "
+                           "or turn AI help off")
+    if keys:
+        home.export_keys()
+    return models
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

@@ -267,6 +267,53 @@ def test_compiled_study_is_not_a_failed_run(tmp_path, capsys):
     assert jobs.latest_run(root) is None
 
 
+def _with_ai(home, slug, **vary):
+    import yaml
+
+    path = home / "studies" / slug / "study.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["budget"]["ai"] = {"enabled": True, "max_usd": 1.0}
+    data["vary"].update(vary)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("template", ["tune", "faster"])
+def test_compile_takes_the_models_of_settings_on_a_study_with_ai(tmp_path, capsys, monkeypatch, template):
+    """Persona round 1, F7: `study compile` failed on every study with AI search help ("no model is set
+    up"), because it never read the models `study start` takes from Settings. A settings study and a
+    code study compile with them; without a key for the provider it says what to do, as `study start` does."""
+    import shutil
+    import subprocess
+
+    import yaml
+
+    from evolvekit.app.store import Home
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    app = SOLVER
+    if template == "faster":
+        repo = tmp_path / "solver repo"
+        shutil.copytree(SOLVER.parent, repo, ignore=shutil.ignore_patterns("fresh", "__pycache__"))
+        for argv in (["init", "-q", "-b", "main"], ["add", "-A"],
+                     ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]):
+            subprocess.run(["git", *argv], cwd=repo, check=True, capture_output=True)
+        app = repo / "solver.py"
+    _new(tmp_path, "Depot A", "--template", template, "--app", str(app))
+    assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
+    _with_ai(tmp_path, "depot-a", **({"code": {**_study_yaml(tmp_path)["vary"]["code"], "repo": str(app.parent)}}
+                                     if template == "faster" else {}))
+    capsys.readouterr()
+    assert main(["study", "compile", "depot-a", "--home", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert "AI search help is on, and there is no key for it: add one in Settings, or turn AI help off" in err
+    Home(tmp_path).save_settings({"provider": "claude-cli", "models": {"search": ""}})
+    assert main(["study", "compile", "depot-a", "--run-id", "c1", "--home", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "(fewer if the AI is slow)" in out, "the plan says it does not count the AI's time"
+    config = yaml.safe_load((tmp_path / "studies" / "depot-a" / "runs" / "c1" / "evolvekit.yaml").read_text(encoding="utf-8"))
+    assert config["models"]["strong"]["provider"] == "claude-cli"
+
+
 def test_compile_on_a_home_study_points_to_study_start(tmp_path, capsys):
     _new(tmp_path, "Depot A", "--template", "tune", "--app", str(SOLVER))
     assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
