@@ -242,7 +242,7 @@
       : st.plan && st.plan.warning ? "Ready, but the plan is thin" : "Ready to start?";
     var why = missing ? problems[0].text : blocked ? "Fix the plan first." : failed ? "Fix the test run first." : t.state === "running" ? "Start works while the test runs." : "";
     var can = !missing && !blocked && !failed;
-    var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary()].concat([whenSummary()]).filter(Boolean);
+    var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary(), whenSummary()].filter(Boolean);
     var c = study().cases || {}, rules = (study().constraints || []).length, measures = Object.keys(study().kpis || {}).length;
     var lim = study().limits || {}, ai = ((study().budget || {}).ai || {}).enabled;
     var more = html`<div class="more-row">
@@ -300,7 +300,7 @@
         EK.post(EK.studyPath(st.slug, "/start")).then(function (res) {
           if (res.scheduled) {
             // A study with a schedule waits for its first window (D3): "Scheduled: next window Sat 00:00".
-            EK.toast("done", "Scheduled: " + String((res.campaign || {}).line || "").replace(/^Campaign · /, ""));
+            EK.toast("done", EK.scheduledWords(res));
             EK.go("#/");
             return;
           }

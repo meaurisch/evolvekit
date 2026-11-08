@@ -66,23 +66,23 @@
     });
   }
   function poll(main, query, gen) {
+    // Chosen again after every answer: 10 s while a study runs or waits in the queue; 30 s while a
+    // campaign is armed between windows, so the next window's words never go stale (D20); else none.
     var d = data;
-    {
-      var live = d.studies.some(function (s) { return s.kind === "running" || s.kind === "queued"; });
-      // Between windows the next window's words must not go stale (D20): every 30 s while a campaign is armed.
-      var armed = d.studies.some(function (s) { return s.kind === "campaign" || (s.campaign && s.campaign.state === "armed"); });
-      if (live || armed) EK.every(live ? 10000 : 30000, function () {
-        EK.get("/api/home").then(function (n) {
-          if (!EK.isCurrent(gen)) return;
-          data = remembered = n;
-          var grid = EK.$(".home-cards", main);
-          if (grid && !EK.$(".menu:not([hidden])", main)) {
-            var busy = document.activeElement && document.activeElement !== main && main.contains(document.activeElement);
-            if (!busy && !document.body.classList.contains("drawer-open")) { EK._moveFocus = false; draw(main, query); }
-          }
-        }).catch(function () { /* the next poll tries again */ });
-      });
-    }
+    var live = d.studies.some(function (s) { return s.kind === "running" || s.kind === "queued"; });
+    var armed = d.studies.some(function (s) { return s.kind === "campaign" || (s.campaign && s.campaign.state === "armed"); });
+    if (!live && !armed) return;
+    EK.later(live ? 10000 : 30000, function () {
+      EK.get("/api/home").then(function (n) {
+        if (!EK.isCurrent(gen)) return;
+        data = remembered = n;
+        var grid = EK.$(".home-cards", main);
+        if (grid && !EK.$(".menu:not([hidden])", main)) {
+          var busy = document.activeElement && document.activeElement !== main && main.contains(document.activeElement);
+          if (!busy && !document.body.classList.contains("drawer-open")) { EK._moveFocus = false; draw(main, query); }
+        }
+      }).catch(function () { /* the next poll tries again */ }).then(function () { if (EK.isCurrent(gen)) poll(main, query, gen); });
+    });
   }
 
   function draw(main, query) {

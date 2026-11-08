@@ -1644,7 +1644,10 @@ final check runs when the plan is done. `study start depot-a` waits for the
 first window (`scheduled: next window Sat 00:00 (the app, or evolvekit study
 wait, starts it then)`); `--now` starts at once, and that session is not
 stopped at a window's end. `study stop` pauses the campaign (`study start`
-resumes it). The windows are kept only while the app runs then — `evolvekit
+resumes it). A start after the campaign has finished begins a new one
+(`scheduled: a new campaign (the last one finished); next window …`): its
+first window starts a new run, `--now` at once, and the old run stays a past
+run. The windows are kept only while the app runs then — `evolvekit
 app --service`, or a terminal with `study wait depot-a`, which waits until
 the campaign has its answer, not for the first window's stop. `study status`
 says the campaign's line (`campaign · next window Sat 00:00`); the app's Set
@@ -1681,7 +1684,7 @@ Every command:
 | `study list [--json]` | every study in the library home: its name, harness and the state line its card shows (`draft · step 3 of 7`, `running · round 2 of 6`, …) |
 | `study cases SLUG --add FILE... [--hold-back N] [--json]` | copies cases into the study, refuses the files the harness cannot read, and holds `N` back for the final check |
 | `study check SLUG` | what is still missing; exit 2 while anything is |
-| `study start SLUG [--now] [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running; a study with a `schedule` is scheduled instead (`scheduled: next window Sat 00:00`, `--json` `{"scheduled": true, "next"}`), and `--now` starts it at once, as a session no window's end stops |
+| `study start SLUG [--now] [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running; a study with a `schedule` is scheduled instead (`scheduled: next window Sat 00:00`, `--json` `{"scheduled": true, "next", "edge"}`: `edge` `start`, or `end` while a window is open), and `--now` starts it at once, as a session no window's end stops; after a finished campaign, a new one |
 | `study bakeoff SLUG --ref REF [--ref REF ...] [--wait [--timeout S]] [--json]` | a code study: each branch against the starting point on the held-back cases, with no search; exit 2 when a branch or the study is refused |
 | `study stop SLUG [--json]` | asks the running run to stop, or takes a queued one out of the line; on a scheduled study it also pauses the campaign (`study start` resumes it) |
 | `study status SLUG [--run ID] [--json]` | the state line; `--json` the document the app's Running screen reads |

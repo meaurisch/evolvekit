@@ -12,6 +12,7 @@ import socket
 import time
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -614,8 +615,126 @@ def test_start_now_does_what_the_window_would(tmp_path):
         "the campaign's search time left, whatever the window"
     assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 2}
     write_run(root, "r1", "done", generations=6, planned=6, used_s=3600 - 60, final={"decision": "keep"}, launch=3)
-    with pytest.raises(AppError, match="no search time left"):
-        scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=True, **Recorder().calls_for(LAUNCHERS))
+    rec = Recorder()
+    answer = scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=True, **rec.calls_for(LAUNCHERS))
+    assert rec.calls == [("start", (home, root), {})] and answer["renewed"] == "finished", \
+        "a finished campaign begins anew: a new run at once, never a refusal"
+
+
+# ---------------------------------------------------------------------------
+# fix round 1: a removed schedule, a new campaign, a missed window kept, the lock
+# ---------------------------------------------------------------------------
+
+
+def test_a_removed_schedule_ends_the_wait(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "stopped", generations=2, planned=6)
+    study = load_study(root)
+    study.schedule = None
+    save_study(study, root)
+    assert not scheduler.campaign_done(root, load_study(root), now=local("2026-11-14 10:00")), "armed until a tick sees it"
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **Recorder().calls_for())
+    assert scheduler.read_campaign(root)["state"] == "paused"
+    assert scheduler.campaign_done(root, load_study(root), now=local("2026-11-14 10:00"))
+
+
+def test_a_finished_campaign_begins_anew(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "done", generations=6, planned=6, used_s=3600 - 60, final={"decision": "use"})
+    scheduler.tick(home, now=local("2026-11-13 18:00"), **Recorder().calls_for())
+    assert scheduler.read_campaign(root)["state"] == "complete"
+    answer = scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=False)
+    assert answer["scheduled"] and answer["renewed"] == "finished" and answer["words"] == "next window Sat 00:00"
+    assert answer["campaign"]["state"] == "armed" and answer["campaign"]["line"] == "Campaign · next window Sat 00:00"
+    assert scheduler.read_campaign(root)["after"] == "r1" and scheduler.campaign_run(root) is None
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-14 00:00:05"), **rec.calls_for())
+    assert rec.calls == [("start", (home, root), {})], "the next window starts a new run; r1 stays a past run"
+    assert scheduler.read_campaign(root)["state"] == "armed"
+
+
+def test_a_start_inside_the_window_says_so(tmp_path):
+    home, root = campaign_study(tmp_path)
+    answer = scheduler.start_campaign(home, root, now=local("2026-11-14 10:00"), at_once=False)
+    assert answer["words"] == "its window is open now, until Sun 23:59" and answer["renewed"] is None
+
+
+def test_a_schedule_with_no_window_left_is_refused_in_words_that_work(tmp_path):
+    home, root = campaign_study(tmp_path)
+    study = load_study(root)
+    study.schedule = replace(study.schedule, until=date(2026, 11, 1))
+    save_study(study, root)
+    for at_once in (False, True):
+        with pytest.raises(AppError, match="set a later Until"):
+            scheduler.start_campaign(home, root, now=local("2026-11-13 18:00"), at_once=at_once,
+                                     **Recorder().calls_for(LAUNCHERS))
+
+
+def test_the_apps_first_tick_after_a_missed_window_keeps_the_line(tmp_path):
+    home, root = campaign_study(tmp_path, windows=({"days": ["sat"], "from": "00:00", "to": "06:00"},
+                                                   {"days": ["mon"], "from": "01:00", "to": "06:00"}))
+    scheduler.tick(home, now=local("2026-11-13 20:00"), **Recorder().calls_for())   # Friday: the last tick
+    scheduler.tick(home, now=local("2026-11-15 12:00"), **Recorder().calls_for())   # Sunday: the app is back
+    assert scheduler.read_campaign(root)["missed"]["start"] == local("2026-11-14 00:00").isoformat()
+    scheduler.tick(home, now=local("2026-11-15 12:01:05"), **Recorder().calls_for())
+    line = "Campaign · the window of Sat 00:00 was missed: the app was not running · next window Mon 01:00"
+    assert scheduler.campaign_state(root, load_study(root), now=local("2026-11-15 12:02"))["line"] == line
+    rec = Recorder()
+    scheduler.tick(home, now=local("2026-11-16 01:00:05"), **rec.calls_for())
+    assert rec.names() == ["start"] and scheduler.read_campaign(root)["missed"] is None, "a session launched"
+    assert scheduler.campaign_state(root, load_study(root), now=local("2026-11-16 02:00"))["line"] == \
+        "Campaign · this window ends Mon 06:00"
+
+
+def test_a_missed_window_is_old_news_once_the_next_one_starts(tmp_path):
+    home, root = campaign_study(tmp_path, windows=({"days": ["sat"], "from": "00:00", "to": "06:00"},
+                                                   {"days": ["mon"], "from": "01:00", "to": "06:00"}))
+    campaign = scheduler.read_campaign(root)
+    campaign.update(ticked_at=local("2026-11-16 08:00").isoformat(),
+                    missed={"start": local("2026-11-14 00:00").isoformat(), "end": local("2026-11-14 06:00").isoformat()})
+    (root / scheduler.CAMPAIGN).write_text(json.dumps(campaign), encoding="utf-8")
+    assert scheduler.campaign_state(root, load_study(root), now=local("2026-11-16 08:00"))["missed"] is None, \
+        "Monday's window started since: Saturday's is not said any more"
+
+
+def test_by_hand_takes_the_lock_only_on_an_armed_campaign(tmp_path):
+    home, root = campaign_study(tmp_path)
+    (root / scheduler.CAMPAIGN).unlink()
+    lock = home.root / scheduler.LOCK
+    lock.write_text(json.dumps({"pid": os.getpid(), "at": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
+    assert scheduler.by_hand(home, root, lambda: {"run": "r1"}) == {"run": "r1"}, "no campaign: no wait on the lock"
+    assert not (root / scheduler.CAMPAIGN).exists()
+    lock.unlink()
+
+
+def test_the_api_starts_and_stops_a_scheduled_study(tmp_path, monkeypatch):
+    from test_app_server import call
+
+    home, root = campaign_study(tmp_path)
+    slug = root.name
+    (root / scheduler.CAMPAIGN).unlink()
+    solver = Path(__file__).resolve().parents[1] / "examples" / "cli-solver" / "solver.py"
+    home.save_step(slug, {"application": {"path": str(solver), "version": ""}})  # ready to start
+    monkeypatch.setattr(scheduler, "tick", lambda *a, **k: [])
+    monkeypatch.setattr(jobs, "_spawn", lambda env, argv, root, run_dir: 2 ** 22 + 7)
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        status, answer = call(server, "POST", f"/api/studies/{slug}/start", {})
+        assert status == 200 and answer["scheduled"] is True and "run" not in answer, answer
+        assert scheduler.read_campaign(root)["state"] == "armed" and not (root / "runs").exists()
+        status, answer = call(server, "POST", f"/api/studies/{slug}/start", {"now": "yes"})
+        assert status == 400 and "now" in answer["error"]
+        status, answer = call(server, "POST", f"/api/studies/{slug}/stop?run=nothing-here", {})
+        assert status == 404 and scheduler.read_campaign(root)["state"] == "armed", "a bad name pauses nothing"
+        status, answer = call(server, "POST", f"/api/studies/{slug}/stop", {})
+        assert status == 200 and answer == {"paused": True, "stopping": False}
+        assert scheduler.read_campaign(root)["state"] == "paused"
+        status, answer = call(server, "POST", f"/api/studies/{slug}/start", {"now": True})
+        assert status == 200 and answer["run"] and answer["campaign"]["state"] == "armed", answer
+        assert scheduler.read_campaign(root)["by_hand"] == {"run": answer["run"], "session": 1}
+    finally:
+        server.stop()
 
 
 def test_start_scheduled_only_arms(tmp_path):

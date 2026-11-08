@@ -656,3 +656,21 @@ def test_setup_says_when_it_runs():
 def test_the_study_page_says_the_campaign():
     notices = _page_function(STUDY_PAGE, "notices")
     assert "campaign" in notices and "camp.line" in notices
+    assert '"Resume the campaign"' in notices and 'camp.state === "paused"' in notices
+    assert '"resume-campaign": function' in STUDY_PAGE
+
+
+def test_a_scheduled_start_says_when_in_the_servers_words():
+    out = _node("""process.stdout.write(JSON.stringify([
+      EK.scheduledWords({scheduled: true, words: "next window Sat 00:00", renewed: null}),
+      EK.scheduledWords({scheduled: true, words: "its window is open now, until Sun 23:59"}),
+      EK.scheduledWords({scheduled: true, words: "next window Sat 00:00", renewed: "finished"})]));""")
+    assert out == ["Scheduled: next window Sat 00:00", "Scheduled: its window is open now, until Sun 23:59",
+                   "Scheduled a new campaign: the last one finished · next window Sat 00:00"]
+    for page in (SETUP_PAGE, STUDY_PAGE):
+        assert "EK.scheduledWords(res)" in page and "Campaign · " not in page
+
+
+def test_home_chooses_its_poll_again_after_every_answer():
+    poll = _page_function(HOME_PAGE, "poll")
+    assert "EK.later(live ? 10000 : 30000" in poll and "poll(main, query, gen)" in poll.split("EK.later", 1)[1]

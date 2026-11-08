@@ -44,6 +44,7 @@ from typing import Any
 from evolvekit.app import AppError
 from evolvekit.app import jobs, work
 from evolvekit.app.prices import price_of
+from evolvekit.app.store import as_json
 from evolvekit.config import ModelConfig
 from evolvekit.expressions import Expression, ExpressionError
 from evolvekit.harness import HarnessError
@@ -325,7 +326,7 @@ def context(root: Path, study: Study, harness: Harness, *, screen: str = "", run
                      **({"guard": k.guard} if k.guard else {})} for n, k in harness.kpis.items()},
         "kpi_templates": {n: {"label": t.label, "sql": t.sql, "params": list(t.params)} for n, t in harness.kpi_templates.items()},
     }
-    so_far = study.to_yaml()
+    so_far = as_json(study.to_yaml())  # a schedule's `until` is a date: JSON carries it as text
     so_far.pop("application", None)  # a path on this machine says nothing about the study
     summary = work.preview_summary(root, harness)
     return (

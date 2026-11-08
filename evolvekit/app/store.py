@@ -913,7 +913,7 @@ class Home:
         cases = self.cases(slug)
         return {
             "slug": slug,
-            "study": _as_json(study.to_yaml()),
+            "study": as_json(study.to_yaml()),
             "problems": problems,
             "steps": [
                 {"number": i + 1, "title": title, "problems": sum(1 for p in problems if p["step"] == i + 1)}
@@ -927,12 +927,12 @@ class Home:
         }
 
 
-def _as_json(value: Any) -> Any:
-    """`study.to_yaml()` as JSON carries it: a date (`schedule.until`) as `"2026-12-31"`."""
+def as_json(value: Any) -> Any:
+    """`study.to_yaml()` (or any part of it) as JSON carries it: a date (`schedule.until`) as `"2026-12-31"`."""
     if isinstance(value, dict):
-        return {k: _as_json(v) for k, v in value.items()}
+        return {k: as_json(v) for k, v in value.items()}
     if isinstance(value, list):
-        return [_as_json(v) for v in value]
+        return [as_json(v) for v in value]
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     return value

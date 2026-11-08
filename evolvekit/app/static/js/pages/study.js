@@ -710,7 +710,9 @@
     var s = st.status, out = [];
     // A study with a schedule: its campaign's line under the header (the next window, a pause, a missed window).
     var camp = (st.doc.state || {}).campaign;
-    if (camp && camp.line) out.push(EK.notice(camp.tone === "warn" ? "warning" : "info", camp.line));
+    // A paused campaign is resumed from here: Start arms it again (D4: a person's stop pauses it).
+    if (camp && camp.line) out.push(EK.notice(camp.tone === "warn" ? "warning" : "info", camp.line,
+      camp.state === "paused" ? { text: "Resume the campaign", act: "resume-campaign" } : null));
     if (s.phase === "search" && /again/.test(s.sentence || "")) out.push(EK.notice("info", "Continued where it stopped, after a restart."));
     if (s.busy_line && isLive()) out.push(EK.notice("warning", "Your computer is busy. Tries may run slower.", { text: "Is it still fair?", act: "busy" }));
     // Before and while the run: what to hear besides the plan (too few held-back cases for a firm answer).
@@ -811,13 +813,19 @@
         var r = st.results.final.recheck;
         EK.post(EK.studyPath(st.slug, "/final-check" + runQ()), { seeds: r.seeds }).then(function () { EK.toast("done", "Checking again with more runs"); EK.go(EK.studyHref(st.slug)); }).catch(EK.fail);
       },
+      "resume-campaign": function () {
+        EK.post(EK.studyPath(st.slug, "/start"), {}).then(function (res) {
+          EK.toast("done", res.scheduled ? EK.scheduledWords(res) : "Started");
+          EK.rerender();
+        }).catch(EK.fail);
+      },
       resume: function () { EK.post(EK.studyPath(st.slug, "/start"), { resume: st.run }).then(function () { EK.toast("done", "Carrying on"); EK.rerender(); }).catch(EK.fail); },
       restart: function () {
         // A bake-off starts again as itself: the same branches, never a search.
         var again = isBakeoff() ? EK.post(EK.studyPath(st.slug, "/bakeoff"), { refs: st.status.bakeoff_refs }) : EK.post(EK.studyPath(st.slug, "/start"));
         again.then(function (res) {
           // A study with a schedule is scheduled, not started: its next window starts it (D3).
-          if (res.scheduled) { EK.toast("done", "Scheduled: " + String((res.campaign || {}).line || "").replace(/^Campaign · /, "")); EK.go("#/"); return; }
+          if (res.scheduled) { EK.toast("done", EK.scheduledWords(res)); EK.go("#/"); return; }
           EK.go(EK.studyHref(st.slug, res.run));
         }).catch(EK.fail);
       },

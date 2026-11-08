@@ -66,6 +66,14 @@
     return s.chance != null ? EK.capital(EK.chanceWords(s.chance)) + " · " + range.charAt(0).toLowerCase() + range.slice(1) : range;
   };
 
+  /** What a start of a scheduled study says (POST /start's `scheduled` answer): "Scheduled: next window
+      Sat 00:00", "Scheduled: its window is open now, until Sun 23:59", or after a finished campaign
+      "Scheduled a new campaign: the last one finished · next window Sat 00:00". */
+  EK.scheduledWords = function (res) {
+    var words = (res && res.words) || "";
+    return res && res.renewed ? "Scheduled a new campaign: the last one " + res.renewed + " · " + words : "Scheduled: " + words;
+  };
+
   /** A Home card from one study of GET /api/home. */
   EK.cardOf = function (s) {
     var phase = EK.pepperPhase(s), r = s.rounds || {};

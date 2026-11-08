@@ -45,15 +45,18 @@ from evolvekit.stopping import STOP_REQUEST, active_seconds
 
 __all__ = [
     "ACTIONS_PER_WINDOW", "BY_YOU", "CAMPAIGN", "CLOCK_FILE", "Clock", "FAILED_PAUSE_LINE", "FAILURES_TO_PAUSE", "LOCK",
-    "MIN_SESSION_S", "SPAN_FILE", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_state", "clear_clock",
+    "MIN_SESSION_S", "NO_SCHEDULE", "SPAN_FILE", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_run",
+    "campaign_state", "clear_clock",
     "clock_of", "launch_queued", "mark_by_hand", "pause", "read_campaign", "search_left_s", "session_of",
-    "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
+    "scheduled_words", "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
 ]
 
 CAMPAIGN = "campaign.json"
 """In the study folder: `{"state": "armed"|"paused"|"complete"|"ended", "armed_at", "reason", "by_hand":
-{"run", "session"}|None, "stopped_by_window", "window", "actions", "failed_sessions", "ticked_at"}`, and
-`counted`: the last session (`<run>:<n>`) whose end the tick has counted, so each is counted once."""
+{"run", "session"}|None, "stopped_by_window", "window", "actions", "failed_sessions", "ticked_at"}`;
+`counted`: the last session (`<run>:<n>`) whose end the tick has counted, so each is counted once;
+`after`: the study's last run before this campaign (a new campaign after a finished one sees only
+the runs started after it); `missed`: `{"start", "end"}` of a window no tick saw, kept for the line."""
 MIN_SESSION_S = 600.0
 """A continuation shorter than this is not started; a campaign with less search time left is complete (D5)."""
 ACTIONS_PER_WINDOW = 3
@@ -192,7 +195,8 @@ def clock_of(home: Any) -> Clock:
 
 def _blank() -> dict[str, Any]:
     return {"state": "armed", "armed_at": None, "reason": None, "by_hand": None, "stopped_by_window": None,
-            "window": None, "actions": 0, "failed_sessions": [], "ticked_at": None, "counted": None}
+            "window": None, "actions": 0, "failed_sessions": [], "ticked_at": None, "counted": None, "after": None,
+            "missed": None}
 
 
 def read_campaign(root: Path) -> dict[str, Any] | None:
@@ -212,11 +216,16 @@ def _write_campaign(root: Path, campaign: dict[str, Any]) -> None:
     _atomic_write(Path(root) / CAMPAIGN, json.dumps(campaign, indent=2) + "\n")
 
 
-def arm(root: Path, *, now: datetime) -> dict[str, Any]:
+def arm(root: Path, *, now: datetime, renew: bool = False) -> dict[str, Any]:
     """Arm the study's campaign at `now`: its windows start runs from the next tick. The failures
-    and the window's launches are counted afresh."""
+    and the window's launches are counted afresh. `renew`: a new campaign, after one that finished
+    or ended -- its runs are the ones started from now on (`after`: the study's latest run now), so
+    its first window starts a new run and the old one stays a past run."""
     campaign = {**(read_campaign(root) or _blank()), "state": "armed", "armed_at": _iso(now), "reason": None,
-                "failed_sessions": [], "stopped_by_window": None, "window": None, "actions": 0}
+                "failed_sessions": [], "stopped_by_window": None, "window": None, "actions": 0, "missed": None}
+    if renew:
+        dirs = jobs._run_dirs(Path(root))  # noqa: SLF001 - the runs, oldest first, as jobs lists them
+        campaign.update(after=dirs[-1].name if dirs else None, by_hand=None, counted=None)
     _write_campaign(root, campaign)
     return campaign
 
@@ -379,6 +388,7 @@ def mark_by_hand(home: Any, slug: str, run_id: str) -> None:
         return
     run_dir = root / "runs" / run_id
     campaign["by_hand"] = {"run": run_id, "session": session_of(run_dir)}
+    campaign["missed"] = None  # a session of the campaign ran: the missed window is past news
     _write_campaign(root, campaign)
     (run_dir / SPAN_FILE).unlink(missing_ok=True)
 
@@ -470,6 +480,7 @@ class _Tick:
         launched = False
         for _, _, root, campaign in armed:
             before = json.dumps(campaign, sort_keys=True)
+            self.note_missed(root, campaign)
             if not launched:  # one launch per tick: the studies after it wait for the next, but are stamped
                 launched = self.study(root, campaign)
             self.save(root, campaign, before)
@@ -485,6 +496,21 @@ class _Tick:
             campaign["ticked_at"] = _iso(self.now)
         if json.dumps(campaign, sort_keys=True) != before:
             _write_campaign(root, campaign)
+
+    def note_missed(self, root: Path, campaign: dict[str, Any]) -> None:
+        """Keep the window no tick saw (`missed`), before this tick's stamp hides it: a whole span
+        passed since the last tick. It is said until the next span starts or a session launches."""
+        try:
+            schedule = load_study(root).schedule
+        except (HarnessError, OSError, ValueError):
+            return
+        if schedule is None:
+            return
+        found = _missed(schedule, campaign, self.now)
+        if found is not None:
+            campaign["missed"] = {"start": _iso(found[0]), "end": _iso(found[1])}
+        elif campaign.get("missed") is not None and _missed_kept(schedule, campaign.get("missed"), self.now) is None:
+            campaign["missed"] = None
 
     def say(self, root: Path, words: str) -> None:
         self.said.append(f"{root.name}: {words}")
@@ -512,9 +538,7 @@ class _Tick:
         if schedule is None:
             self.end(root, campaign, "paused", NO_SCHEDULE, f"the campaign is paused: {NO_SCHEDULE}")
             return False
-        dirs = jobs._run_dirs(root)  # noqa: SLF001 - the runs, oldest first, as jobs lists them
-        run_dir = dirs[-1] if dirs else None
-        job = jobs.phase(run_dir) if run_dir is not None else {}
+        run_dir, job = _latest(root, campaign)  # the campaign's own latest run (`after`)
         state = job.get("phase")
         session = session_of(run_dir) if run_dir is not None else 0
         active = state in jobs.ACTIVE
@@ -578,6 +602,7 @@ class _Tick:
             self.say(root, f"{refused}: {exc}")
             self.failed(root, campaign, f"launch:{_iso(self.now)}", str(exc))
             return True
+        campaign["missed"] = None  # a session of the campaign launched
         self.say(root, f"{words} (window {_window_words(span)})")
         return True
 
@@ -682,27 +707,53 @@ def tick(home: Any, *, now: datetime, speed: float = 1.0, real_now: datetime | N
 # ---------------------------------------------------------------------------
 
 
-def _latest(root: Path) -> tuple[Path | None, dict[str, Any]]:
-    """The study's latest run folder and its phase (`{}` when it has none)."""
+def _latest(root: Path, campaign: dict[str, Any] | None = None) -> tuple[Path | None, dict[str, Any]]:
+    """The study's latest run folder and its phase (`{}` when it has none); with `campaign`, the
+    latest of the runs started after its `after` (a new campaign's own), None before its first."""
     dirs = jobs._run_dirs(Path(root))  # noqa: SLF001 - the runs, oldest first, as jobs lists them
+    after = (campaign or {}).get("after")
+    names = [d.name for d in dirs]
+    if after in names:
+        dirs = dirs[names.index(after) + 1:]
     run_dir = dirs[-1] if dirs else None
     return run_dir, (jobs.phase(run_dir) if run_dir is not None else {})
 
 
-def _missed(schedule: Schedule, campaign: dict[str, Any], now: datetime) -> datetime | None:
-    """The start of the latest span that began after the campaign was armed and after its last tick
+def campaign_run(root: Path) -> str | None:
+    """The latest run of the study's campaign (after a renewal, only the new campaign's), or None."""
+    run_dir, _ = _latest(root, read_campaign(root))
+    return run_dir.name if run_dir is not None else None
+
+
+def _missed_kept(schedule: Schedule, missed: Any, now: datetime) -> datetime | None:
+    """The start of the recorded missed window while it is news: no span has started since it
+    ended. None once one has (or when nothing is recorded)."""
+    if not isinstance(missed, dict):
+        return None
+    start, end = _moment(missed.get("start")), _moment(missed.get("end"))
+    if start is None or end is None:
+        return None
+    for around in (end, now):
+        for begin, _ in schedule.spans(around):
+            if end.timestamp() < begin.timestamp() <= now.timestamp():
+                return None
+    return start.astimezone()
+
+
+def _missed(schedule: Schedule, campaign: dict[str, Any], now: datetime) -> tuple[datetime, datetime] | None:
+    """The latest span that began after the campaign was armed and after its last tick
     (`ticked_at`, on the window clock), and ended before `now`: no tick saw it, so the app (or
     `study wait`) was not running then."""
     marks = [m for m in (_moment(campaign.get("armed_at")), _moment(campaign.get("ticked_at"))) if m is not None]
     if not marks:
         return None
     since = max(marks, key=lambda m: m.timestamp())
-    found: datetime | None = None
+    found: tuple[datetime, datetime] | None = None
     for around in (since, now):
         for start, end in schedule.spans(around):
             if since.timestamp() < start.timestamp() and end.timestamp() <= now.timestamp():
-                if found is None or start.timestamp() > found.timestamp():
-                    found = start
+                if found is None or start.timestamp() > found[0].timestamp():
+                    found = (start, end)
     return found
 
 
@@ -729,7 +780,7 @@ def campaign_state(root: Path, study: Study, *, now: datetime) -> dict[str, Any]
         return {**out, "state": "draft", "line": line}
     state = campaign.get("state")
     if state == "armed":
-        run_dir, job = _latest(root)
+        run_dir, job = _latest(root, campaign)
         state = _judged(run_dir, job, schedule, now) or "armed"
     if state in ("complete", "ended", "paused"):
         out.update(state=state, next=None, edge=None)
@@ -745,7 +796,12 @@ def campaign_state(root: Path, study: Study, *, now: datetime) -> dict[str, Any]
         line = reason if reason.startswith("The campaign is paused") else f"Campaign · paused: {reason}"
         return {**out, "line": line, "tone": "warn"}
     tail = (f"next window {when}" if edge == "start" else f"this window ends {when}" if edge == "end" else ENDED)
-    missed = _missed(schedule, campaign, now)
+    # The window the tick recorded as missed, while no span has started since; else one passing
+    # now with no tick at all (`study status` with no app open).
+    missed = _missed_kept(schedule, campaign.get("missed"), now)
+    if missed is None:
+        found = _missed(schedule, campaign, now)
+        missed = found[0] if found is not None else None
     if missed is not None:
         return {**out, "missed": _iso(missed), "tone": "warn",
                 "line": f"Campaign · the window of {when_words(missed, now)} was missed: the app was not running · {tail}"}
@@ -754,10 +810,16 @@ def campaign_state(root: Path, study: Study, *, now: datetime) -> dict[str, Any]
 
 def campaign_done(root: Path, study: Study, *, now: datetime) -> bool:
     """Whether a campaign has its answer: complete or ended (judged as every tick judges them), or
-    paused -- and no run of the study is active or queued. A window's stop is not an end."""
-    state = campaign_state(root, study, now=now)
-    if state is None or state["state"] not in ("complete", "ended", "paused"):
-        return False
+    paused -- and no run of the study is active or queued. A window's stop is not an end. A study
+    whose schedule was taken out is judged by its stored campaign (the tick pauses it then)."""
+    if study.schedule is None:
+        stored = read_campaign(root)
+        if stored is None or stored.get("state") == "armed":
+            return False
+    else:
+        state = campaign_state(root, study, now=now)
+        if state is None or state["state"] not in ("complete", "ended", "paused"):
+            return False
     phase = _latest(root)[1].get("phase")
     return phase not in jobs.ACTIVE and phase != "queued"
 
@@ -792,7 +854,10 @@ def window_left_s(root: Path, run_dir: Path, *, now: datetime | None = None) -> 
 def by_hand(home: Any, root: Path, launch: Callable[[], dict[str, Any]]) -> dict[str, Any]:
     """A session a person launches (a resume, a continuation, a final check again): `launch()`
     inside `tick_lock`, then `mark_by_hand` when the study's campaign is armed (D4, D47), so no tick
-    sees the session before it is theirs. `launch`'s answer."""
+    sees the session before it is theirs. `launch`'s answer. A study whose campaign is not armed
+    launches as it always did, without the lock."""
+    if (read_campaign(root) or {}).get("state") != "armed":
+        return launch()
     with tick_lock(home):
         answer = launch()
         run = answer.get("run") if isinstance(answer, dict) else None
@@ -801,39 +866,72 @@ def by_hand(home: Any, root: Path, launch: Callable[[], dict[str, Any]]) -> dict
     return answer
 
 
+def scheduled_words(state: dict[str, Any] | None, now: datetime) -> str:
+    """When a scheduled study starts, in the words `study start` and the page say: "next window
+    Sat 00:00", or inside a window "its window is open now, until Sun 23:59"."""
+    moment = _moment((state or {}).get("next"))
+    if moment is None:
+        return ENDED
+    when = when_words(moment.astimezone(), now)
+    return f"its window is open now, until {when}" if state.get("edge") == "end" else f"next window {when}"
+
+
+def _finished(root: Path, campaign: dict[str, Any] | None, schedule: Schedule, now: datetime) -> str | None:
+    """"finished" or "ended" when the study's campaign has its answer (stored, or judged now), so a
+    start begins a new campaign; None otherwise (no campaign yet, armed, paused)."""
+    if campaign is None:
+        return None
+    stored = campaign.get("state")
+    run_dir, job = _latest(root, campaign)
+    judged = _judged(run_dir, job, schedule, now)
+    if stored == "ended" or judged == "ended":
+        return "ended"
+    if stored == "complete" or judged == "complete":
+        return "finished"
+    return None
+
+
 def start_campaign(home: Any, root: Path, *, now: datetime, at_once: bool, start: Callable[..., Any] | None = None,
                    continue_run: Callable[..., Any] | None = None,
                    recheck: Callable[..., Any] | None = None) -> dict[str, Any]:
     """A person starts a scheduled study (D3). `at_once=False`: the campaign is armed, and its
-    windows start the sessions: `{"scheduled": True, "campaign": campaign_state(...)}`. `at_once`
-    (`--now`): what a tick would do inside a window -- start, resume, check again or continue
-    with the campaign's search time left -- whatever the window, and the campaign armed with that
-    session by hand (D4, D47), the launch and the mark inside `tick_lock`: the launch's answer and
-    `"campaign"`. `start`, `continue_run` and `recheck` default to `jobs`' own."""
+    windows start the sessions: `{"scheduled": True, "renewed", "words", "campaign":
+    campaign_state(...)}`. `at_once` (`--now`): what a tick would do inside a window -- start,
+    resume, check again or continue with the campaign's search time left -- whatever the window,
+    and the campaign armed with that session by hand (D4, D47), the launch and the mark inside
+    `tick_lock`: the launch's answer, `"renewed"` and `"campaign"`. A campaign that finished or
+    ended is begun anew (`renewed`: "finished" or "ended"): its next session is a new run, and
+    the old one stays a past run. `start`, `continue_run` and `recheck` default to `jobs`' own."""
     root = Path(root)
     study = load_study(root)
-    if study.schedule is None:
+    schedule = study.schedule
+    if schedule is None:
         raise AppError("the study has no schedule: start it as usual", 409)
-    if not at_once:
-        with tick_lock(home):
-            arm(root, now=now)
-        return {"scheduled": True, "campaign": campaign_state(root, study, now=now)}
+    if schedule.past_until(now):
+        raise AppError("its schedule has no window left: set a later Until in When it runs (or in study.yaml) "
+                       "to run it again", 409)
     calls = {"start": start or jobs.start, "continue_run": continue_run or jobs.continue_run,
              "recheck": recheck or jobs.resume_final_check}
     with tick_lock(home):
-        run_dir, job = _latest(root)
-        if job.get("phase") in jobs.ACTIVE or job.get("phase") == "queued":
+        campaign = read_campaign(root)
+        renewed = _finished(root, campaign, schedule, now)
+        if not at_once:
+            arm(root, now=now, renew=renewed is not None)
+            state = campaign_state(root, study, now=now)
+            return {"scheduled": True, "renewed": renewed, "words": scheduled_words(state, now), "campaign": state}
+        if jobs.running(root):
             raise AppError("the study is already running", 409)
-        action = _next_action(home, root, run_dir, job, None)
-        if action is None:
-            raise AppError("the campaign has no search time left: give the study more hours to search on", 409)
+        run_dir, job = (None, {}) if renewed is not None else _latest(root, campaign)
+        # Nothing of the latest run can go on: a new run, as a new campaign's first session.
+        action = _next_action(home, root, run_dir, job, None) or (
+            "start", (home, root), {}, "started a run", "could not start a run")
         name, args, kwargs, _, _ = action
         path = root / CAMPAIGN
         try:
             before: str | None = path.read_text(encoding="utf-8")
         except OSError:
             before = None
-        arm(root, now=now)
+        arm(root, now=now, renew=renewed is not None or (name == "start" and not kwargs))
         try:
             answer = calls[name](*args, **kwargs)
         except BaseException:
@@ -846,7 +944,7 @@ def start_campaign(home: Any, root: Path, *, now: datetime, at_once: bool, start
         run = answer.get("run") or (run_dir.name if run_dir is not None else None)
         if run:
             mark_by_hand(home, root.name, str(run))
-    return {**answer, "campaign": campaign_state(root, study, now=now)}
+    return {**answer, "renewed": renewed, "campaign": campaign_state(root, study, now=now)}
 
 
 def stop_by_person(home: Any, root: Path, run: str | None) -> dict[str, Any]:

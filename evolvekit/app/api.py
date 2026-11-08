@@ -605,7 +605,10 @@ def stop(req: Request) -> dict[str, Any]:
     """Stop the run; on an armed campaign, a person's stop also pauses it (D4)."""
     root, _, _ = req.home.load(req.params["slug"])
     if (scheduler.read_campaign(root) or {}).get("state") == "armed":
-        return scheduler.stop_by_person(req.home, root, req.query.get("run") or jobs.latest_run(root))
+        run = req.query.get("run") or jobs.latest_run(root)
+        if run is not None:
+            jobs._run_dir(root, run)  # noqa: SLF001 - a name that is no run is refused before anything is paused
+        return scheduler.stop_by_person(req.home, root, run)
     return jobs.stop(root, _run(req, root))
 
 

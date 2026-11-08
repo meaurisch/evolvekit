@@ -1047,7 +1047,7 @@ def test_start_scheduled_prints_next_window(tmp_path, capsys, monkeypatch):
     assert "evolvekit app install-startup" in err and started == []
     assert scheduler.read_campaign(root)["state"] == "armed"
     assert main(["study", "start", root.name, "--home", str(home.root), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out.splitlines()[0]) == {"scheduled": True, "next": local("2026-11-14 00:00").isoformat()}
+    assert json.loads(capsys.readouterr().out.splitlines()[0]) == {"scheduled": True, "next": local("2026-11-14 00:00").isoformat(), "edge": "start"}
 
 
 def test_start_now_starts_at_once(tmp_path, capsys, monkeypatch):
@@ -1150,3 +1150,41 @@ def test_wait_on_a_campaign_times_out_with_4(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
     assert main(["study", "wait", root.name, "--timeout", "0.1", "--home", str(home.root)]) == 4, "no run needed"
     assert "Campaign · next window Sat 00:00" in capsys.readouterr().err
+
+
+def test_start_after_a_finished_campaign_begins_a_new_one(tmp_path, capsys, monkeypatch):
+    from evolvekit.app import jobs, scheduler
+
+    _friday_evening(monkeypatch)
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "done", generations=6, planned=6, used_s=3600 - 60, final={"decision": "use"})
+    scheduler.pause(root, reason=scheduler.COMPLETE, state="complete")
+    assert main(["study", "start", root.name, "--home", str(home.root)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == ("scheduled: a new campaign (the last one finished); next window "
+                                                       "Sat 00:00 (the app, or evolvekit study wait, starts it then)")
+    scheduler.pause(root, reason=scheduler.COMPLETE, state="complete")
+    started = []
+    monkeypatch.setattr(jobs, "start", lambda *a, **k: started.append(k) or {"run": "r2"})
+    assert main(["study", "start", root.name, "--now", "--home", str(home.root)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "started run r2: a new campaign (the last one finished)"
+    assert started == [{}], "a new run, at once"
+
+
+def test_wait_ends_when_the_schedule_is_taken_out(tmp_path, capsys, monkeypatch):
+    from evolvekit import cli
+    from evolvekit.harness.study import load_study, save_study
+
+    _friday_evening(monkeypatch)
+    home, root = campaign_study(tmp_path)
+    tick = cli._tick_queue  # noqa: SLF001
+
+    def taken_out_then_tick(home):
+        study = load_study(root)
+        study.schedule = None
+        save_study(study, root)  # "As soon as I start it" in Set up, while the wait waits
+        tick(home)
+
+    monkeypatch.setattr(cli, "_tick_queue", taken_out_then_tick)
+    monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
+    assert main(["study", "wait", root.name, "--timeout", "5", "--home", str(home.root)]) == 1
+    assert capsys.readouterr().out.strip() == "Campaign · paused: the study has no schedule any more"

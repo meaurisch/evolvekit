@@ -10,7 +10,6 @@ import shutil
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
@@ -1409,24 +1408,20 @@ def _start_campaign(home, root: Path, args: argparse.Namespace) -> int:
     (D3) -- or with `--now` a session at once, by hand, which no window's end stops (D4)."""
     from evolvekit.app import jobs, scheduler
     from evolvekit.app.running import read_running
-    from evolvekit.harness.schedule import when_words
 
     now = scheduler.clock_of(home).now()
     answer = scheduler.start_campaign(home, root, now=now, at_once=bool(args.now))
     slug = root.name
+    renewed = answer.get("renewed")
+    anew = f"a new campaign (the last one {renewed}); " if renewed else ""
     if answer.get("scheduled"):
         campaign = answer["campaign"] or {}
-        moment = datetime.fromisoformat(campaign["next"]) if campaign.get("next") else None
         if args.json:
-            print(json.dumps({"scheduled": True, "next": campaign.get("next")}), flush=True)
-        elif moment is not None and campaign.get("edge") == "end":
-            print(f"scheduled: its window is open now, until {when_words(moment, now)} (the app, or evolvekit "
-                  "study wait, starts it now)", flush=True)
-        elif moment is not None:
-            print(f"scheduled: next window {when_words(moment, now)} (the app, or evolvekit study wait, starts it then)",
-                  flush=True)
+            print(json.dumps({"scheduled": True, "next": campaign.get("next"), "edge": campaign.get("edge"),
+                              **({"new_campaign": True} if renewed else {})}), flush=True)
         else:
-            print(f"scheduled, but {campaign.get('line') or 'its schedule has no window left'}", flush=True)
+            then = "now" if campaign.get("edge") == "end" else "then"
+            print(f"scheduled: {anew}{answer['words']} (the app, or evolvekit study wait, starts it {then})", flush=True)
         if read_running(home.root) is None:
             print(SERVICE_NOTE, file=sys.stderr)
     else:
@@ -1438,6 +1433,9 @@ def _start_campaign(home, root: Path, args: argparse.Namespace) -> int:
                     "(the app or `evolvekit study wait` starts it)")
         else:
             document, line = {"run": run, "started": True}, f"started run {run}"
+        if renewed:
+            document["new_campaign"] = True
+            line += f": {anew.rstrip('; ')}"
         print(json.dumps(document) if args.json else line, flush=True)
     if args.wait:
         return _wait(home, slug, args.timeout, args.json, args)
@@ -1504,10 +1502,13 @@ def _wait_campaign(home, slug: str, root: Path, study, timeout: float | None, as
     except KeyboardInterrupt:
         print(f"stopped waiting; the campaign of {slug} goes on", file=sys.stderr)
         return 130
-    run = jobs.latest_run(root)
+    run = scheduler.campaign_run(root)  # the campaign's own: a new campaign's, not the last one's
     job = jobs.phase(jobs._run_dir(root, run)) if run else {}  # noqa: SLF001 - the one check of a run's name
     state = job.get("phase")
-    campaign = scheduler.campaign_state(root, study, now=scheduler.clock_of(home).now()) or {}
+    campaign = scheduler.campaign_state(root, study, now=scheduler.clock_of(home).now())
+    if campaign is None:  # the schedule was taken out while it waited: the tick paused the campaign
+        stored = scheduler.read_campaign(root) or {}
+        campaign = {"state": stored.get("state"), "line": f"Campaign · paused: {stored.get('reason') or scheduler.NO_SCHEDULE}"}
     if state == "done":
         document = build_verdict(root, run)
         if as_json:
