@@ -62,6 +62,8 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study wait SLUG [--timeout S] [--json]` | wait until the run has ended | 0 done, 1 stopped or failed, 4 timeout |
 | `evolvekit study verdict SLUG [--run ID] [--json]` | the final check's answer: the verdict and what to do about it | |
 | `evolvekit study report SLUG [--run ID] [--markdown \| --json]` | the report of a run: the verdict document, or `--markdown` for people | |
+| `evolvekit study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`; prints its path | 0 written; 2 a settings study, or the starting point stayed the best |
+| `evolvekit study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints the verdict's line and what it will do -- the branch `evolvekit/<slug>-<run>` with the best's change, the push, the PR with `gh` (the report as its body) -- and does it only with `--yes`; ask the engineer first | 0 printed or done; 1 the branch exists, or the push or `gh` failed; 2 a settings study, the starting point stayed the best, or the change does not apply on `HEAD` |
 | `evolvekit study open SLUG [--no-browser]` | print the study's address in the app (starting the app if none runs) and open it | |
 | `evolvekit skill list` | the skills that ship with evolvekit | |
 | `evolvekit skill install [--dir DIR] [--force]` | write the skills into a project (`.agents/skills`, with a pointer for a tool that reads only its own skills folder) | |

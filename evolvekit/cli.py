@@ -499,6 +499,21 @@ def build_parser() -> argparse.ArgumentParser:
     form = s_report.add_mutually_exclusive_group()
     form.add_argument("--markdown", action="store_true", help="the report as Markdown")
     form.add_argument("--json", action="store_true", help="the verdict document (the default)")
+    s_export = study.add_parser("export", help="a code study's result as a file: --diff writes the best combination's patch")
+    s_export.add_argument("slug", help="the study's name in the library home")
+    s_export.add_argument("--diff", action="store_true", help="the best combination's change, as runs/<id>/best.patch")
+    s_export.add_argument("--run", help="a run's id (default: the latest)")
+    s_export.add_argument("--home", help=home_help)
+    s_export.add_argument("--json", action="store_true", help='print {"patch"} and nothing else')
+    s_pr = study.add_parser("pr", help="a code study's best change as a branch, pushed, with a PR whose body is the "
+                                       "report; prints what it will do, and does it only with --yes")
+    s_pr.add_argument("slug", help="the study's name in the library home")
+    s_pr.add_argument("--run", help="a run's id (default: the latest)")
+    s_pr.add_argument("--base", metavar="BRANCH", help="the branch the PR goes into (default: the repository's default)")
+    s_pr.add_argument("--draft", action="store_true", help="open the PR as a draft")
+    s_pr.add_argument("--yes", action="store_true", help="do it: make the branch, push it, open the PR")
+    s_pr.add_argument("--home", help=home_help)
+    s_pr.add_argument("--json", action="store_true", help="print the plan (and with --yes what was done) as JSON")
     s_open = study.add_parser("open", help="print the study's address in the app (starting the app if none runs) and open it")
     s_open.add_argument("slug", help="the study's name in the library home")
     s_open.add_argument("--no-browser", action="store_true", help="only print the address")
@@ -1204,6 +1219,53 @@ def _verdict_command(command: str, args: argparse.Namespace) -> int:
     return 0
 
 
+def _change_command(command: str, args: argparse.Namespace) -> int:
+    """`study export --diff` and `study pr` (design §5.6): a code study's best change as a
+    patch, or as a branch, a push and a PR -- the last two only with `--yes`. A refusal
+    before anything is done exits 2; a failure while doing it exits 1."""
+    from evolvekit.harness import pr
+
+    if command == "export" and not args.diff:
+        print("name what to export: --diff (the best combination's change as a patch)", file=sys.stderr)
+        return 2
+    root = _home(args).study_root(args.slug)
+    try:
+        if command == "export":
+            patch = pr.export_diff(root, args.run)
+        else:
+            plan = pr.plan_pr(root, args.run, base=args.base, draft=args.draft)
+    except HarnessError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    if command == "export":
+        print(json.dumps({"patch": str(patch)}) if args.json else patch)
+        return 0
+    if not args.yes:
+        if args.json:
+            print(json.dumps({**plan.to_json(), "done": False}))
+            return 0
+        for line in pr.describe(plan):
+            print(line)
+        print("nothing was done: run it again with --yes to do this")
+        return 0
+    if not args.json:
+        for line in pr.describe(plan):
+            print(line)
+        sys.stdout.flush()
+    try:
+        done = pr.open_pr(plan)
+    except HarnessError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({**plan.to_json(), **done, "done": True}))
+        return 0
+    print(f"made the branch {done['branch']} at {done['commit'][:12]}")
+    print(f"pushed it to {plan.remote}" if done["pushed"] else "not pushed: there is no remote")
+    print(f"PR: {done['url']}" if done["url"] else done["note"])
+    return 0
+
+
 def _wait(home, slug: str, timeout: float | None, as_json: bool, args: argparse.Namespace | None = None) -> int:
     """`study wait`: until the latest run has ended -- 0 done (the verdict),
     1 stopped or failed, 4 when `timeout` seconds pass first. For people (not
@@ -1422,6 +1484,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _study_run_command(command, args)
     if command in ("verdict", "report"):
         return _verdict_command(command, args)
+    if command in ("export", "pr"):
+        return _change_command(command, args)
     if command == "open":
         return _study_open(args)
     folder = _study_root(args.directory, args)
