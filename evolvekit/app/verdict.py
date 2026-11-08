@@ -14,9 +14,11 @@ the paired mean of the runs' changes (the statistic of `mean_pct`), so the two
 need not agree with each other. `combinations` counts every combination the
 search measured, the starting point among them: a plan of 2 combinations a
 round for 2 rounds gives 5. `planned` holds the plan's `rounds` and
-`combinations`; `how_it_ran`, only when the search stopped on time with fewer
-rounds than planned or its AI budget was used up, says so in a sentence
-(`how_it_ran`). `spent`, on a run
+`combinations`; `how_it_ran`, only when fewer rounds ran than planned (or all
+of them, but some combinations repeated one already tried) or its AI budget
+was used up, says so in a sentence (`how_it_ran`). `why_keep`, only on a
+`keep` whose held-back cases all moved the goal's way while its range still
+allows a loss, says in one sentence why it is still keep (`why_keep`). `spent`, on a run
 with AI, is what its AI spent (`ai_spent`): `{usd, cap_usd, line}`, or
 `{requests, line}` for a provider that counts requests. The page
 (`jobs.results`), the command line and the report all render from it, so they
@@ -52,7 +54,7 @@ from typing import Any
 from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, t_cdf
 
 __all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "no_difference_line",
-           "number_text"]
+           "number_text", "why_keep"]
 
 SCHEMA = 1
 """Bumped when a key of the document changes meaning."""
@@ -497,6 +499,9 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     document["learned_from"] = {"cases": len(study.training), "pct": learned_pct if named else None}
     document["rule"] = RULE_WORDS
     document["by_case"] = _held_rows(result, held)
+    why = why_keep(document["decision"], words, document["by_case"], goal["direction"]) if named and not candidates else ""
+    if why:
+        document["why_keep"] = why
     document["changed"] = [{"name": c["name"], "label": c["label"], "from": c["old_text"], "to": c["new_text"]}
                            for c in changed if c["changed"]]
     if not named:
@@ -510,7 +515,7 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     plan = jobs._plan(run_dir, job)
     if not job.get("bakeoff"):
         document["planned"] = {"rounds": plan.get("rounds"), "combinations": plan.get("combinations")}
-    ran = how_it_ran(job, plan, facts["tried"], bool(study.budget.ai_enabled))
+    ran = how_it_ran(job, plan, facts["tried"], bool(study.budget.ai_enabled), repeated=_repeated(run_dir))
     if ran:
         document["how_it_ran"] = ran
     spent = ai_spent(run_dir, study, job)
@@ -535,19 +540,53 @@ def _held_rows(result: dict[str, Any], held: list[dict[str, Any]]) -> list[dict[
              "outcome": _outcome(row)} for row in rows]
 
 
+def why_keep(decision: str, words: dict[str, Any], rows: list[dict[str, Any]], direction: str) -> str:
+    """Persona p4 (H2): a `keep` whose held-back cases ALL moved the goal's way, while its range still
+    allows a loss, says why in one plain sentence: "Every held-back case was lower (3.1 % and 8.2 %),
+    but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer
+    answer." -- up to three cases' figures, else "Every one of the N held-back cases". Never on use,
+    worse or same, and never a gain: it says why there is none. Empty otherwise."""
+    ci = words.get("ci95")
+    if decision != "keep" or words.get("state") != "unclear" or not ci or not ci[0] < 0:
+        return ""
+    if len(rows) < 2 or any(row.get("outcome") != "better" for row in rows):
+        return ""
+    word, n = _better_word(direction), len(rows)
+    if n <= 3:
+        figures = [_pct(row.get("change_pct")) for row in rows]
+        listed = figures[0] if n == 1 else ", ".join(figures[:-1]) + " and " + figures[-1]
+        said = f"Every held-back case was {word} ({listed})"
+    else:
+        said = f"Every one of the {n} held-back cases was {word}"
+    return (f"{said}, but with only {n} cases the range is too wide to rule out a loss: "
+            "hold back more cases for a firmer answer.")
+
+
+def _repeated(run_dir: Path) -> int:
+    """How many of the search's combinations repeated one already tried, so were not measured."""
+    from evolvekit.app import jobs
+
+    return sum(1 for r in jobs._rows(run_dir) if r.get("rejected") and str(r.get("reject_reason") or "").startswith("duplicate"))
+
+
 AI_BUDGET_STOPS = ("the AI budget was used up", "budget.max_usd reached")
 """How a search's stop reason starts when its AI budget ended it (`budget.AI_USED_UP`, `BudgetGuard.check`)."""
 
 
-def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool) -> str:
-    """When a search stopped on time with fewer rounds than its plan said, the
-    sentence that says so: "Ran 2 of the 11 planned rounds (25 combinations,
-    about 132 planned): the time ran out; the AI's replies took longer than the
-    plan assumed." When its AI budget ended it: "Ran 2 of the 3 planned rounds
-    (…): the AI budget was used up.", or "The AI budget was used up in round 4
-    (…)." when no planned round was left out. Empty when the plan happened, for
-    a bake-off (no search), and for a run continued with more time (its plan is
-    the continuation's)."""
+def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool, *, repeated: int = 0) -> str:
+    """Whenever fewer rounds ran than the plan said (persona p4, H7), the
+    sentence that says so, with the reason from the stop: "Ran 2 of the 11
+    planned rounds (25 combinations, about 132 planned): the time ran out; the
+    AI's replies took longer than the plan assumed." -- or "…: the search time
+    was used.", "…: stopped.", "…: the search stopped early (<its reason>)."
+    When its AI budget ended it: "Ran 2 of the 3 planned rounds (…): the AI
+    budget was used up.", or "The AI budget was used up in round 4 (…)." when no
+    planned round was left out. Every round ran, but `repeated` combinations
+    repeated one already tried: "Ran all 17 planned rounds (176 combinations,
+    about 204 planned): 29 repeated a combination already tried, so they were
+    not measured again." Empty when the plan happened, for a bake-off (no
+    search), and for a run continued with more time (its plan is the
+    continuation's)."""
     search = job.get("search") or {}
     done, planned = search.get("generations"), plan.get("rounds")
     if job.get("bakeoff") or job.get("continued_at") or not isinstance(done, int) or not isinstance(planned, int):
@@ -564,10 +603,20 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
         if done < planned:
             return f"{rounds}{counts}: the AI budget was used up."
         return f"The AI budget was used up in round {done}{counts}."
-    if done >= planned or not reason.startswith("time limit"):
+    if done >= planned:
+        if repeated > 0 and isinstance(tried, int) and isinstance(plan.get("combinations"), int) \
+                and tried < plan["combinations"]:
+            return (f"Ran all {planned} planned round{'s' if planned != 1 else ''}{counts}: {repeated} repeated a "
+                    f"combination already tried, so {'they were' if repeated != 1 else 'it was'} not measured again.")
         return ""
-    why = "the AI's replies took longer than the plan assumed" if ai else "the rounds took longer than the plan assumed"
-    return f"{rounds}{counts}: the time ran out; {why}."
+    if reason.startswith("time limit reached"):
+        return f"{rounds}{counts}: the search time was used."
+    if reason.startswith("time limit"):
+        why = "the AI's replies took longer than the plan assumed" if ai else "the rounds took longer than the plan assumed"
+        return f"{rounds}{counts}: the time ran out; {why}."
+    if not reason or reason.startswith("stopped"):
+        return f"{rounds}{counts}: stopped."
+    return f"{rounds}{counts}: the search stopped early ({reason.rstrip('.')})."
 
 
 COUNTS_REQUESTS = ("copilot-cli",)

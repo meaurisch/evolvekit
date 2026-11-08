@@ -1546,6 +1546,8 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     verdict = verdict_doc._document(root, run_dir, study, harness, job, final, comparison, by_case["held"], changed,
                                     facts, learned_pct, baseline=baseline, check_runs=check_runs)
     final["line"], final["advice"] = verdict["line"], verdict["advice"]
+    if verdict.get("why_keep"):  # why a keep whose held-back cases all improved is still keep (persona p4, H2)
+        final["why_keep"] = verdict["why_keep"]
     # The held-back table's change is the document's: the paired mean over the final check's runs.
     paired = {row["name"]: row["change_pct"] for row in verdict["by_case"]}
     by_case["held"] = [{**row, "change_pct": paired.get(row["case"], row["change_pct"])} for row in by_case["held"]]
@@ -1571,7 +1573,7 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
         "cases": {"training": list(study.training), "test": list(study.test)},
         "can_continue": can_continue(run_dir, job),
     }
-    for key in ("how_it_ran", "planned", "spent"):  # how much of the plan ran and what the AI spent, as the verdict says
+    for key in ("how_it_ran", "planned", "spent", "why_keep"):  # how much of the plan ran, what the AI spent, why keep
         if verdict.get(key):
             data[key] = verdict[key]
     if "candidates" in verdict:  # a bake-off: every branch with its own decision and line
@@ -2192,7 +2194,7 @@ def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, car
     """A finished card with the verdict's own words beside it (design 3.4): `verdict` holds the
     document's `decision`, `line` and `advice`, and `says`, the decision in the state line's words
     ("not proven on the held-back cases", "probably better"), and when the document has them its
-    `how_it_ran` and, for a bake-off, `candidates` (each branch's `ref` and `line`). Only with `document_of`, as the card
+    `how_it_ran`, `why_keep` and, for a bake-off, `candidates` (each branch's `ref` and `line`). Only with `document_of`, as the card
     asks for it: a list of runs need not pay for a verdict per run; a run whose verdict cannot be
     read keeps its card without one."""
     if document_of is None:
@@ -2206,6 +2208,8 @@ def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, car
                "advice": document.get("advice", ""), "says": says}
     if document.get("how_it_ran"):
         verdict["how_it_ran"] = document["how_it_ran"]
+    if document.get("why_keep"):
+        verdict["why_keep"] = document["why_keep"]
     if document.get("spent"):
         verdict["spent"] = document["spent"]
     if document.get("candidates"):

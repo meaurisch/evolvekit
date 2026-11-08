@@ -1188,3 +1188,44 @@ def test_wait_ends_when_the_schedule_is_taken_out(tmp_path, capsys, monkeypatch)
     monkeypatch.setattr(cli, "WAIT_EVERY_S", 0.01)
     assert main(["study", "wait", root.name, "--timeout", "5", "--home", str(home.root)]) == 1
     assert capsys.readouterr().out.strip() == "Campaign · paused: the study has no schedule any more"
+
+
+def _monday_morning(monkeypatch):
+    """The clock reads Monday 16 November 2026, 08:39, for every command."""
+    from evolvekit.app import scheduler
+
+    monkeypatch.setattr(scheduler, "clock_of", lambda home: scheduler.Clock(start=local("2026-11-16 08:39"), origin=time.time()))
+
+
+def test_start_more_gives_a_finished_campaign_time_in_its_next_window(tmp_path, capsys, monkeypatch):
+    """Persona p4, H5: more time for a weekend study, asked on Monday, is spent on Saturday."""
+    from evolvekit.app import jobs, scheduler
+    from evolvekit.harness.study import load_study
+
+    _monday_morning(monkeypatch)
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "done", generations=6, planned=6, max_hours=0.1, used_s=360, final={"decision": "keep"})
+    scheduler.pause(root, reason=scheduler.COMPLETE, state="complete")
+    monkeypatch.setattr(jobs, "continue_run", lambda *a, **k: pytest.fail("never now, outside a window"))
+    assert main(["study", "start", root.name, "--more", "0.3", "--home", str(home.root)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "Scheduled 18 min more for the next window (Sat 00:00)"
+    assert load_study(root).budget.hours == pytest.approx(0.4) and scheduler.read_campaign(root)["state"] == "armed"
+    assert main(["study", "start", root.name, "--more", "0.3", "--json", "--home", str(home.root)]) == 0
+    answer = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert answer["scheduled"] is True and answer["run"] == "r1" and answer["edge"] == "start"
+    assert main(["study", "start", root.name, "--more", "0.3", "--now", "--home", str(home.root)]) == 1
+
+
+def test_status_says_when_a_campaign_ran(tmp_path, capsys, monkeypatch):
+    """Persona p4, H3: `study status` says when the campaign's sessions ran, on the window clock."""
+    from evolvekit.app import scheduler
+
+    _monday_morning(monkeypatch)
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "done", generations=6, planned=6, max_hours=0.1, used_s=360, final={"decision": "keep"})
+    campaign = scheduler.read_campaign(root)
+    campaign["sessions"] = [{"run": "r1", "session": 1, "from": local("2026-11-14 00:04").isoformat(),
+                             "to": local("2026-11-15 09:27").isoformat(), "by_hand": False}]
+    (root / scheduler.CAMPAIGN).write_text(json.dumps(campaign), encoding="utf-8")
+    assert main(["study", "status", root.name, "--home", str(home.root)]) == 0
+    assert "Ran in its windows: Sat 00:04 – Sun 09:27" in capsys.readouterr().out.splitlines()

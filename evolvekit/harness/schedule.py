@@ -225,6 +225,40 @@ class Schedule:
     def past_until(self, now: datetime, *, tz: tzinfo | None = None) -> bool:
         return self.until is not None and self.next_edge(now, tz=tz) is None
 
+    def week_seconds(self, now: datetime, *, tz: tzinfo | None = None) -> float:
+        """The seconds the windows give in the week from `now` (`now` to seven days on), up to
+        `until`: 47 h 59 min for weekends, 25 h for weeknights."""
+        begin = _aware(now, tz).astimezone(_UTC)
+        end = begin + timedelta(days=7)
+        total = 0.0
+        for start, stop in self._spans_utc(now, tz):
+            low, high = max(start, begin), min(stop, end)
+            if high > low:
+                total += (high - low).total_seconds()
+        return total
+
+    def reach(self, now: datetime, seconds: float, *, tz: tzinfo | None = None
+              ) -> tuple[datetime, datetime | None] | None:
+        """Where `seconds` of window time from `now` begin and end, the windows taken in order:
+        `(first moment, the moment the last second is spent)`, in the local zone; the end None
+        when the windows up to `until` give less; None when no window is left at all."""
+        cursor = _aware(now, tz).astimezone(_UTC)
+        left = max(0.0, float(seconds))
+        first: datetime | None = None
+        for _ in range(1000):  # each look covers a week or more: twenty years of windows at most
+            ahead = [(max(start, cursor), stop) for start, stop in self._spans_utc(cursor, tz) if stop > cursor]
+            if not ahead:
+                break
+            for start, stop in ahead:
+                if first is None:
+                    first = start
+                room = (stop - start).total_seconds()
+                if room >= left:
+                    return _local(first, tz), _local(start + timedelta(seconds=left), tz)
+                left -= room
+                cursor = stop
+        return None if first is None else (_local(first, tz), None)
+
 
 PRESETS: dict[str, dict[str, Any]] = {
     "nights": {

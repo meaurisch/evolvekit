@@ -473,6 +473,9 @@ def build_parser() -> argparse.ArgumentParser:
     s_start.add_argument("--now", action="store_true",
                          help="a study with a schedule: start at once, whatever the window (no window's end stops "
                               "this session)")
+    s_start.add_argument("--more", type=float, metavar="H",
+                         help="a study with a schedule whose campaign finished its run: H hours more search time, "
+                              "spent in its next window (never now), as the app's Continue does")
     s_start.add_argument("--wait", action="store_true", help="then wait until the run has ended, as study wait does")
     s_start.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
     s_start.add_argument("--home", help=home_help)
@@ -1301,10 +1304,13 @@ def _plan_line(study) -> str:
 
 
 def _say_verdict(document: dict) -> None:
-    """The verdict's sentence, then what to do about it, one per line; for a
-    bake-off each branch's own line by its ref; then how much of the plan
-    ran when the run ran less of it than planned."""
+    """The verdict's sentence (and, on a keep whose held-back cases all
+    improved, why it is still keep), then what to do about it, one per line;
+    for a bake-off each branch's own line by its ref; then how much of the
+    plan ran when the run ran less of it than planned."""
     print(document["line"])
+    if document.get("why_keep"):
+        print(document["why_keep"])  # why a keep whose held-back cases all improved is still keep
     headline = str(document["line"])
     for candidate in document.get("candidates") or []:
         words = str(candidate.get("line", ""))
@@ -1543,8 +1549,25 @@ def _start_campaign(home, root: Path, args: argparse.Namespace) -> int:
     from evolvekit.app.running import read_running
 
     now = scheduler.clock_of(home).now()
-    answer = scheduler.start_campaign(home, root, now=now, at_once=bool(args.now))
     slug = root.name
+    if args.more is not None:
+        if args.now:
+            raise AppError("study start: --more or --now, not both (--more waits for the next window)")
+        run = jobs.latest_run(root)
+        if run is None:
+            raise AppError("the study has no run to give more time to: evolvekit study start schedules its first")
+        more = scheduler.continue_campaign(home, root, run, args.more, now=now)
+        if args.json:
+            print(json.dumps({key: more[key] for key in ("scheduled", "run", "hours", "next", "edge", "words")}), flush=True)
+        else:
+            print(more["words"], flush=True)
+        if read_running(home.root) is None:
+            print(SERVICE_NOTE, file=sys.stderr)
+        if args.wait:
+            return _wait(home, slug, args.timeout, args.json, args)
+        _say_next(args, f"study wait {slug}", f"study status {slug}")
+        return 0
+    answer = scheduler.start_campaign(home, root, now=now, at_once=bool(args.now))
     renewed = answer.get("renewed")
     anew = f"a new campaign (the last one {renewed}); " if renewed else ""
     if answer.get("scheduled"):
@@ -1677,6 +1700,8 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
     if command == "start":
         if study.schedule is not None:
             return _start_campaign(home, root, args)
+        if args.more is not None:
+            raise AppError("study start --more: only on a study with a schedule (its next window spends the time)")
         answer = jobs.start(home, root)
         run = answer["run"]
         if answer.get("queued"):
@@ -1724,6 +1749,8 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         print(card["line"])
         if campaign is not None and card.get("kind") != "campaign":
             print(campaign["line"])  # the campaign beside the run's own line: its next window, or its end
+        if campaign is not None and campaign.get("history_line"):
+            print(campaign["history_line"])  # when its sessions ran, on the window clock
         if (card.get("pace") or {}).get("line"):
             print(card["pace"]["line"])  # a live search: how many of the planned rounds its pace buys
         if card.get("kind") == "running" and (card.get("spent") or {}).get("line"):
@@ -1848,6 +1875,13 @@ def cmd_study(args: argparse.Namespace) -> int:
     models = _study_models(args, study, keys=command == "run")
     if command == "compile":
         plan = execute.plan_for(study, harness, execute.measured(folder), models=models)
+        when = None
+        if study.schedule is not None and not plan.blocked:  # it ends on its windows, not "done around 17:34"
+            from evolvekit.app import scheduler
+
+            # A library study's home keeps the rehearsal clock; a folder elsewhere reads the real one.
+            clock = scheduler.clock_of(folder.parent.parent) if folder.parent.name == "studies" else scheduler.Clock()
+            when = scheduler.plan_window(study.schedule, plan.hours, now=clock.now(), speed=clock.speed)["line"]
         if not args.run_id:
             # Nothing was asked to be kept: compile to prove it works, then leave no folder
             # in runs/ -- it holds only runs that were started (persona round 4, F2).
@@ -1862,12 +1896,12 @@ def cmd_study(args: argparse.Namespace) -> int:
                         (folder / "runs").rmdir()
                     except OSError:
                         pass
-            print(f"compiled, nothing written (give --run-id to keep the files): {plan.summary()}")
+            print(f"compiled, nothing written (give --run-id to keep the files): {plan.summary(when=when)}")
             if not Path(args.directory).is_dir():
                 _say_next(args, f"study start {args.directory}")
             return 0
         run_dir = write_run(study, harness, plan, folder, args.run_id, models=models)
-        print(f"compiled into {run_dir}: {plan.summary()}")
+        print(f"compiled into {run_dir}: {plan.summary(when=when)}")
         if not Path(args.directory).is_dir():  # a name in the library home: start it as the skills say
             _say_next(args, f"study start {args.directory}")
             return 0

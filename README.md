@@ -1664,7 +1664,7 @@ Every command:
 | `study cases SLUG --add FILE... [--hold-back N] [--json]` | copies cases into the study, refuses the files the harness cannot read, and holds `N` back for the final check |
 | `study groups SLUG [--k N] [--json]` | groups the cases by their features (or by the tags given in the app's Cases list) and writes `groups.json`; a group needs at least two cases to learn from. `--k` (2 to 5) asks for that many groups; without it, 2 or 3, whichever has the best silhouette. The first time, each case is solved once at the starting values to read its tables (one line per case on stderr). Exit 1 when a case cannot be solved (as `study preview`) or a run of the study is going; 2 when `--k` is outside 2 to 5 |
 | `study check SLUG` | what is still missing; exit 2 while anything is |
-| `study start SLUG [--now] [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running; a study with a `schedule` is scheduled instead (`scheduled: next window Sat 00:00`, `--json` `{"scheduled": true, "next", "edge"}`: `edge` `start`, or `end` while a window is open), and `--now` starts it at once, as a session no window's end stops; after a finished campaign, a new one |
+| `study start SLUG [--now] [--more H] [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running; a study with a `schedule` is scheduled instead (`scheduled: next window Sat 00:00`, `--json` `{"scheduled": true, "next", "edge"}`: `edge` `start`, or `end` while a window is open), and `--now` starts it at once, as a session no window's end stops; after a finished campaign, a new one. `--more H` (a scheduled study): its finished run gets H hours more search time (`budget.hours` grows by H), spent in its next window, never now: `Scheduled 18 min more for the next window (Sat 00:00)`, `--json` `{"scheduled", "run", "hours", "next", "edge", "words"}` |
 | `study bakeoff SLUG --ref REF [--ref REF ...] [--wait [--timeout S]] [--json]` | a code study: each branch against the starting point on the held-back cases, with no search; exit 2 when a branch or the study is refused |
 | `study stop SLUG [--json]` | asks the running run to stop, or takes a queued one out of the line; on a scheduled study it also pauses the campaign (`study start` resumes it) |
 | `study status SLUG [--run ID] [--json]` | the state line; `--json` the document the app's Running screen reads |
@@ -2017,8 +2017,15 @@ campaign (a person's stop is respected: `study start` resumes it). A start
 after the campaign has finished begins a new one (`scheduled: a new campaign
 (the last one finished); next window …`): its first window starts a new run,
 and the old run stays a past run. When all the search time is spent and the
-final check is done, Home says *Campaign finished*. `study status` says the
-campaign's line (`campaign · next window Sat 00:00`), and `study wait`
+final check is done, Home says *Campaign finished*. More time for a finished
+campaign (the app's *Continue*, or `study start depot-a --more 0.3`) is spent
+in the next window, never now: `Scheduled 18 min more for the next window (Sat
+00:00)`; raising `budget.hours` does the same. Set up's plan of a scheduled
+study says when it would end on its windows (*starts Sat 00:00; about 18 min
+of search; done around Sat 00:18*). The campaign keeps when each session ran,
+on the clock the windows follow (`sessions` in the study's `campaign.json`),
+and says it: *Ran in its windows: Sat 00:04 – Sun 09:27*. `study status` says the
+campaign's line (`campaign · next window Sat 00:00`) and when it ran, and `study wait`
 waits for the campaign's answer, not for the first window's stop (exit 0
 with the verdict; 1 when the campaign paused or ended without a finished
 run).

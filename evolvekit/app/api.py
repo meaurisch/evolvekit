@@ -210,6 +210,13 @@ def _document(req: Request, slug: str) -> dict[str, Any]:
     # The campaign's words (None without a schedule) and the windows Set up offers (D19).
     document["campaign"] = document["state"].get("campaign")
     document["schedule_presets"] = PRESETS
+    if study.schedule is not None:
+        # The hours one week of its windows gives (real hours, so a rehearsal's are fewer), and the
+        # campaign's search time left on its run (None before its first run): persona p4, H1.
+        clock = scheduler.clock_of(req.home)
+        document["schedule_hours"] = scheduler.schedule_hours(study.schedule, now=clock.now(), speed=clock.speed)
+        run = scheduler.campaign_run(root)
+        document["campaign_left_s"] = (scheduler.campaign_left_s(root / "runs" / run) if run is not None else None)
     document["notes"] = plan_notes(len(study.test))  # too few held-back cases for a firm answer, before any run
     return document
 
@@ -423,8 +430,14 @@ def plan(req: Request) -> dict[str, Any]:
         if hours is not None and hours > study.budget.hours:
             fixes.append({"kind": "time", "hours": hours, "label": f"Allow {_hours_words(hours)} in total",
                           "detail": f"About {GOOD * tunables} combinations for all {tunables}."})
-    return {"summary": chosen.summary(), "estimated": estimated, "warning": warning, "fixes": fixes,
-            "tunables": tunables, **chosen.to_json()}
+    window = None
+    if study.schedule is not None and not chosen.blocked:
+        # A scheduled study ends on its windows, not "done around 17:34" from now (persona p4, H1).
+        clock = scheduler.clock_of(req.home)
+        window = scheduler.plan_window(study.schedule, chosen.hours, now=clock.now(), speed=clock.speed)
+    return {"summary": chosen.summary(when=window["line"] if window else None), "estimated": estimated,
+            "warning": warning, "fixes": fixes, "tunables": tunables, **chosen.to_json(),
+            **({"window": window} if window else {})}
 
 
 THIN, GOOD = 6, 10
@@ -644,12 +657,21 @@ def final_check(req: Request) -> dict[str, Any]:
 
 def continue_run(req: Request) -> dict[str, Any]:
     """`{"run": RUN, "hours": H}`: a finished run searched on for H hours
-    more (the study's hours when not said), then checked again."""
-    root, _, _ = req.home.load(req.params["slug"])
+    more (the study's hours when not said), then checked again. On a study with a
+    schedule the time goes to its next window instead (`scheduler.continue_campaign`:
+    `{"scheduled": true, "next", "words", ...}`), or with `{"now": true}` at once, as a
+    session by hand."""
+    root, study, _ = req.home.load(req.params["slug"])
     body = req.json()
     run = body.get("run") or _run(req, root)
     if not isinstance(run, str):
         raise AppError("run: the name of a run")
+    now = body.get("now", False)
+    if not isinstance(now, bool):
+        raise AppError("now: true or false")
+    if study.schedule is not None and not now:
+        return scheduler.continue_campaign(req.home, root, run, body.get("hours"),
+                                           now=scheduler.clock_of(req.home).now())
     return scheduler.by_hand(req.home, root, lambda: jobs.continue_run(req.home, root, run, body.get("hours")))
 
 

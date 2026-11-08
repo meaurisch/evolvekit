@@ -588,7 +588,9 @@ runs, the run is queued and the server starts it later), `stop` (on a queued
 run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,
 with N runs per case), `continue` (`{"run": RUN, "hours": H}`: a finished
 run searches on for H hours more, at most 48, then checks again; 409 while
-anything runs), `status` (its `best` is the best so far as `study status` says it:
+anything runs; on a study with a schedule the time goes to its next window
+instead, see below, and `{"now": true}` continues at once, as a session by
+hand), `status` (its `best` is the best so far as `study status` says it:
 `pct`, `says` in words such as "6.1 % lower tour length", and the combination's
 `id`; `spent` is the AI's spend of its cap, `pace` after the first round the
 rounds the pace so far buys when fewer than planned, `writing` how many of a
@@ -625,6 +627,36 @@ back; `GET /api/compare?a=<name>[/<run>]&b=<name>[/<run>]` is two runs side
 by side. A run is `python -m evolvekit.app.job STUDY RUN`, started so that it
 outlives the app.
 
+**A study with a schedule.** `GET /api/studies/{name}` then also has:
+
+| Key | Holds |
+|---|---|
+| `campaign` | `scheduler.campaign_state`: `state` (`draft`, `armed`, `paused`, `complete`, `ended`), `next` and `edge` (the windows' next edge, `start` or `end`), `line` (*Campaign · next window Sat 00:00*), `tone`, `missed`; `history_line`, when the campaign's own runs ran, on the window clock (*Ran in its windows: Sat 00:04 – Sun 09:27*, one span per session joined by "; ", then *and on Sat 10:00 – … by hand* for a person's session, *…* while one goes on; `null` before any ran); `history_by_run`, `{run: line}` for every run with a session kept, for the Past runs list |
+| `schedule_presets` | the windows *When it runs* offers |
+| `schedule_hours` | the hours of search one week of its windows gives, in real hours: weekends about 48, weeknights 25; under a rehearsal clock that week's hours divided by its speed (a weekend at 120 × is 0.4) |
+| `campaign_left_s` | the campaign's search time left on its run, in seconds (the run's plan less what its sessions used, plus the hours `budget.hours` has grown since the run was planned); `null` before its first run |
+
+`plan` then has `window`: `{"line", "starts", "done"}`, the plan on the
+windows from the home's clock (a rehearsal's too) — *starts Sat 00:00; about
+18 min of search; done around Sat 00:18* (*starts now* inside a window; *…:
+more than its windows give before its Until (30 Nov)* and no `done` when they
+give less; *its schedule has no window left*) — and its `summary` ends with
+that line instead of *done around 17:34*. `start` arms the campaign
+(`{"scheduled": true, "renewed", "words", "campaign"}`), or with
+`{"now": true}` starts a session at once, by hand. `continue` raises the
+campaign's search time by H hours (the study's hours when not said;
+`budget.hours` grows by H in `study.yaml`), arms the campaign again and
+launches nothing: `{"scheduled": true, "run", "hours", "next", "edge",
+"words", "campaign"}`, `words` being *Scheduled 18 min more for the next
+window (Sat 00:00)* (inside a window: *Scheduled 18 min more: its window is
+open now, until Sun 23:59*). The run must be the study's latest and able to
+go on (409 otherwise, or while anything of the study runs); 400 when H leaves
+the campaign under 10 minutes of search. The next window's tick continues the
+run, never sooner. `campaign.json` keeps `sessions`: `[{"run", "session",
+"from", "to", "by_hand"}]` on the window clock — `from` the tick's time when
+it launched the session (a person's: the home's clock at the launch), `to`
+the time of the first tick that saw it end (`null` until then).
+
 **The verdict document.** The verdict is computed in one place:
 `build_verdict(root, run)` in `evolvekit/app/verdict.py`. It reads the study
 folder, the run's `job.json` and its `confirm/final/` files, needs no server,
@@ -654,7 +686,8 @@ names:
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
 | `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
-| `how_it_ran` | only when the search stopped on time with fewer rounds than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …" — the Study page shows it under Details |
+| `how_it_ran` | whenever fewer rounds ran than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …", with the reason from the stop (*the time ran out*, *the search time was used*, *stopped*, *the search stopped early (…)*, *the AI budget was used up*); when every round ran but some combinations repeated one already tried, "Ran all 17 planned rounds (176 combinations, about 204 planned): 29 repeated a combination already tried, so they were not measured again." — the Study page shows it under Details |
+| `why_keep` | only on a `keep` whose held-back cases all moved the goal's way while its range still allows a loss: one sentence after `line` that says why it is still keep, "Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer answer." (up to three cases' figures, else "Every one of the N held-back cases was lower"); never on `use`, `worse` or a keep with no difference, and never a gain. `results` carries it (and its `final`), a finished card's `verdict`, the report and `study verdict` say it after the line |
 | `spent` | only on a run with AI help: what its AI spent, from the run's `usage.jsonl`: `{"usd", "cap_usd", "line"}` with the line "AI: $0.87 of $1.00", or `{"requests", "line"}` ("AI: 14 requests") for a provider that counts requests; a fact, not a claim |
 
 The page is plain HTML, CSS and JavaScript with no build step, under

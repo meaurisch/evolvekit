@@ -122,6 +122,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     direction = measure.get("direction") or "lower"
     name, application = results.get("study") or verdict.get("study"), results.get("harness")
     out = [f"# {name}" + (f" - {application}" if application else ""), "", "## Verdict", "", verdict.get("line", "")]
+    if verdict.get("why_keep"):
+        out += ["", verdict["why_keep"]]  # why a keep whose held-back cases all improved is still keep
     if verdict.get("advice"):
         out += ["", verdict["advice"]]
     for note in notes:

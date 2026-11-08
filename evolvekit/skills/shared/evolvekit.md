@@ -53,9 +53,9 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study groups SLUG [--k N] [--json]` | group the cases by their features (or by the tags given in the app's Cases list) into `groups.json`; a group needs at least two cases to learn from | 1 a case cannot be solved or a run is going, 2 `--k` outside 2 to 5 |
 | `evolvekit study check SLUG` | name what is still missing before the study can run | 0 ready, 2 problems |
 | `evolvekit study preview SLUG` | solve the smallest training case at the starting values | |
-| `evolvekit study compile SLUG` | prints the plan: rounds, combinations (with AI help, the seconds it assumes for each AI change), the final check, "done around HH:MM" and a note when too few cases are held back for a firm answer, or the thin plan with its three ways out; writes no run folder unless `--run-id ID` is given | 0 a plan; 2 a thin plan or a problem |
+| `evolvekit study compile SLUG` | prints the plan: rounds, combinations (with AI help, the seconds it assumes for each AI change), the final check, "done around HH:MM" (a study with a `schedule`: "starts Sat 00:00; about 18 min of search; done around Sat 00:18", on its windows) and a note when too few cases are held back for a firm answer, or the thin plan with its three ways out; writes no run folder unless `--run-id ID` is given | 0 a plan; 2 a thin plan or a problem |
 | `evolvekit study run SLUG` | compile, search and run the final check in the foreground | |
-| `evolvekit study start SLUG [--now] [--wait [--timeout S]] [--json]` | start the study as the app's Start does (queued while another study runs). A study with a `schedule` is armed and waits for its first window (`scheduled: next window Sat 00:00`; only a running app keeps the windows); `--now` starts it at once, as a session no window's end stops; after a finished campaign it begins a new one | |
+| `evolvekit study start SLUG [--now] [--more H] [--wait [--timeout S]] [--json]` | start the study as the app's Start does (queued while another study runs). A study with a `schedule` is armed and waits for its first window (`scheduled: next window Sat 00:00`; only a running app keeps the windows); `--now` starts it at once, as a session no window's end stops; after a finished campaign it begins a new one; `--more H` gives its finished run H hours more search time, spent in its next window, never now ("Scheduled 18 min more for the next window (Sat 00:00)") | 1 `--more` on a study with no schedule, a run that cannot go on, or under 10 minutes in all |
 | `evolvekit study bakeoff SLUG --ref REF [--ref REF] [--wait [--timeout S]] [--json]` | a code study: check given branches against the starting point on the held-back cases, with no search; the verdict's `candidates` hold each branch's own line; needs no AI help | 0 started or queued (with `--wait`, as `study wait`); 2 a settings study, a study not ready, no held-back case, no such ref, a branch outside the open files or one that does not apply on the starting commit |
 | `evolvekit study stop SLUG [--json]` | stop the running run, or take back a queued one; on a scheduled study it also pauses the campaign (`study start` resumes it) | |
 | `evolvekit study status SLUG [--run ID] [--json]` | where the run is: the state line, or the app's status document | |
@@ -103,7 +103,8 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `started_at`, `finished_at`, `elapsed_s` | when and how long |
 | `rounds`, `combinations` | how much the search tried |
 | `planned` | `rounds`, `combinations`: what the plan said the search would try (not on a bake-off) |
-| `how_it_ran` | only when the search stopped on time with fewer rounds than planned: the sentence that says how much of the plan ran, and why |
+| `how_it_ran` | only when fewer rounds ran than planned (or all of them, but some combinations repeated one already tried): the sentence that says how much of the plan ran, and why |
+| `why_keep` | only on a `keep` whose held-back cases all moved the goal's way while the range still allows a loss: one sentence that says why it is still keep ("Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer answer.") |
 | `spent` | only on a run with AI help: what its AI spent, `usd`, `cap_usd` and `line` ("AI: $0.87 of $1.00"), or `requests` and `line` for a provider that counts requests |
 
 The `decision` values:
@@ -120,7 +121,8 @@ The `decision` values:
 | `skipped` | the final check was skipped (such as no held-back cases); see `reason` |
 
 `line` and `advice` are the only sentences an agent repeats. `how_it_ran`, when there is one, claims nothing:
-pass it on when the plan's rounds did not all run. `spent`'s `line` claims nothing either: it may be quoted beside them.
+pass it on when the plan's rounds did not all run. `why_keep` claims no gain either: it says why there is none, and
+goes right after `line` when there is one. `spent`'s `line` claims nothing either: it may be quoted beside them.
 
 ## Rules
 

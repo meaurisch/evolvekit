@@ -361,10 +361,111 @@ def test_a_search_that_ran_short_of_its_plan_says_so(tmp_path, capsys):
         "the time ran out; the rounds took longer than the plan assumed.")
 
 
-@pytest.mark.parametrize("stop,generations", [(TIME_LIMIT, 11), ("stopped on request", 2), ("no improvement for 3 rounds", 4)])
-def test_a_plan_that_happened_or_another_stop_says_nothing_of_it(tmp_path, stop, generations):
-    v = build_verdict(*_short_run(tmp_path, ai=True, stop=stop, generations=generations))
+def test_a_plan_that_happened_says_nothing_of_it(tmp_path):
+    v = build_verdict(*_short_run(tmp_path, ai=True, stop=TIME_LIMIT, generations=11))
     assert "how_it_ran" not in v
+
+
+@pytest.mark.parametrize("stop,generations,why", [
+    ("stopped on request", 2, "stopped"),
+    ("time limit reached: 0.17 h of active run time, budget.max_hours is 0.1484 h", 5, "the search time was used"),
+    ("no improvement for 3 rounds", 4, "the search stopped early (no improvement for 3 rounds)"),
+])
+def test_fewer_rounds_than_planned_always_say_how_much_ran(tmp_path, stop, generations, why):
+    """Persona p4, H7: how much of the plan ran, whenever fewer rounds ran than planned -- not only
+    when the time ran out -- with the reason from the stop."""
+    v = build_verdict(*_short_run(tmp_path, ai=False, stop=stop, generations=generations))
+    assert v["how_it_ran"] == f"Ran {generations} of the 11 planned rounds (25 combinations, about 132 planned): {why}."
+
+
+def test_combinations_that_repeated_one_already_tried_are_said(tmp_path):
+    """Persona p4: every planned round ran, yet fewer combinations than planned -- the ones that
+    repeated a combination already tried were not measured again."""
+    root, run = _short_run(tmp_path, ai=False, stop="the plan's rounds are done", generations=11)
+    with (root / "runs" / run / "runs.jsonl").open("a", encoding="utf-8") as handle:
+        for n in range(3):
+            handle.write(json.dumps({"id": f"d{n}", "operator": "param_cross", "rejected": True,
+                                     "reject_reason": "duplicate: structurally identical to x1"}) + "\n")
+    assert build_verdict(root, run)["how_it_ran"] == (
+        "Ran all 11 planned rounds (25 combinations, about 132 planned): 3 repeated a combination already "
+        "tried, so they were not measured again.")
+
+
+def _two_held_back(tmp_path: Path, changes: tuple[float, ...] = (3.1, 8.2), ci: tuple[float, float] = (-26.7, 37.9),
+                   decision: str = "keep", direction: str | None = None) -> tuple[Path, str]:
+    """Persona p4's Monday answer: a keep on held-back cases that each came out better, with a range
+    that still allows a loss."""
+    import yaml
+
+    root, run = _run_of(tmp_path, decision)
+    run_dir = root / "runs" / run
+    if direction is not None:
+        data = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+        data["goal"] = {"levels": [{"kpi": "tour_length", "direction": direction}]}
+        (root / "study.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    cases = [f"cases/held-{i}.json" for i in range(len(changes))]
+    folder = run_dir / "confirm" / "final"
+    mean = sum(changes) / len(changes)
+    folder.joinpath("comparison.json").write_text(json.dumps({
+        "seeds": [1001, 1002, 1003], "instances": cases,
+        "per_candidate": {"c1": {
+            "summary": {"n": len(changes), "mean": mean, "ci95": list(ci), "chance": 0.85, "worst": ci[0]},
+            "per_instance": [{"instance": c, "pairs": 3, "improvement_pct": x} for c, x in zip(cases, changes)]}},
+    }), encoding="utf-8")
+    rows = []
+    for case, change in zip(cases, changes):
+        for seed in (1001, 1002, 1003):
+            rows.append({"configuration": "baseline", "instance": case, "seed": seed, "ok": True,
+                         "kpis": {"tour_length": 50.0, "longest_leg": 3.0}})
+            rows.append({"configuration": "c1", "instance": case, "seed": seed, "ok": True,
+                         "kpis": {"tour_length": 50.0 * (1 - change / 100), "longest_leg": 3.0}})
+    folder.joinpath("results.json").write_text(json.dumps(rows), encoding="utf-8")
+    return root, run
+
+
+WHY_KEEP = ("Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide "
+            "to rule out a loss: hold back more cases for a firmer answer.")
+
+
+def test_a_keep_whose_held_back_cases_all_improved_says_why(tmp_path, capsys):
+    """Persona p4, H2: both held-back cases came out lower, yet the headline says "at worst 26.7 %
+    worse". One plain sentence after the verdict's line says why it is still keep -- on the page,
+    the card, the report and `study verdict`."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import _say_verdict
+    from evolvekit.harness.study import load_study
+
+    root, run = _two_held_back(tmp_path)
+    v = build_verdict(root, run)
+    assert v["decision"] == "keep" and v["why_keep"] == WHY_KEEP
+    page = jobs.results(root, run, document_of)
+    assert page["why_keep"] == WHY_KEEP and page["final"]["why_keep"] == WHY_KEEP
+    card = jobs.run_line(root, load_study(root), root / "runs" / run, document_of)
+    assert card["verdict"]["why_keep"] == WHY_KEEP
+    report = render_report(v).split("## Verdict", 1)[1]
+    assert report.index(v["line"]) < report.index(WHY_KEEP) < report.index(v["advice"])
+    capsys.readouterr()
+    _say_verdict(v)
+    assert capsys.readouterr().out.splitlines()[:3] == [v["line"], WHY_KEEP, v["advice"]]
+
+
+def test_why_keep_names_three_cases_at_most_and_the_goals_direction(tmp_path):
+    three = build_verdict(*_two_held_back(tmp_path / "a", changes=(3.1, 4.0, 8.2), direction="higher"))
+    assert three["why_keep"].startswith("Every held-back case was higher (3.1 %, 4.0 % and 8.2 %), but with only 3 cases")
+    four = build_verdict(*_two_held_back(tmp_path / "b", changes=(3.1, 4.0, 8.2, 1.0)))
+    assert four["why_keep"] == ("Every one of the 4 held-back cases was lower, but with only 4 cases the range is too "
+                                "wide to rule out a loss: hold back more cases for a firmer answer.")
+
+
+@pytest.mark.parametrize("changes,ci,decision", [
+    ((3.1, -2.0), (-26.7, 37.9), "keep"),   # a case went the other way
+    ((3.1, 8.2), (0.5, 9.0), "keep"),       # the range rules out a loss
+    ((3.1, 8.2), (1.0, 9.0), "use"),
+    ((-3.1, -8.2), (-12.0, -1.0), "worse"),
+])
+def test_why_keep_is_only_on_a_keep_that_could_still_be_a_loss(tmp_path, changes, ci, decision):
+    v = build_verdict(*_two_held_back(tmp_path, changes=changes, ci=ci, decision=decision))
+    assert "why_keep" not in v
 
 
 RAW_SEED, RAW_BEST = 7.888410522186774, 7.408278547681725

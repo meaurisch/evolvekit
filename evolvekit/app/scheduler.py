@@ -38,17 +38,17 @@ from evolvekit.events import read_events
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import read_job
 from evolvekit.harness.schedule import DAY_WORDS, MONTH_WORDS, Schedule, when_words
-from evolvekit.harness.study import Study, load_study
+from evolvekit.harness.study import Study, load_study, save_study
 from evolvekit.ledger import _atomic_write, read_jsonl
 from evolvekit.lock import pid_alive
 from evolvekit.stopping import STOP_REQUEST, active_seconds
 
 __all__ = [
     "ACTIONS_PER_WINDOW", "BY_YOU", "CAMPAIGN", "CLOCK_FILE", "Clock", "FAILED_PAUSE_LINE", "FAILURES_TO_PAUSE", "LOCK",
-    "MIN_SESSION_S", "NO_SCHEDULE", "SPAN", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_run",
-    "campaign_state", "clear_clock",
-    "clock_of", "launch_queued", "mark_by_hand", "pause", "read_campaign", "search_left_s", "session_of",
-    "scheduled_words", "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
+    "MIN_SESSION_S", "NO_SCHEDULE", "SPAN", "TICK_WRITE_S", "arm", "by_hand", "campaign_done", "campaign_left_s",
+    "campaign_run", "campaign_state", "clear_clock", "clock_of", "continue_campaign", "launch_queued", "mark_by_hand",
+    "pause", "plan_window", "read_campaign", "schedule_hours", "search_left_s", "session_of", "scheduled_words",
+    "start_campaign", "stop_by_person", "tick", "tick_lock", "window_left_s", "write_clock",
 ]
 
 CAMPAIGN = "campaign.json"
@@ -56,7 +56,13 @@ CAMPAIGN = "campaign.json"
 {"run", "session"}|None, "stopped_by_window", "window", "actions", "failed_sessions", "ticked_at"}`;
 `counted`: the last session (`<run>:<n>`) whose end the tick has counted, so each is counted once;
 `after`: the study's last run before this campaign (a new campaign after a finished one sees only
-the runs started after it); `missed`: `{"start", "end"}` of a window no tick saw, kept for the line."""
+the runs started after it); `missed`: `{"start", "end"}` of a window no tick saw, kept for the line;
+`sessions`: the campaign's history on the window clock, `[{"run", "session", "from": iso, "to": iso|None,
+"by_hand": bool}]` -- `from` is the tick's `now` when it launched the session (a person's: the home's
+clock at the launch), `to` the `now` of the first tick that saw it ended (None until then); kept
+across a new campaign (each run's own), the last `SESSIONS_KEPT`."""
+SESSIONS_KEPT = 200
+"""The most sessions `campaign.json` remembers."""
 MIN_SESSION_S = 600.0
 """A continuation shorter than this is not started; a campaign with less search time left is complete (D5)."""
 ACTIONS_PER_WINDOW = 3
@@ -204,7 +210,7 @@ def clock_of(home: Any) -> Clock:
 def _blank() -> dict[str, Any]:
     return {"state": "armed", "armed_at": None, "reason": None, "by_hand": None, "stopped_by_window": None,
             "window": None, "actions": 0, "failed_sessions": [], "ticked_at": None, "counted": None, "after": None,
-            "missed": None}
+            "missed": None, "sessions": []}
 
 
 def read_campaign(root: Path) -> dict[str, Any] | None:
@@ -217,6 +223,9 @@ def read_campaign(root: Path) -> dict[str, Any] | None:
         campaign["failed_sessions"] = []
     if not isinstance(campaign.get("actions"), int):
         campaign["actions"] = 0
+    if not isinstance(campaign.get("sessions"), list):
+        campaign["sessions"] = []
+    campaign["sessions"] = [s for s in campaign["sessions"] if isinstance(s, dict) and s.get("run") and s.get("from")]
     return campaign
 
 
@@ -260,6 +269,22 @@ def search_left_s(run_dir: Path) -> float:
     except (TypeError, ValueError):
         total = 0.0
     return max(0.0, total - active_seconds(read_events(run_dir)))
+
+
+def campaign_left_s(run_dir: Path) -> float:
+    """The campaign's search time left on this run (D5): `search_left_s`, plus the hours the study
+    was given since the run was planned -- `budget.hours` in `study.yaml` now, less the `hours` its
+    `plan.json` was made for (never less than nothing). So more time for a scheduled study
+    (`continue_campaign`, or more hours in Set up) is search time its next window spends."""
+    run_dir = Path(run_dir)
+    left = search_left_s(run_dir)
+    plan = _read(run_dir / "plan.json") or (read_job(run_dir) or {}).get("plan") or {}
+    try:
+        planned = float(plan["hours"])
+        given = float(load_study(run_dir.parent.parent).budget.hours)
+    except (KeyError, TypeError, ValueError, HarnessError, OSError):
+        return left
+    return left + max(0.0, given - planned) * 3600.0
 
 
 # ---------------------------------------------------------------------------
@@ -386,19 +411,53 @@ def launch_queued(home: Any) -> str | None:
         _release(path, held)
 
 
-def mark_by_hand(home: Any, slug: str, run_id: str) -> None:
+def mark_by_hand(home: Any, slug: str, run_id: str, *, now: datetime | None = None) -> None:
     """The session a person just launched on `run_id` is theirs: no window's end stops it (D47).
     Called inside `tick_lock`, right after the launch; a no-op unless the campaign is armed. The
-    run's `campaign-span.json` goes: a session by hand keeps nothing awake."""
+    run's `campaign-span.json` goes: a session by hand keeps nothing awake. The session joins the
+    campaign's `sessions`, by hand, from `now` (default: the home's clock, `clock_of`)."""
     root = Path(home.studies_dir) / slug
     campaign = read_campaign(root)
     if campaign is None or campaign.get("state") != "armed":
         return
     run_dir = root / "runs" / run_id
-    campaign["by_hand"] = {"run": run_id, "session": session_of(run_dir)}
+    session = session_of(run_dir)
+    campaign["by_hand"] = {"run": run_id, "session": session}
     campaign["missed"] = None  # a session of the campaign ran: the missed window is past news
+    _note_session(campaign, run_id, session, now if now is not None else clock_of(home).now(), by_hand=True)
     _write_campaign(root, campaign)
     (run_dir / SPAN).unlink(missing_ok=True)
+
+
+def _note_session(campaign: dict[str, Any], run: str, session: int, moment: datetime, *, by_hand: bool) -> None:
+    """A launched session joins the campaign's `sessions` (once: a session already there is only
+    marked by hand)."""
+    sessions = campaign["sessions"]
+    for entry in sessions:
+        if entry.get("run") == run and entry.get("session") == session and entry.get("to") is None:
+            entry["by_hand"] = bool(entry.get("by_hand")) or by_hand
+            return
+    sessions.append({"run": run, "session": session, "from": _iso(moment), "to": None, "by_hand": by_hand})
+    del sessions[:-SESSIONS_KEPT]
+
+
+def _close_sessions(root: Path, campaign: dict[str, Any], now: datetime) -> None:
+    """Every session of `sessions` that has ended gets its `to`: `now`, the first tick that sees it.
+    A session has ended when its run is no longer going, or the run went on to a later session; a
+    queued run's session has not begun (a person's, numbered 0 till it launches as 1)."""
+    for entry in campaign["sessions"]:
+        if entry.get("to") is not None:
+            continue
+        run_dir = root / "runs" / str(entry.get("run"))
+        if run_dir.is_dir():
+            state = jobs.phase(run_dir).get("phase")
+            if state == "queued":
+                continue
+            if entry.get("session") == 0:
+                entry["session"] = 1  # the queued session, launched
+            if state in jobs.ACTIVE and session_of(run_dir) <= int(entry.get("session") or 0):
+                continue
+        entry["to"] = _iso(now)
 
 
 # ---------------------------------------------------------------------------
@@ -493,11 +552,18 @@ class _Tick:
             if campaign is not None and campaign.get("state") == "armed":
                 when = _moment(campaign.get("armed_at"))
                 armed.append((when.timestamp() if when else float("inf"), root.name, root, campaign))
+            elif campaign is not None and any(s.get("to") is None for s in campaign["sessions"]):
+                # Paused, complete or ended with a session not yet seen to end: its history is kept too.
+                before = json.dumps(campaign, sort_keys=True)
+                _close_sessions(root, campaign, self.now)
+                if json.dumps(campaign, sort_keys=True) != before:
+                    _write_campaign(root, campaign)
         armed.sort(key=lambda item: item[:2])
         launched = False
         for _, _, root, campaign in armed:
             before = json.dumps(campaign, sort_keys=True)
             self.note_missed(root, campaign)
+            _close_sessions(root, campaign, self.now)
             if not launched:  # one launch per tick: the studies after it wait for the next, but are stamped
                 launched = self.study(root, campaign)
             self.save(root, campaign, before)
@@ -612,8 +678,9 @@ class _Tick:
         _write_campaign(root, campaign)  # counted before the call: a launch that crashes the tick still counts
         self.held = _refresh(self.lock, self.held)  # a slow launcher must not make the lock look stale
         fresh = name == "start" and not kwargs.get("resume")
+        number = _next_session(run_dir) if not fresh and run_dir is not None else 1
         if not fresh and run_dir is not None:  # the session's span, before it starts: it reads the file
-            self.span_file(run_dir, span, schedule.keep_awake, _next_session(run_dir))
+            self.span_file(run_dir, span, schedule.keep_awake, number)
         try:
             answer = self.calls[name](*args, **kwargs)
         except (AppError, HarnessError) as exc:
@@ -633,7 +700,11 @@ class _Tick:
         new_run = answer.get("run") if fresh and isinstance(answer, dict) else None
         if new_run and jobs._RUN.match(str(new_run)):  # noqa: SLF001 - a run's name, as jobs judges it
             new_dir = root / "runs" / str(new_run)
-            self.span_file(new_dir, span, schedule.keep_awake, max(1, session_of(new_dir)))
+            number = max(1, session_of(new_dir))
+            self.span_file(new_dir, span, schedule.keep_awake, number)
+            _note_session(campaign, str(new_run), number, self.now, by_hand=False)
+        elif not fresh and run_dir is not None:
+            _note_session(campaign, run_dir.name, number, self.now, by_hand=False)
         self.say(root, f"{words} (window {_window_words(span)})")
         return True
 
@@ -681,13 +752,14 @@ class _Tick:
 def _judged(run_dir: Path | None, job: dict[str, Any], schedule: Schedule, now: datetime) -> str | None:
     """`"complete"`, `"ended"` or None: what the campaign is, whatever the window, by its latest run
     (D49). Complete: the run is done -- or stopped with a verdict -- and the campaign's search time
-    left is under `MIN_SESSION_S` (or a done run cannot go on); ended: past `until`, no run active."""
+    left (`campaign_left_s`) is under `MIN_SESSION_S` (or a done run cannot go on); ended: past
+    `until`, no run active."""
     state = job.get("phase")
-    if run_dir is not None and state == "done" and (search_left_s(run_dir) < MIN_SESSION_S
+    if run_dir is not None and state == "done" and (campaign_left_s(run_dir) < MIN_SESSION_S
                                                     or not jobs.can_continue(run_dir, job)):
         return "complete"
     if (run_dir is not None and state == "stopped" and (job.get("final") or {}).get("decision")
-            and search_left_s(run_dir) < MIN_SESSION_S):
+            and campaign_left_s(run_dir) < MIN_SESSION_S):
         return "complete"  # a verdict, and no time to search on: armed, it would wait for ever
     if state not in jobs.ACTIVE and state != "queued" and schedule.past_until(now):
         return "ended"
@@ -698,7 +770,7 @@ def _next_action(home: Any, root: Path, run_dir: Path | None, job: dict[str, Any
                  window_s: float | None) -> tuple[str, tuple[Any, ...], dict[str, Any], str, str] | None:
     """What a window does with the study's latest run: `(call, args, kwargs, words, refused)`, or
     None. A continuation gets the smaller of `window_s` (real seconds of the window left; None: no
-    window bounds it, as for `--now`) and the campaign's search time left (D5)."""
+    window bounds it, as for `--now`) and the campaign's search time left (`campaign_left_s`, D5)."""
     state = job.get("phase")
     if run_dir is None or state == "unknown" or (state in ("stopped", "failed") and not _archived(run_dir)):
         return "start", (home, root), {}, "started a run", "could not start a run"
@@ -711,12 +783,12 @@ def _next_action(home: Any, root: Path, run_dir: Path | None, job: dict[str, Any
     if jobs.can_resume(run_dir, job):
         return "start", (home, root), {"resume": run}, f"resumed run {run}", f"could not resume run {run}"
     # No verdict and no rounds left: it goes on while there is search time, else checked again.
-    if _no_verdict(run_dir, job) and (search_left_s(run_dir) < MIN_SESSION_S
+    if _no_verdict(run_dir, job) and (campaign_left_s(run_dir) < MIN_SESSION_S
                                       or not jobs.can_continue(run_dir, job)):
         return ("recheck", (home, root, run), {}, f"started the final check of run {run} again",
                 f"could not start the final check of run {run} again")
     if jobs.can_continue(run_dir, job):
-        seconds = min(search_left_s(run_dir), jobs.MAX_CONTINUE_HOURS * 3600.0)
+        seconds = min(campaign_left_s(run_dir), jobs.MAX_CONTINUE_HOURS * 3600.0)
         if window_s is not None:
             seconds = min(seconds, window_s)
         if seconds < MIN_SESSION_S:
@@ -823,22 +895,61 @@ def _missed(schedule: Schedule, campaign: dict[str, Any], now: datetime) -> tupl
     return found
 
 
+def _span_words(entry: dict[str, Any], now: datetime) -> str:
+    """One session as `Sat 00:04 – Sun 09:27` (`when_words`), `… ` for its end while it goes on."""
+    start, end = _moment(entry.get("from")), _moment(entry.get("to"))
+    first = when_words(start.astimezone(), now) if start is not None else "…"
+    return f"{first} – {when_words(end.astimezone(), now) if end is not None else '…'}"
+
+
+def history_line(sessions: list[dict[str, Any]], now: datetime) -> str | None:
+    """When the sessions ran, on the window clock: "Ran in its windows: Sat 00:04 – Sun 09:27" (one
+    span per session, joined by "; "), then "and on Sat 10:00 – … by hand" for a person's; "Ran by
+    hand on …" when only a person's ran. None for no session."""
+    if not sessions:
+        return None
+    windows = [_span_words(s, now) for s in sessions if not s.get("by_hand")]
+    hand = [_span_words(s, now) for s in sessions if s.get("by_hand")]
+    if not windows:
+        return "Ran by hand on " + "; ".join(hand)
+    line = "Ran in its windows: " + "; ".join(windows)
+    return line + (" and on " + "; ".join(hand) + " by hand" if hand else "")
+
+
+def _history(root: Path, campaign: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
+    """`history_line`: the sessions of the campaign's own runs (after `after`); `history_by_run`:
+    each run's own line, for every run with a session kept (the Past runs drawer's)."""
+    if campaign is None:
+        return {"history_line": None, "history_by_run": {}}
+    sessions = campaign["sessions"]
+    names = [d.name for d in jobs._run_dirs(Path(root))]  # noqa: SLF001 - the runs, oldest first, as jobs lists them
+    after = campaign.get("after")
+    own = set(names[names.index(after) + 1:] if after in names else names)
+    by_run: dict[str, Any] = {}
+    for run in dict.fromkeys(str(s.get("run")) for s in sessions):
+        by_run[run] = history_line([s for s in sessions if s.get("run") == run], now)
+    return {"history_line": history_line([s for s in sessions if s.get("run") in own], now),
+            "history_by_run": by_run}
+
+
 def campaign_state(root: Path, study: Study, *, now: datetime) -> dict[str, Any] | None:
     """The study's campaign in the words Home, the Study page and `study status` say: None without a
     schedule, else `{"state": "draft"|"armed"|"paused"|"complete"|"ended", "next": iso|None, "edge":
-    "start"|"end"|None, "line", "tone": "warn"|None, "missed": iso|None}`. `next` is the next edge
-    of the windows (`edge` says which). An armed campaign whose latest run makes it complete or
-    ended is said so at once (D49), before the next tick writes it."""
+    "start"|"end"|None, "line", "tone": "warn"|None, "missed": iso|None, "history_line": str|None,
+    "history_by_run": {run: str}}`. `next` is the next edge of the windows (`edge` says which). An
+    armed campaign whose latest run makes it complete or ended is said so at once (D49), before the
+    next tick writes it. `history_line` says when the campaign's sessions ran, on the window clock
+    (`history_line`); `history_by_run` each run's own."""
     schedule = study.schedule
     if schedule is None:
         return None
     now = now if now.tzinfo is not None else now.astimezone()
     found = schedule.next_edge(now)
     edge_at, edge = found if found is not None else (None, None)
-    out: dict[str, Any] = {"state": "armed", "next": _iso(edge_at) if edge_at is not None else None, "edge": edge,
-                           "line": "", "tone": None, "missed": None}
-    when = when_words(edge_at, now) if edge_at is not None else ""
     campaign = read_campaign(root)
+    out: dict[str, Any] = {"state": "armed", "next": _iso(edge_at) if edge_at is not None else None, "edge": edge,
+                           "line": "", "tone": None, "missed": None, **_history(root, campaign, now)}
+    when = when_words(edge_at, now) if edge_at is not None else ""
     if campaign is None:
         line = ("Campaign · not started: its first window would be " + when if edge == "start"
                 else "Campaign · not started: its window is open now, until " + when if edge == "end"
@@ -928,7 +1039,7 @@ def by_hand(home: Any, root: Path, launch: Callable[[], dict[str, Any]]) -> dict
         answer = launch()
         run = answer.get("run") if isinstance(answer, dict) else None
         if run:
-            mark_by_hand(home, Path(root).name, str(run))
+            mark_by_hand(home, Path(root).name, str(run), now=clock_of(home).now())
     return answer
 
 
@@ -991,7 +1102,7 @@ def start_campaign(home: Any, root: Path, *, now: datetime, at_once: bool, start
             arm(root, now=now, renew=renewed is not None or _stuck(home, root, run_dir, job))
             live = _live_run(root)
             if live is not None:  # the person started it (D4): no window's end stops it
-                mark_by_hand(home, root.name, live)
+                mark_by_hand(home, root.name, live, now=now)
             state = campaign_state(root, study, now=now)
             return {"scheduled": True, "renewed": renewed, "words": scheduled_words(state, now), "campaign": state}
         if jobs.running(root):
@@ -1018,8 +1129,109 @@ def start_campaign(home: Any, root: Path, *, now: datetime, at_once: bool, start
             raise
         run = answer.get("run") or (run_dir.name if run_dir is not None else None)
         if run:
-            mark_by_hand(home, root.name, str(run))
+            mark_by_hand(home, root.name, str(run), now=now)
     return {**answer, "renewed": renewed, "campaign": campaign_state(root, study, now=now)}
+
+
+def _duration(seconds: float) -> str:
+    """`18 min`, `6 h`, `1.5 h`: the plan's time in words."""
+    if seconds < 5400:
+        return f"{max(1, round(seconds / 60.0))} min"
+    return f"{round(seconds / 3600.0, 1):g} h"
+
+
+def continue_campaign(home: Any, root: Path, run: str, hours: float | None = None, *,
+                      now: datetime) -> dict[str, Any]:
+    """More time for a scheduled study (persona p4, H5): its search time grows by `hours` (the
+    study's hours when not said) -- `budget.hours` in `study.yaml`, which `campaign_left_s` counts --
+    and its campaign is armed again, so the next window continues the finished run `run` (never
+    now, outside a window). The same campaign: one whose newer campaign hid `run` (`after`) sees it
+    again. Refused (409) while anything of the study runs or the run cannot go on, for a run that is
+    not the study's latest, past the schedule's Until; (400) for hours that leave the campaign
+    less than `MIN_SESSION_S`. `{"scheduled": True, "run", "hours", "next", "edge", "words":
+    "Scheduled 18 min more for the next window (Sat 00:00)", "campaign"}`."""
+    root = Path(root)
+    study = load_study(root)
+    schedule = study.schedule
+    if schedule is None:
+        raise AppError("the study has no schedule: give the run more time as usual", 409)
+    if study.per_group:
+        from evolvekit.harness.study import PER_GROUP_SCHEDULE
+
+        raise AppError(PER_GROUP_SCHEDULE, 409)
+    if schedule.past_until(now):
+        raise AppError("its schedule has no window left: set a later Until in When it runs (or in study.yaml) "
+                       "to run it again", 409)
+    if hours is None:
+        hours = study.budget.hours
+    if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not 0 < float(hours) <= jobs.MAX_CONTINUE_HOURS:
+        raise AppError(f"hours: a number of hours, more than 0 and at most {jobs.MAX_CONTINUE_HOURS:g}", 400)
+    hours = float(hours)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the one check of a run's name
+    with tick_lock(home):
+        dirs = jobs._run_dirs(root)  # noqa: SLF001 - the runs, oldest first, as jobs lists them
+        if jobs.running(root) or _live_run(root) is not None:
+            raise AppError("the study is already running", 409)
+        if not dirs or dirs[-1].name != run_dir.name:
+            raise AppError("only the study's latest run goes on in its windows", 409)
+        job = jobs.phase(run_dir)
+        if not jobs.can_continue(run_dir, job):
+            raise AppError("this run did not finish its search, so it cannot be given more time", 409)
+        if campaign_left_s(run_dir) + hours * 3600.0 < MIN_SESSION_S:
+            raise AppError(f"hours: at least {round(MIN_SESSION_S / 60)} min of search in all, the shortest "
+                           "session a window starts", 400)
+        study.budget.hours = round(float(study.budget.hours) + hours, 4)
+        save_study(study, root)
+        campaign = arm(root, now=now)
+        names = [d.name for d in dirs]
+        if campaign.get("after") is not None and campaign["after"] in names \
+                and names.index(campaign["after"]) >= names.index(run_dir.name):
+            # A new campaign armed after this run: bring the run back into it, not a new run.
+            index = names.index(run_dir.name)
+            campaign["after"] = names[index - 1] if index > 0 else None
+            _write_campaign(root, campaign)
+        state = campaign_state(root, study, now=now)
+    more = f"Scheduled {_duration(hours * 3600.0)} more"
+    moment = _moment((state or {}).get("next"))
+    if moment is None:
+        words = f"{more}: {ENDED}"
+    elif state.get("edge") == "end":
+        words = f"{more}: its window is open now, until {when_words(moment.astimezone(), now)}"
+    else:
+        words = f"{more} for the next window ({when_words(moment.astimezone(), now)})"
+    return {"scheduled": True, "run": run_dir.name, "hours": hours, "next": (state or {}).get("next"),
+            "edge": (state or {}).get("edge"), "words": words, "campaign": state}
+
+
+def plan_window(schedule: Schedule, hours: float, *, now: datetime, speed: float = 1.0) -> dict[str, Any]:
+    """A scheduled study's plan on its windows (persona p4, H1): `{"line": "starts Sat 00:00; about
+    18 min of search; done around Sat 00:22", "starts": iso|None, "done": iso|None}`. The study's
+    `hours` are real time, spread over the windows in order from `now` (the window clock; at a
+    rehearsal's `speed` a real hour is `speed` hours of it). "starts now" inside a window; "more than
+    its windows give before its Until (30 Nov)" (and no `done`) when they give less; "its schedule has
+    no window left" when none is."""
+    now = now if now.tzinfo is not None else now.astimezone()
+    found = schedule.reach(now, float(hours) * 3600.0 * float(speed))
+    if found is None:
+        return {"line": ENDED, "starts": None, "done": None}
+    start, done = found
+    starts = "now" if start.timestamp() <= now.timestamp() + 1 else when_words(start, now)
+    search = f"about {_duration(float(hours) * 3600.0)} of search"
+    if done is None:
+        until = schedule.until
+        before = f" before its Until ({until.day} {MONTH_WORDS[until.month - 1]})" if until is not None else ""
+        return {"line": f"starts {starts}; {search}: more than its windows give{before}", "starts": _iso(start),
+                "done": None}
+    return {"line": f"starts {starts}; {search}; done around {when_words(done, now)}", "starts": _iso(start),
+            "done": _iso(done)}
+
+
+def schedule_hours(schedule: Schedule, *, now: datetime, speed: float = 1.0) -> float:
+    """The hours of search one week of the windows gives (persona p4, H1): weekends about 48, weeknights
+    25 -- real hours, so under a rehearsal clock running `speed` times as fast, that week's hours divided
+    by `speed` (a weekend at 120 x is 24 real minutes). Up to `until`."""
+    now = now if now.tzinfo is not None else now.astimezone()
+    return round(schedule.week_seconds(now) / 3600.0 / float(speed), 4)
 
 
 def stop_by_person(home: Any, root: Path, run: str | None) -> dict[str, Any]:

@@ -842,7 +842,8 @@ def test_a_persons_resume_continue_and_check_again_are_by_hand(tmp_path, monkeyp
         assert status == 200, answer
         assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 2}
         write_run(root, "r1", "done", generations=6, planned=6, used_s=600, final={"decision": "keep"}, launch=2)
-        status, answer = call(server, "POST", f"/api/studies/{slug}/continue", {"run": "r1", "hours": 1})
+        # A continue at once (`now`): without it, a scheduled study's more time waits for its window (H5).
+        status, answer = call(server, "POST", f"/api/studies/{slug}/continue", {"run": "r1", "hours": 1, "now": True})
         assert status == 200, answer
         assert scheduler.read_campaign(root)["by_hand"] == {"run": "r1", "session": 3}
         write_run(root, "r1", "stopped", generations=6, planned=6, used_s=600, final={"stopped": True}, launch=3)
@@ -930,3 +931,216 @@ def test_a_refused_launch_leaves_no_span_file(tmp_path):
     rec = Recorder(start_raises=AppError("the application is not there", 409))
     scheduler.tick(home, now=local("2026-11-15 23:29"), **rec.calls_for())
     assert rec.names() == ["start"] and not (run_dir / scheduler.SPAN).exists()
+
+
+# -- persona p4 round 1: the campaign's history, more time for the next window, the plan on the windows
+
+
+def _starts_r1(root: Path):
+    """A `start` that makes run r1 live, as `jobs.start` would."""
+    def start(home_, root_, **kwargs):
+        write_run(root, "r1", "search", alive=True)
+        return {"run": "r1", "started": True}
+    return start
+
+
+def _at(text: str) -> str:
+    return local(text).isoformat(timespec="seconds")
+
+
+def test_the_campaign_keeps_its_sessions_on_the_window_clock(tmp_path):
+    """H3: when in the weekend did it run? Each session the tick launches is kept from the tick's
+    `now` (the rehearsal clock's, 120 x) to the `now` of the first tick that sees it ended."""
+    home, root = campaign_study(tmp_path)
+    calls = {**Recorder().calls_for(), "start": _starts_r1(root)}
+    scheduler.tick(home, now=local("2026-11-14 00:04"), speed=120.0, **calls)
+    assert scheduler.read_campaign(root)["sessions"] == [
+        {"run": "r1", "session": 1, "from": _at("2026-11-14 00:04"), "to": None, "by_hand": False}]
+    scheduler.tick(home, now=local("2026-11-14 12:00"), speed=120.0, **calls)
+    assert scheduler.read_campaign(root)["sessions"][0]["to"] is None, "still going"
+    write_run(root, "r1", "done", generations=6, planned=6, max_hours=1.0, used_s=3600, final={"decision": "keep"})
+    scheduler.tick(home, now=local("2026-11-15 09:27"), speed=120.0, **calls)
+    campaign = scheduler.read_campaign(root)
+    assert campaign["state"] == "complete" and campaign["sessions"][0]["to"] == _at("2026-11-15 09:27")
+    state = scheduler.campaign_state(root, load_study(root), now=local("2026-11-16 08:39"))
+    assert state["history_line"] == "Ran in its windows: Sat 00:04 – Sun 09:27"
+    assert state["history_by_run"] == {"r1": "Ran in its windows: Sat 00:04 – Sun 09:27"}
+
+
+def test_a_continuation_is_a_session_of_its_own(tmp_path):
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "done", generations=6, planned=6, max_hours=2.0, used_s=1200, final={"decision": "keep"})
+    scheduler.tick(home, now=local("2026-11-14 10:00"), **Recorder().calls_for())
+    assert scheduler.read_campaign(root)["sessions"] == [
+        {"run": "r1", "session": 2, "from": _at("2026-11-14 10:00"), "to": None, "by_hand": False}]
+    write_run(root, "r1", "search", alive=True, launch=2)
+    scheduler.tick(home, now=local("2026-11-14 11:00"), **Recorder().calls_for())
+    assert scheduler.read_campaign(root)["sessions"][0]["to"] is None, "the continuation is going"
+
+
+def test_a_session_by_hand_is_kept_on_the_rehearsal_clock(tmp_path):
+    """H3: a person's session joins the history from the clock the app keeps (the rehearsal's here)."""
+    home, root = campaign_study(tmp_path)
+    write_run(root, "r1", "done", generations=6, planned=6, max_hours=1.0, used_s=900, final={"decision": "keep"})
+    server = AppServer(home.root, port=0)  # its app.json is what makes the rehearsal clock honoured
+    try:
+        scheduler.write_clock(home.root, local("2026-11-14 10:00"), 120.0)
+
+        def launch():
+            write_run(root, "r1", "search", alive=True, launch=2)
+            return {"run": "r1", "continued": True}
+
+        scheduler.by_hand(home, root, launch)
+    finally:
+        server.stop()
+    (entry,) = scheduler.read_campaign(root)["sessions"]
+    assert {k: entry[k] for k in ("run", "session", "to", "by_hand")} == {"run": "r1", "session": 2, "to": None,
+                                                                         "by_hand": True}
+    assert abs(datetime.fromisoformat(entry["from"]) - local("2026-11-14 10:00")) < timedelta(minutes=10), \
+        "the rehearsal's time, not the real one"
+
+
+def test_the_history_line_says_each_session(tmp_path):
+    home, root = campaign_study(tmp_path)
+    study = load_study(root)
+    assert scheduler.campaign_state(root, study, now=local("2026-11-16 08:39"))["history_line"] is None, "nothing ran yet"
+    write_run(root, "r1", "search", alive=True, launch=2)
+    campaign = scheduler.read_campaign(root)
+    campaign["sessions"] = [
+        {"run": "r1", "session": 1, "from": _at("2026-11-14 00:04"), "to": _at("2026-11-14 06:00"), "by_hand": False},
+        {"run": "r1", "session": 2, "from": _at("2026-11-14 10:00"), "to": None, "by_hand": True}]
+    (root / scheduler.CAMPAIGN).write_text(json.dumps(campaign), encoding="utf-8")
+    state = scheduler.campaign_state(root, study, now=local("2026-11-14 10:30"))
+    assert state["history_line"] == "Ran in its windows: Sat 00:04 – Sat 06:00 and on Sat 10:00 – … by hand"
+    campaign["sessions"] = campaign["sessions"][1:]
+    (root / scheduler.CAMPAIGN).write_text(json.dumps(campaign), encoding="utf-8")
+    assert scheduler.campaign_state(root, study, now=local("2026-11-14 10:30"))["history_line"] == \
+        "Ran by hand on Sat 10:00 – …"
+    (root / scheduler.CAMPAIGN).unlink()
+    assert scheduler.campaign_state(root, study, now=local("2026-11-14 10:30"))["history_line"] is None, "a draft"
+
+
+def _finished_campaign(tmp_path):
+    """Persona p4's weekend: 0.3 h of search time, all used, the campaign complete on Sunday."""
+    home, root = campaign_study(tmp_path)
+    study = load_study(root)
+    study.budget.hours = 0.3
+    save_study(study, root)
+    run_dir = write_run(root, "r1", "done", generations=17, planned=17, max_hours=0.2746, used_s=0.27 * 3600,
+                        final={"decision": "keep"})
+    plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    (run_dir / "plan.json").write_text(json.dumps({**plan, "hours": 0.3}), encoding="utf-8")
+    scheduler.tick(home, now=local("2026-11-15 09:27"), **Recorder().calls_for())
+    assert scheduler.read_campaign(root)["state"] == "complete"
+    return home, root
+
+
+def test_more_time_for_a_scheduled_study_goes_to_the_next_window(tmp_path):
+    """H5: Monday's Continue on a weekend study raises its search time and waits for Saturday; it
+    never runs now, outside a window."""
+    home, root = _finished_campaign(tmp_path)
+    rec = Recorder()
+    answer = scheduler.continue_campaign(home, root, "r1", 0.3, now=local("2026-11-16 08:39"))
+    assert answer["scheduled"] is True and answer["run"] == "r1" and answer["hours"] == pytest.approx(0.3)
+    assert answer["next"] == _at("2026-11-21 00:00") and answer["edge"] == "start"
+    assert answer["words"] == "Scheduled 18 min more for the next window (Sat 00:00)"
+    assert answer["campaign"]["state"] == "armed" and answer["campaign"]["line"] == "Campaign · next window Sat 00:00"
+    assert load_study(root).budget.hours == pytest.approx(0.6), "saved to study.yaml"
+    campaign = scheduler.read_campaign(root)
+    assert campaign["state"] == "armed" and campaign["after"] is None, "the same campaign's run, not a new one"
+    assert scheduler.campaign_left_s(root / "runs" / "r1") == pytest.approx((0.2746 - 0.27 + 0.3) * 3600)
+    scheduler.tick(home, now=local("2026-11-16 09:00"), **rec.calls_for())
+    assert rec.calls == [], "never now, outside a window"
+    scheduler.tick(home, now=local("2026-11-21 00:00:05"), **rec.calls_for())
+    assert rec.calls == [("continue_run", (home, root, "r1"), {"hours": pytest.approx(0.3046, abs=1e-3)})]
+
+
+def test_more_time_inside_a_window_says_so_and_a_short_one_is_refused(tmp_path):
+    home, root = _finished_campaign(tmp_path)
+    with pytest.raises(AppError) as short:
+        scheduler.continue_campaign(home, root, "r1", 0.1, now=local("2026-11-16 08:39"))
+    assert short.value.status == 400 and "at least 10 min" in str(short.value)
+    assert load_study(root).budget.hours == pytest.approx(0.3), "nothing saved"
+    answer = scheduler.continue_campaign(home, root, "r1", 0.5, now=local("2026-11-21 10:00"))
+    assert answer["words"] == "Scheduled 30 min more: its window is open now, until Sun 23:59"
+    write_run(root, "r2", "search", alive=True)
+    with pytest.raises(AppError) as going:
+        scheduler.continue_campaign(home, root, "r1", 0.5, now=local("2026-11-21 10:00"))
+    assert going.value.status == 409
+
+
+def test_a_finished_campaign_renewed_still_continues_the_run_it_is_given(tmp_path):
+    """A start after the finished campaign armed a new one (`after` = r1); more time for r1 brings it
+    back into the campaign rather than starting a new run."""
+    home, root = _finished_campaign(tmp_path)
+    scheduler.start_campaign(home, root, now=local("2026-11-16 08:00"), at_once=False, **Recorder().calls_for(LAUNCHERS))
+    assert scheduler.read_campaign(root)["after"] == "r1"
+    scheduler.continue_campaign(home, root, "r1", 0.3, now=local("2026-11-16 08:39"))
+    assert scheduler.read_campaign(root)["after"] is None and scheduler.campaign_run(root) == "r1"
+
+
+def test_the_api_continue_of_a_scheduled_study_is_scheduled(tmp_path, monkeypatch):
+    from test_app_server import call
+
+    home, root = _finished_campaign(tmp_path)
+    slug = root.name
+    monkeypatch.setattr(scheduler, "tick", lambda *a, **k: [])
+    launched = []
+    monkeypatch.setattr(jobs, "_spawn", lambda env, argv, root, run_dir: launched.append(argv) or 2 ** 22 + 7)
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        status, answer = call(server, "POST", f"/api/studies/{slug}/continue", {"run": "r1", "hours": 0.3})
+        assert status == 200 and answer["scheduled"] is True and answer["words"].startswith("Scheduled 18 min more"), answer
+        assert launched == [], "nothing runs now"
+        status, answer = call(server, "POST", f"/api/studies/{slug}/continue", {"run": "r1", "hours": 0.3, "now": "yes"})
+        assert status == 400 and "now" in answer["error"]
+    finally:
+        server.stop()
+
+
+def test_a_scheduled_plan_says_when_it_ends_on_its_windows():
+    """H1: the plan of a weekend study, read on Friday 17:38: it starts at the window and ends where
+    its hours, spread over the windows, run out -- on the window clock (a rehearsal's 120 x too)."""
+    from evolvekit.harness.schedule import PRESETS, Schedule
+
+    weekend = Schedule.parse(PRESETS["weekends"]["schedule"])
+    friday = local("2026-11-13 17:38")
+    window = scheduler.plan_window(weekend, 0.3, now=friday)
+    assert window == {"line": "starts Sat 00:00; about 18 min of search; done around Sat 00:18",
+                      "starts": _at("2026-11-14 00:00"), "done": _at("2026-11-14 00:18")}
+    assert scheduler.plan_window(weekend, 0.3, now=friday, speed=120.0)["line"] == \
+        "starts Sat 00:00; about 18 min of search; done around Sun 12:00"
+    assert scheduler.plan_window(weekend, 0.3, now=local("2026-11-14 10:00"))["line"] == \
+        "starts now; about 18 min of search; done around Sat 10:18"
+    nights = Schedule.parse(PRESETS["nights"]["schedule"])
+    assert scheduler.plan_window(nights, 6, now=friday)["line"] == \
+        "starts Mon 01:00; about 6 h of search; done around Tue 02:00"
+    short = Schedule.parse({**PRESETS["weekends"]["schedule"], "until": "2026-11-15"})
+    assert scheduler.plan_window(short, 60, now=friday) == {
+        "line": "starts Sat 00:00; about 60 h of search: more than its windows give before its Until (15 Nov)",
+        "starts": _at("2026-11-14 00:00"), "done": None}
+    assert scheduler.plan_window(short, 1, now=local("2026-11-16 08:00"))["line"] == "its schedule has no window left"
+    assert scheduler.schedule_hours(weekend, now=friday) == pytest.approx(47.98, abs=0.01)
+    assert scheduler.schedule_hours(nights, now=friday) == pytest.approx(25.0)
+    assert scheduler.schedule_hours(weekend, now=friday, speed=120.0) == pytest.approx(0.4, abs=0.001), \
+        "real hours of search: at 120 x a weekend is 24 real minutes"
+
+
+def test_the_plan_and_the_study_of_a_scheduled_study_carry_the_window_clock(tmp_path):
+    from test_app_server import call
+
+    home, root = _finished_campaign(tmp_path)
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        status, plan = call(server, "GET", f"/api/studies/{root.name}/plan")
+        assert status == 200 and plan["window"]["line"].startswith("starts "), plan
+        assert plan["window"]["line"] in plan["summary"] and "done around" not in plan["summary"].replace(
+            plan["window"]["line"], "")
+        status, document = call(server, "GET", f"/api/studies/{root.name}")
+        assert status == 200 and document["schedule_hours"] == pytest.approx(47.98, abs=0.01)
+        assert document["campaign_left_s"] == pytest.approx((0.2746 - 0.27) * 3600)
+        assert "history_line" in document["campaign"]
+    finally:
+        server.stop()
