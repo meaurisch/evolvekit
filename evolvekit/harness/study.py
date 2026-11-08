@@ -42,6 +42,7 @@ __all__ = [
     "SettingChoice",
     "Study",
     "StudyKpi",
+    "Warm",
     "check_templates",
     "load_study",
     "load_study_file",
@@ -346,6 +347,37 @@ class CodeVary:
 
 
 @dataclass
+class Warm:
+    """`warm: {from, run, at, ranked}`: the study was warm-started (`study new --warm`) from the
+    finished study `from` (its run `run`, finished `at`); `ranked` is the order of the settings
+    by how much they went with the measure, when the tuned set was chosen by it (else empty)."""
+
+    from_slug: str
+    run: str
+    at: str
+    ranked: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def parse(raw: Any, path: str = "warm") -> "Warm":
+        data = dict(_mapping(raw, path))
+        _known(data, {"from", "run", "at", "ranked"}, path)
+        if hasattr(data.get("at"), "isoformat"):  # YAML reads an unquoted timestamp as a datetime
+            data["at"] = data["at"].isoformat()
+        for key, what in (("from", "the study it was warm-started from"), ("run", "that study's run"),
+                          ("at", "when that run finished")):
+            if not isinstance(data.get(key), str) or not data[key]:
+                raise HarnessError(f"{path}.{key}: expected {what}, got {data.get(key)!r}")
+        ranked = data.get("ranked") or []
+        if not isinstance(ranked, list) or not all(isinstance(n, str) for n in ranked):
+            raise HarnessError(f"{path}.ranked: expected a list of setting names, got {ranked!r}")
+        return Warm(from_slug=data["from"], run=data["run"], at=data["at"], ranked=list(ranked))
+
+    def to_yaml(self) -> dict[str, Any]:
+        return {"from": self.from_slug, "run": self.run, "at": self.at,
+                **({"ranked": list(self.ranked)} if self.ranked else {})}
+
+
+@dataclass
 class Study:
     name: str
     harness_id: str
@@ -371,6 +403,8 @@ class Study:
     """The wizard step the study was last saved on (the app's "draft · step 4 of 7")."""
     schedule: Schedule | None = None
     """When the study may run, in local wall-clock time; `None` for a study that runs when started."""
+    warm: Warm | None = None
+    """Where `study new --warm` took its starting values from; `None` for a plain start."""
 
     # -- reading and writing -----------------------------------------------
 
@@ -380,7 +414,7 @@ class Study:
         _known(
             data,
             {"study", "name", "harness", "template", "application", "cases", "inputs", "vary", "constraints",
-             "kpis", "goal", "guardrails", "limits", "budget", "plan", "step", "schedule"},
+             "kpis", "goal", "guardrails", "limits", "budget", "plan", "step", "schedule", "warm"},
             "<study>",
         )
         if data.get("study") != STUDY_FORMAT:
@@ -454,6 +488,7 @@ class Study:
             plan=_mapping(data.get("plan"), "plan") or {"auto": True},
             step=int(_number(data.get("step", 1), "step")),
             schedule=Schedule.parse(data["schedule"]) if data.get("schedule") is not None else None,
+            warm=Warm.parse(data["warm"]) if data.get("warm") is not None else None,
         )
 
     def to_yaml(self) -> dict[str, Any]:
@@ -487,6 +522,7 @@ class Study:
             "plan": dict(self.plan),
             "step": self.step,
             **({"schedule": self.schedule.to_yaml()} if self.schedule is not None else {}),
+            **({"warm": self.warm.to_yaml()} if self.warm is not None else {}),
         }
 
     # -- what the study tunes ------------------------------------------------

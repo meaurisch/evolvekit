@@ -1990,6 +1990,7 @@ def next_study(home: Any, root: Path, run: str, name: str = "") -> str:
     new_root = home.study_root(slug)
     fresh = copy.deepcopy(study)
     fresh.name = load_study(new_root).name
+    fresh.warm = None  # it starts from this result, not from a warm start
     for sub in ("cases", "inputs"):
         source = root / sub
         if source.is_dir():

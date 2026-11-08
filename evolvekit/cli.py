@@ -435,6 +435,9 @@ def build_parser() -> argparse.ArgumentParser:
     s_new.add_argument("--template", help="a template id of the harness (default: a blank study)")
     s_new.add_argument("--app", help="where the application is (a path)")
     s_new.add_argument("--dir", help="write a standalone study folder here instead of into the library home")
+    s_new.add_argument("--warm", action="store_true",
+                       help="start from what finished studies on this harness learned: the latest `use` winner's "
+                            "values as the starting point, and a prior around them for the search")
     s_new.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_new.add_argument("--json", action="store_true", help='print {"slug", "root"} and nothing else')
     s_app = study.add_parser("application", help="say where a study's application is, or list the ones found here")
@@ -1762,6 +1765,9 @@ def cmd_study(args: argparse.Namespace) -> int:
 
     command = args.study_command
     if command == "new":
+        if args.dir and args.warm:
+            print("--warm reads the library home's finished studies; leave out --dir", file=sys.stderr)
+            return 2
         if args.dir:
             folder = Path(args.dir)
             study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name, args.template)
@@ -1784,7 +1790,11 @@ def cmd_study(args: argparse.Namespace) -> int:
             return 0
         home = _home(args)
         given = Path(args.harness)  # a harness folder on disk, else an id the home knows
-        slug = home.create_study(args.harness, args.template, args.name, folder=given if given.is_dir() else None)
+        said: list[str] = []
+        slug = home.create_study(args.harness, args.template, args.name, folder=given if given.is_dir() else None,
+                                 warm=args.warm, said=said)
+        for line in said:
+            print(line, file=sys.stderr)
         answer = None
         if args.app:
             answer = home.set_application(slug, _full_path(args.app))

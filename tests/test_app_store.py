@@ -189,6 +189,12 @@ def test_app_edit_keeps_schedule_per_group_and_warm(home):
     home.save_step(slug, {"schedule": None})
     assert load_study(home.study_root(slug)).schedule is None
     assert "schedule:" not in (home.study_root(slug) / "study.yaml").read_text(encoding="utf-8")
+    warm = {"from": "spring", "run": "r1", "at": "2026-10-01T00:12:00+00:00",
+            "ranked": ["accept_worse", "init", "neighbours", "restart_after"]}
+    home.save_step(slug, {"warm": warm})
+    home.save_step(slug, {"limits": {"time_per_case_s": 2.0, "retries": 0, "runs_per_case": 1}, "step": 5})
+    assert load_study(home.study_root(slug)).warm.to_yaml() == warm, "another step's save keeps the warm start"
+    assert home.document(slug)["study"]["warm"]["from"] == "spring"
 
 
 def test_a_settings_input_is_checked_against_the_harness(home):

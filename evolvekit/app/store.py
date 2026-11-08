@@ -77,9 +77,9 @@ ARCHIVED = ".archived"
 """The marker file of an archived study: a fact about the library, not a field of the study."""
 STUDY_PARTS = ("study.yaml", "harness", "cases", "inputs")
 """What a study is made of, as against what it produced: `runs/`, `preview/`, `assistant.jsonl`."""
-STEP_KEYS = ("template", "step", "schedule")
+STEP_KEYS = ("template", "step", "schedule", "warm")
 """Parts `save_step` accepts though the study's `study.yaml` may not have them yet."""
-OPTIONAL_KEYS = ("schedule",)
+OPTIONAL_KEYS = ("schedule", "warm")
 """Parts `save_step` takes out when given `None`."""
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
@@ -320,19 +320,30 @@ class Home:
             slug, number = f"{base}-{number}", number + 1
         return slug
 
-    def create_study(self, harness_id: str, template: str | None, name: str, *, folder: Path | None = None) -> str:
+    def create_study(self, harness_id: str, template: str | None, name: str, *, folder: Path | None = None,
+                     warm: bool = False, said: list[str] | None = None) -> str:
         """A new study of the harness `harness_id` from the library -- only
         ever an id: the API passes what a request says. The command line,
-        given a harness folder, passes it as `folder`."""
+        given a harness folder, passes it as `folder`. `warm` starts it from
+        what this home's finished studies on the harness learned
+        (`memory.warm_start`); the lines to say about that are added to `said`."""
         name = str(name or "").strip()
         if not name:
             raise AppError("name: give the study a name")
         source = Path(folder) if folder is not None else self.harness_entry(harness_id).path
         slug = self._free_slug(name)
+        root = self.studies_dir / slug
         try:
-            create_study(self.studies_dir / slug, source, name, template or None)
+            create_study(root, source, name, template or None)
+            if warm:
+                from evolvekit.harness import memory  # it reads studies through this module's Home
+
+                study, lines = memory.warm_start(self, load_harness(root / "harness"), load_study(root))
+                save_study(study, root)
+                if said is not None:
+                    said.extend(lines)
         except HarnessError as exc:
-            shutil.rmtree(self.studies_dir / slug, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
             raise AppError(str(exc)) from None
         return slug
 

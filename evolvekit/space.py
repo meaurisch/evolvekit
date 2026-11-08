@@ -44,6 +44,7 @@ from evolvekit.expressions import Expression, ExpressionError
 
 __all__ = [
     "CONSTRAINT_ATTEMPTS",
+    "PRIOR_BAND",
     "Constraint",
     "Parameter",
     "ParameterSpace",
@@ -60,6 +61,12 @@ CONSTRAINT_ATTEMPTS = 100
 to refuse. Drawing is arithmetic on a dict; a hundred draws cost nothing next
 to one evaluation, and a constraint that a hundred draws cannot satisfy is one
 the search space should have been parametrised around."""
+
+
+PRIOR_BAND = 0.1
+"""How far around a prior's value `param_lhs` draws, as a share of the parameter's range on its
+own scale, either side. A prior is what an earlier study's winner suggests, never a fence: the
+rest of the draws still cover the whole range."""
 
 
 class SpaceError(ValueError):
@@ -142,6 +149,10 @@ class Parameter:
     choices: tuple[Any, ...] = ()
     flag: str = ""
     help: str = ""
+    prior: tuple[Any, float] | None = None
+    """`(value, weight)` from `prior: {value, weight}`: `param_lhs` draws that share of its samples
+    around the value (`PRIOR_BAND`). Not part of `describe` nor of the rendered block, so an
+    evaluation cached without a prior stays a hit with one."""
 
     # -- declaration -----------------------------------------------------
 
@@ -159,7 +170,7 @@ class Parameter:
                 f"{path}: expected a mapping such as {{type: int, low: 1, high: 9, "
                 f"default: 3}}, got {type(raw).__name__}"
             )
-        known = {"type", "low", "high", "log", "choices", "default", "flag", "help"}
+        known = {"type", "low", "high", "log", "choices", "default", "flag", "help", "prior"}
         unknown = sorted(set(raw) - known)
         if unknown:
             raise SpaceError(f"{path}: unknown key(s) {unknown}; known keys are {sorted(known)}")
@@ -193,7 +204,21 @@ class Parameter:
         problem = parameter.problem_with(parameter.default)
         if problem:
             raise SpaceError(f"{path}.default: {problem}")
+        if raw.get("prior") is not None:
+            parameter = replace(parameter, prior=parameter._prior(raw["prior"], f"{path}.prior"))
         return parameter
+
+    def _prior(self, raw: Any, path: str) -> tuple[Any, float]:
+        if not isinstance(raw, Mapping) or set(raw) != {"value", "weight"}:
+            raise SpaceError(f"{path}: expected {{value: ..., weight: ...}} with a weight above 0 and at most 1, got {raw!r}")
+        value = _yaml_number(raw["value"], self.type) if self.numeric else raw["value"]
+        problem = self.problem_with(value)
+        if problem:
+            raise SpaceError(f"{path}.value: {problem}")
+        weight = _yaml_number(raw["weight"], "float")
+        if not _is_number(weight) or not 0 < weight <= 1:
+            raise SpaceError(f"{path}.weight: a share of the draws, above 0 and at most 1, got {raw['weight']!r}")
+        return self.coerce(value), float(weight)
 
     def _check_declaration(self, raw: Mapping[str, Any], path: str) -> None:
         if self.type in ("int", "float"):

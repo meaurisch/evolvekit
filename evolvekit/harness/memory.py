@@ -6,10 +6,17 @@ the values that won and the direction they moved. Code studies, bake-offs and pe
 are listed with their verdicts but give no settings facts (a code study's winner is a diff, a
 bake-off has no search, a per-group winner is not one value per setting). Figures are from the
 searches ("on the cases they learned from"); only a verdict claims an improvement.
+
+`warm_start` gives a new study the latest `use` study's winning values as its starting point
+(and, after three settings studies, tunes the recommended number of settings that went most
+with the measure); `priors_for` gives a warm-started run a prior around each winner whose
+weight halves with every study since it (design §6.3: a prior never excludes a value in range).
 """
 
 from __future__ import annotations
 
+import copy
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,11 +29,15 @@ from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import BAKEOFF, run_study_of
 from evolvekit.harness.library import find_harnesses
 from evolvekit.harness.manifest import Harness, load_harness
-from evolvekit.harness.study import Study
+from evolvekit.harness.study import SettingChoice, Study, Warm
 from evolvekit.status import build_status
 
 IMPORTANCE_MIN_N = 5
 """A study's importance counts when its correlation rests on at least this many fully evaluated combinations."""
+MIN_PRIOR_WEIGHT = 0.05
+"""A prior weaker than this (five studies since its winner) is dropped: it would steer nothing."""
+RERANK_AFTER = 3
+"""Finished settings studies before `warm_start` chooses the tuned set by importance."""
 
 _CACHE_MAX = 512
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -247,3 +258,134 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
         entry["direction"] = "mixed" if len(moves) == 2 else next(iter(moves), None)
         out["settings"][name] = entry
     return out
+
+
+def _settings_studies(finished: list[Finished]) -> list[Finished]:
+    return [f for f in finished if f.kind in ("settings", "both")]
+
+
+def _bounds(parameter: Any, choice: SettingChoice) -> tuple[Any, Any]:
+    """A numeric setting's range in a study: its own narrower one, else the harness's (whole numbers for an int)."""
+    low = parameter.low if choice.low is None else choice.low
+    high = parameter.high if choice.high is None else choice.high
+    if parameter.type == "int":
+        return int(math.ceil(low)), int(math.floor(high))
+    return low, high
+
+
+def _fits(parameter: Any, choice: SettingChoice, value: Any) -> bool:
+    """Whether `value` is a legal value of the setting inside the study's range for it."""
+    if parameter.problem_with(value) is not None:
+        return False
+    if parameter.numeric:
+        low, high = _bounds(parameter, choice)
+        return low <= value <= high
+    return True
+
+
+def _ranked(harness: Harness, settings: dict[str, Any]) -> list[str]:
+    """The recommended settings and those a study measured, the most important first; a setting
+    with no importance after, in the harness's rank order."""
+    candidates = list(harness.recommended)
+    candidates += [n for n in harness.settings
+                   if n not in candidates and (settings.get(n) or {}).get("importance") is not None]
+    order = {name: i for i, name in enumerate(candidates)}
+
+    def key(name: str) -> tuple[bool, float, int]:
+        importance = (settings.get(name) or {}).get("importance")
+        return importance is None, -(importance or 0.0), order[name]
+
+    return sorted(candidates, key=key)
+
+
+def warm_start(home: Any, harness: Harness, study: Study, *,
+               document_of: Callable[[Path], dict] | None = None) -> tuple[Study, list[str]]:
+    """`study` warm-started from the home's latest `use` settings study on `harness`'s id, and the
+    lines to say. Each tuned setting starts from that study's winner when the value lies in this
+    study's range; with a template that tunes `recommended` and at least `RERANK_AFTER` finished
+    settings studies, the tuned set is the `len(harness.recommended)` settings that went most with
+    the measure (when any importance is known at all: without one there is nothing to rank by). `harness` is the version the new study is made with. `document_of` reads a run's
+    status document (`build_status`, kept per finished run, when None)."""
+    finished = finished_studies(home, harness.id)
+    used = [f for f in _settings_studies(finished) if f.decision == "use"]
+    if not used:
+        return study, [f"nothing to warm-start from: no finished study on {harness.id} says use; a plain start"]
+    source = used[-1]
+    facts = learned(home, harness.id, document_of=document_of)["settings"]
+    study = copy.deepcopy(study)
+    ranked: list[str] = []
+    tail: list[str] = []
+    template = harness.templates.get(study.template) or {}
+    vary = template.get("vary") if isinstance(template, dict) else None
+    measured = len(_settings_studies(finished))
+    known = any(entry.get("importance") is not None for name, entry in facts.items() if name in harness.settings)
+    if isinstance(vary, dict) and vary.get("settings") == "recommended" and measured >= RERANK_AFTER and known:
+        ranked = _ranked(harness, facts)
+        tuned = ranked[:len(harness.recommended)]
+        kept = {n: c for n, c in study.settings.items() if n not in tuned and c.mode != "tune"}
+        study.settings = {**{n: (study.settings[n] if n in study.settings and study.settings[n].mode == "tune"
+                                 else SettingChoice("tune")) for n in tuned}, **kept}
+        tail.append(f"tuned: the {len(tuned)} settings that went most with the measure in {measured} studies: "
+                    + ", ".join(tuned))
+    winners = {name: w["value"] for name, entry in facts.items() for w in entry["winners"] if w["study"] == source.slug}
+    said, outside = [], []
+    for name in study.tuned_settings():
+        setting = harness.settings.get(name)
+        if setting is None or name not in winners:
+            continue
+        parameter, choice, value = setting.parameter, study.settings[name], winners[name]
+        if _fits(parameter, choice, value):
+            choice.start = parameter.coerce(value)
+            said.append(f"{name} {_figure(choice.start)}")
+        elif parameter.numeric and parameter.problem_with(value) is None:
+            low, high = _bounds(parameter, choice)
+            outside.append(f"{name}: {source.name}'s winner {_figure(value)} lies outside this study's range "
+                           f"{_figure(low)}–{_figure(high)}; it starts where it would without the warm start")
+        else:
+            outside.append(f"{name}: {source.name}'s winner {_figure(value)} is not a value it can take now; "
+                           "it starts where it would without the warm start")
+    study.warm = Warm(from_slug=source.slug, run=source.run, at=source.finished_at.isoformat(), ranked=ranked)
+    lines = [f"warm start from {source.name} (use): " + (", ".join(said) if said else "none of its values fits this study")]
+    lines += outside
+    if said:
+        lines.append(f"the starting point is now {source.name}'s winner: the final check compares the result with it")
+    return study, lines + tail
+
+
+def _study_harness(home: Any, study: Study, finished: list[Finished]) -> Harness | None:
+    """The harness version the study was made with, from the library; else the newest of its id."""
+    for entry in find_harnesses(Path(home.root)):
+        if entry.harness is not None and entry.harness.id == study.harness_id \
+                and entry.harness.version == study.harness_version:
+            return entry.harness
+    for f in reversed(finished):
+        if f.pinned.version == study.harness_version:
+            return f.pinned
+    return current_harness(home, study.harness_id, finished)
+
+
+def priors_for(home: Any, study: Study, *, document_of: Callable[[Path], dict] | None = None) -> dict[str, dict]:
+    """`{name: {"value", "weight"}}` for each setting `study` tunes that a `use` study won: the
+    latest winner, at weight `0.5 ** k`, `k` being 1 + the finished studies on the harness after
+    the winner's (the new study is the first since). Dropped below `MIN_PRIOR_WEIGHT`, and when
+    the value is outside the study's range."""
+    finished = finished_studies(home, study.harness_id)
+    facts = learned(home, study.harness_id, document_of=document_of)["settings"]
+    harness = _study_harness(home, study, finished)
+    if harness is None:
+        return {}
+    at = {f.slug: f.finished_at for f in finished}
+    priors: dict[str, dict] = {}
+    for name in study.tuned_settings():
+        entry, setting = facts.get(name), harness.settings.get(name)
+        if not entry or not entry["winners"] or setting is None:
+            continue
+        winner = entry["winners"][-1]  # `learned` lists them oldest first
+        won = at.get(winner["study"])
+        if won is None:
+            continue
+        weight = 0.5 ** (1 + sum(1 for f in finished if f.finished_at > won and f.slug != winner["study"]))
+        if weight < MIN_PRIOR_WEIGHT or not _fits(setting.parameter, study.settings[name], winner["value"]):
+            continue
+        priors[name] = {"value": setting.parameter.coerce(winner["value"]), "weight": weight}
+    return priors
