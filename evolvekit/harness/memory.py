@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from statistics import fmean
 from typing import Any, Callable
 
@@ -29,6 +30,7 @@ IMPORTANCE_MIN_N = 5
 
 _CACHE_MAX = 512
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_LOCK = threading.Lock()
 """A finished run's verdict words (and, when no `document_of` is given, its settings), by `jobs._finished_key`."""
 
 
@@ -70,16 +72,18 @@ def _words(root: Path, run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
     from evolvekit.app import jobs, verdict
 
     key = jobs._finished_key(run_dir, job)
-    kept = _CACHE.get(key)
+    with _LOCK:
+        kept = _CACHE.get(key)
     if kept is None:
         try:
             document = verdict.build_verdict(root, run_dir.name)
-            kept = {"decision": str(document.get("decision") or ""), "line": str(document.get("line") or "")}
-        except Exception:  # noqa: BLE001 - a damaged run is listed without words, not an error
-            kept = {"decision": "", "line": ""}
-        if len(_CACHE) >= _CACHE_MAX:
-            _CACHE.clear()
-        _CACHE[key] = kept
+        except Exception:  # noqa: BLE001 - a damaged run is listed without words, not an error, and not remembered
+            return {"decision": "", "line": ""}
+        kept = {"decision": str(document.get("decision") or ""), "line": str(document.get("line") or "")}
+        with _LOCK:
+            if len(_CACHE) >= _CACHE_MAX:
+                _CACHE.clear()
+            _CACHE[key] = kept
     return kept
 
 
@@ -169,12 +173,15 @@ def _items(run_dir: Path, document_of: Callable[[Path], dict] | None) -> list[di
             key = ("items", *jobs._finished_key(run_dir, jobs.phase(run_dir)))
         except Exception:  # noqa: BLE001
             key = None
-        if key is not None and key in _CACHE:
-            return _CACHE[key]["items"]
+        if key is not None:
+            with _LOCK:
+                kept = _CACHE.get(key)
+            if kept is not None:
+                return kept["items"]
     try:
         document = (document_of or build_status)(run_dir) or {}
-    except Exception:  # noqa: BLE001 - a run without a readable status gives no figures
-        document = {}
+    except Exception:  # noqa: BLE001 - a run without a readable status gives no figures, and none is remembered
+        return []
     items = []
     for item in ((document.get("parameters") or {}).get("items") or []):
         if not isinstance(item, dict) or not item.get("name"):
@@ -183,9 +190,10 @@ def _items(run_dir: Path, document_of: Callable[[Path], dict] | None) -> list[di
         items.append({"name": str(item["name"]), "default": item.get("default"), "best": item.get("best"),
                       "importance": importance.get("value"), "n": int(importance.get("n") or 0)})
     if key is not None:
-        if len(_CACHE) >= _CACHE_MAX:
-            _CACHE.clear()
-        _CACHE[key] = {"items": items}
+        with _LOCK:
+            if len(_CACHE) >= _CACHE_MAX:
+                _CACHE.clear()
+            _CACHE[key] = {"items": items}
     return items
 
 
@@ -207,6 +215,8 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
         gone, changed = [], []
         for item in _items(f.run_dir, document_of):
             name = item["name"]
+            if name in f.study.data:
+                continue  # a data change is a parameter of the search too, not a setting
             setting = current.settings.get(name)
             if setting is None:
                 gone.append(f"{name} (in {f.name}) is not a setting of {current.title} {current.version} any more: left out")

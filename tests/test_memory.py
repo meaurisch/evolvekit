@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -16,12 +17,12 @@ STARTS = {"neighbours": 8, "restart_after": 2000, "accept_worse": 0.0, "init": "
 
 
 def finished(home, docs, name, *, decision, best=None, importance=None, finished_at, start=None, template="tune",
-             run="r1") -> Path:
+             run="r1", mean=4.2) -> Path:
     """A study of the demo tour with one finished run; `docs` gets the run's status document."""
     slug = home.create_study("demo-tour", template, name)
     root = home.studies_dir / slug
     run_dir = root / "runs" / run
-    finished_run(run_dir, decision=decision, started=f"{finished_at}T00:00:00+00:00")
+    finished_run(run_dir, decision=decision, mean=mean, started=f"{finished_at}T00:00:00+00:00")
     best, importance, start = best or {}, importance or {}, {**STARTS, **(start or {})}
     rows = [json.loads(line) for line in (run_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
     rows[1]["params"] = {**rows[1]["params"], **best}
@@ -32,6 +33,11 @@ def finished(home, docs, name, *, decision, best=None, importance=None, finished
              for n in [*importance, *[b for b in best if b not in importance]]]
     docs[run_dir] = {"parameters": {"available": True, "items": items}}
     return root
+
+
+def again(root, **kw):
+    shutil.rmtree(root / "runs" / "r1" / "confirm")
+    finished_run(root / "runs" / "r1", started="2026-10-01T00:00:00+00:00", **kw)
 
 
 def test_learned_counts_and_importance_mean(tmp_path):
@@ -108,3 +114,78 @@ def test_learned_takes_each_studys_newest_done_run(tmp_path):
 
 def test_learned_empty_home(tmp_path):
     assert memory.learned(Home(tmp_path / "my home"), "demo-tour") == {"studies": [], "settings": {}, "notes": []}
+
+
+def test_archived_included_and_trash_excluded(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    kept = finished(home, docs, "Kept", decision="keep", importance={"neighbours": (0.5, 20)}, finished_at="2026-10-01")
+    gone = finished(home, docs, "Gone", decision="keep", importance={"neighbours": (0.5, 20)}, finished_at="2026-10-02")
+    home.set_archived(kept.name, True)
+    home.delete_study(gone.name)
+    got = memory.learned(home, "demo-tour", document_of=docs.get)
+    assert [s["name"] for s in got["studies"]] == ["Kept"]
+
+
+def test_damaged_run_folder_is_skipped(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "Fine", decision="keep", importance={"neighbours": (0.5, 20)}, finished_at="2026-10-01")
+    root = finished(home, docs, "Broken", decision="keep", finished_at="2026-10-02")
+    (root / "runs" / "r1" / "job.json").write_text("{ garbage", encoding="utf-8")
+    got = memory.learned(home, "demo-tour", document_of=docs.get)
+    assert [s["name"] for s in got["studies"]] == ["Fine"]
+
+
+def test_words_follow_a_changed_run_and_a_failed_read_is_not_kept(tmp_path, monkeypatch):
+    from evolvekit.app import verdict
+
+    home, docs = Home(tmp_path / "my home"), {}
+    root = finished(home, docs, "Tours", decision="use", finished_at="2026-10-01")
+    assert memory.learned(home, "demo-tour", document_of=docs.get)["studies"][0]["decision"] == "use"
+    again(root, decision="keep")
+    assert memory.learned(home, "demo-tour", document_of=docs.get)["studies"][0]["decision"] == "keep"
+    real = verdict.build_verdict
+    monkeypatch.setattr(verdict, "build_verdict", lambda *a, **k: (_ for _ in ()).throw(OSError("locked")))
+    again(root, decision="use", mean=7.0)
+    assert memory.learned(home, "demo-tour", document_of=docs.get)["studies"][0]["decision"] == ""
+    monkeypatch.setattr(verdict, "build_verdict", real)
+    assert memory.learned(home, "demo-tour", document_of=docs.get)["studies"][0]["decision"] == "use"
+
+
+@pytest.mark.parametrize("edit, note", [
+    (lambda s: s["neighbours"].update(type="float"),
+     "neighbours: its type changed since Old (float, now int): that study's figures are left out"),
+    (lambda s: s["restart_after"].update(log=False),
+     "restart_after: its scale changed since Old (linear, now log): that study's figures are left out"),
+    (lambda s: s["init"].update(choices=["random", "nearest", "greedy"]),
+     "init: its choices changed since Old (random, nearest, greedy, now random, nearest): that study's figures are left out"),
+])
+def test_type_scale_and_choice_changes_leave_the_figures_out(tmp_path, edit, note):
+    home, docs = Home(tmp_path / "my home"), {}
+    root = finished(home, docs, "Old", decision="use", finished_at="2026-10-01",
+                    best={"neighbours": 12, "restart_after": 5000, "init": "random"})
+    pinned = yaml.safe_load((root / "harness" / "harness.yaml").read_text(encoding="utf-8"))
+    edit(pinned["settings"])
+    (root / "harness" / "harness.yaml").write_text(yaml.safe_dump(pinned, sort_keys=False), encoding="utf-8")
+    got = memory.learned(home, "demo-tour", document_of=docs.get)
+    assert got["notes"] == [note]
+
+
+@pytest.mark.parametrize("decision, mean", [("single", 4.2), ("worse", -3.0), ("keep", 0.0)])
+def test_no_winner_unless_the_verdict_says_use(tmp_path, decision, mean):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "Tours", decision=decision, best={"neighbours": 12}, finished_at="2026-10-01", mean=mean)
+    got = memory.learned(home, "demo-tour", document_of=docs.get)
+    assert got["studies"][0]["decision"] != "use"
+    assert got["settings"]["neighbours"]["winners"] == []
+
+
+def test_data_changes_in_the_status_items_are_not_settings(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    root = finished(home, docs, "Both", decision="use", best={"neighbours": 12, "stop_weight": 1.5}, finished_at="2026-10-01")
+    study = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    study.setdefault("vary", {})["data"] = {"stop_weight": {"lever": "weights", "mode": "scale", "low": 1, "high": 2, "start": 1}}
+    (root / "study.yaml").write_text(yaml.safe_dump(study, sort_keys=False), encoding="utf-8")
+    shutil_copy = root / "runs" / "r1" / "study.yaml"
+    shutil_copy.write_text(yaml.safe_dump(study, sort_keys=False), encoding="utf-8")
+    got = memory.learned(home, "demo-tour", document_of=docs.get)
+    assert "stop_weight" not in got["settings"] and got["notes"] == []
