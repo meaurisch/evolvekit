@@ -17,7 +17,7 @@ from evolvekit.app import AppError, assistant, compare, jobs, scheduler, tries, 
 from evolvekit.app.detach import no_window_flags
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
-from evolvekit.harness import HarnessError
+from evolvekit.harness import HarnessError, memory
 from evolvekit.harness.execute import plan_for, read_preview
 from evolvekit.harness.manifest import Harness
 from evolvekit.harness.plan import plan_notes
@@ -116,7 +116,7 @@ def home(req: Request) -> dict[str, Any]:
             continue
         state = jobs.state_line(root, study, req.server.status_document)
         template = (pinned.templates.get(study.template) or {}).get("title") if study.template else None
-        studies.append({"slug": slug, "name": study.name, "harness": pinned.title + (f" · {template}" if template else ""),
+        studies.append({"slug": slug, "name": study.name, "harness_id": pinned.id, "harness": pinned.title + (f" · {template}" if template else ""),
                         **state, "updated_at": (root / "study.yaml").stat().st_mtime,
                         "archived": req.home.is_archived(slug)})
     studies.sort(key=lambda s: -float(s.get("updated_at") or 0))
@@ -186,7 +186,9 @@ def install(req: Request) -> dict[str, Any]:
 
 def harness(req: Request) -> dict[str, Any]:
     entry = req.home.harness_entry(req.params["harness"], req.query.get("version") or None)
-    return describe_harness(entry.harness)  # type: ignore[arg-type]
+    described = describe_harness(entry.harness)  # type: ignore[arg-type]
+    described["learned"] = memory.learned(req.home, described["id"], document_of=req.server.status_document)
+    return described
 
 
 # ---------------------------------------------------------------------------

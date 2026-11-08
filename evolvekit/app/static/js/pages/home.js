@@ -34,10 +34,18 @@
     })}</div>`;
   }
 
+  /** What we learned: the harness of the newest finished study; the Applications drawer when there is none. */
+  function learnedLink() {
+    var newest = (data.studies || []).filter(function (s) { return s.kind === "finished" && s.harness_id && !s.archived; })[0];
+    var icon = EK.gl("chev", 18);
+    return newest ? EK.link("What we learned", { href: "#/harness/" + EK.q(newest.harness_id), icon: icon })
+      : EK.link("What we learned", { act: "apps", icon: icon });
+  }
   function links() {
     var apps = (data.harnesses || []).length;
     return html`<div class="home-links">
       ${EK.link("Applications (" + apps + ")", { act: "apps", icon: EK.gl("folder", 18) })}
+      ${learnedLink()}
       ${EK.link("Add a harness or zip", { act: "add", icon: EK.gl("drop", 18) })}
       ${EK.link("Compare two studies", { act: "compare", icon: EK.gl("chev", 18) })}
       ${EK.link("Library folder", { act: "library", icon: EK.gl("folder", 18) })}</div>`;
@@ -229,6 +237,7 @@
       return html`<li><div class="row-main"><span class="strong">${h.title} <span class="ink-2">${h.version || ""}</span></span>
         <span class="type-small ink-2">${h.summary || ""}</span>
         <span class="type-small ink-2">${(h.templates || []).map(function (t) { return t.title; }).join(" · ")}</span></div>
+        ${EK.link("What we learned", { href: "#/harness/" + EK.q(h.id) })}
         <span class="badge">${h.built_in ? "built in" : "installed"}</span></li>`;
     });
     EK.openDrawer({ title: "Applications you can tune", sub: "Each comes with its harness", wide: true,

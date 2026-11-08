@@ -1,5 +1,5 @@
 /* evolvekit app: start-up, the app bar, the router.
-   Routes (hash):  #/  ·  #/start  ·  #/start/<slug>  ·  #/setup/<slug>  ·  #/study/<slug>[?run=&view=]
+   Routes (hash):  #/  ·  #/start  ·  #/start/<slug>  ·  #/setup/<slug>  ·  #/study/<slug>[?run=&view=]  ·  #/harness/<id>
                    #/compare?a=&b=  ·  #/settings
    The old page's routes still work: #/new, #/study/<slug>/<1-7>, …/running, …/results. */
 (function () {
@@ -57,7 +57,7 @@
     });
     var on = current === "settings";
     var settings = html`<a class="nav-link nav-settings${on ? " is-on" : ""}" href="#/settings"${EK.attrs({ "aria-current": on ? "page" : null })}>${EK.gl("gear", 20)}Settings</a>`;
-    var here = { home: "Home", start: "Start a study", setup: "Set up", study: "Study", compare: "Compare", settings: "Settings" }[current] || "";
+    var here = { home: "Home", start: "Start a study", setup: "Set up", study: "Study", compare: "Compare", settings: "Settings", harness: "What we learned" }[current] || "";
     EK.mount(bar, html`<a class="brand" href="#/">${EK.mark(24)}<span class="brand-word">evolvekit</span></a>
       <nav class="nav wide-only" aria-label="Pages">${links}${settings}</nav>
       <span class="type-small ink-2 bar-here phone-only">${here}</span>
@@ -135,7 +135,7 @@
     document.title = "evolvekit";  // a page that names the tab (the Study page) does so as it draws
     if (EK.closeDrawer) EK.closeDrawer({ keepAssistant: true, quiet: true });
     var name = r.path[0] || "home";
-    var page = { "": "home", home: "home", start: "start", setup: "setup", study: "study", compare: "compare", settings: "settings" }[name] || "home";
+    var page = { "": "home", home: "home", start: "start", setup: "setup", study: "study", compare: "compare", settings: "settings", harness: "harness" }[name] || "home";
     var slug = r.path[1] || "";
     if (slug && (page === "study" || page === "setup" || page === "start")) EK.rememberStudy(slug);
     var main = document.getElementById("main");

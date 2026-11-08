@@ -112,6 +112,21 @@ neither renamed, archived nor deleted. One click away under the cards:
 harness or zip* (a study zip dropped there becomes a study), *Compare two
 studies* and the *Library folder*.
 
+**What we learned.** One page per application, at *What we learned* on Home
+(the link under the cards goes to the application of your newest finished
+study) and beside each application in *Applications*. It lists the finished
+studies on that application, each with its own verdict line, and then a table
+with a row for every setting that was tuned: *Tuned in* (how many studies),
+*How strongly it went with the measure* (a bar and a figure such as
+`0.42 · from 2 studies`, or *not enough tries to tell*), *Winning values*
+(`12 in Depot spring (1 Oct)`, or *none yet*) and *Winners moved it* (*up*,
+*down*, *both ways*). That strength is how strongly a setting's values went
+with the measure in the searches: it is not proof of anything, and the page
+claims no gain of its own. A winning value comes only from a study whose
+final check said *use it*. What could not be read across (a setting the
+application no longer has, or one whose meaning changed) is listed under
+*Left out*.
+
 ## A study, from start to answer
 
 The app has four pages for a study: **Start a study**, **Set up**, the
