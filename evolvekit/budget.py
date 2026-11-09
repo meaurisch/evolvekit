@@ -147,8 +147,9 @@ class StopDecision:
 class StopPolicy:
     """Patience / epsilon / target over the archive-best score."""
 
-    def __init__(self, config: StopConfig) -> None:
+    def __init__(self, config: StopConfig, *, takes_big_steps: bool = True) -> None:
         self.config = config
+        self.takes_big_steps = takes_big_steps
         self.best: float | None = None
         self.stagnant = 0
         self.big_steps_in_window = 0
@@ -199,11 +200,11 @@ class StopPolicy:
     def economics_reason(self, point: GenerationPoint | None) -> str | None:
         """Why the money says to stop, or `None`.
 
-        Both rules refuse to fire until at least one big step has been spent
-        since the last improvement. A plateau's first answer is the strong
-        model, not the exit.
+        In a run that takes big steps, both rules refuse to fire until one has
+        been spent since the last improvement: a plateau's first answer is the
+        strong model, not the exit. A run that takes none has nothing to wait for.
         """
-        if point is None or self.big_steps_in_window < 1:
+        if point is None or (self.takes_big_steps and self.big_steps_in_window < 1):
             return None
 
         cap = self.config.max_usd_since_improvement

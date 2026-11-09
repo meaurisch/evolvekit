@@ -173,11 +173,13 @@ class Driver:
         self.budget = BudgetGuard(config.budget)
         # `min_big_steps` holds a plateau open until the strong model has been
         # tried. A run without a model has no big step to wait for, and would
-        # never be allowed to stop on patience.
+        # never be allowed to stop on patience. The same relief applies to the
+        # economics rules, which otherwise wait for a big step that never comes.
         self.stop_policy = StopPolicy(
             config.stop
             if config.search.takes_big_steps
-            else replace(config.stop, min_big_steps=0)
+            else replace(config.stop, min_big_steps=0),
+            takes_big_steps=config.search.takes_big_steps,
         )
         self.behaviour = BehaviourIndex()
         self.events = EventLog(self.ledger.run_dir)

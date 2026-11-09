@@ -240,6 +240,21 @@ def test_the_usd_rule_does_not_fire_below_its_cap():
     assert policy.update(1.0, _points(0.50)[-1]).stop is False
 
 
+def test_without_big_steps_the_exchange_rate_rule_needs_no_big_step_credit():
+    policy = StopPolicy(
+        StopConfig(patience=99, min_gain_per_usd=GainPerUsdRule(window=RULE_WINDOW, threshold=1.0)),
+        takes_big_steps=False,
+    )
+    policy.update(1.0)
+    decision = policy.update(1.0, _points(0.50, window_gain=0.01)[-1])
+    assert decision.stop and "stop.min_gain_per_usd reached" in decision.reason
+
+
+def test_without_big_steps_the_usd_rule_needs_no_big_step_credit_either():
+    policy = StopPolicy(StopConfig(patience=99, max_usd_since_improvement=0.20), takes_big_steps=False)
+    assert policy.update(1.0, _points(0.50)[-1]).stop is True
+
+
 def test_the_gain_per_usd_rule_stops_a_bad_exchange_rate():
     policy = _plateaued_policy(
         StopConfig(patience=99, min_gain_per_usd=GainPerUsdRule(window=RULE_WINDOW, threshold=1.0))
@@ -491,3 +506,34 @@ def test_the_archive_snapshot_carries_the_configured_economics_window(tmp_path, 
     code = main(["status", "--run-dir", str(driver.ledger.run_dir)])
     assert code == 0
     assert "(w7)" in capsys.readouterr().out
+
+
+def test_the_driver_stops_a_run_without_big_steps_on_its_exchange_rate(tmp_path):
+    """D4: with `big_step_every: 0` both rules were documented and dead."""
+    config = load_config(EXAMPLE_CONFIG)
+    config = replace(
+        config,
+        evaluate=replace(config.evaluate, stages=config.evaluate.stages[:2]),
+        models=replace(
+            config.models,
+            small=replace(config.models.small, price_in_per_mtok=1000.0),
+            strong=replace(config.models.strong, price_in_per_mtok=1000.0),
+        ),
+        stop=replace(config.stop, patience=99, min_big_steps=0,
+                     min_gain_per_usd=GainPerUsdRule(window=2, threshold=1.0)),
+        search=replace(config.search, generations=6, children_per_generation=1, big_step_every=0,
+                       scratchpad_every=0, inspirations=0, operators={"rewrite": 1.0}),
+    )
+    assert config.search.takes_big_steps is False
+    flat = (
+        "```python\n"
+        "def priority(item, bins):\n"
+        '    """Worst fit -- worse than the seed, and never improving."""\n'
+        "    return [b - item for b in bins]\n"
+        "```"
+    )
+    provider = FakeProvider([flat], cycle=True)
+    driver = Driver(config, run_dir=tmp_path / "econ0", providers={"small": provider, "strong": provider})
+    summary = driver.run()
+    assert "stop.min_gain_per_usd reached" in summary.stop_reason
+    assert summary.generations < 6
