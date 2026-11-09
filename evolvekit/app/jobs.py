@@ -1727,11 +1727,15 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
         label = goal.get("label") or goal["says"]
         named = f" ({data['per_group']['group']})" if data.get("per_group") else ""
         by_case = f"<h2>{esc(label[:1].upper() + label[1:])}, case by case{esc(named)}</h2>" + by_case
-    facts = [("Time per case", _duration(context["time_per_case_s"])), ("Time for the study", _duration(context["hours"] * 3600)),
-             # The starting point is no combination the search tried: "0, plus today's settings" for a search
-             # that did not run, as the Markdown counts it (fix round 1, M5).
-             ("Combinations tried", f"{context['tried'] - 1}, plus today's settings" if isinstance(context["tried"], int)
-              and context["tried"] >= 1 else str(context["tried"]))]
+    facts = [("Time per case", _duration(context["time_per_case_s"])), ("Time for the study", _duration(context["hours"] * 3600))]
+    if data.get("how_it_ran"):
+        # Fewer rounds ran than planned: its sentence says what ran, and replaces the count, as in the Markdown.
+        facts.append(("How it ran", str(data["how_it_ran"])))
+    else:
+        # The starting point is no combination the search tried: "0, plus today's settings" for a search
+        # that did not run, as the Markdown counts it (fix round 1, M5).
+        facts.append(("Combinations tried", f"{context['tried'] - 1}, plus today's settings" if isinstance(context["tried"], int)
+                      and context["tried"] >= 1 else str(context["tried"])))
     if context.get("took"):
         facts.append(("It took", context["took"]))
     if context.get("started_at"):

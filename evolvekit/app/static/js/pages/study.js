@@ -789,7 +789,7 @@
       parts.push(html`<div class="facts-grid">
         <div class="fact"><span class="type-label">Time per case</span><span>${EK.duration(c.time_per_case_s)}</span></div>
         <div class="fact"><span class="type-label">Time in total</span><span>${EK.hours(c.hours)}${c.took ? " · took " + c.took : ""}</span></div>
-        <div class="fact"><span class="type-label">Combinations</span><span>${c.tried != null ? EK.int(c.tried) + " tried" : ""}</span></div>
+        <div class="fact"><span class="type-label">Combinations</span><span>${c.tried != null ? EK.int(Math.max(0, c.tried - 1)) + " tried, plus " + (whatOf() === "code" ? "today’s code" : whatOf() === "data" ? "the data as it is" : "today’s settings") : ""}</span></div>
         <div class="fact"><span class="type-label">Starting point</span><span>${c.compared_with || ""}</span></div>
         ${spent ? html`<div class="fact"><span class="type-label">AI spend</span><span id="details-spent">${spent.line}</span></div>` : ""}</div>`);
       // How much of the plan ran, when less did: the verdict document's own sentence.

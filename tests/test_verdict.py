@@ -737,7 +737,10 @@ def test_a_search_that_did_not_run_never_says_it_found_nothing_better(tmp_path):
     assert all(v["line"] in text for text in words)
     assert v["how_it_ran"] == "None of the 4 planned rounds ran: only today's settings were measured."
     assert v["learned_from"]["pct"] is None, "a search that did not run learned nothing"
-    assert "Combinations tried</div><div class='v'>0, plus today&#x27;s settings" in jobs.report_html(page), "M5"
+    ran = jobs.report_html(page)
+    assert "Combinations tried" not in ran and "How it ran</div><div class='v'>None of the 4 planned rounds ran" in ran, "as the Markdown"
+    counted = jobs.report_html({k: v for k, v in page.items() if k != "how_it_ran"})
+    assert "Combinations tried</div><div class='v'>0, plus today&#x27;s settings" in counted, "M5"
 
 
 @pytest.mark.parametrize("what,said", [
