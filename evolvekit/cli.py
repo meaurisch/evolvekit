@@ -149,7 +149,8 @@ stop:
   epsilon: 0.001
   target: null
   # Economics stops, both off by default. Either one only fires after at least
-  # one big step has been spent since the last improvement.
+  # one big step has been applied since the last improvement. In a run that
+  # takes no big steps (`big_step_every: 0`, or no model) the guard does not apply.
   # max_usd_since_improvement: 0.25    # patience, denominated in money
   # min_gain_per_usd:                  # score units per USD over a window
   #   window: 3
@@ -165,7 +166,7 @@ search:
     rewrite: 0.3
     crossover: 0.2
     # param_lhs: 0.2   # costs no tokens; needs a `# PARAMS: {...}` line in the block
-  inspirations: 2       # 1-2 elites from other cells, shown as delta summaries
+  inspirations: 2       # 1 to this many elites from other cells, as delta summaries
   scratchpad_every: 5   # meta-scratchpad refresh, in generations; 0 turns it off
   novelty_retry: true   # re-prompt once when the model repeats itself
   # Let the run decide how wide to search: two flat generations add a child,

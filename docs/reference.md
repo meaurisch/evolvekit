@@ -115,7 +115,7 @@ interrupted or dead.
 | Section | Answers |
 |---|---|
 | `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
-| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `within noise`, or `unknown` when each score is a single run. The verdict is a paired comparison over the seeds both candidates ran on, and says in words that those are the seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
+| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero, as `confirm` judges — with `ci95`, `mean_gain`, `sd_gain` and `n`, the number of cases; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
 | `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
 | `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
 | `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
@@ -123,7 +123,8 @@ interrupted or dead.
 | `candidates`, `archive`, `spend`, `log_tail` | One light row per candidate (no code), the grid snapshot, USD / tokens / evaluator seconds, and the run's last console lines. |
 
 `schema` is bumped when a key changes meaning or disappears; adding keys does not
-bump it. The document never contains `NaN` or `Infinity`. A view that fails is
+bump it. It is 2 since `progress.improvement` lost `t` and its `n` came to
+count cases rather than runs. The document never contains `NaN` or `Infinity`. A view that fails is
 listed under `errors` and leaves the other sections intact.
 
 ### The live dashboard
@@ -185,7 +186,7 @@ seed = the skeleton's EVOLVE-BLOCK
   ├─ generation g       C children; C adapts on stagnation (optional)
   │    sample P parents from the archive's elites
   │                  weight = sigmoid(z(fitness)) × 1/(1 + children)
-  │    draw 1 to `search.inspirations` (default 2) inspirations from *other* cells
+  │    draw 1 to `search.inspirations` (default 2) elites from *other* cells
   │
   │    operators   diff (SEARCH/REPLACE) · rewrite · crossover → small model
   │                big_step, every K gens or on plateau        → strong model
@@ -205,7 +206,8 @@ seed = the skeleton's EVOLVE-BLOCK
   │
   ├─ hold-out below the seed's → does not compete (holdout_veto)
   ├─ insert into the archive: one elite per cell, ranked by
-  │     public − holdout_penalty × max(0, public − private)   (penalty 0 by default)
+  │     public − holdout_penalty × max(0, public − private)
+  │     (holdout_penalty is 0 by default)
   │
   ├─ economics: cumulative USD, best, USD since the last improvement,
   │             USD per unit of gain over a sliding window
@@ -229,12 +231,16 @@ through the final stage, hold-out included, without a failure. Four kinds of
 candidate keep their finite score in `runs.jsonl` (`competes: false`) and are
 never ranked: one whose evaluation failed or timed out, one that was not
 promoted past a cheaper stage, one whose final stage was skipped by
-`budget.max_full_evals_per_day`, and one whose hold-out run failed. The reason
-is arithmetic rather than taste: a proxy score comes from a different input set,
-and the default `failure_score: -1000` *outranks* every healthy candidate whose
-minimised cost is above 1000. `run` and `status` report the count as
-`unfinished`; a number that keeps climbing is an evaluator problem, not a
-search problem.
+`budget.max_full_evals_per_day`, and one whose hold-out run failed — a hold-out
+run that does not report the measures the score is computed from fails too,
+rather than borrowing them from the public run. The reason is arithmetic rather
+than taste: a proxy score comes from a different input set, and the default
+`failure_score: -1000` *outranks* every healthy candidate whose minimised cost
+is above 1000. `run` and `status` report the count as `unfinished`; a number
+that keeps climbing is an evaluator problem, not a search problem. A fifth kind
+finished: with `evaluate.holdout_veto` on, a candidate whose hold-out score is
+below the starting point's is kept out by the veto. It is counted apart, as
+`kept out`.
 
 ### The archive
 
@@ -296,8 +302,8 @@ computed locally. Crossover is the one operator that also sees an inspiration's
 code, because it cannot combine two candidates otherwise.
 
 Each inspiration adds a summary and a score line to the prompt, and on a tree
-problem its whole diff, so raising `search.inspirations` raises the cost of every
-prompt. Crossover is always shown exactly one.
+problem its whole diff, so raising `search.inspirations` raises the cost of
+every prompt. Crossover is always shown exactly one.
 
 `param_lhs` costs no tokens. It needs a declaration inside the evolve block:
 
@@ -792,10 +798,11 @@ Three of them, because a child can repeat itself in three different ways.
 docstrings and comments, the names it binds (arguments, assignment and loop
 targets, nested defs) canonicalised to `v0, v1, …`; builtins, the skeleton's
 helpers and imports keep their names, so `max` and `min` are different
-programs; and the result hashed. A child whose hash matches its parent's is a **no-op**; one that
-matches any archived candidate is a **duplicate**. Both are written to
-`runs.jsonl` with `rejected: true`, a `reject_reason` naming the twin and a
-`twin_id`, and neither enters the archive, the parent pool, or the evaluator.
+programs; and the result hashed. A child whose hash matches its parent's is a
+**no-op**; one that matches any archived candidate is a **duplicate**. Both are
+written to `runs.jsonl` with `rejected: true`, a `reject_reason` naming the
+twin and a `twin_id`, and neither enters the archive, the parent pool, or the
+evaluator.
 
 With `search.novelty_retry: true` (the default) the model gets exactly one
 re-prompt — "that was identical to `<id>`; propose something different" — before
@@ -823,10 +830,12 @@ search:
 | `off` | — | the Phase B behaviour |
 
 **A near-duplicate is never rejected.** It gets the same single re-prompt a
-structural duplicate gets — "closest to `<id>` at similarity 0.98 — change the
-decision rule, not the constants" — and if the retry is *still* near, the child
-is **evaluated anyway** and flagged: `novelty: "near"`, `near_twin_id`,
-`similarity`. That asymmetry is deliberate. Run 2 found nothing at all in twelve
+structural duplicate gets — "closest to `<id>` at similarity 0.98", then
+"change the decision rule, not the constants" when the twin is its parent (only
+constants moved), or "`<id>` already made this change — try a different one"
+when another candidate made the same change — and if the retry is *still* near,
+the child is **evaluated anyway** and flagged: `novelty: "near"`,
+`near_twin_id`, `similarity`. That asymmetry is deliberate. Run 2 found nothing at all in twelve
 novel samples; a filter that can starve a twelve-sample search is worse than one
 that occasionally pays for a cousin. The counts appear in the run summary,
 `status`, and both leaderboards, separately from the rejections, because a
@@ -1012,8 +1021,10 @@ Neither may fire until at least **one big step has applied since the last
 improvement** (its reply parsed into a candidate; a reply that never did is not
 counted). A plateau's first answer is the strong model, not the exit — a guard
 like the one `stop.min_big_steps` puts on `stop.patience`, hard-wired to one
-here; `stop.min_big_steps` counts big steps tried, applied or not. `stop.patience` still wins when both would fire, so the reason printed is
-always the first one that became true.
+here; `stop.min_big_steps` counts big steps tried, applied or not. In a run
+that takes no big steps (`big_step_every: 0`, or no model) the guard does not
+apply. `stop.patience` still wins when both would fire, so the reason printed
+is always the first one that became true.
 
 `stop.min_gain_per_usd.window` also sets the window the whole series is
 computed over; without it the window is three generations, which is
@@ -1489,7 +1500,8 @@ the climb does not pay for them.
 **`max_usd_since_improvement`.** Patience denominated in money, which is the
 unit a plateau actually costs. It refuses to fire until at least one big step
 has applied since the last improvement, so it can never end a run on the
-generation before the strong model would have been tried.
+generation before the strong model would have been tried. In a run that takes
+no big steps (`big_step_every: 0`, or no model) the guard does not apply.
 
 **`max_full_evals_per_day`.** A hard stop, not a warning, and the one number
 `preflight` will argue with you about.
@@ -2613,7 +2625,8 @@ stochastic, Azure-backed evaluators.
 - **The prompt** (`evolvekit/prompts.py`) — a cacheable system half carrying
   the problem's `description`, `tools`, `constraints` and `what_counts_as_new`
   as named sections, and a bounded user half carrying the parent's block, its
-  score breakdown, its evaluator's own notes, 1–2 inspiration delta summaries,
+  score breakdown, its evaluator's own notes, delta summaries of 1 to
+  `search.inspirations` inspirations,
   the meta-scratchpad, the "Already tried" dead-end list, and the operator
   instruction. Nothing in it grows with the number of generations.
 - **Providers** (`evolvekit/providers/`) — `azure`, `openrouter`, `claude-cli`
