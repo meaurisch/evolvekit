@@ -57,7 +57,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, t_cdf
+from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, is_posterior, t_cdf
 
 __all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "why_keep"]
@@ -110,19 +110,27 @@ def _span(low: float, high: float) -> str:
     return f"somewhere between {number_text(-low)} % worse and {number_text(high)} % better"
 
 
-def _chance_words(p: float | None) -> str:
+_LEGACY_USE_CHANCE = 0.9
+"""The threshold the chance words of a comparison written before A1 guard."""
+
+
+def _chance_words(p: float | None, posterior: bool = True) -> str:
     """A chance of a gain in twentieths: "about 19 in 20", never sounding
     certain: "better than 19 in 20" above it, "less than 1 in 20" below 1 in 20,
     and "almost certain" from 0.995; nothing for no chance. A chance just
     under the rule's 19 in 20 says so ("under 19 in 20"), never rounding up
-    to read like a pass."""
+    to read like a pass. A comparison written before A1 (`posterior=False`)
+    keeps the words it had, guarding its own 9 in 10 ("under 9 in 10")."""
     if p is None:
         return ""
     if p >= 0.995:
         return "almost certain"
     if p < 0.05:
         return "less than 1 in 20"
-    if p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
+    if not posterior:
+        if p < _LEGACY_USE_CHANCE and round(p * 20) >= round(_LEGACY_USE_CHANCE * 20):
+            return "under 9 in 10"
+    elif p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
         # 0.947 would round to "about 19 in 20", which reads like the rule's
         # 19 in 20 when the rule said no: say which side of it the chance is.
         return f"under {round(USE_CHANCE * 20)} in 20"
@@ -236,8 +244,10 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     better = _better_word(goal["direction"])
     worse = "higher" if better == "lower" else "lower"
     cases = f"{n} held-back case{'s' if n != 1 else ''}"
+    posterior = is_posterior(summary)
     base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "decision": decision, "chance": chance,
-            "chance_words": _chance_words(chance), "worst_pct": worst, "rule": RULE_WORDS}
+            "chance_words": _chance_words(chance, posterior), "worst_pct": worst, "rule": RULE_WORDS,
+            "posterior": posterior}
     use_advice = f"Use {new}: {they} probably better on cases the search never saw."
     if result.get("identical"):
         # Every paired run gave exactly today's result: no range or chance can say anything about a
@@ -267,7 +277,7 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                 "advice": f"{keep}: one held-back case is too few cases to tell{on_it}; "
                           "a study that holds back three or more can."}
     low, high = ci
-    words = _chance_words(chance)
+    words = _chance_words(chance, posterior)
     sure = words == "almost certain"
     of_gain = "" if not words else "a gain almost certain" if sure else f"a chance of {words} of a gain"
     if decision == "use":
@@ -284,7 +294,13 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                 "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']}{', ' + of_gain if of_gain else ''} "
                         f"({_span(low, high)}).",
                 "advice": f"{keep}: {new} did worse on cases the search never saw."}
-    parts = ([of_gain] if of_gain else []) + [f"at worst {_pct(worst)} worse ({_span(low, high)})"]
+    if posterior:
+        # "At worst" is the 5 % quantile the rule reads; the 95 % range has its own words, its ends named as such.
+        edge = (f"at worst {_pct(worst)} worse" if worst < -0.05 else "at worst about the same"
+                if worst <= 0.05 else f"at least {_pct(worst)} better")
+        parts = ([of_gain] if of_gain else []) + [f"{edge}; its 95 % range is {_span(low, high)}"]
+    else:  # a comparison written before A1, whose worst case was the range's low end: its words as they were
+        parts = ([of_gain] if of_gain else []) + [f"at worst {_pct(worst)} worse ({_span(low, high)})"]
     return {**base, "state": "unclear", "line": f"Not proven on {cases}: {'; '.join(parts)}.",
             "advice": f"{keep} for now: the gain is not proven."}
 

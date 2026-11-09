@@ -127,7 +127,9 @@ def test_the_final_check_as_far_as_it_got(tmp_path):
 
     own = verdict_summary([log_gain(b, n, "minimize") for b, n in ((100, 98), (200, 194), (300, 297))],
                           direction="minimize")
-    assert (c["mean"], c["ci95"], c["chance"], c["worst"]) == (own["mean"], own["ci95"], own["chance"], own["worst"]),         "the verdict's own quantity: log gains through verdict_summary, not a mean of percentages"
+    mine = (c["mean"], c["ci95"], c["chance"], c["worst"])
+    assert mine == (own["mean"], own["ci95"], own["chance"], own["worst"]), \
+        "the verdict's own quantity: log gains through verdict_summary, not a mean of percentages"
 
 
 def test_a_run_with_nothing_yet_is_empty_not_an_error(tmp_path):

@@ -19,7 +19,7 @@
     // No run told the change from today's: the verdict's own line, and no figure.
     if (f.state === "same") return [kind, f.line, EK.keepWords({ what: s.what }) + "."];
     var w = EK.answerWords({ decision: f.decision, mean: f.mean, ci95: f.ci95, chance: f.chance, what: s.what, goal: s.goal });
-    var sub = (EK.capital(EK.chanceWords(f.chance)) || "") + (f.n ? (f.chance != null ? " · " : "") + EK.plural(f.n, "held-back case") : "");
+    var sub = (EK.capital(EK.chanceWords(f.chance, f.posterior)) || "") + (f.n ? (f.chance != null ? " · " : "") + EK.plural(f.n, "held-back case") : "");
     return [kind, w.head, sub];
   }
   function overlap(a, b) { return a && b && a[0] <= b[1] && b[0] <= a[1]; }

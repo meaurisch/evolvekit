@@ -1019,6 +1019,7 @@ _decision = decision_of
 def _extend_check(
     study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,
     stop: threading.Event, time_left_s: Callable[[], float], confirm: Callable[..., Any] = confirm, up: str = UP,
+    extend: bool = True,
 ) -> tuple[Any, int]:
     """The final check with `plan.check_seeds` runs per case, its answer read
     once (look 1); while that answer is still open (`keep`), seeds remain,
@@ -1031,7 +1032,8 @@ def _extend_check(
     call names the whole seed list and only the new seeds are run. Returns
     the last comparison and its runs per case; `job.json` says how many it is
     on (`check.seeds`). `up` is the way from the run's folder to the study's
-    (`GROUP_UP` for a group's folder)."""
+    (`GROUP_UP` for a group's folder). `extend=False` (a check of an explicit
+    number of runs) is never extended."""
     m = len(study.test)
     seed_cost_s = math.ceil(2 * m / max(1, plan.workers)) * float(plan.run_s)
     instances = [f"{up}/{case}" for case in study.test]
@@ -1045,7 +1047,7 @@ def _extend_check(
         return comparison, result
 
     comparison, result = look(seeds)
-    added = _runs_to_add(result, seeds, seed_cost_s, time_left_s, stop)
+    added = _runs_to_add(result, seeds, seed_cost_s, time_left_s, stop) if extend else 0
     if added:
         seeds += added
         log(f"final check: added {added} run{'s' if added != 1 else ''} per held-back case and read the answer again")
@@ -1203,7 +1205,7 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     try:
         comparison, seeds = _extend_check(
             study, plan, config, run_dir, job, log, stop=stop.event,
-            time_left_s=_time_left(job, plan) if extend else (lambda: 0.0), up=up,
+            time_left_s=_time_left(job, plan) if extend else (lambda: 0.0), up=up, extend=extend,
         )
     except ConfirmStopped:
         job.finish("stopped", final={"stopped": True})

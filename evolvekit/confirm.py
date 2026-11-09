@@ -69,19 +69,19 @@ if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
 __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
     "t_cdf", "decide", "decision_of", "verdict_summary", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT",
-    "USE_MARGIN_CHANCE", "WORSE_CHANCE", "RULE_WORDS",
+    "WORSE_CHANCE", "RULE_WORDS", "is_posterior",
 ]
 
 BASELINE = "baseline"
 
 USE_CHANCE = 0.95
-"""`decide` says "use" from this posterior chance of a gain on ..."""
+"""`decide` says "use" from this posterior chance of a gain on."""
 
 USE_MARGIN_PCT = 1.0
-"""... and only when the chance of losing more than this many % ..."""
-
-USE_MARGIN_CHANCE = 0.95
-"""... is under 1 - this (the chance of a gain above `-USE_MARGIN_PCT` is at least this)."""
+"""The margin of `chance_margin` (the chance of losing no more than this many %),
+kept in `comparison.json` for engineers, and of the rule a comparison written
+before A1 was decided by. It does not decide: with x_m < 0, P(gain > x_m) is at
+least P(gain > 0), so a chance of a gain of 19 in 20 already passes it."""
 
 WORSE_CHANCE = 0.1
 """`decide` says "worse" up to this chance of a gain: P(gain < 0) >= 0.90."""
@@ -90,29 +90,26 @@ _LEGACY_USE_CHANCE = 0.9
 """The rule a comparison written before the posterior was decided by: "use"
 from a one-sided t chance of 0.9 with the 95 % lower bound within 1 %."""
 
-RULE_WORDS = (
-    "Use when the chance of a gain is at least 19 in 20 "
-    "and the chance of losing more than 1 % is under 1 in 20."
-)
+RULE_WORDS = "Use when the chance of a gain is at least 19 in 20."
 """The rule in one sentence, as the page states it."""
 
 PRIOR = "reference"
 """The posterior's prior, as `comparison.json` names it: p(mu, sigma^2) ~ 1 / sigma^2."""
 FREQUENTIST_LABEL = "frequentist 95 % confidence interval and Wilcoxon test, for engineers"
+CHANCE_MARGIN_LABEL = "the chance of losing no more than 1 %, for engineers: it does not decide"
 
 
 def decide(summary: dict[str, Any]) -> str:
     """One fixed rule on a `verdict_summary`, for a planner who has to choose:
-    "use" when the posterior chance of a gain is at least `USE_CHANCE` and the
-    chance of a gain above -`USE_MARGIN_PCT` % is at least `USE_MARGIN_CHANCE`;
+    "use" when the posterior chance of a gain is at least `USE_CHANCE`;
     "worse" when the chance of a gain is `WORSE_CHANCE` or less; "keep"
     (today's settings) in between. "single" with one instance, where no
     chance can be given, and "none" with nothing to compare. `RULE_WORDS`
     says the same in a sentence.
 
-    A summary without `chance_margin` was written before the posterior: it
-    is decided by the rule it was decided by then (a chance of 0.9 and the
-    95 % lower bound within 1 %), so a stored comparison keeps its answer."""
+    A summary without `posterior` was written before A1: it is decided by
+    the rule it was decided by then (a chance of 0.9 and the 95 % lower bound
+    within 1 %), so a stored comparison keeps its answer."""
     n = int(summary.get("n") or 0)
     if n == 0:
         return "none"
@@ -121,11 +118,22 @@ def decide(summary: dict[str, Any]) -> str:
     chance = float(summary["chance"])
     if chance <= WORSE_CHANCE:
         return "worse"
-    if "chance_margin" not in summary:
+    if not is_posterior(summary):
         return "use" if chance >= _LEGACY_USE_CHANCE and float(summary["worst"]) >= -USE_MARGIN_PCT else "keep"
-    if chance >= USE_CHANCE and float(summary["chance_margin"]) >= USE_MARGIN_CHANCE:
-        return "use"
-    return "keep"
+    return "use" if chance >= USE_CHANCE else "keep"
+
+
+def is_posterior(summary: dict[str, Any]) -> bool:
+    """Whether a summary carries A1's posterior (`verdict_summary`), not a
+    comparison written before it: the words of the chance follow the rule
+    it was decided by."""
+    return isinstance(summary.get("posterior"), dict)
+
+
+def _floor2(p: float) -> float:
+    """`p` floored to two places, so a chance just under a threshold never
+    prints as the threshold (0.9496 is 0.94, 0.996 is 0.99)."""
+    return math.floor(p * 100 + 1e-9) / 100
 
 
 def decision_of(result: dict[str, Any]) -> str:
@@ -196,6 +204,7 @@ def verdict_summary(d: Sequence[float], *, direction: str) -> dict[str, Any]:
         "ci95": [pct_from_log(low, direction), pct_from_log(high, direction)],
         "chance": chance,
         "chance_margin": chance_margin,
+        "chance_margin_label": CHANCE_MARGIN_LABEL,
         "worst": pct_from_log(worst_log, direction),
         "wins": wins, "losses": losses,
         "log": {"mean": post.mu, "sd": statistics.stdev(d), "ci95": [low, high], "worst": worst_log},
@@ -204,13 +213,8 @@ def verdict_summary(d: Sequence[float], *, direction: str) -> dict[str, Any]:
         "frequentist": {**_pct_summary(paired_summary(d), direction), "label": FREQUENTIST_LABEL},
     }
     decision = decide(out)
-    lose = f"losing more than {USE_MARGIN_PCT:g} % of {1 - chance_margin:.2f}"
-    if decision == "use":
-        verdict = f"probably better: a chance of a gain of {chance:.2f}, and of {lose}"
-    elif decision == "worse":
-        verdict = f"probably WORSE: a chance of a gain of {chance:.2f}"
-    else:
-        verdict = f"not proven: a chance of a gain of {chance:.2f}, and of {lose}"
+    said = f"a chance of a gain of {_floor2(chance):.2f}"
+    verdict = {"use": "probably better", "worse": "probably WORSE"}.get(decision, "not proven") + f": {said}"
     out["decision"], out["verdict"] = decision, verdict + " (reference prior)"
     return out
 
@@ -911,8 +915,9 @@ def render_markdown(comparison: Comparison) -> str:
             head = (
                 f"**Mean improvement {s['mean']:+.3f} %** (the paired mean, the posterior's), "
                 f"95 % credible interval {interval} over {s['n']} instance(s); "
-                f"{s['wins']} better, {s['losses']} worse; chance of a gain {s['chance']:.2f}, of losing more than "
-                f"{USE_MARGIN_PCT:g} % {1 - s['chance_margin']:.2f}; prior {s.get('prior', PRIOR)}. **{verdict}.**"
+                f"{s['wins']} better, {s['losses']} worse; chance of a gain {_floor2(s['chance']):.2f}, "
+                f"of losing more than {USE_MARGIN_PCT:g} % {1 - s['chance_margin']:.2f} (for engineers: it does "
+                f"not decide); prior {s.get('prior', PRIOR)}. **{verdict}.**"
             )
         else:
             head = f"**Mean improvement {s['mean']:+.3f} %** over {s['n']} instance(s). **{verdict}.**"

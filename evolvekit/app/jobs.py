@@ -1277,8 +1277,11 @@ def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, 
              used_s: float | None = None) -> dict[str, Any] | None:
     """A final check with twice the runs per case, where that could still
     settle an open answer. The runs done are kept, so it only adds runs; what
-    it adds is said against the study's total time."""
-    if comparison is None or final.get("state") not in ("unclear", "worse"):
+    it adds is said against the study's total time. Offered only while the
+    answer was read once: after an extension it has had its two reads
+    (decision 13b), and a third would say "use" more often than the rule
+    promises (`READ_TWICE` says so on the page)."""
+    if comparison is None or final.get("state") not in ("unclear", "worse") or _read_twice(comparison):
         return None
     have = len(comparison.get("seeds") or [])
     want = min(2 * have, len(CHECK_SEEDS))
@@ -1297,6 +1300,18 @@ def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, 
             "why": (time + " " if time else "") + "More runs per case make each case's number steadier, and the runs "
                    "already done are kept. The range can still widen: with a few cases, it is mostly how much they differ "
                    "that sets it."}
+
+
+READ_TWICE = ("This answer has had its two reads: the final check added runs while it was open and read it "
+              "again. Checking once more would make a lucky \"use\" likelier; for a firmer answer, bring more "
+              "cases and start a new study from this result that holds more of them back.")
+"""What the page says where a recheck would be offered, after an extension."""
+
+
+def _read_twice(comparison: dict[str, Any] | None) -> bool:
+    """Whether the comparison's answer was read twice already (`looks`; 1 for one written before it said so)."""
+    looks = (comparison or {}).get("looks", 1)
+    return isinstance(looks, int) and looks >= 2
 
 
 def _today(root: Path, harness: Harness, change: Any) -> list[float]:
@@ -1507,6 +1522,9 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     final = _final_words(job, comparison, goal, what, baseline)
     final["recheck"] = (_recheck(final, plan, comparison, used_s)
                         if job.get("phase") == "done" and not job.get("bakeoff") else None)
+    if (job.get("phase") == "done" and not job.get("bakeoff") and final.get("state") in ("unclear", "worse")
+            and _read_twice(comparison)):
+        final["read_twice"] = READ_TWICE
     if final.get("state") in ("unclear", "worse", "single"):
         final["next"] = ("For a firmer answer: bring more cases (other days or weeks) and start a new study from "
                          "this result that holds more of them back.")

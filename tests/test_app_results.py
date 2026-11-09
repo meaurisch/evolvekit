@@ -115,6 +115,26 @@ def test_an_open_answer_can_be_checked_again_with_twice_the_runs():
     assert jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=12)) is None
     assert jobs._recheck({"state": "confirmed"}, PLAN, comparison([1.0, 2.0])) is None, "a settled answer"
     assert jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0], seeds=12)) is None, "no seeds left"
+    read_twice = {**comparison([-1.0, 2.0]), "looks": 2}
+    assert jobs._recheck({"state": "unclear"}, PLAN, read_twice) is None, "after an extension: its two reads"
+    assert jobs._recheck({"state": "unclear"}, PLAN, {**comparison([-1.0, 2.0]), "looks": 1}) is not None
+    assert "two reads" in jobs.READ_TWICE
+
+
+def test_a_comparison_written_before_a1_keeps_its_words():
+    """Decision 13d: "under 19 in 20" only for a summary that carries the posterior."""
+    legacy = words_for([1.0, 1.6, 0.25], decision="use")
+    assert legacy["chance"] == pytest.approx(0.932, abs=0.002) and legacy["posterior"] is False
+    assert legacy["chance_words"] == "about 19 in 20" and "a chance of about 19 in 20" in legacy["line"]
+    assert jobs._chance_words(0.932) == "under 19 in 20" and jobs._chance_words(0.932, posterior=False) == "about 19 in 20"
+    assert jobs._chance_words(0.897, posterior=False) == "under 9 in 10", "the old rule's own guard"
+    from evolvekit.confirm import verdict_summary
+
+    summary = verdict_summary([0.01, 0.016, 0.0025], direction="minimize")
+    fresh = jobs._final_words({"final": {"candidate": "c1"}}, comparison(None, cases=3, summary=summary), GOAL, "settings")
+    assert fresh["posterior"] is True and fresh["decision"] == "keep" and fresh["chance_words"] == "under 19 in 20"
+    assert "at worst" in fresh["line"] and "its 95 % range is" in fresh["line"], \
+        "at worst is the 5 % quantile; the range's ends are named as the range"
 
 
 def test_the_goal_case_by_case_counts_only_runs_both_finished():
@@ -166,7 +186,7 @@ def test_a_summary_to_paste():
     assert jobs._summary_text(data).splitlines() == [
         "PyVRP: tune solver settings (PyVRP), run 20260927-005503",
         "Answer: Keep today's settings for now: the gain is not proven.",
-        "Use when the chance of a gain is at least 19 in 20 and the chance of losing more than 1 % is under 1 in 20.",
+        "Use when the chance of a gain is at least 19 in 20.",
         "Set-up: 20 s per case, 30 min in total; the search learned from 2 cases and was checked on 1 held-back case."
         " Compared with PyVRP's own defaults.",
         "Search: " + data["headline"],

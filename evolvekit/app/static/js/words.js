@@ -58,13 +58,14 @@
     return { head: "No answer", sub: s.line || "" };
   };
 
-  /** The caption under a range: the chance and the worst case, or why there is no range. */
+  /** The caption under a range: the chance and the range's ends, or why there is no range. A comparison
+      written before A1 (`posterior: false`) keeps its own words for the chance. */
   EK.rangeCaption = function (s) {
     var ci = s.ci95;
     if (!ci) return "One case: a number, no range";
-    if (s.decision === "keep" && s.chance != null && s.chance < 0.95) return "Chance under 19 in 20 · at worst " + EK.better(ci[0]) + " · at best " + EK.better(ci[1]);
-    var range = EK.rangeWords(ci[0], ci[1]);
-    return s.chance != null ? EK.capital(EK.chanceWords(s.chance)) + " · " + range.charAt(0).toLowerCase() + range.slice(1) : range;
+    var range = EK.rangeWords(ci[0], ci[1]), legacy = s.posterior === false, rule = legacy ? 0.9 : 0.95;
+    if (s.decision === "keep" && s.chance != null && s.chance < rule) return (legacy ? "Chance under 9 in 10 · " : "Chance under 19 in 20 · ") + range;
+    return s.chance != null ? EK.capital(EK.chanceWords(s.chance, s.posterior)) + " · " + range : range;
   };
 
   /** What a start of a scheduled study says (POST /start's `scheduled` answer): "Scheduled: next window

@@ -321,3 +321,13 @@ def test_the_check_stops_adding_runs_when_time_the_seeds_or_a_stop_say_so(tmp_pa
     # Four workers make a round cheaper: ceil(6 / 4) * 20 = 40 s, so 100 s pays for two more, 30 s for none.
     assert run(_plan_with(workers=4), time_left=lambda: 100.0)[0] == [3, 5]
     assert run(_plan_with(workers=4), time_left=lambda: 30.0)[0] == [3]
+
+
+def test_a_check_of_an_explicit_number_of_runs_is_never_extended(tmp_path):
+    calls: list[int] = []
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    free = _plan_with(run_s=0.0)  # a run that costs nothing would otherwise always fit
+    _, seeds = _extend_check(_three_held_back(tmp_path), free, None, tmp_path, job, lambda _m: None,
+                             stop=threading.Event(), time_left_s=lambda: 0.0,
+                             confirm=_confirm_recording(calls, settled_at=99), extend=False)
+    assert calls == [3] and seeds == 3

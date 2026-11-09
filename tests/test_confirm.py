@@ -16,10 +16,9 @@ from evolvekit.config import ConfigError, build_config, load_config
 from evolvekit.confirm import (
     BASELINE,
     USE_CHANCE,
-    USE_MARGIN_CHANCE,
-    USE_MARGIN_PCT,
     Comparison,
     _analyse,
+    _floor2,
     _run_noise_of,
     confirm,
     decide,
@@ -177,8 +176,8 @@ def test_the_chance_shown_is_the_chance_the_rule_reads():
     assert s["prior"] == "reference" and "prior_scale" not in s
     assert decide(s) == s["decision"] == "use"
     assert s["chance"] == pytest.approx(0.9611, abs=1e-4) and s["chance_margin"] == pytest.approx(0.9868, abs=1e-4)
-    assert s["chance"] >= USE_CHANCE and s["chance_margin"] >= USE_MARGIN_CHANCE
-    assert s["worst"] >= -USE_MARGIN_PCT, "use means the worst case shown is within 1 %"
+    assert s["chance"] >= USE_CHANCE and s["worst"] >= 0, "use means the worst case shown is no loss"
+    assert s["chance_margin_label"].endswith("it does not decide")
     assert s["ci95"][0] <= s["worst"] <= s["mean"], "worst is the 5 % quantile, inside the 95 % range"
     assert s["mean"] == pytest.approx(100 * (1 - math.exp(-statistics.fmean(d)))), "the mean shown is the cases' mean"
     assert s["frequentist"]["label"].startswith("frequentist")
@@ -186,14 +185,18 @@ def test_the_chance_shown_is_the_chance_the_rule_reads():
         "the spread is on the log scale and said so: no top-level sd beside percent figures"
 
 
-def test_use_holds_exactly_when_the_chance_and_the_worst_case_the_page_shows_say_so():
-    """Decision 3: `worst` is the 5 % quantile, so use <=> chance >= 0.95 and worst >= -1 %."""
+def test_use_holds_exactly_when_the_chance_of_a_gain_is_19_in_20():
+    """Decision 13a: use <=> chance >= 0.95. `worst` is the 5 % quantile, so a use's worst case
+    shown is no loss; and the margin's chance is never below the chance of a gain (x_m < 0), so
+    it could never have been the leg that said no."""
     rng = random.Random(7)
     for _ in range(300):
         d = [rng.gauss(rng.uniform(-0.02, 0.04), rng.uniform(0.001, 0.03)) for _ in range(rng.randint(2, 8))]
         s = verdict_summary(d, direction=rng.choice(["minimize", "maximize"]))
-        rule = s["chance"] >= USE_CHANCE and s["worst"] >= -USE_MARGIN_PCT - 1e-9
-        assert (s["decision"] == "use") == rule, s
+        assert (s["decision"] == "use") == (s["chance"] >= USE_CHANCE), s
+        assert s["chance_margin"] >= s["chance"]
+        if s["decision"] == "use":
+            assert s["worst"] >= -1e-9
 
 
 def test_no_spread_is_no_division():
@@ -230,16 +233,17 @@ def test_the_rule_decides_on_the_posterior():
 
 def test_the_sentence_says_the_decision_and_its_numbers():
     use = verdict_summary([0.05, 0.052, 0.048], direction="minimize")
-    assert use["verdict"] == ("probably better: a chance of a gain of 1.00, and of losing more than 1 % of 0.00 "
-                              "(reference prior)")
+    assert use["chance"] > 0.9995 and use["verdict"] == "probably better: a chance of a gain of 0.99 (reference prior)", \
+        "floored: a chance below 1 never prints as 1.00"
     worse = verdict_summary([-0.015, -0.010, -0.012, -0.008], direction="minimize")
     assert worse["verdict"] == "probably WORSE: a chance of a gain of 0.00 (reference prior)"
     keep = verdict_summary([-0.09, 0.115, -0.004], direction="minimize")
-    assert keep["verdict"].startswith("not proven: a chance of a gain of 0.54")
+    assert keep["verdict"] == "not proven: a chance of a gain of 0.54 (reference prior)"
+    assert _floor2(0.9496) == 0.94 and _floor2(0.996) == 0.99 and _floor2(0.95) == 0.95 and _floor2(0.0) == 0.0
 
 
 def test_a_comparison_written_before_the_posterior_decides_as_it_did():
-    """Review Focus 3: a stored summary without `chance_margin` keeps the rule it was decided by."""
+    """Review Focus 3: a stored summary without the posterior keeps the rule it was decided by."""
     assert decide({"n": 3, "chance": 0.96, "worst": -0.5}) == "use"
     assert decide({"n": 3, "chance": 0.92, "worst": -0.5}) == "use", "the old rule's 9 in 10"
     assert decide({"n": 3, "chance": 0.96, "worst": -1.5}) == "keep"
@@ -309,33 +313,37 @@ def _a_study(rng: random.Random, *, gains: list[float], run_sd: float):
 
 
 def _final_answer(look, *, runs: int = 3, most: int = 12) -> str:
-    """The product's looks, as `execute._extend_check` takes them (decision 12): look 1 after
-    the planned runs; while it is open, every run up to the cap at once and look 2, whatever it
-    says; then one recheck with twice the runs when the answer is not use."""
+    """The product's looks, as `execute._extend_check` and the page take them (decisions 12 and
+    13b): look 1 after the planned runs; while it is open, every run up to `most` (the seeds,
+    or the time) at once and look 2, whatever it says. The page offers one recheck with twice
+    the runs only to an answer read once."""
     from evolvekit.confirm import runs_can_help  # A1.3; until then it always says yes
 
-    result = look(runs)
+    result, looks = look(runs), 1
     if decision_of(result) == "keep" and runs < most and runs_can_help(result):
-        runs = most
+        runs, looks = most, 2
         result = look(runs)
-    if decision_of(result) != "use" and runs < most:
-        result = look(min(2 * runs, most))
+    if looks == 1 and decision_of(result) != "use" and runs < 12:
+        result = look(min(2 * runs, 12))
     return decision_of(result)
 
 
 NULL_SETTINGS = {
-    # name: (sd of the cases' true log gains around 0, run-to-run sd of a run's log objective)
-    "runs noisier than cases": (0.005, 0.02),
-    "cases noisier than runs": (0.02, 0.005),
-    "no replicate runs (every run of a case alike)": (0.02, 0.0),
+    # name: (sd of the cases' true log gains around 0, run-to-run sd of a run's log objective,
+    #        the most runs per case the extension reaches: the 12 seeds, or what the time pays for)
+    "runs noisier than cases": (0.005, 0.02, 12),
+    "cases noisier than runs": (0.02, 0.005, 12),
+    "no replicate runs (every run of a case alike)": (0.02, 0.0, 12),
+    "time-capped extension (to 4 runs, then no recheck)": (0.005, 0.02, 4),
 }
 
 
 def _null_use_rate(setting: str, studies: int, seed: int = 20261108) -> float:
     """The share of `studies` seeded null studies of `setting` that say use."""
-    case_sd, run_sd = NULL_SETTINGS[setting]
+    case_sd, run_sd, most = NULL_SETTINGS[setting]
     rng = random.Random(seed)
-    uses = sum(_final_answer(_a_study(rng, gains=[rng.gauss(0.0, case_sd) for _ in range(4)], run_sd=run_sd)) == "use"
+    uses = sum(_final_answer(_a_study(rng, gains=[rng.gauss(0.0, case_sd) for _ in range(4)], run_sd=run_sd),
+                             most=most) == "use"
                for _ in range(studies))
     return uses / studies
 
@@ -366,8 +374,8 @@ def test_a_null_study_says_use_in_under_one_in_ten_two_standard_errors_clear(set
 
 
 def test_a_null_study_with_quiet_runs_reports_its_false_use_rate(capsys):
-    """Not asserted: with runs much quieter than the 1 % margin the margin leg does not
-    bind, and only P(gain > 0) >= 0.95 stands between the null and use (open question 5)."""
+    """Not asserted: runs much quieter than 1 %. The rule is P(gain > 0) >= 0.95 alone (the 1 %
+    margin never binds, decision 13a), so nothing but the chance stands between the null and use."""
     rng = random.Random(11)
     uses = sum(_final_answer(_a_study(rng, gains=[0.0] * 4, run_sd=0.002)) == "use" for _ in range(200))
     with capsys.disabled():

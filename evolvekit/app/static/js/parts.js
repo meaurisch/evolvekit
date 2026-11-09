@@ -167,7 +167,7 @@
 
   // ------------------------------------------------------------------ the likely range
   /** IntervalStrip (RangeStrip): the likely range as a band through today, the estimate as a dot,
-      BOTH ends marked "worst" and "best" with the same weight, the dashed 1 % limit.
+      BOTH ends of the 95 % range marked "low end" and "high end" with the same weight.
       Values are improvements in percent: positive is better. */
   EK.intervalStrip = function (mean, lo, hi, o) {
     o = o || {};
@@ -186,26 +186,25 @@
     }
     out.push('<line x1="' + X(0).toFixed(1) + '" y1="' + (y - 16) + '" x2="' + X(0).toFixed(1) + '" y2="' + (y + 8) + '" style="stroke:' + ink + '" stroke-width="2"/>' +
       '<text x="' + X(0).toFixed(1) + '" y="' + (y + 20) + '" text-anchor="middle" style="fill:' + ink + ';font:700 11px var(--sans)">today</text>');
-    out.push('<line x1="' + X(-1).toFixed(1) + '" y1="' + (y - 12) + '" x2="' + X(-1).toFixed(1) + '" y2="' + (y + 6) + '" style="stroke:' + sub + '" stroke-width="1.4" stroke-dasharray="2 2"/>');
     if (has) {
       out.push('<rect x="' + X(lo).toFixed(1) + '" y="' + (y - 7) + '" width="' + Math.max(1, X(hi) - X(lo)).toFixed(1) + '" height="14" rx="2" style="fill:' + ink + ';fill-opacity:.16;stroke:' + ink + '" stroke-width="1.5"/>');
       var close = X(hi) - X(lo) < 44;
-      [[lo, "worst", close ? "end" : "middle"], [hi, "best", close ? "start" : "middle"]].forEach(function (e) {
+      [[lo, "low end", close ? "end" : "middle"], [hi, "high end", close ? "start" : "middle"]].forEach(function (e) {
         out.push('<path d="M' + X(e[0]).toFixed(1) + " " + (y - 9) + ' l-5 -8 h10 z" style="fill:' + ink + '"/>' +
           '<text x="' + X(e[0]).toFixed(1) + '" y="' + (y - 21) + '" text-anchor="' + e[2] + '" style="fill:' + ink + ';font:700 11px var(--sans)">' + e[1] + "</text>");
       });
     }
     if (mean != null) out.push('<circle cx="' + X(mean).toFixed(1) + '" cy="' + y + '" r="6" style="fill:' + ink + ";stroke:" + (o.onAccent ? "var(--accent)" : "var(--surface-panel)") + '" stroke-width="2"/>');
-    var aria = mean == null ? "No estimate yet" : "Estimate " + EK.better(mean) + (has ? ", at worst " + EK.better(lo) + ", at best " + EK.better(hi) : ", no range from one case") +
-      "; the dashed mark is the 1 % limit";
+    var aria = mean == null ? "No estimate yet" : "Estimate " + EK.better(mean) +
+      (has ? ", 95 % range from " + EK.better(lo) + " to " + EK.better(hi) : ", no range from one case");
     return html`<div class="interval-strip${o.onAccent ? " on-accent" : ""}"${attrs({ style: "max-width:" + w + "px" })}>
       ${raw('<svg width="100%" height="58" viewBox="0 0 ' + w + ' 58" role="img" aria-label="' + EK.esc(aria) + '" style="display:block;overflow:visible">' + out.join("") + "</svg>")}
-      ${o.compact ? "" : html`<div class="strip-caption type-small"><span>← worse</span><span>dashed: 1 % limit</span><span>better →</span></div>`}</div>`;
+      ${o.compact ? "" : html`<div class="strip-caption type-small"><span>← worse</span><span>better →</span></div>`}</div>`;
   };
-  /** The range in one sentence, both ends. */
+  /** The range in one sentence, both ends: the 95 % range's ends, never "worst" (that is the 5 % quantile). */
   EK.rangeWords = function (lo, hi) {
     if (lo == null || hi == null) return "One case: a number, no range.";
-    return "At worst " + EK.better(lo) + " · at best " + EK.better(hi);
+    return "95 % range from " + EK.better(lo) + " to " + EK.better(hi);
   };
 
   // ------------------------------------------------------------------ cards and menus

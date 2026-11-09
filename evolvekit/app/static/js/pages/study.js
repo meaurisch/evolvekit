@@ -253,11 +253,11 @@
       Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Keep · final check on " + EK.plural(f.n || heldCount(), "held-back case"), head: verdictHead(f),
         sub: verdictSub(f), right: "range",
         range: !same && f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null,
-        caption: same ? "" : isBakeoff() && !f.ci95 ? "Each branch’s answer is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
+        caption: same ? "" : isBakeoff() && !f.ci95 ? "Each branch’s answer is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95, posterior: f.posterior }), rule: true,
         acts: [f.recheck ? { text: "Check with more runs", kind: "secondary", act: "recheck" } : null].filter(Boolean) });
     } else if (d === "worse") {
       Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Worse · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
-        sub: verdictSub(f), right: "range", range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95 }), rule: true,
+        sub: verdictSub(f), right: "range", range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95, posterior: f.posterior }), rule: true,
         acts: [{ text: "Start a new study", kind: "secondary", act: "next" }] });
     } else if (d === "single") {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Final check done · 1 held-back case", head: verdictHead(f),
@@ -343,7 +343,7 @@
       : x.right === "both" ? html`${EK.runTimeline(Object.assign({ width: w }, tl))}<div style="height:8px"></div>${EK.intervalStrip(x.range[0], x.range[1], x.range[2], { width: w })}`
       : x.range ? EK.intervalStrip(x.range[0], x.range[1], x.range[2], { width: w, onAccent: acc }) : "";
     var acts = x.acts.map(function (a) { return EK.button(a.text, Object.assign({ kind: "primary", onAccent: acc }, a)); });
-    var rule = x.rule ? html`<p class="type-small strip-rule${acc ? "" : " ink-2"}">The rule: use it at 19 in 20 or better, and under 1 in 20 of losing more than 1 %. ${EK.link("Why", { act: "why", cls: acc ? "on-accent-link" : "" })}</p>` : "";
+    var rule = x.rule ? html`<p class="type-small strip-rule${acc ? "" : " ink-2"}">The rule: use it at 19 in 20 or better. ${EK.link("Why", { act: "why", cls: acc ? "on-accent-link" : "" })}</p>` : "";
     var facts = liveFacts(st.status).concat(runFacts());
     var factLine = facts.length ? html`<div class="strip-facts${acc ? "" : " ink-2"}">${facts.map(function (f) { return html`<span>${f}</span>`; })}</div>` : "";
     return html`<section class="status-strip${acc ? " is-accent" : ""}" aria-label="Status" aria-live="polite" aria-atomic="true">
@@ -795,6 +795,7 @@
       // How much of the plan ran, when less did: the verdict document's own sentence.
       if (r.how_it_ran) parts.push(html`<p class="type-small">${r.how_it_ran}</p>`);
       if (r.final && r.final.next) parts.push(html`<p class="type-small ink-2">${r.final.next}</p>`);
+      if (r.final && r.final.read_twice) parts.push(html`<p class="type-small ink-2">${r.final.read_twice}</p>`);
       if (r.final && r.final.recheck) parts.push(html`<div class="actions">${EK.button(r.final.recheck.label, { kind: r.final.recheck.over ? "quiet" : "secondary", act: "recheck" })}</div><p class="type-small ink-2">${r.final.recheck.why}</p>`);
       var dir = (goalOf() || {}).direction, measure = (goalOf() || {}).label || "the measure";
       var table = function (title, rows, change) {
@@ -1013,7 +1014,7 @@
         }).catch(EK.fail);
       },
       why: function () {
-        EK.openDrawer({ title: "The rule", body: html`<p class="type-body">${(st.results && st.results.final && st.results.final.rule) || "Use when the chance of a gain is at least 19 in 20 and the chance of losing more than 1 % is under 1 in 20."}</p>
+        EK.openDrawer({ title: "The rule", body: html`<p class="type-body">${(st.results && st.results.final && st.results.final.rule) || "Use when the chance of a gain is at least 19 in 20."}</p>
           <p class="type-small ink-2">The final check runs the best combination and today’s ${whatOf()} on the held-back cases, which the search never saw.</p>` });
       },
       busy: function () {
