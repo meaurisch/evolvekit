@@ -227,6 +227,12 @@ class Posterior:
         half = _t95(self.df) * self.scale
         return self.mu - half, self.mu + half
 
+    def interval90(self) -> tuple[float, float]:
+        """The central 90 % credible interval: the 5 % and 95 % quantiles. Its
+        low end is `quantile_low(0.05)` exactly, the bound the rule reads."""
+        low = self.quantile_low(0.05)
+        return low, self.mu + (self.mu - low)
+
 
 @lru_cache(maxsize=None)
 def _t90(df: int) -> float:

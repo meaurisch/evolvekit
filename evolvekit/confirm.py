@@ -329,9 +329,11 @@ def verdict_summary(d: Sequence[float], *, direction: str,
     The posterior of the true mean gain under the reference prior
     (`stats.posterior_mean_t`: Student's t with n - 1 degrees of freedom
     around the cases' mean, scale s / sqrt(n)). `mean` is its mean (the
-    cases' mean), `ci95` its 95 % credible interval, `chance` P(gain > 0),
-    `chance_margin` P(gain > the 1 % margin) and `worst` the 5 % quantile,
-    the one-sided bound the rule reads -- all in percent of the starting
+    cases' mean), `ci95` its 95 % credible interval (for engineers),
+    `range90` its 90 % credible interval (the 5 % and 95 % quantiles: the
+    range a person is shown), `chance` P(gain > 0), `chance_margin` P(gain >
+    the 1 % margin) and `worst` the 5 % quantile, the one-sided bound the rule
+    reads and `range90`'s low end -- all in percent of the starting
     point's value (`pct_from_log`); `log` and `posterior` keep the log-scale
     numbers. The frequentist interval and Wilcoxon test are under
     `frequentist`, for engineers. `decision` is `decide` of this summary and
@@ -343,19 +345,20 @@ def verdict_summary(d: Sequence[float], *, direction: str,
     n = len(d)
     wins, losses = sum(1 for x in d if x > 0), sum(1 for x in d if x < 0)
     if n == 0:
-        out: dict[str, Any] = {"n": 0, "mean": None, "ci95": None, "chance": None, "chance_margin": None,
+        out: dict[str, Any] = {"n": 0, "mean": None, "ci95": None, "range90": None, "chance": None, "chance_margin": None,
                                "worst": None, "wins": 0, "losses": 0, "verdict": "nothing to compare"}
         out["decision"] = decide(out)
         return out
     if n == 1:
-        out = {"n": 1, "mean": pct_from_log(d[0], direction), "ci95": None, "chance": None, "chance_margin": None,
+        out = {"n": 1, "mean": pct_from_log(d[0], direction), "ci95": None, "range90": None, "chance": None,
+               "chance_margin": None,
                "worst": None, "wins": wins, "losses": losses, "log": {"mean": d[0], "sd": None, "ci95": None},
                "verdict": "one instance: no chance can be given"}
         out["decision"] = decide(out)
         return out
     post = posterior_mean_t(d)
     low, high = post.interval95()
-    worst_log = post.quantile_low(0.05)
+    worst_log, high90 = post.interval90()
     chance = post.p_above(0.0)
     chance_margin = post.p_above(margin_log(USE_MARGIN_PCT, direction))
     out = {
@@ -366,8 +369,11 @@ def verdict_summary(d: Sequence[float], *, direction: str,
         "chance_margin": chance_margin,
         "chance_margin_label": CHANCE_MARGIN_LABEL,
         "worst": pct_from_log(worst_log, direction),
+        # The range a person is shown: its low end is `worst`, the same number (decision 15).
+        "range90": [pct_from_log(worst_log, direction), pct_from_log(high90, direction)],
         "wins": wins, "losses": losses,
-        "log": {"mean": post.mu, "sd": statistics.stdev(d), "ci95": [low, high], "worst": worst_log},
+        "log": {"mean": post.mu, "sd": statistics.stdev(d), "ci95": [low, high], "range90": [worst_log, high90],
+                "worst": worst_log},
         "prior": PRIOR,
         "posterior": {"mu": post.mu, "scale": post.scale, "df": post.df},
         "frequentist": {**_pct_summary(paired_summary(d), direction), "label": FREQUENTIST_LABEL},
@@ -1088,7 +1094,8 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
             "level": index + 1, "kpi": kpi, "direction": level.get("direction"), "unit": unit,
             "tolerance": tolerance, "relative": bool(level.get("relative")), "tolerance_abs": tolerance_abs,
             "tolerance_in_unit": within, "baseline_mean": baseline_mean, "mean_difference": mean,
-            "ci95": interval, "worst": summary["worst"], "chance": summary["chance"], "n": summary["n"],
+            "ci95": interval, "range90": summary["range90"], "worst": summary["worst"], "chance": summary["chance"],
+            "n": summary["n"],
             "wins": summary["wins"], "losses": summary["losses"], "state": state, "clear": clear,
             "per_case": per_case,
         })
@@ -1122,14 +1129,14 @@ def _level_summary(gains: Sequence[float], unit: str, direction: str) -> dict[st
     (`posterior_mean_t`) on the plain differences."""
     if unit == "percent":
         s = verdict_summary(gains, direction=direction)
-        return {key: s[key] for key in ("n", "mean", "ci95", "worst", "chance", "wins", "losses", "decision")}
+        return {key: s[key] for key in ("n", "mean", "ci95", "range90", "worst", "chance", "wins", "losses", "decision")}
     n = len(gains)
-    out: dict[str, Any] = {"n": n, "mean": fmean(gains) if gains else None, "ci95": None, "worst": None,
+    out: dict[str, Any] = {"n": n, "mean": fmean(gains) if gains else None, "ci95": None, "range90": None, "worst": None,
                            "chance": None, "wins": sum(1 for g in gains if g > 0),
                            "losses": sum(1 for g in gains if g < 0)}
     if n >= 2:
         post = posterior_mean_t(gains)
-        out.update(mean=post.mu, ci95=list(post.interval95()), worst=post.quantile_low(0.05),
+        out.update(mean=post.mu, ci95=list(post.interval95()), range90=list(post.interval90()), worst=post.quantile_low(0.05),
                    chance=post.p_above(0.0), posterior={"mu": post.mu, "scale": post.scale, "df": post.df})
     out["decision"] = decide(out)
     out.pop("posterior", None)

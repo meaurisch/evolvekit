@@ -26,7 +26,7 @@ PLACEHOLDERS = {"SLUG": "gate-study", "NAME": "Gate", "ID": "demo-tour", "T": "t
                 "DIR": "harness", "FILE": "cases/a.json", "N": "2", "H": "2", "S": "600"}
 GROUPS = ("study", "harness", "skill")
 VERDICT_KEYS = ("schema", "study", "run", "phase", "decision", "reason", "line", "advice", "measure", "held_back",
-                "mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words", "levels", "learned_from", "rule",
+                "mean_pct", "ci95_pct", "range90_pct", "worst_pct", "chance", "chance_words", "levels", "learned_from", "rule",
                 "by_case", "changed", "files", "started_at", "finished_at", "elapsed_s", "rounds", "combinations",
                 "planned", "how_it_ran", "spent")
 REPORTING_RULE = "Report only the verdict's line and its advice, word for word, and add no sentence that claims more."
@@ -89,6 +89,16 @@ def test_reference_names_every_verdict_key():
     spans = set(re.findall(r"`([^`]+)`", section))
     assert set(VERDICT_KEYS) - spans == set()
     assert set(DECISIONS) - spans == set()
+
+
+def test_the_docs_name_the_90_range_the_page_shows():
+    """Decision 15: the manuals say the range a person sees is the 90 % range, its key, and that
+    `ci95` stays for engineers."""
+    app, manual, skill = (_text(p) for p in (ROOT / "docs" / "app.md", ROOT / "docs" / "reference.md", REFERENCE))
+    for text in (app, manual, skill):
+        assert "range90_pct" in text and "90 % range" in text
+    assert "`range90`" in manual and "for engineers" in manual
+    assert "its own 95 % range" in app, "a check written before A1 keeps its own range"
 
 
 def test_reference_vocabulary_matches_app():

@@ -293,6 +293,6 @@ def _check(run_dir: Path, objective: str, minimize: bool) -> dict[str, Any] | No
     summary = verdict_summary(list(gains.values()), direction=direction) if gains else {}
     return {"pairs": sum(len(v) for v in per.values()), "runs_per_case": planned, "cases": len(gains),
             "per_case": {k: round(pct_from_log(v, direction), 4) for k, v in gains.items()},
-            "mean": summary.get("mean"), "ci95": summary.get("ci95"), "chance": summary.get("chance"),
-            "worst": summary.get("worst")}
+            "mean": summary.get("mean"), "ci95": summary.get("ci95"), "range90": summary.get("range90"),
+            "chance": summary.get("chance"), "worst": summary.get("worst")}
 

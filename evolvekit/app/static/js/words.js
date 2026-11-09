@@ -58,13 +58,16 @@
     return { head: "No answer", sub: s.line || "" };
   };
 
-  /** The caption under a range: the chance and the range's ends, or why there is no range. A comparison
-      written before A1 (`posterior: false`) keeps its own words for the chance. A keep that failed more
-      runs than the starting point (`failed_more`, decision 14a) says its chance does not decide. */
+  /** The caption under a range: the chance and the range's ends, or why there is no range. The range is
+      the 90 % range (`range90`), named so, its low end the sentence's "at least" / "at worst" to the digit
+      (decision 15); a use states its chance in figures even when almost certain. A comparison written
+      before A1 (`posterior: false`, only `ci95`) keeps its own range and words for the chance. A keep that
+      failed more runs than the starting point (`failed_more`, decision 14a) says its chance does not decide. */
   EK.rangeCaption = function (s) {
-    var ci = s.ci95;
-    if (!ci) return "One case: a number, no range";
-    var range = EK.rangeWords(ci[0], ci[1]), legacy = s.posterior === false, rule = legacy ? 0.9 : 0.95;
+    var r = EK.shownRange({ mean: 0, range90: s.range90, ci95: s.ci95 });
+    if (!r) return "One case: a number, no range";
+    var range = EK.rangeWords(r[1], r[2], r[3], r[4]), legacy = s.posterior === false, rule = legacy ? 0.9 : 0.95;
+    if (s.decision === "use" && !legacy && s.chance != null && s.chance >= 0.995) return "Almost certain: a chance over 19 in 20 · " + range;
     if (s.decision === "keep" && s.failed_more) return "The chance does not decide: it failed " + s.failed_more + " run" + (s.failed_more === 1 ? "" : "s") + " the starting point finished · " + range;
     if (s.decision === "keep" && s.chance != null && s.chance < rule) return (legacy ? "Chance under 9 in 10 · " : "Chance under 19 in 20 · ") + range;
     return s.chance != null ? EK.capital(EK.chanceWords(s.chance, s.posterior)) + " · " + range : range;
@@ -144,7 +147,7 @@
       // Why a keep is still keep when every held-back case improved (persona p4, H2): under the line.
       if (v.why_keep) c.why = v.why_keep;
       c.sub = v.advice || "";
-      if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
+      c.range = EK.shownRange(s); // the 90 % range, or a run written before A1's own 95 % range
       // Stopped before its first round (persona p5, J1): the way on is Continue, from the card itself, as the
       // Study page's (fix round 1, M4); a study with a schedule keeps the time for its next window.
       if (s.not_run) {

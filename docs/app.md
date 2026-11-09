@@ -370,10 +370,20 @@ in 20 reads *over 1 in 20*, never like worse's. With no true gain, the worst
 case (pure run noise) reads *use* in about 8.9 % of studies and *worse* in
 about 5 %. The chance shown is
 the chance the rule reads, so a *use* never shows a loss as its worst case.
-Every estimate shows its likely range (95 %) as a band through *today*, with
-both ends marked, the *low end* and the *high end*. A study whose final check
+Every estimate shows its **90 % range** (the posterior's 5 % and 95 %
+quantiles) as a band through *today*, with both ends marked, the *low end* and
+the *high end*, and named *90 % range* in the sentence, the caption, the Home
+card, the report and the assistant's figures. Its low end is the sentence's
+*at least* / *at worst* to the digit (both to one decimal): the bound the rule
+reads, so a *use* reads *at least 4.5 % better … on average over 5 held-back
+cases; its 90 % range is likely between 4.5 % and 8.0 % better*. *At least* is
+the average over the held-back cases, so a single case below it breaks no
+promise, and a *use* gives its chance in figures too (*a chance of better than
+19 in 20*, *a chance of over 19 in 20 (almost certain)*). The 95 % interval
+stays in `comparison.json` and `.md` as `ci95`, for engineers. A study whose final check
 was written before this rule keeps the rule it was decided by (*use it at 9 in
-10 or better, worst within 1 %*), with its own words and its own decision.
+10 or better, worst within 1 %*), with its own words, its own 95 % range and its
+own decision.
 
 While a round's changes are being written by the AI the strip says so —
 *Writing changes: 7 of 12.* — until that round's runs begin; a study without
@@ -793,15 +803,15 @@ names:
 | `line`, `advice` | the verdict's one sentence, as the Study page shows it, and the sentence after it |
 | `measure` | `{"kpi", "label", "unit", "direction"}` of the measure that decided |
 | `held_back` | `{"cases", "runs_per_case"}` |
-| `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point: the posterior mean, its 95 % credible range, `worst_pct` the 5 % bound the rule reads (the change is at least this with a chance of 19 in 20), `chance` the chance of a gain; with goals in order of importance, those of the level the answer is read on (`numbers_from`); absent with `pending`, `stopped` and `skipped`, and on a `keep` whose every run gave exactly today's result (its `line` begins "No difference in any run"; the page shows that line and no band) |
+| `mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point: the posterior mean, its 95 % credible range (for engineers), `range90_pct` its 90 % range -- the 5 % and 95 % quantiles, the range the page, the card, the report and the assistant show, named "90 % range" (`null` for a final check written before A1, which shows its 95 % range) -- `worst_pct` the 5 % bound the rule reads and `range90_pct`'s low end, the same number (the change is at least this with a chance of 19 in 20), `chance` the chance of a gain; with goals in order of importance, those of the level the answer is read on (`numbers_from`); absent with `pending`, `stopped` and `skipped`, and on a `keep` whose every run gave exactly today's result (its `line` begins "No difference in any run"; the page shows that line and no band) |
 | `levels` | with goals in order of importance: one entry per goal with the same keys (its own `chance` among them), `deciding: true` on the one that decided and `read_on: true` on the one the answer is read on (the deciding one, else the level the comparison could go no further than) |
-| `numbers_from` | with goals in order of importance: `{"level", "kpi", "unit", "deciding"}`, the level whose figures `mean_pct`, `ci95_pct`, `worst_pct` and `chance` are |
+| `numbers_from` | with goals in order of importance: `{"level", "kpi", "unit", "deciding"}`, the level whose figures `mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct` and `chance` are |
 | `limited_by` | `"cases"` when the final check found that only more held-back cases could firm the answer up (the runs' own noise is a small part of what keeps it open), so it added no runs; on a keep, `why_keep` then says so |
 | `learned_from` | `{"cases", "pct"}`: the cases the search learned from, labelled as such |
 | `rule` | the fixed rule, in words |
 | `by_case` | one row per held-back case: `name`, `start`, `best`, `change_pct`, `outcome` (`better`, `worse`, `same`, `failed`) |
 | `changed` | the settings and data changes of the best combination: `name`, `label`, `from`, `to` |
-| `candidates` | only on a bake-off's run (`study bakeoff`): one entry per branch in the order given, `ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance` — each against the starting point by the same rule; `same: true` and no figures on a branch whose every run gave exactly today's result; `by_case`, the branch's held-back rows in the keys of `by_case` (none on a branch at the starting commit) |
+| `candidates` | only on a bake-off's run (`study bakeoff`): one entry per branch in the order given, `ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct`, `chance` — each against the starting point by the same rule; `same: true` and no figures on a branch whose every run gave exactly today's result; `by_case`, the branch's held-back rows in the keys of `by_case` (none on a branch at the starting commit) |
 | `groups` | only on a run per kind of case (`per_group: true`): `{name: document}`, each group's own verdict document built from its folder `runs/<id>/groups/<slug>/` (with `group`; a group whose search has not begun is `pending`). The run's own document then has no figures, `levels`, `learned_from` or `changed` of its own: its `decision` is `pending` or `stopped` while a group has no answer, `use` only when every group checked on two or more held-back cases says use, `single` when no group has two, else `keep`. With several groups they are judged together: a group's *use* is read only once every group is checked, Holm's step-down over the groups then decides which of those *use*s stand (until then such a group is `pending`, *Its answer is read once every kind of case is checked.*); `held_back` counts every group's cases, `by_case` holds every group's rows, each with its `group`, `rule` adds the top-level rule, `rule_lines` are the sentences of `rule.md`, and `spent` (with AI) is every group's together |
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |

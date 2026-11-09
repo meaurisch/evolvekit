@@ -92,7 +92,7 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `advice` | the one sentence after it, what to do |
 | `measure` | the deciding measure: its label, unit and direction |
 | `held_back` | `cases`, `runs_per_case`: how many held-back cases, and the runs per case |
-| `mean_pct`, `ci95_pct`, `worst_pct` | the paired change in percent of the starting point, its 95 % range, and the 5 % bound the rule reads (at least this, with a chance of 19 in 20): not the worst that can happen; with several goals, those of the level the answer is read on |
+| `mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct` | the paired change in percent of the starting point, its 95 % range (for engineers), its 90 % range (the range the page and the report show, named "90 % range"; `null` for a check written before A1), and the 5 % bound the rule reads, the 90 % range's low end (at least this on average over the held-back cases, with a chance of 19 in 20): not the worst that can happen; quote the 90 % range, not `ci95_pct`; with several goals, those of the level the answer is read on |
 | `chance`, `chance_words` | how likely the gain is real, and in words |
 | `levels` | with several goals: one entry per goal (with its own `chance`), `deciding: true` on the one that decided, `read_on: true` on the one the answer is read on |
 | `numbers_from` | with several goals: `level`, `kpi`, `unit`, `deciding`: which level the figures above are |
@@ -101,7 +101,7 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `rule` | the fixed rule in words |
 | `by_case` | one row per held-back case, with `name`, `start`, `best`, `change_pct`, `outcome` |
 | `changed` | the settings and data changes of the best combination: from, to |
-| `candidates` | only on a `study bakeoff` run: one entry per branch in the order given (`ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, or `same: true` and no figures when every run of the branch gave exactly today's result; `by_case`, the branch's held-back rows as in `by_case` above); the run's own `line` names the chosen branch as one of N, or says none is shown to beat the starting point, or -- when no run of any branch differed -- says so; a branch at the starting commit says it is today's code |
+| `candidates` | only on a `study bakeoff` run: one entry per branch in the order given (`ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct`, `chance`, or `same: true` and no figures when every run of the branch gave exactly today's result; `by_case`, the branch's held-back rows as in `by_case` above); the run's own `line` names the chosen branch as one of N, or says none is shown to beat the starting point, or -- when no run of any branch differed -- says so; a branch at the starting commit says it is today's code |
 | `files` | the exports that exist in `runs/<id>/downloads/` |
 | `started_at`, `finished_at`, `elapsed_s` | when and how long |
 | `rounds`, `combinations` | how much the search tried |

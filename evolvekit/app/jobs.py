@@ -1452,7 +1452,7 @@ PER_GROUP_DOWNLOADS = (
     {"name": "rule", "label": f"Which cases get which settings ({RULE_MD})"},
 )
 """The two files of a finished per-group run, beside its group's own downloads."""
-HELD_FIGURES = ("mean", "ci95", "worst_pct", "chance", "chance_words", "chance_margin", "why_keep", "levels",
+HELD_FIGURES = ("mean", "ci95", "range90", "worst_pct", "chance", "chance_words", "chance_margin", "why_keep", "levels",
                 "read_twice", "next")
 """What a group's `final` drops while the verdict holds its "use" (`results`): its figures and their words."""
 
@@ -1605,7 +1605,8 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     by_case["held"] = [{**row, "change_pct": paired.get(row["case"], row["change_pct"])} for row in by_case["held"]]
     if "decision" in final:
         final["decision"] = verdict["decision"]
-    for key, name in (("mean", "mean_pct"), ("ci95", "ci95_pct"), ("worst_pct", "worst_pct"), ("chance", "chance"),
+    for key, name in (("mean", "mean_pct"), ("ci95", "ci95_pct"), ("range90", "range90_pct"), ("worst_pct", "worst_pct"),
+                      ("chance", "chance"),
                       ("chance_words", "chance_words")):
         if key in final and name in verdict:
             final[key] = verdict[name]
@@ -2119,7 +2120,8 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
     (done, planned), `what` (settings, data or both), and by state
     `finish_at`, `left_s`, `hours`, `continued`, `best_pct`, `check`,
     `waiting_for`; for a finished run its `decision` (use, keep, worse,
-    single, skipped) with `mean`, `ci95`, `chance` and `n` held-back cases,
+    single, skipped) with `mean`, `ci95`, `range90` (the range a person is
+    shown; None for a comparison written before A1), `chance` and `n` held-back cases,
     and `same` (no figures: "finished · no difference in any run") when every
     run gave exactly the starting point's result -- for a bake-off, every
     branch's; `branch`, what `study pr` made for it (`branch_of`); `check_stopped` for a final check
@@ -2217,6 +2219,8 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
         decision = _decision_of(final, summary) if summary else ("use" if final.get("confirmed") else "keep")
         facts.update({"decision": decision, "mean": mean if isinstance(mean, (int, float)) else None,
                       "ci95": summary.get("ci95"), "chance": _chance_of(summary) if summary else None,
+                      # The range a person is shown (decision 15); None for a comparison written before A1.
+                      "range90": verdict_doc.range90_of(summary, str((comparison or {}).get("direction") or "minimize")),
                       "n": int(summary.get("n") or 0)})
         row = read_on_row(own["levels"]) if isinstance(own.get("levels"), dict) else None
         if row is not None:
@@ -2226,11 +2230,12 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
             mean = row.get("mean_difference") if percent else None
             facts.update({"mean": mean if isinstance(mean, (int, float)) else None,
                           "ci95": list(row["ci95"]) if percent and row.get("ci95") else None,
+                          "range90": list(row["range90"]) if percent and row.get("range90") else None,
                           "chance": row.get("chance"), "n": int(row.get("n") or 0)})
             if row.get("kpi") != goal.get("kpi"):
                 mean = None  # "N % lower <the goal>" would name another measure than the one read
         if same:
-            facts.update({"decision": "keep", "mean": None, "ci95": None, "chance": None, "same": True})
+            facts.update({"decision": "keep", "mean": None, "ci95": None, "range90": None, "chance": None, "same": True})
             card = {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · no difference in any run",
                     **facts}
         elif decision == "use":
@@ -2287,8 +2292,8 @@ def _per_group_line(root: Path, study: Study | None, run_dir: Path, document_of:
         pinned, goal = study, {"says": "the goal", "direction": "lower"}
     card = {"kind": "finished", "run": run_dir.name, "line": line, "phase": state, "what": _kind_of(pinned),
             "goal": {"says": goal.get("says"), "label": goal.get("label"), "direction": goal.get("direction")},
-            "rounds": {"done": 0, "planned": 0}, "decision": decision, "mean": None, "ci95": None, "chance": None,
-            "n": int((document.get("held_back") or {}).get("cases") or 0), "group": words, "per_group": True}
+            "rounds": {"done": 0, "planned": 0}, "decision": decision, "mean": None, "ci95": None, "range90": None,
+            "chance": None, "n": int((document.get("held_back") or {}).get("cases") or 0), "group": words, "per_group": True}
     if tone:
         card["tone"] = tone
     return _with_verdict(root, run_dir, document_of, card)

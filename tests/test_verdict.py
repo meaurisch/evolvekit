@@ -894,3 +894,34 @@ def test_a_keep_just_above_one_in_20_never_reads_like_worse():
     """Decision 14b: worse is at 1 in 20, so a keep's chance just above it says which side it is on."""
     assert _chance_words(0.06) == "over 1 in 20" and _chance_words(0.05) == "about 1 in 20"
     assert _chance_words(0.04) == "less than 1 in 20" and _chance_words(0.08) == "about 2 in 20"
+
+
+def _a1_run(tmp_path: Path) -> tuple[Path, dict]:
+    """A finished use run whose final check carries A1's posterior (`verdict_summary`)."""
+    from evolvekit.confirm import verdict_summary
+
+    root, _ = study_with_runs(tmp_path)
+    summary = verdict_summary([0.05, 0.08, 0.06, 0.045, 0.07], direction="minimize")
+    finished_run(root / "runs" / RUN, decision="use", summary=summary)
+    return root, summary
+
+
+def test_the_verdict_document_carries_the_90_range_its_low_end_worst(tmp_path):
+    """Decision 15: `range90_pct` is the range a person is shown, its low end `worst_pct`; `ci95_pct`
+    stays for engineers. The page's `final` and the Home card read the 90 % range."""
+    root, summary = _a1_run(tmp_path)
+    v = build_verdict(root, RUN)
+    assert v["range90_pct"] == summary["range90"] and v["range90_pct"][0] == v["worst_pct"]
+    assert v["ci95_pct"] == summary["ci95"] and v["ci95_pct"] != v["range90_pct"]
+    assert "its 90 % range is" in v["line"] and "95 %" not in v["line"]
+    assert jobs.results(root, RUN, document_of)["final"]["range90"] == v["range90_pct"]
+    card = jobs.run_line(root, None, root / "runs" / RUN)
+    assert card["range90"] == v["range90_pct"] and card["ci95"] == v["ci95_pct"]
+
+
+def test_a_verdict_written_before_a1_has_no_90_range(use_run):
+    """Decision 15: a pre-A1 check keeps its own 95 % range; there is no 90 % range to show."""
+    root, _ = use_run
+    v = build_verdict(root, RUN)
+    assert v["ci95_pct"] and v.get("range90_pct") is None
+    assert jobs.run_line(root, None, root / "runs" / RUN)["range90"] is None

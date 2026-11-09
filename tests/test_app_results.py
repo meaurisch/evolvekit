@@ -155,8 +155,55 @@ def test_a_comparison_written_before_a1_keeps_its_words():
     summary = verdict_summary([0.01, 0.016, 0.0025], direction="minimize")
     fresh = jobs._final_words({"final": {"candidate": "c1"}}, comparison(None, cases=3, summary=summary), GOAL, "settings")
     assert fresh["posterior"] is True and fresh["decision"] == "keep" and fresh["chance_words"] == "under 19 in 20"
-    assert "at worst" in fresh["line"] and "its 95 % range is" in fresh["line"], \
+    assert "at worst" in fresh["line"] and "its 90 % range is" in fresh["line"], \
         "at worst is the 5 % quantile; the range's ends are named as the range"
+
+
+def _a1_words(gains: list[float], decision: str | None = None) -> tuple[dict, dict]:
+    """The words of an A1 summary (`verdict_summary`) of per-case log gains, and the summary."""
+    from evolvekit.confirm import verdict_summary
+
+    summary = verdict_summary(gains, direction="minimize")
+    job = {"candidate": "c1", **({"decision": decision} if decision else {})}
+    return (jobs._final_words({"final": job}, comparison(None, cases=summary["n"], summary=summary), GOAL, "settings"),
+            summary)
+
+
+def test_the_pages_range_is_the_90_range_whose_low_end_is_at_least():
+    """Decision 15 (persona round 1): the planner read "at least 4.5 % better" beside a bar from 4.0 %.
+    The range a person sees is the 90 % range, named so, and its low end is "at least" to the digit."""
+    use, summary = _a1_words([0.05, 0.08, 0.06, 0.045, 0.07])
+    assert summary["range90"][0] == summary["worst"], "one number: the 5 % quantile"
+    assert summary["ci95"][0] < summary["range90"][0] < summary["range90"][1] < summary["ci95"][1]
+    assert use["decision"] == "use" and use["range90"] == summary["range90"] and use["worst_pct"] == summary["worst"]
+    low, high = (f"{abs(v):.1f}" for v in summary["range90"])
+    assert f"at least {low} % better than your starting point on average over 5 held-back cases" in use["line"]
+    assert f"its 90 % range is likely between {low} % and {high} % better" in use["line"], use["line"]
+    assert "95 %" not in use["line"]
+    keep, summary = _a1_words([-0.09, 0.11, -0.004])
+    low, high = f"{abs(summary['range90'][0]):.1f}", f"{summary['range90'][1]:.1f}"
+    assert keep["decision"] == "keep"
+    assert f"at worst {low} % worse; its 90 % range is somewhere between {low} % worse and {high} % better" in keep["line"]
+    worse, summary = _a1_words([-0.05, -0.08, -0.06, -0.045])
+    assert worse["decision"] == "worse" and "(its 90 % range is likely between" in worse["line"], worse["line"]
+
+
+def test_a_use_states_its_chance_in_figures():
+    """Decision 15: "almost certain" alone gives no figure; a use always says its chance in twentieths."""
+    sure, summary = _a1_words([0.05, 0.051, 0.049, 0.05, 0.0505])
+    assert summary["chance"] >= 0.995 and sure["decision"] == "use"
+    assert "a chance of over 19 in 20 (almost certain)" in sure["line"], sure["line"]
+    likely, summary = _a1_words([0.05, 0.02, 0.06, -0.01, 0.04])
+    assert likely["decision"] == "use" and f"a chance of {likely['chance_words']};" in likely["line"], likely["line"]
+    assert "in 20" in likely["chance_words"]
+
+
+def test_a_comparison_written_before_a1_keeps_its_own_range():
+    """Decision 15: a pre-A1 summary has no 90 % range; it keeps its 95 % range and its words."""
+    legacy = words_for([5.0, 5.2, 4.8])
+    assert legacy["posterior"] is False and legacy["range90"] is None and legacy["ci95"]
+    assert legacy["line"] == ("Probably better: 5.0 % lower real cost on 3 held-back cases, almost certain; "
+                              "at least 4.5 % better than your starting point.")
 
 
 def test_the_goal_case_by_case_counts_only_runs_both_finished():

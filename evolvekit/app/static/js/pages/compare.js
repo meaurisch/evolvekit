@@ -1,5 +1,5 @@
 /* evolvekit app: Compare — which did better? Two studies or two runs side by
-   side, aligned by label: the answer, the likely range, the held-back cases
+   side, aligned by label: the answer, the range, the held-back cases
    joined by name, what changed, the set-up. #/compare?a=<slug>[/<run>]&b=… */
 (function () {
   "use strict";
@@ -23,12 +23,20 @@
     return [kind, w.head, sub];
   }
   function overlap(a, b) { return a && b && a[0] <= b[1] && b[0] <= a[1]; }
-  /** A side's likely range: the band and its words, or why there is none. */
+  /** A side's range -- the 90 % range, or a run written before A1's own 95 % range -- the band and its
+      words, or why there is none. */
   function rangeOf(s, w) {
     var f = s.final || {};
     if (f.state === "same") return html`<p class="type-small ink-2">No range: every run gave today’s result.</p>`;
     if (!checked(s) || f.mean == null) return html`<p class="type-small ink-2">No range: no final check.</p>`;
-    return html`${EK.intervalStrip(f.mean, f.ci95 && f.ci95[0], f.ci95 && f.ci95[1], { width: w })}<p class="type-small ink-2">${EK.rangeWords(f.ci95 && f.ci95[0], f.ci95 && f.ci95[1])}</p>`;
+    var r = EK.shownRange(f) || [f.mean, null, null];
+    return html`${EK.rangeStrip(r, { width: w })}<p class="type-small ink-2">${EK.rangeWords(r[1], r[2], r[3], r[4])}</p>`;
+  }
+
+  /** The range row's label: "90 % range", or "Range" beside a run written before A1, whose own words name its 95 % range. */
+  function rangeLabel(A, B) {
+    var legacy = [A, B].some(function (s) { var r = EK.shownRange(s.final); return r && r[3] !== EK.RANGE_NAME; });
+    return legacy ? "Range" : EK.RANGE_NAME;
   }
 
   function verdictHead(d) {
@@ -38,9 +46,9 @@
     if (!checked(A) && checked(B)) return ["Compare · one side unchecked", "Only B has a final check", "A’s number may not hold on new cases."];
     if (!checked(A) && !checked(B)) return ["Compare · not checked", "Neither has a final check", "Both numbers are on their own cases."];
     var both = ka === kb ? (ka === "use" ? "both say use it" : ka === "keep" ? "both say keep" : "both say the same") : null;
-    var fa = A.final.ci95, fb = B.final.ci95;
-    if (both && overlap(fa, fb)) return ["Compare · same goal", "About the same: " + both, "Their likely ranges overlap."];
-    if (fa && fb && !overlap(fa, fb)) return ["Compare · same goal", (fa[0] > fb[1] ? "A" : "B") + " did better", "Their likely ranges do not overlap."];
+    var ra = EK.shownRange(A.final), rb = EK.shownRange(B.final), fa = ra && ra.slice(1, 3), fb = rb && rb.slice(1, 3);
+    if (both && overlap(fa, fb)) return ["Compare · same goal", "About the same: " + both, "Their ranges overlap."];
+    if (fa && fb && !overlap(fa, fb)) return ["Compare · same goal", (fa[0] > fb[1] ? "A" : "B") + " did better", "Their ranges do not overlap."];
     return ["Compare · same goal", "A says " + (ka === "use" ? "use it" : ka) + ", B says " + (kb === "use" ? "use it" : kb), "Read each range below."];
   }
 
@@ -84,7 +92,7 @@
       })}</tbody></table>`;
   }
   /** A bake-off's branches side by side (design 5.5): the starting point's column, then one column per
-      branch with its mark, its own verdict line verbatim and its likely range. Nothing here composes a verdict. */
+      branch with its mark, its own verdict line verbatim and its 90 % range. Nothing here composes a verdict. */
   function candidatesView(d, w) {
     var cols = [], c, mark = { use: "use", keep: "keep", worse: "worse" };
     var direction = ["higher", "maximize"].indexOf((d.measure || {}).direction) >= 0 ? "higher" : "lower";
@@ -97,7 +105,7 @@
         <p class="type-small ink-2 mono">${String(c.commit || "").slice(0, 7)}</p>
         ${EK.verdictMark(mark[c.decision] || "none", 36)}<p class="type-body">${EK.figures(c.line)}</p>
         ${caseFigures(c, direction)}
-        ${c.mean_pct != null ? EK.intervalStrip(c.mean_pct, c.ci95_pct && c.ci95_pct[0], c.ci95_pct && c.ci95_pct[1], { width: w }) : ""}</section>`);
+        ${c.mean_pct != null ? EK.rangeStrip(EK.shownRange({ mean: c.mean_pct, range90: c.range90_pct, ci95: c.ci95_pct }) || [c.mean_pct, null, null], { width: w }) : ""}</section>`);
     }
     return html`<div class="cand-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(${Math.min(w, 240)}px,1fr));gap:24px">${cols}</div>`;
   }
@@ -159,7 +167,7 @@
         ${EK.compareRow("Goal", html`<p class="type-small">${EK.capital(A.goal.says)}, ${A.goal.direction}</p>`, html`<p class="type-small">${EK.capital(B.goal.says)}, ${B.goal.direction}</p>`,
           !d.same_goal ? EK.notice("warning", "Different goals: the numbers do not compare.") : "")}
         ${EK.compareRow("Answer", EK.verdictLine(aa[0], aa[1], aa[2]), EK.verdictLine(ab[0], ab[1], ab[2]))}
-        ${EK.compareRow("Likely range", range(A), range(B))}
+        ${EK.compareRow(rangeLabel(A, B), range(A), range(B))}
         ${cases}
         ${EK.compareRow("What changed", changes(A), changes(B))}
         ${EK.compareRow("Set-up", setup(A), setup(B))}

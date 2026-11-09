@@ -1255,13 +1255,17 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   read *use* at a chance of 0.99996. The chance is printed to two places and
   never on the far side of a threshold: a keep never prints 0.95 or 0.05. `worst` is the posterior's 5 % quantile,
   so a *use* never shows a loss as its worst case; `ci95` is its 95 % interval
-  and `mean` the mean of the instances' gains, all in percent of the baseline.
+  (for engineers), `range90` its 90 % interval (the 5 % and 95 % quantiles,
+  whose low end is `worst`: the range a person is shown, named *90 % range*
+  in the sentence, on the Study page and in the report, and the verdict
+  document's `range90_pct`) and `mean` the mean of the instances' gains, all in
+  percent of the baseline.
   The sentence (`verdict`) is built from the same numbers, so it and the
   decision cannot disagree. The frequentist interval and the exact Wilcoxon
   signed-rank test are kept under `frequentist`, labelled as the engineers'
   view, and `chance_margin` (the chance of losing no more than 1 %) is recorded
   and does not decide. `comparison.json` also holds `prior: "reference"`, the
-  `log` scale of the summary (`mean`, `sd`, `ci95`, `worst`) and `run_noise`
+  `log` scale of the summary (`mean`, `sd`, `ci95`, `range90`, `worst`) and `run_noise`
   (the baseline's run-to-run noise as the search measured it: recorded, not a
   prior). One instance has no chance (`single`); none gives `none`. A
   `comparison.json` written before this rule has no `posterior` and keeps the
@@ -2035,7 +2039,7 @@ that does not exist, a branch that changes files outside the open files
 (widen `vary.code.open` or the harness's `code.open`), or one that does not
 apply on the starting commit (rebase it onto it). `study verdict --json` then
 holds `candidates`: one entry per branch in the order given, `{ref, commit,
-decision, line, mean_pct, ci95_pct, worst_pct, chance, by_case}`, each with
+decision, line, mean_pct, ci95_pct, range90_pct, worst_pct, chance, by_case}`, each with
 its own line and its own figures per held-back case (`by_case`, as the
 verdict's own), which the report's *Branches compared* table shows too. The run's own line names the branch with the largest mean among those
 whose decision is `use`, as `Of 2 branches, nearest-first: …`, and with two

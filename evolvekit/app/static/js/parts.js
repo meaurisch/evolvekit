@@ -166,11 +166,14 @@
   };
 
   // ------------------------------------------------------------------ the likely range
-  /** IntervalStrip (RangeStrip): the likely range as a band through today, the estimate as a dot,
-      BOTH ends of the 95 % range marked "low end" and "high end" with the same weight.
+  /** IntervalStrip (RangeStrip): the range as a band through today, the estimate as a dot,
+      BOTH ends of the range marked "low end" and "high end" with the same weight. The range is the
+      90 % range (`o.name`, one decimal: its low end is the verdict's "at least" / "at worst", decision 15);
+      a comparison written before A1 passes its own `{ name: "95 % range", digits: 2 }`.
       Values are improvements in percent: positive is better. */
   EK.intervalStrip = function (mean, lo, hi, o) {
     o = o || {};
+    var name = o.name || EK.RANGE_NAME, digits = o.digits == null ? 1 : o.digits;
     var w = o.width || 440, ink = o.onAccent ? "var(--on-accent)" : "var(--ink-1)", sub = o.onAccent ? "var(--on-accent)" : "var(--ink-2)";
     var has = lo != null && hi != null;
     var vals = [mean].concat(has ? [lo, hi] : []);
@@ -195,16 +198,33 @@
       });
     }
     if (mean != null) out.push('<circle cx="' + X(mean).toFixed(1) + '" cy="' + y + '" r="6" style="fill:' + ink + ";stroke:" + (o.onAccent ? "var(--accent)" : "var(--surface-panel)") + '" stroke-width="2"/>');
-    var aria = mean == null ? "No estimate yet" : "Estimate " + EK.better(mean) +
-      (has ? ", 95 % range from " + EK.better(lo) + " to " + EK.better(hi) : ", no range from one case");
+    var aria = mean == null ? "No estimate yet" : "Estimate " + EK.better(mean, digits) +
+      (has ? ", " + name + " from " + EK.better(lo, digits) + " to " + EK.better(hi, digits) : ", no range from one case");
     return html`<div class="interval-strip${o.onAccent ? " on-accent" : ""}"${attrs({ style: "max-width:" + w + "px" })}>
       ${raw('<svg width="100%" height="58" viewBox="0 0 ' + w + ' 58" role="img" aria-label="' + EK.esc(aria) + '" style="display:block;overflow:visible">' + out.join("") + "</svg>")}
       ${o.compact ? "" : html`<div class="strip-caption type-small"><span>← worse</span><span>better →</span></div>`}</div>`;
   };
-  /** The range in one sentence, both ends: the 95 % range's ends, never "worst" (that is the 5 % quantile). */
-  EK.rangeWords = function (lo, hi) {
+  /** The range in one sentence, both ends, to one decimal as the verdict's sentence: "90 % range from
+      4.5 % better to 8.0 % better", its low end the sentence's "at least" / "at worst" to the digit
+      (decision 15). A comparison written before A1 passes its own name and digits ("95 % range", 2). */
+  EK.rangeWords = function (lo, hi, name, digits) {
     if (lo == null || hi == null) return "One case: a number, no range.";
-    return "95 % range from " + EK.better(lo) + " to " + EK.better(hi);
+    var d = digits == null ? 1 : digits;
+    return (name || EK.RANGE_NAME) + " from " + EK.better(lo, d) + " to " + EK.better(hi, d);
+  };
+  /** What a person is shown of a final check's range: `range90` (A1's 90 % range) as
+      `[mean, low, high, name, digits]`; a comparison written before A1, which has only its 95 %
+      interval (`ci95`), keeps it in its own words; null without a range. */
+  EK.RANGE_NAME = "90 % range";
+  EK.shownRange = function (f) {
+    if (!f || f.mean == null) return null;
+    if (f.range90) return [f.mean, f.range90[0], f.range90[1], EK.RANGE_NAME, 1];
+    if (f.ci95) return [f.mean, f.ci95[0], f.ci95[1], "95 % range", 2];
+    return null;
+  };
+  /** The strip of a `shownRange` array, in its own name and digits. */
+  EK.rangeStrip = function (r, o) {
+    return EK.intervalStrip(r[0], r[1], r[2], Object.assign({ name: r[3], digits: r[4] }, o || {}));
   };
 
   // ------------------------------------------------------------------ cards and menus
@@ -223,7 +243,7 @@
     var menuId = "menu-" + c.slug;
     var vis = "";
     if (c.timeline) vis = html`<div class="card-vis">${EK.runTimeline(Object.assign({ width: 300 }, c.timeline))}</div>`;
-    if (c.range) vis = html`<div class="card-vis">${EK.intervalStrip(c.range[0], c.range[1], c.range[2], { width: 334, compact: true })}</div>`;
+    if (c.range) vis = html`<div class="card-vis">${EK.rangeStrip(c.range, { width: 334, compact: true })}</div>`;
     var actions = (c.actions || []).length ? html`<div class="card-actions">${c.actions.map(function (a) {
       return EK.button(a.text, Object.assign({ kind: a.kind || "secondary", size: "s" }, a));
     })}</div>` : "";

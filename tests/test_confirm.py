@@ -18,6 +18,7 @@ from evolvekit.confirm import (
     USE_CHANCE,
     Comparison,
     _analyse,
+    _level_summary,
     _chance2,
     _run_noise_of,
     confirm,
@@ -179,6 +180,13 @@ def test_the_chance_shown_is_the_chance_the_rule_reads():
     assert s["chance"] >= USE_CHANCE and s["worst"] >= 0, "use means the worst case shown is no loss"
     assert s["chance_margin_label"].endswith("it does not decide")
     assert s["ci95"][0] <= s["worst"] <= s["mean"], "worst is the 5 % quantile, inside the 95 % range"
+    # Decision 15: the range a person is shown is the 90 % range, whose low end IS worst.
+    assert s["range90"][0] == s["worst"] and s["ci95"][0] < s["range90"][0] < s["range90"][1] < s["ci95"][1]
+    assert s["log"]["range90"][0] == s["log"]["worst"]
+    assert _level_summary(d, "percent", "minimize")["range90"] == s["range90"]
+    half = 2.920 / 3 ** 0.5  # t(2 df) at 95 %, scale sd / sqrt(n) = 1 / sqrt(3)
+    assert _level_summary([1.0, 2.0, 3.0], "unit", "minimize")["range90"] == pytest.approx([2 - half, 2 + half], abs=1e-3)
+    assert verdict_summary([0.01], direction="minimize")["range90"] is None
     assert s["mean"] == pytest.approx(100 * (1 - math.exp(-statistics.fmean(d)))), "the mean shown is the cases' mean"
     assert s["frequentist"]["label"].startswith("frequentist")
     assert "sd" not in s and s["log"]["sd"] == pytest.approx(statistics.stdev(d)), \
