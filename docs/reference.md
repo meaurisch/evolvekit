@@ -1008,10 +1008,11 @@ stop:
     threshold: 0.5
 ```
 
-Neither may fire until at least **one big step has been spent since the last
-improvement**. A plateau's first answer is the strong model, not the exit —
-the same guard `stop.min_big_steps` puts on `stop.patience`, hard-wired to one
-here. `stop.patience` still wins when both would fire, so the reason printed is
+Neither may fire until at least **one big step has applied since the last
+improvement** (its reply parsed into a candidate; a reply that never did is not
+counted). A plateau's first answer is the strong model, not the exit — a guard
+like the one `stop.min_big_steps` puts on `stop.patience`, hard-wired to one
+here; `stop.min_big_steps` counts big steps tried, applied or not. `stop.patience` still wins when both would fire, so the reason printed is
 always the first one that became true.
 
 `stop.min_gain_per_usd.window` also sets the window the whole series is
@@ -1487,7 +1488,7 @@ the climb does not pay for them.
 
 **`max_usd_since_improvement`.** Patience denominated in money, which is the
 unit a plateau actually costs. It refuses to fire until at least one big step
-has been spent since the last improvement, so it can never end a run on the
+has applied since the last improvement, so it can never end a run on the
 generation before the strong model would have been tried.
 
 **`max_full_evals_per_day`.** A hard stop, not a warning, and the one number

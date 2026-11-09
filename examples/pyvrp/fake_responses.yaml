@@ -56,9 +56,9 @@
         )
     ```
 
-# The scheduled big step. Not reached in a two-generation run, but a run with
+# The big step (scheduled or on a plateau). Not reached in a two-generation run, but a run with
 # `--generations 6` walks into it and should find something here.
-- when: "scheduled big step"
+- when: "This is a big step."
   response: |
     ```python
     def configure(data, time_limit, seed):

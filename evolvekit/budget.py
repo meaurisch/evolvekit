@@ -153,9 +153,18 @@ class StopPolicy:
         self.best: float | None = None
         self.stagnant = 0
         self.big_steps_in_window = 0
+        """Big steps tried since the last improvement: what `min_big_steps` counts."""
+        self.big_steps_applied_in_window = 0
+        """Big steps whose response applied since the last improvement: what the
+        economics guard and every reported count read."""
 
     def note_big_step(self) -> None:
+        """A big step was planned: it counts as tried, applied or not."""
         self.big_steps_in_window += 1
+
+    def note_big_step_applied(self) -> None:
+        """A big step's response parsed and applied: a candidate exists."""
+        self.big_steps_applied_in_window += 1
 
     @property
     def plateau(self) -> bool:
@@ -182,6 +191,7 @@ class StopPolicy:
             self.best = max(best_score, self.best if self.best is not None else best_score)
             self.stagnant = 0
             self.big_steps_in_window = 0
+            self.big_steps_applied_in_window = 0
         else:
             self.best = max(self.best, best_score)
             self.stagnant += 1
@@ -201,10 +211,11 @@ class StopPolicy:
         """Why the money says to stop, or `None`.
 
         In a run that takes big steps, both rules refuse to fire until one has
-        been spent since the last improvement: a plateau's first answer is the
-        strong model, not the exit. A run that takes none has nothing to wait for.
+        applied since the last improvement: a plateau's first answer is the
+        strong model, not the exit, and a reply that never parsed is no answer.
+        A run that takes none has nothing to wait for.
         """
-        if point is None or (self.takes_big_steps and self.big_steps_in_window < 1):
+        if point is None or (self.takes_big_steps and self.big_steps_applied_in_window < 1):
             return None
 
         cap = self.config.max_usd_since_improvement

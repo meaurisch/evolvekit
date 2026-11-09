@@ -216,6 +216,7 @@ def _plateaued_policy(config) -> StopPolicy:
     policy = StopPolicy(config)
     policy.update(1.0)          # the improvement
     policy.note_big_step()      # the plateau's first answer: the strong model
+    policy.note_big_step_applied()  # ... and its response applied
     return policy
 
 
@@ -280,9 +281,11 @@ def test_both_rules_are_off_by_default():
 def test_an_improvement_clears_the_big_step_credit_so_the_rules_hold_again():
     policy = StopPolicy(StopConfig(patience=99, max_usd_since_improvement=0.01))
     policy.note_big_step()
+    policy.note_big_step_applied()
     policy.update(1.0)          # first score: baseline
-    policy.update(5.0)          # an improvement resets big_steps_in_window
+    policy.update(5.0)          # an improvement resets both big-step counts
     assert policy.big_steps_in_window == 0
+    assert policy.big_steps_applied_in_window == 0
     assert policy.update(5.0, _points(0.50)[-1]).stop is False
 
 

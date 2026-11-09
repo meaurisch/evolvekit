@@ -51,7 +51,7 @@ from evolvekit.events import EventLog, Heartbeat, read_events
 from evolvekit.leaderboard import seed_private
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
-from evolvekit.prompts import Inspiration
+from evolvekit.prompts import Inspiration, big_step_reason
 from evolvekit.providers import Provider, build_provider
 from evolvekit.providers.base import CallCapped, supports_call_cap
 from evolvekit.search.archive import Archive
@@ -249,6 +249,8 @@ class Driver:
         """The run-log notes said once per run (`_agent_patch`, `_calling`)."""
         self._ai_out: str | None = None
         """Why no more AI changes are written (`_ai_room`): the search ends after its round."""
+        self._big_step_reason: str | None = None
+        """Which trigger planned this round's big step (`_plan_operators`), told to the model."""
         self._parent_notes: dict[str, str] = {}
         """One artefact per parent that bred a behavioural twin, spent on that
         parent's next prompt. The parent's children counter has already been
@@ -1015,16 +1017,33 @@ class Driver:
         exactly where the last process left it -- and on a fresh run the series
         is the seed generation alone, which is what the policy was always fed
         first.
+
+        Two counts, as live: every big-step row was tried (planned), and it
+        applied unless it has the shape `_breed_one` gives a failed apply --
+        rejected, no novelty verdict, and its parent's block written back.
         """
-        big_step_generations = {
-            int(c.generation)
-            for c in self.archive
-            if str(c.operator).startswith("big_step")
-        }
+        by_id = {c.id: c for c in self.archive}
+        tried: set[int] = set()
+        applied: set[int] = set()
+        for c in self.archive:
+            if not str(c.operator).startswith("big_step"):
+                continue
+            tried.add(int(c.generation))
+            parent = by_id.get(c.parent_id) if c.parent_id else None
+            failed = (
+                c.rejected
+                and c.novelty is None
+                and parent is not None
+                and c.block == parent.block
+            )
+            if not failed:
+                applied.add(int(c.generation))
         decision = StopDecision(False)
         for point in self._economics():
-            if point.generation in big_step_generations:
+            if point.generation in tried:
                 self.stop_policy.note_big_step()
+            if point.generation in applied:
+                self.stop_policy.note_big_step_applied()
             decision = self.stop_policy.update(point.best, point)
         return decision
 
@@ -1159,9 +1178,14 @@ class Driver:
         plan = [self.rng.choices(names, weights=shares, k=1)[0] for _ in range(count)]
         every = self.config.search.big_step_every
         scheduled = every > 0 and generation % every == 0
+        self._big_step_reason = None
         if self.config.search.takes_big_steps and (scheduled or plateau):
             plan[0] = "big_step"
+            # Tried counts here, for `min_big_steps`; applied counts in `_breed_one`.
             self.stop_policy.note_big_step()
+            self._big_step_reason = big_step_reason(
+                scheduled=scheduled, every=every, stagnant=self.stop_policy.stagnant
+            )
         return plan
 
     # -- tuning a declared space: who is worth starting from -------------
@@ -1359,6 +1383,9 @@ class Driver:
         outcome, verdict, attempts = self._propose(
             operator, parent, inspirations, candidate_id, generation, role
         )
+        if operator == "big_step" and outcome.ok:
+            # The response parsed and applied; `_restore_stop_policy` reads the same from the row.
+            self.stop_policy.note_big_step_applied()
 
         child = Candidate(
             id=candidate_id,
@@ -1447,6 +1474,8 @@ class Driver:
         attempts = 0
         self._embed_context = (candidate_id, generation)
         hint = self._compose_hint(parent)
+        if operator == "big_step" and self._big_step_reason:
+            hint = "\n\n".join(part for part in (self._big_step_reason, hint) if part)
         outcome = self._invoke(operator, parent, inspirations, role, hint, candidate_id)
         attempts += 1
         self._bill(outcome, candidate_id, generation, operator, role)

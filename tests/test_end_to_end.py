@@ -524,7 +524,7 @@ def test_the_operator_instruction_reaches_the_model(demo_run):
         if len(payload["messages"]) > 1:
             bodies.append(payload["messages"][1]["content"])
     assert any("SEARCH/REPLACE" in b for b in bodies)
-    assert any("scheduled big step" in b for b in bodies)
+    assert any("This is a big step." in b for b in bodies)
 
 
 # -- the LHS sampler, shipped for Phase B ---------------------------------
