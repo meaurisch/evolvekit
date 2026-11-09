@@ -2043,8 +2043,9 @@ decision, line, mean_pct, ci95_pct, range90_pct, worst_pct, chance, by_case}`, e
 its own line and its own figures per held-back case (`by_case`, as the
 verdict's own), which the report's *Branches compared* table shows too. The run's own line names the branch with the largest mean among those
 whose decision is `use`, as `Of 2 branches, nearest-first: …`, and with two
-or more branches that could pass it adds *Chosen among k branches: the true
-gain is likely smaller than shown.* (identical branches are not counted). The
+or more branches that could pass it adds *Chosen among k branches: it passed
+the stricter check for choosing among k, but the figures are this branch's own,
+and picking the best of k tends to overstate them.* (identical branches are not counted). The
 branches are a family: a branch that is *use* by its own chance but fails
 Holm's step-down over the branches (see the rule under
 [`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export)) is

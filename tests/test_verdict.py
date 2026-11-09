@@ -373,9 +373,9 @@ def test_the_no_difference_line_names_what_may_not_reach_the_program():
 
 
 @pytest.mark.parametrize("low,high,words", [
-    (-0.0, 0.0, "somewhere between 0.0 % worse and 0.0 % better"),
-    (-0.04, 0.03, "somewhere between 0.0 % worse and 0.0 % better"),
-    (0.0, -0.0, "somewhere between 0.0 % worse and 0.0 % better"),
+    (-0.0, 0.0, "about the same"),
+    (-0.04, 0.03, "about the same"),
+    (0.0, -0.0, "about the same"),
     (-1.26, 2.0, "somewhere between 1.3 % worse and 2.0 % better"),
     (-3.0, -0.04, "likely between 0.0 % and 3.0 % worse"),
 ])
@@ -925,3 +925,45 @@ def test_a_verdict_written_before_a1_has_no_90_range(use_run):
     v = build_verdict(root, RUN)
     assert v["ci95_pct"] and v.get("range90_pct") is None
     assert jobs.run_line(root, None, root / "runs" / RUN)["range90"] is None
+
+
+def test_the_90_range_is_rebuilt_from_the_posterior_when_the_key_is_missing(tmp_path):
+    """Dropping `range90` from an A1 summary gives the same range back, its low end the summary's `worst`."""
+    from evolvekit.app.verdict import range90_of
+
+    _, summary = _a1_run(tmp_path)
+    rebuilt = range90_of({k: v for k, v in summary.items() if k != "range90"})
+    assert rebuilt == pytest.approx(summary["range90"]) and rebuilt[0] == pytest.approx(summary["worst"])
+
+
+def test_posterior_interval90_is_symmetric_about_its_mean_and_its_low_end_is_the_5_percent_quantile():
+    from evolvekit.stats import Posterior
+
+    post = Posterior(n=5, mu=0.06, scale=0.01, df=4)
+    low, high = post.interval90()
+    assert low == post.quantile_low(0.05) and low < post.mu < high
+    assert high - post.mu == pytest.approx(post.mu - low)
+    assert post.p_above(low) == pytest.approx(0.95)
+
+
+def test_an_end_that_rounds_to_zero_reads_about_the_same_never_0_0_worse():
+    from evolvekit.app.verdict import _span
+
+    assert _span(-0.02, 3.0) == "somewhere between about the same and 3.0 % better"
+    assert _span(-2.0, 0.03) == "somewhere between 2.0 % worse and about the same"
+    assert "0.0" not in _span(-0.04, 0.04)
+    assert _span(-1.0, 2.0) == "somewhere between 1.0 % worse and 2.0 % better"
+
+
+def test_a_keep_line_gives_the_middle_figure_in_the_use_lines_words(tmp_path):
+    """A1's keep line leads with the posterior mean as the use line says it, then its chance and 90 % range."""
+    from evolvekit.confirm import verdict_summary
+
+    root, _ = study_with_runs(tmp_path)
+    summary = verdict_summary([0.05, -0.02, 0.06, -0.03, 0.04], direction="minimize")
+    finished_run(root / "runs" / RUN, decision="keep", summary=summary)
+    line = build_verdict(root, RUN)["line"]
+    middle = line.split("held-back cases: ", 1)[1].split(",", 1)[0]
+    assert middle.endswith(("lower cost", "lower", "higher", "worse")) or " % " in middle, line
+    assert f"{abs(summary['mean']):.1f} %" in middle, line
+    assert "a chance of" in line and "its 90 % range is" in line and line.endswith(".")

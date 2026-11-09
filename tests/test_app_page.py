@@ -1186,3 +1186,12 @@ def test_a_range_written_before_a1_keeps_its_own_name_and_digits():
         shown: EK.shownRange({ mean: 1, ci95: [-1.234, 3.456] }), none: EK.shownRange({ mean: 1 })}));""")
     assert out["keep"] == "Chance under 9 in 10 · 95 % range from 1.23 % worse to 3.46 % better"
     assert out["shown"] == [1, -1.234, 3.456, "95 % range", 2] and out["none"] is None
+
+
+def test_the_tries_legend_says_one_case_not_1_cases():
+    """Persona round 2: "full look, 1 cases"."""
+    plots = (STATIC / "js" / "plots.js").read_text(encoding="utf-8")
+    legend = plots[plots.index("EK.triesLegend = function"):]
+    legend = legend[:legend.index("};")]
+    assert '(d.cases.length === 1 ? " case" : " cases")' in legend
+    assert '(d.quick_cases === 1 ? " case" : " cases")' in legend

@@ -578,8 +578,9 @@ held-back case's change (the mean of the paired runs, *4.1 % lower* or *the
 same*; none for a branch at the starting commit) and its likely range,
 and the rule each was judged by. The headline is the run's own verdict: the
 branch with the largest gain among those that pass the rule, named as one of
-the branches compared, with *Chosen among k branches: the true gain is likely
-smaller than shown.* when two or more branches could pass (a branch that
+the branches compared, with *Chosen among k branches: it passed the stricter
+check for choosing among k, but the figures are this branch's own, and picking
+the best of k tends to overstate them.* when two or more branches could pass (a branch that
 passes on its own but not once the branches are compared is *keep*: *Not
 proven on 4 held-back cases with 3 branches compared*), or *None of the 2 branches is shown to beat the
 starting point.*, and today's code stays.

@@ -131,12 +131,12 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     facts = []
     # The range a person is shown: the 90 % range, whose low end is the verdict's "at least" / "at worst"
     # (decision 15); a comparison written before A1 has only its 95 % interval, and keeps it.
-    shown, name = ((verdict["range90_pct"], RANGE_NAME) if verdict.get("range90_pct") else
-                   (verdict.get("ci95_pct"), "95 % interval"))
+    shown, range_name = ((verdict["range90_pct"], RANGE_NAME) if verdict.get("range90_pct") else
+                         (verdict.get("ci95_pct"), "95 % interval"))
     if shown:
         low, high = shown
         facts.append(f"Change in {measure.get('label') or 'the measure'} on the held-back cases: "
-                     f"{_change(verdict.get('mean_pct'), direction)}, {_between(low, high, direction)} ({name}).")
+                     f"{_change(verdict.get('mean_pct'), direction)}, {_between(low, high, direction)} ({range_name}).")
     if verdict.get("chance_words"):
         facts.append(f"Chance of a gain: {verdict['chance_words']}.")
     reason = verdict.get("reason") or ""

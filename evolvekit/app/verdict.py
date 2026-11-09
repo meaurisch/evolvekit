@@ -49,7 +49,7 @@ for a branch that changed no run, which has `same: true` instead); `by_case`
 is that branch's held-back rows, in the keys of the run's own `by_case`. Its own
 `decision` and `line` are the chosen branch's -- the largest mean among those
 whose decision is `use` -- said as one of N (with N of 2 or more it adds that
-the branch was chosen among N, so its true gain is likely smaller than shown;
+the branch was chosen among N: it passed the stricter check for choosing among N, but its figures are its own, and picking the best of N tends to overstate them;
 a branch whose own chance passes the rule but not Holm's over the branches is
 `keep`, its line says so), or `keep` with "None of the N
 branches is shown to beat the starting point." and then no figures, held-back
@@ -120,7 +120,12 @@ def _span(low: float, high: float) -> str:
         return f"likely between {number_text(low)} % and {number_text(high)} % better"
     if high < 0:
         return f"likely between {number_text(-high)} % and {number_text(-low)} % worse"
-    return f"somewhere between {number_text(-low)} % worse and {number_text(high)} % better"
+    # An end that rounds to 0.0 is "about the same", as the bar's text says, never "0.0 % worse".
+    low_text = "about the same" if number_text(-low) in ("0.0", "0") else f"{number_text(-low)} % worse"
+    high_text = "about the same" if number_text(high) in ("0.0", "0") else f"{number_text(high)} % better"
+    if low_text == high_text:
+        return "about the same"
+    return f"somewhere between {low_text} and {high_text}"
 
 
 _LEGACY_USE_CHANCE = 0.9
@@ -374,6 +379,9 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                         f"{edge} on average over {cases}; its {RANGE_NAME} is {_span(low, high)}.",
                 "advice": use_advice}
     named = f"its {RANGE_NAME} is " if shown else ""
+    # The keep line gives the middle figure the use line gives, in the same words (A1's lines only).
+    middle = f"{_pct(mean)} {word} {goal['says']}" if shown else ""
+    lead = ", ".join(x for x in (middle, of_gain) if x)
     if decision == "worse":
         return {**base, "state": "worse",
                 "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']}{', ' + of_gain if of_gain else ''} "
@@ -382,7 +390,7 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     held = result.get("holm") or {}
     if held.get("passed") is False and held.get("own") == "use":
         # Its own chance passes the rule, but chosen among its rivals it does not (Holm): the line says why.
-        parts = ([of_gain] if of_gain else []) + [f"{named or 'its 95 % range is '}{_span(low, high)}"]
+        parts = ([lead] if lead else []) + [f"{named or 'its 95 % range is '}{_span(low, high)}"]
         return {**base, "state": "unclear",
                 "line": f"Not proven on {cases} with {held['k']} {held['what']} compared: {'; '.join(parts)}.",
                 "advice": f"{keep} for now: the gain is not proven among {held['k']} {held['what']} compared."}
@@ -390,7 +398,7 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
         # "At worst" is the 5 % quantile the rule reads, and the 90 % range's low end: the same number.
         edge = (f"at worst {_pct(worst)} worse" if worst < -0.05 else "at worst about the same"
                 if worst <= 0.05 else f"at least {_pct(worst)} better")
-        parts = ([of_gain] if of_gain else []) + [f"{edge}; {named or 'its 95 % range is '}{_span(low, high)}"]
+        parts = ([lead] if lead else []) + [f"{edge}; {named or 'its 95 % range is '}{_span(low, high)}"]
     else:  # a comparison written before A1, whose worst case was the range's low end: its words as they were
         parts = ([of_gain] if of_gain else []) + [f"at worst {_pct(worst)} worse ({_span(low, high)})"]
     more = failed_more(result)
@@ -904,7 +912,9 @@ def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
         # The family Holm paid for (identical branches and the starting point are not in it), not the count.
         paid = (((comparison or {}).get("per_candidate") or {}).get(chosen_id) or {}).get("holm") or {}
         if chosen["decision"] == "use" and int(paid.get("k") or 0) >= 2:
-            document["line"] += f" Chosen among {paid['k']} branches: the true gain is likely smaller than shown."
+            document["line"] += (f" Chosen among {paid['k']} branches: it passed the stricter check for choosing among "
+                                 f"{paid['k']}, but the figures are this branch's own, and picking the best of "
+                                 f"{paid['k']} tends to overstate them.")
         if chosen["decision"] == "use":
             document["advice"] = f"Use the code of {chosen['ref']}: it is probably better on cases no branch was made for."
         return str(document["decision"]), True

@@ -94,7 +94,8 @@ def test_bakeoff_two_refs_on_demo_tour(tmp_path):
         comparison = json.loads((folder / "runs" / "b1" / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
         k = (comparison["per_candidate"][job["final"]["candidate"]].get("holm") or {}).get("k", 1)
         # `same` gave exactly today's result, so it is outside Holm's family: k counts the branches that differed.
-        cost = f" Chosen among {k} branches: the true gain is likely smaller than shown." if k >= 2 else ""
+        cost = (f" Chosen among {k} branches: it passed the stricter check for choosing among {k}, but the figures are "
+                f"this branch's own, and picking the best of {k} tends to overstate them.") if k >= 2 else ""
         assert verdict["decision"] == "use" and verdict["line"] == (
             f"Of 2 branches, {chosen}: {own['line'][0].lower()}{own['line'][1:]}{cost}")
         assert ("Chosen among" in verdict["line"]) == (k >= 2)
@@ -265,7 +266,8 @@ def test_compare_page_lists_candidates(tmp_path):
     line = verdict["candidates"][1]["line"]
     assert verdict["decision"] == "use" and verdict["line"] == (
         f"Of 2 branches, restart: {line[0].lower()}{line[1:]} "
-        "Chosen among 2 branches: the true gain is likely smaller than shown."),         "the run's line is its chosen candidate's, said as one of two, and what choosing costs"
+        "Chosen among 2 branches: it passed the stricter check for choosing among 2, but the figures are "
+        "this branch's own, and picking the best of 2 tends to overstate them."), "the run's line is its chosen candidate's, said as one of two, and what choosing costs"
     assert verdict["candidates"][0]["mean_pct"] == -0.5 and verdict["candidates"][0]["line"].startswith("Not proven")
     assert "2 branches were compared; the more are compared, the likelier one looks ahead by chance." in render_report(verdict)
     plain_root, _ = study_with_runs(tmp_path / "plain")

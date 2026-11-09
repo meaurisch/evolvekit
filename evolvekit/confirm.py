@@ -871,7 +871,7 @@ def _analyse(comparison: Comparison) -> None:
     anywhere = max((g for g in map(largest_of, comparison.candidates) if g is not None), default=0.0)
     for cid in comparison.candidates:
         mine = table.get(cid, {})
-        largest = win = largest_of(cid)  # the size of a loss (the candidate failed) and of a win (the baseline did)
+        largest = largest_of(cid)  # the size of a loss (the candidate failed) and, the same, of a win (the baseline did)
         planned_keys = [(instance, s) for instance in comparison.instances for s in comparison.seeds]
         if (largest is not None and largest < _SMALLEST_FAILURE_LOG
                 and any(k in base and k not in mine for k in planned_keys)):
@@ -879,7 +879,7 @@ def _analyse(comparison: Comparison) -> None:
             # not: its crash still counts as a real loss, at least 1 % (decision 14a). A crash of the baseline
             # is then a win of the same size, so failures that strike both alike cancel out (round 4). With no
             # crash of its own nothing is floored, and the baseline's crashes win only its own largest (R1).
-            largest = win = max(largest, anywhere, _SMALLEST_FAILURE_LOG)
+            largest = max(largest, anywhere, _SMALLEST_FAILURE_LOG)
         per_instance, finished_only = [], []
         for instance in comparison.instances:
             counts = dict.fromkeys(_PAIR_COUNTS, 0)
@@ -899,8 +899,8 @@ def _analyse(comparison: Comparison) -> None:
                         gains.append(-largest)
                 elif key in mine:
                     counts["baseline_failed_pairs"] += 1
-                    if win is not None:
-                        gains.append(win)
+                    if largest is not None:
+                        gains.append(largest)
                 else:
                     counts["both_failed_pairs"] += 1
             gains = finished + gains
@@ -926,7 +926,7 @@ def _analyse(comparison: Comparison) -> None:
         totals = {name: sum(r[name] for r in per_instance) for name in (*_PAIR_COUNTS, "failed_pairs")}
         one_sided = {key: totals[key] for key in ("candidate_failed_pairs", "baseline_failed_pairs")}
         summary = verdict_summary(log_gains, direction=direction, failed=one_sided)
-        summary["verdict"] += _counted_as(totals, largest, win, direction)
+        summary["verdict"] += _counted_as(totals, largest, direction)
         if comparison.levels:
             summary["decision_label"] = OBJECTIVE_ALONE  # the levels decide (`_analyse_levels`)
         comparison.per_candidate[cid] = {
@@ -935,7 +935,7 @@ def _analyse(comparison: Comparison) -> None:
             "summary": summary,
             "finished_only": verdict_summary(finished_only, direction=direction),
             "failure_counted_as_log": largest,
-            "failure_counted_as_pct": _failure_sizes(largest, win, direction),
+            "failure_counted_as_pct": _failure_sizes(largest, direction),
             "pairs": sum(r["pairs"] for r in per_instance),
             "pairs_planned": planned,
             "failed_runs": failed,
@@ -952,17 +952,17 @@ def _analyse(comparison: Comparison) -> None:
                     levels["decision"], levels["confirmed"] = "keep", False
 
 
-def _failure_sizes(largest: float | None, win: float | None, direction: str) -> dict[str, float] | None:
+def _failure_sizes(largest: float | None, direction: str) -> dict[str, float] | None:
     """The imputed pairs in percent, as the comparison used them: a pair only
     the candidate failed counts as `-largest`, a loss of `-pct_from_log(-largest)`;
-    one only the baseline failed as `+win`, a win of `pct_from_log(win)`. Both
-    are the candidate's own largest gain, or, when it failed a pair beside
-    finished pairs that barely differ, that floored at 1 % (`win == largest`);
-    `win` stays the own largest only when nothing was floored. In percent the
-    two differ (twice the cost is 100 % more, half of it 50 % less)."""
-    if largest is None or win is None:
+    one only the baseline failed as `+largest`, a win of `pct_from_log(largest)`.
+    Both are the same log size: the candidate's own largest gain, or, when it
+    failed a pair beside finished pairs that barely differ, that floored at
+    1 %. In percent the two differ (twice the cost is 100 % more, half of it
+    50 % less)."""
+    if largest is None:
         return None
-    return {"loss": -pct_from_log(-largest, direction), "win": pct_from_log(win, direction)}
+    return {"loss": -pct_from_log(-largest, direction), "win": pct_from_log(largest, direction)}
 
 
 def _pct_summary(summary: dict[str, Any], direction: str) -> dict[str, Any]:
@@ -1143,12 +1143,12 @@ def _level_summary(gains: Sequence[float], unit: str, direction: str) -> dict[st
     return out
 
 
-def _counted_as(totals: dict[str, int], largest: float | None, win: float | None, direction: str) -> str:
+def _counted_as(totals: dict[str, int], largest: float | None, direction: str) -> str:
     """What the verdict has to say about pairs that did not simply finish.
-    `largest` and `win` are the log sizes of a loss and of a win (`_failure_sizes`);
+    `largest` is the log size of a loss and of a win (`_failure_sizes`);
     each imputed pair is said in the percent it was counted as."""
     notes = []
-    sizes = _failure_sizes(largest, win, direction)
+    sizes = _failure_sizes(largest, direction)
     for key, side, what, size in (("candidate_failed_pairs", "the candidate", "a loss", "loss"),
                                   ("baseline_failed_pairs", "the baseline", "a win", "win")):
         if totals[key] and sizes is not None:
