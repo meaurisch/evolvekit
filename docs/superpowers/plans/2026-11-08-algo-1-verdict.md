@@ -1057,6 +1057,18 @@ re-derive the formula; these are the re-derivations.
     docs state it. Holm is not applied to "worse" (it changes nothing that is done: worse keeps
     today's code, as keep does). Cost if wrong: a real loss needs more evidence to be called
     worse; the action (keep today's code) is the same.
+15. **After the persona round: the range a person sees is the 90 % range, so its low end is
+    "at least" / "at worst".** The planner read "at least 4.5 % better" beside a bar whose low end
+    was 4.0 % (the 95 % interval's 2.5 % end): two bounds for one idea. `worst` is the 5 %
+    quantile (decision 3) and the rule reads it (chance ≥ 0.95 ⇔ worst ≥ 0), so the page's range is
+    the 5 %–95 % interval, named "90 % range" everywhere a person reads it (sentence, bar caption,
+    aria, card, report); its low end equals "at least"/"at worst" to the digit (one rounding for
+    sentence and bar, one decimal). The 95 % interval stays in `comparison.json`/`.md` as `ci95`
+    for engineers; the verdict document carries the 90 % range in its own key. Also: a "use"
+    sentence states its chance in figures too ("a chance of over 19 in 20"), and "at least" says it
+    is the average over the held-back cases ("on average over 5 held-back cases"), so a single case
+    below it does not read as a broken promise. Legacy comparisons keep their own range and words.
+    Cost if wrong: the page's range is narrower than the engineers' 95 % interval; both are labelled.
 
 ## Open questions for the builder check
 
