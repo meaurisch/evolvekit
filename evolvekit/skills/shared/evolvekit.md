@@ -87,6 +87,7 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `phase` | `queued`, `starting`, `search`, `check`, `done`, `stopped` or `failed` |
 | `decision` | the answer, one of the values below |
 | `reason` | with `skipped` and `none`: the sentence the run recorded |
+| `not_run` | `true` with `skipped` when the search stopped before its first round ("The search did not run: there was not enough time left for its first round."): nothing was searched or compared, so say that, never that nothing better was found; the app's *Continue* gives the search its time on the same run, or `study start` makes a new run |
 | `line` | the one sentence the app shows as the verdict |
 | `advice` | the one sentence after it, what to do |
 | `measure` | the deciding measure: its label, unit and direction |
@@ -118,7 +119,7 @@ The `decision` values:
 | `single` | only one held-back case, too few to decide |
 | `pending` | no final check yet |
 | `stopped` | the final check was stopped |
-| `skipped` | the final check was skipped (such as no held-back cases); see `reason` |
+| `skipped` | the final check was skipped (such as no held-back cases, or a search that did not run: `not_run`); see `reason` |
 
 `line` and `advice` are the only sentences an agent repeats. `how_it_ran`, when there is one, claims nothing:
 pass it on when the plan's rounds did not all run. `why_keep` claims no gain either: it says why there is none, and

@@ -150,7 +150,9 @@ def probe_application(harness: Harness, app: str, *, timeout: float = PROBE_TIME
             return Probe(False, f"Python {short}, no {spec.module}", python=python)
         version = answer.get("version") or "?"
         if spec.version and not version_matches(version, spec.version):
-            return Probe(False, f"{harness.title} {version} found, and this harness needs {harness.title} {version_words(spec.version)}",
+            # What was found and where, then what is needed (persona p5, J3): never "not found" for it.
+            return Probe(False, f"{harness.title} {version} found in {app}; this harness needs {harness.title} "
+                                f"{version_words(spec.version)}",
                          version=version, python=python)
         return Probe(True, f"{harness.title} {version} found", version=version, python=python)
     tokens = shlex.split(spec.probe, posix=True)

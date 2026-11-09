@@ -7,8 +7,10 @@ page uses nothing but this, so a server could take the app's place later.
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -178,18 +180,35 @@ def put_settings(req: Request) -> dict[str, Any]:
 
 def install(req: Request) -> dict[str, Any]:
     """A harness from the .zip in the body -- or, as JSON `{path}`, from a
-    .zip on this computer."""
+    .zip or a harness folder on this computer (the box Home's drawer labels
+    "a harness folder or zip on this computer")."""
     had = {(e.harness.id, e.harness.version): e.built_in for e in req.home.harness_entries() if e.harness is not None}
     if (req.headers.get("Content-Type") or "").startswith("application/json"):
         raw = str(req.json().get("path") or "").strip().strip('"')
         path = Path(raw).expanduser()
-        if not raw or not path.is_absolute() or not path.is_file():
-            raise AppError("give the full path of the harness's .zip file, such as C:\\Users\\you\\Downloads\\pyvrp-1.0.0.zip")
-        harness = req.home.install(path.read_bytes(), path.name)
+        if raw and path.is_absolute() and path.is_dir():
+            harness = req.home.install(_zipped_folder(path), path.name + ".zip")
+        elif not raw or not path.is_absolute() or not path.is_file():
+            raise AppError("give the full path of a harness folder or its .zip file, such as "
+                           "C:\\Users\\you\\Downloads\\pyvrp-1.0.0.zip")
+        else:
+            harness = req.home.install(path.read_bytes(), path.name)
     else:
         harness = req.home.install(req.body, req.query.get("name") or "harness.zip")
     before = had.get((harness.id, harness.version))
     return {**describe_harness(harness), "already": None if before is None else "built in" if before else "installed"}
+
+
+def _zipped_folder(folder: Path) -> bytes:
+    """A harness folder as the .zip `install` takes: its files under the
+    folder's name, without Python's caches. A folder that is not a harness
+    is refused by the install, as a zip that is not one is."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for file in sorted(folder.rglob("*")):
+            if file.is_file() and "__pycache__" not in file.relative_to(folder).parts and file.suffix != ".pyc":
+                bundle.write(file, (Path(folder.name) / file.relative_to(folder)).as_posix())
+    return buffer.getvalue()
 
 
 def harness(req: Request) -> dict[str, Any]:

@@ -47,7 +47,9 @@ The installer is one zip, `evolvekit-app-<version>-win64.zip`, from whoever
 builds evolvekit for your team (`python tasks.py dist`); it needs no Python.
 Extract it into a folder of your own (Downloads, Desktop, Documents — never
 `C:\Users\<you>\evolvekit`, which is your library) and double-click
-`evolvekit-app.exe`. The exe is unsigned: if SmartScreen says *Windows
+`evolvekit-app.exe`: after Windows's *Extract All* it is in
+`<zip name>\evolvekit-app\evolvekit-app.exe`, one folder further in than the
+folder Extract All makes. The exe is unsigned: if SmartScreen says *Windows
 protected your PC*, choose *More info*, then *Run anyway*, for a zip from your
 team only; if Windows or an antivirus blocks it with no *Run anyway*, ask your
 IT team. The browser opens at the app; double-clicking again opens the app
@@ -365,7 +367,8 @@ estimate shows its likely range as a band through *today*, with both ends
 marked, *worst* and *best*, and the dashed 1 % limit.
 
 While a round's changes are being written by the AI the strip says so —
-*Writing changes: 7 of 12.* — until that round's runs begin. Under a live
+*Writing changes: 7 of 12.* — until that round's runs begin; a study without
+AI help writes no changes, so it never says it. Under a live
 run's sentence the strip gives two facts as the status document says them:
 what the AI has spent of its cap (*AI: $0.42 of $1.00*, or *AI: 4 requests*
 for a provider that counts requests), and after the first round, when the
@@ -480,7 +483,11 @@ case's change as the verdict computes it, the mean of the paired runs.
 Further down: **Settings to use** (or **Settings to keep**, when the answer
 is keep, with today's settings first) — what changed (old value → new, with what
 each setting does), *Show the settings file*, *Copy a summary*, *Open the
-report* (every number on one page, to read or send as `report.html`), the
+report* (every number on one page, to read or send as `report.html`: it
+leads with the verdict's line and advice; the search's figure comes after
+it, on the cases the search learned from, not checked; and when the verdict
+is not use, the settings file in it is headed *Settings found, not
+recommended (the verdict says keep today's)*), the
 harness's files (the settings, as flags, the data changes, the changed
 requests) and the study itself as one zip; **What next** — *Continue for
 another 22 h* (the same run goes on: the rounds done are kept, then the final
@@ -611,7 +618,8 @@ everything it does.
 | *… was already built in* after installing a `.zip` | nothing to do: that harness was there already |
 | a case *cannot be read* | open it: it is not a request the harness knows, or it is damaged; remove it |
 | *… is thin* under the plan | take one of the fixes it offers, or accept that the search may miss the best |
-| *fewer than 3 rounds* | take one of the three ways out the plan offers |
+| *fewer than 3 rounds* | press one of the plan's buttons (*Give each case 19 s*, *Allow 30 minutes*): each sets its value and works the plan out again; or take the other way out it names |
+| *The search did not run: …* | the time or a limit ended the run before its first round, so nothing was searched or compared: *Continue for …* gives the search its time |
 | *Not proven on the held-back cases* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
 | *Keep today's settings* and you have time | *Continue for another …*: the search goes on from its best, and the check runs again |
 | *the starting point breaks a guardrail* | the guardrail is stricter than today's plans: loosen it, or give the application more time per case |
@@ -754,6 +762,7 @@ names:
 | `study`, `run`, `phase` | the study's folder name, the run, and where the job is (`queued`, `starting`, `search`, `check`, `done`, `stopped`, `failed`) |
 | `decision` | `use`, `keep` or `worse` by the rule; `none` (nothing beat the starting point), `single` (one held-back case), `pending` (no final check yet), `stopped` (the check was stopped), `skipped` (any other skip, such as no held-back cases) |
 | `reason` | with `none` and `skipped`: the sentence the run recorded |
+| `not_run` | `true` with `skipped` when the search stopped before its first round: `line` is "The search did not run: <why, in plain words>." (such as *there was not enough time left for its first round*), the advice says nothing was searched and to continue it; the page, its Past runs and Home's card say the same and offer *Continue*, never "found nothing better" |
 | `line`, `advice` | the verdict's one sentence, as the Study page shows it, and the sentence after it |
 | `measure` | `{"kpi", "label", "unit", "direction"}` of the measure that decided |
 | `held_back` | `{"cases", "runs_per_case"}` |

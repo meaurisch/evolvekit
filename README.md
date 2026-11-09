@@ -2270,8 +2270,20 @@ evolvekit for your team makes it with `python tasks.py dist` and hands it on.
   into the app's folder; running it from a network drive or a read-only
   folder is untried. Never extract it into `C:\Users\<you>\evolvekit`: that
   folder is your library (below), not a place for the app.
-- **Start it:** double-click `evolvekit-app.exe` in the extracted
-  `evolvekit-app` folder. The exe is not signed, so Windows SmartScreen may say
+- **Start it:** *Extract All* makes a folder named after the zip, and the
+  app is one folder further in: the exe is
+  `<zip name>\evolvekit-app\evolvekit-app.exe`, for example
+  `Downloads\evolvekit-app-0.3.0-win64\evolvekit-app\evolvekit-app.exe`:
+
+  ```text
+  evolvekit-app-0.3.0-win64\      the folder Extract All makes
+    evolvekit-app\                the app's folder
+      evolvekit-app.exe           double-click this
+      evolvekit-cli.exe           the command line (below)
+      _internal\                  the app's own files
+  ```
+
+  Double-click `evolvekit-app.exe` there. The exe is not signed, so Windows SmartScreen may say
   *Windows protected your PC*: choose *More info*, then *Run anyway* — only
   for a zip you got from your team. An antivirus may scan it for a few
   seconds the first time. If Windows or your antivirus blocks it with no
@@ -2290,9 +2302,12 @@ evolvekit for your team makes it with `python tasks.py dist` and hands it on.
   studies, harnesses and settings, never the app's folder.
 - **PyVRP** comes as its own zip, `pyvrp-1.0.0.zip`, which
   `python tasks.py dist` writes beside the app's zip: whoever gives you the
-  app gives you that too. Drop it on Home, or use *Add a harness or zip*. The
-  application is still your own: for PyVRP, the Python that has PyVRP
-  installed — Set up lists the ones it finds, or paste its path. The two
+  app gives you that too. Drop it on Home, or use *Add a harness or zip*
+  and paste the path of the zip (or of a harness folder) into its box: the
+  app says *PyVRP 1.0.0 installed*. The application is still your own: for
+  PyVRP, the Python that has PyVRP installed — Set up lists the ones it
+  finds, or paste its path; a Python with another PyVRP is named with its
+  version and path, so you know which one not to use. The two
   harnesses built in need no Python at all: demo-tour's solver is in the
   app's folder at `_internal\examples\cli-solver\solver.py`, prompt-tune's
   pipeline at `_internal\examples\prompt-pipeline\pipeline.py`.

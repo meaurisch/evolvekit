@@ -1063,3 +1063,60 @@ def test_the_stop_notice_speaks_of_how_the_app_was_started():
                    "study is running (Home shows them); while one runs, extract it into a new folder and start "
                    "it from there.",
                    "The app has stopped. Studies that are running carry on. To open it again, run evolvekit app."]
+
+
+# -- persona p5, round 1 (J1, J2, J3, J4, J6, J7) ------------------------------------
+
+SETUP_PAGE = (STATIC / "js" / "pages" / "setup.js").read_text(encoding="utf-8")
+START_PAGE = (STATIC / "js" / "pages" / "start.js").read_text(encoding="utf-8")
+
+
+def test_a_search_that_did_not_run_says_so_on_home_and_offers_continue():
+    out = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "t", name: "T", kind: "finished", decision: "skipped",
+        not_run: true, line: "finished · the search did not run",
+        verdict: {says: "the search did not run", decision: "skipped",
+                  line: "The search did not run: there was not enough time left for its first round.",
+                  advice: "Keep today's settings for now: nothing was searched yet. Continue the run to give the search its time."}})));""")
+    assert out["kicker"] == "The search did not run" and out["head"].startswith("The search did not run: ")
+    assert out["actions"] == [{"text": "Continue", "act": "open-study", "arg": "t", "kind": "primary"}]
+    assert '"open-study"' in HOME_PAGE
+    words = _node("""process.stdout.write(JSON.stringify([EK.answerWords({decision: "skipped", not_run: true}).head,
+        EK.answerWords({decision: "skipped"}).head]));""")
+    assert words == ["The search did not run", "Nothing beat the starting point"]
+    strip = _strip_branches(STUDY_PAGE)
+    assert 'd === "skipped" && f.not_run' in strip and '"The search did not run"' in strip
+    table = _page_function(STUDY_PAGE, "changedTable")
+    assert '"Nothing: the search did not run."' in table, "never 'the starting point stayed the best' for it"
+
+
+def test_a_continuation_says_how_much_more_and_a_restart_says_restart():
+    out = _node("""function head(s) { return EK.cardOf(Object.assign({slug: "t", name: "T", kind: "running", phase: "search",
+        continued: true, rounds: {done: 0, planned: 4}}, s)).head; }
+      process.stdout.write(JSON.stringify([head({added_h: 0.167}), head({restarted: true}), head({})]));""")
+    assert out == ["Continued: 10 min more", "Continued after a restart", "Continued"]
+
+
+def test_the_install_confirms_by_name_and_the_box_takes_a_zip():
+    assert 'named + " installed"' in HOME_PAGE and '"Or a harness folder or zip on this computer"' in HOME_PAGE
+
+
+def test_home_says_loading_not_no_studies_until_its_first_answer():
+    render = _page_function(HOME_PAGE, "render")
+    assert "Loading…" in render and "(remembered.studies || []).length" in render
+
+
+def test_a_blocked_plans_fixes_are_buttons_and_its_reason_is_said_once():
+    block = _page_function(SETUP_PAGE, "planBlock")
+    assert '"way-fix"' in block and "p.blocked_reason" in block and "barText: p.blocked" not in block
+    assert '"way-fix": function' in SETUP_PAGE and "time_per_case_s: f.seconds" in SETUP_PAGE
+
+
+def test_the_finder_names_another_version_and_never_says_not_found_for_it():
+    block = _page_function(START_PAGE, "appBlock")
+    assert '"Another version of " + title + " found"' in block and '"Point to the Python that has it."' in block
+
+
+def test_the_settings_legend_says_the_goals_direction_and_not_checked():
+    assert "The band: values in tries over 1 % better" not in STUDY_PAGE
+    assert '"values in tries over 1 % " + (g.direction === "higher" ? "higher" : "lower")' in STUDY_PAGE
+    assert '" (not checked)"' in STUDY_PAGE

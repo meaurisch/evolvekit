@@ -651,6 +651,24 @@ def write_group_exports(root: str | Path, run_dir: str | Path, document: dict[st
 BAKEOFF = "bakeoff.json"
 """`{"refs": [...]}` in a bake-off's run directory, written by whoever starts it (`jobs.start`)."""
 NO_SEARCH = "branches compared: no search"
+NOT_RUN = "the search did not run"
+"""How a final check that a search stopped before its first round skips starts (`not_run_words` follows)."""
+
+
+def not_run_words(stop_reason: Any) -> str:
+    """Why a search stopped before its first round, in plain words: what
+    follows "The search did not run: ". The engine's own reason for anything
+    it has no plain words for."""
+    reason = str(stop_reason or "").strip()
+    if reason.startswith("time limit"):
+        return "there was not enough time left for its first round"
+    if reason.startswith(("budget.max_usd", "budget.max_tokens", "the AI budget was used up")):
+        return "the AI budget was used up before its first round"
+    if reason.startswith("budget.max_full_evals_per_day"):
+        return "today's limit on full runs was reached before its first round"
+    if reason == "stopped on request":
+        return "it was stopped before its first round"
+    return reason or "it stopped before its first round"
 
 
 def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
@@ -1135,7 +1153,16 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     """The best against the starting point on the held-back cases; with
     `extend`, more runs per case while time remains and the answer is open.
     `up` is the way from the run's folder to the study's (`GROUP_UP` for a
-    group's folder of a per-group run)."""
+    group's folder of a per-group run). A search that stopped before its
+    first round has nothing to check, and says so (`not_run_words`): never
+    that the starting point stayed the best, which no round looked into."""
+    search = job.state.get("search") or {}
+    if search.get("generations") == 0 and search.get("stop_reason") != NO_SEARCH:
+        if read_jsonl(run_dir / "runs.jsonl"):
+            _write_exports(run_dir, log, up)  # today's settings, as for any finished run
+        job.finish("done", final={"skipped": f"{NOT_RUN}: {not_run_words(search.get('stop_reason'))}",
+                                  "not_run": True})
+        return
     if not study.test:
         _write_exports(run_dir, log, up)
         job.finish("done", final={"skipped": "no cases were held back, so there is no final check"})

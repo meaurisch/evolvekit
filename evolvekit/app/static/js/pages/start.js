@@ -199,8 +199,12 @@
       <span class="type-small ink-2"${EK.attrs({ title: app.path })}>${app.mine ? "Ready on this computer" : "Found on this computer"}</span></div>${EK.button("Other", { kind: "quiet", size: "s", act: "other-app" })}</div>`;
     else {
       var near = (st.found || []).filter(function (x) { return x.version; })[0] || (st.found || [])[0];
-      line = html`<div class="app-line" role="alert">${EK.icon("warning", 20)}<div class="app-line-words"><span class="app-line-title">${label} not found</span>
-      <span class="type-small ink-2">${near ? near.message + ". " : ""}Point to it on this computer.</span></div>${EK.button("Find it", { kind: "secondary", size: "s", act: "other-app" })}</div>`;
+      // One found with another version says what it found and where, never "not found" (persona p5, J3):
+      // "PyVRP 0.13.4 found in C:\…\python.exe; this harness needs PyVRP 0.14.x. Point to the Python that has it."
+      var other = near && near.version && !near.ok, title = (st.harness || harnessOf(st.pick) || {}).title || label;
+      var python = ((st.harness || {}).application || {}).kind === "python";
+      line = html`<div class="app-line" role="alert">${EK.icon("warning", 20)}<div class="app-line-words"><span class="app-line-title">${other ? "Another version of " + title + " found" : label + " not found"}</span>
+      <span class="type-small ink-2">${near ? near.message + ". " : ""}${other ? (python ? "Point to the Python that has it." : "Point to the one it needs.") : "Point to it on this computer."}</span></div>${EK.button("Find it", { kind: "secondary", size: "s", act: "other-app" })}</div>`;
     }
     return html`${picker}${line}`;
   }

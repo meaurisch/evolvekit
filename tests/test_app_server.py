@@ -323,7 +323,19 @@ def test_a_harness_is_installed_from_a_path_on_this_computer(app, tmp_path):
     status, home = call(app, "GET", "/api/home")
     assert any(h["id"] == "demo-tour" and not h["built_in"] for h in home["harnesses"]), "the installed copy is listed"
     status, body = call(app, "POST", "/api/harnesses", {"path": "pyvrp-1.0.0.zip"})
-    assert status == 400 and "full path" in body["error"]
+    assert status == 400 and "full path of a harness folder or its .zip file" in body["error"]
+
+
+def test_a_harness_is_installed_from_a_folder_on_this_computer(app, tmp_path):
+    # Persona p5, J2: the box says "a harness folder or zip on this computer", and both are taken.
+    import shutil
+
+    folder = tmp_path / "my harness"
+    shutil.copytree(DEMO, folder, ignore=shutil.ignore_patterns("__pycache__"))
+    status, harness = call(app, "POST", "/api/harnesses", {"path": str(folder)})
+    assert status == 200 and harness["id"] == "demo-tour" and harness["title"] and harness["version"], harness
+    status, body = call(app, "POST", "/api/harnesses", {"path": str(tmp_path)})
+    assert status == 400, "a folder that is not a harness is refused, as a zip that is not one is"
 
 
 def test_the_detection_list_answers_for_a_study(app):

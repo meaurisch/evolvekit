@@ -675,3 +675,64 @@ def test_why_keep_is_never_given_when_the_goal_has_levels(tmp_path):
     v = build_verdict(root, run)
     assert v["decision"] == "keep" and v.get("levels") and "why_keep" not in v
     assert "why_keep" not in jobs.results(root, run, document_of)["final"]
+
+
+# -- a search that did not run (persona p5, J1) -----------------------------------
+
+NOT_RUN = "the search did not run: there was not enough time left for its first round"
+
+
+def _not_run(tmp_path: Path) -> tuple[Path, str]:
+    """The intern's first run: the starting point measured, then the time limit refused round 1."""
+    root, run = _run_of(tmp_path, "pending")
+    run_dir = root / "runs" / run
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job["plan"] = {"hours": 0.167, "rounds": 4, "combinations": 48}
+    job["search"] = {"generations": 0, "stop_reason": "time limit: another round would not finish within 0.124 h "
+                     "(0.01 h used; a round has taken up to 0.12 h)", "best_id": "seed", "aborted": False}
+    job["final"] = {"skipped": NOT_RUN, "not_run": True}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    rows = [json.loads(line) for line in (run_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+    (run_dir / "runs.jsonl").write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")  # the starting point only
+    (run_dir / "evolvekit.yaml").write_text("{}\n", encoding="utf-8")  # compiled: the run can go on
+    return root, run
+
+
+def test_the_final_check_of_a_search_that_did_not_run_says_why(tmp_path):
+    from evolvekit.harness.execute import Job, _final_check, not_run_words
+
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "runs.jsonl").write_text('{"id": "seed", "operator": "human-seed", "score": -100.0}\n', encoding="utf-8")
+    job = Job(run_dir, run_id="r1", study="s", plan={})
+    job.update(search={"generations": 0, "aborted": False, "best_id": "seed",
+                       "stop_reason": "time limit: another round would not finish within 0.124 h (0.01 h used; "
+                                      "a round has taken up to 0.12 h)"})
+    _final_check(None, None, None, run_dir, job, lambda line: None)  # type: ignore[arg-type]
+    assert job.state["phase"] == "done" and job.state["final"] == {"skipped": NOT_RUN, "not_run": True}
+    assert not_run_words("budget.max_full_evals_per_day reached: 94 of 94") == (
+        "today's limit on full runs was reached before its first round")
+    assert not_run_words("the AI budget was used up: $0.01 of $1.00 left") == "the AI budget was used up before its first round"
+
+
+def test_a_search_that_did_not_run_never_says_it_found_nothing_better(tmp_path):
+    from evolvekit.app.report import render_report
+    from evolvekit.harness.study import load_study
+
+    root, run = _not_run(tmp_path)
+    v = build_verdict(root, run)
+    assert v["line"] == "The search did not run: there was not enough time left for its first round."
+    assert v["advice"] == ("Keep today's settings (Demo tour's own defaults) for now: nothing was searched yet. "
+                           "Continue the run to give the search its time.")
+    assert v["decision"] == "skipped" and v["not_run"] is True
+    page = jobs.results(root, run, document_of)
+    assert page["headline"] == v["line"] and page["final"]["not_run"] and page["can_continue"] is True
+    words = [render_report(v, page), jobs.report_html(page), page["summary_text"]]
+    card = jobs.run_line(root, load_study(root), root / "runs" / run, document_of)  # Past runs and Home's card
+    assert card["line"] == "finished · the search did not run" and card["not_run"] and card["decision"] == "skipped"
+    assert card["verdict"]["line"] == v["line"]
+    for text in words + [card["line"], card["verdict"]["advice"]]:
+        assert "found nothing better" not in text and "stayed the best" not in text and "beat your starting" not in text
+    assert all(v["line"] in text for text in words)
+    assert v["how_it_ran"] == "None of the 4 planned rounds ran: only today's settings were measured."
+    assert v["learned_from"]["pct"] is None, "a search that did not run learned nothing"

@@ -68,6 +68,13 @@ NUMBERS = ("mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words")
 _NO_ANSWER = ("pending", "stopped", "skipped")
 _STAYED_BEST = "starting point stayed the best"
 """What `execute._final_check` records when no combination beat the start."""
+_NOT_RUN = "the search did not run"
+"""What `execute._final_check` records when the search stopped before its first round (`execute.NOT_RUN`)."""
+
+
+def _not_run(final: dict[str, Any]) -> bool:
+    """Whether the run's search stopped before its first round (`execute.NOT_RUN`)."""
+    return bool(final.get("not_run")) or str(final.get("skipped") or "").startswith(_NOT_RUN)
 DOWNLOADS = "downloads"
 VALUES = "values.json"
 """The values the exports in `downloads/` were written from: an input, not an export."""
@@ -191,6 +198,12 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
             "code change": "Keep today's code"}.get(what, "Keep today's settings and data")
     if baseline and what not in ("data changes", "code change"):
         keep += f" ({baseline})"
+    if final.get("skipped") and _not_run(final):
+        # Stopped before its first round (persona p5, J1): nothing was searched, so nothing is said about
+        # what a search would find -- only why it did not run, and that Continue gives it its time.
+        reason = str(final["skipped"])
+        return {"state": "skipped", "not_run": True, "line": reason[0].upper() + reason[1:] + ".",
+                "advice": f"{keep} for now: nothing was searched yet. Continue the run to give the search its time."}
     if final.get("skipped"):
         reason = str(final["skipped"])
         advice = (f"{keep}: the search found nothing better." if "starting point stayed the best" in reason else
@@ -472,6 +485,8 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                                 "decision": decision}
     if decision in ("skipped", "none"):
         document["reason"] = str(final.get("skipped") or "")
+    if words.get("not_run"):
+        document["not_run"] = True  # the search stopped before its first round: Continue gives it its time
     document["line"], document["advice"] = words.get("line", ""), words.get("advice", "")
     seed_row = next((r for r in jobs._rows(run_dir) if r.get("operator") == "human-seed"), None)
     candidates = (_candidates(job, comparison, goal, jobs._what(study), baseline, str((seed_row or {}).get("commit") or ""),
@@ -496,7 +511,9 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     if levels and named and not same:
         document["levels"] = levels
     # A bake-off with no branch shown ahead names no branch: no figure of an unnamed one here either.
-    document["learned_from"] = {"cases": len(study.training), "pct": learned_pct if named else None}
+    # A search that did not run learned nothing: no figure, not even "the same" (persona p5, J1).
+    document["learned_from"] = {"cases": len(study.training),
+                                "pct": learned_pct if named and not words.get("not_run") else None}
     document["rule"] = RULE_WORDS
     document["by_case"] = _held_rows(result, held)
     # Not with goals in order of importance: the range and the rows are the first measure's, while
@@ -604,6 +621,10 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
         combinations.append(f"about {plan['combinations']} planned")
     counts = f" ({', '.join(combinations)})" if combinations else ""
     rounds = f"Ran {done} of the {planned} planned round{'s' if planned != 1 else ''}"
+    if done == 0 and planned > 0:
+        # The search did not run (persona p5, J1): the line says why; this says only what was measured --
+        # never that "the rounds took longer than the plan assumed", which no round did.
+        return f"None of the {planned} planned round{'s' if planned != 1 else ''} ran: only today's settings were measured."
     if reason.startswith(AI_BUDGET_STOPS):
         if done < planned:
             return f"{rounds}{counts}: the AI budget was used up."

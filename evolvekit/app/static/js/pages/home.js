@@ -57,8 +57,10 @@
   /** After a change made here: draw from a fresh answer, never the remembered one. */
   function freshRender() { remembered = null; EK.rerender(); }
   function render(main, slug, query, gen) {
-    // Back on Home: the last answer at once, then the fresh one when it differs.
-    if (remembered) {
+    // Back on Home: the last answer at once, then the fresh one when it differs -- unless the last
+    // answer had no study: "No studies yet" would be said of a library that may have one by now
+    // (persona p5, J7), so "Loading…" until this visit's first answer.
+    if (remembered && ((remembered.studies || []).length || (remembered.trash || []).length)) {
       data = remembered;
       draw(main, query);
       EK.get("/api/home").then(function (d) {
@@ -68,6 +70,7 @@
       }).catch(function () { /* the page shows what it had */ });
       return Promise.resolve().then(function () { poll(main, query, gen); });
     }
+    EK.mount(main, html`<div class="page"><div class="page-inner"><p class="loading" role="status">Loading…</p></div></div>`);
     return EK.get("/api/home").then(function (d) {
       if (!EK.isCurrent(gen)) return;
       data = remembered = d;
@@ -169,7 +172,9 @@
     }).catch(EK.fail);
   }
   function installed(h) {
-    EK.toast("done", h.already ? h.title + " is already " + h.already : "Installed " + h.title + " " + (h.version || ""));
+    // "PyVRP 1.0.0 installed": the harness's title and version (persona p5, J2).
+    var named = h.title + (h.version ? " " + h.version : "");
+    EK.toast("done", h.already ? named + " is already " + h.already : named + " installed");
     freshRender();
   }
 
@@ -200,6 +205,7 @@
       },
       "compare-with": function (el) { EK.go("#/compare?a=" + EK.q(el.getAttribute("data-arg"))); },
       runs: function (el) { EK.go("#/study/" + EK.q(el.getAttribute("data-arg")) + "?runs=1"); },
+      "open-study": function (el) { EK.go("#/study/" + EK.q(el.getAttribute("data-arg"))); },
       zip: function (el) { EK.closeMenus(); location.href = EK.withToken(EK.studyPath(el.getAttribute("data-arg"), "/download/study")); },
       archive: function (el) {
         var s = find(el.getAttribute("data-arg"));
@@ -249,7 +255,7 @@
   }
   function addBody() {
     return html`<div class="sub-section"><h3 class="type-heading">Add a harness or zip</h3>${dropZone()}
-      <form class="sub-section" data-submit="install">${EK.textInput({ id: "harness-path", label: "Or a harness folder on this computer", mono: true, placeholder: "C:\\…\\my-harness" })}
+      <form class="sub-section" data-submit="install">${EK.textInput({ id: "harness-path", label: "Or a harness folder or zip on this computer", mono: true, placeholder: "C:\\…\\pyvrp-1.0.0.zip" })}
       <div>${EK.button("Install", { kind: "secondary", type: "submit" })}</div></form></div>`;
   }
   function addActs() {

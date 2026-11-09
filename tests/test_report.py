@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 
 import pytest
@@ -177,3 +178,38 @@ def test_report_on_a_run_with_no_final_check(tmp_path, capsys):
     assert main(["study", "report", root.name, "--markdown", "--home", _home(root)]) == 0
     out = capsys.readouterr().out
     assert all(f"\n{heading}" in out for heading in HEADINGS)
+
+
+def test_the_html_report_leads_with_the_verdict_and_labels_the_search_figure(keep_run):
+    # Persona p5, J5: "The best settings found give 0.6 % lower distance" was the headline, above the advice to keep.
+    from test_app_results import document_of
+
+    root, _ = keep_run
+    v = build_verdict(root, RUN)
+    data = jobs.results(root, RUN, document_of)
+    assert data["headline"].endswith("on the cases the search learned from, not checked.")
+    page = jobs.report_html(data, ("Demo tour settings (JSON)", '{"restart_after": 13000}'))
+    body = page.split("<main>", 1)[1]
+    first = body.index("class=\"headline\"")
+    line, advice, search = (html.escape(text) for text in (v["line"], v["advice"], data["headline"]))
+    assert body.index(line) > first and body.index(advice) > first
+    assert body.index(line) < body.index(search) and body.index(advice) < body.index(search)
+    assert "on the cases the search learned from, not checked" in body
+    assert "<h2>Settings found, not recommended (the verdict says keep today's)</h2>" in body
+    assert "<h2>Demo tour settings (JSON)</h2>" not in body
+
+
+def test_the_html_reports_settings_are_named_as_they_are_when_the_verdict_says_use(use_run):
+    from test_app_results import document_of
+
+    root, _ = use_run
+    page = jobs.report_html(jobs.results(root, RUN, document_of), ("Demo tour settings (JSON)", "{}"))
+    assert "<h2>Demo tour settings (JSON)</h2>" in page and "not recommended" not in page
+
+
+def test_the_markdown_reports_search_figure_is_not_checked(keep_run):
+    root, _ = keep_run
+    text = _text(root)
+    assert text.index("## Verdict") < text.index("## How it ran")
+    learned = next(line for line in text.splitlines() if line.startswith("- Cases learned from:"))
+    assert learned.endswith("on the cases the search learned from, not checked)"), learned

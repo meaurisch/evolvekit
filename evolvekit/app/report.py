@@ -203,7 +203,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         out.append("Nothing changed.")
 
     learned, held = verdict.get("learned_from") or {}, verdict.get("held_back") or {}
-    ran = [f"Cases learned from: {learned['cases']}" + (f" ({_change(learned['pct'], direction)} on them)" if learned.get("pct") is not None else "")
+    ran = [f"Cases learned from: {learned['cases']}" + (f" ({_change(learned['pct'], direction)} on the cases the search learned from, not checked)"
+                                                         if learned.get("pct") is not None else "")
            ] if learned.get("cases") is not None else []
     tried = verdict.get("combinations")
     if isinstance(tried, int) and tried >= 1:

@@ -28,6 +28,7 @@ from statistics import fmean
 from typing import Any, Callable
 
 from evolvekit import resources
+from evolvekit.config import MODEL_FREE_OPERATORS
 from evolvekit.app import AppError, detach
 from evolvekit.app.prices import price_of
 from evolvekit.app.store import safe_relative
@@ -1475,12 +1476,17 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     improvement = ((document.get("progress") or {}).get("improvement") or {})
     pct = improvement.get("pct")
     what = _what(study)
-    learned = "on the cases the search learned from"
+    # Not checked: the verdict is the only claim (persona p5, J5), so the search's figure says so.
+    learned = "on the cases the search learned from, not checked"
     start_words = f"your starting point ({_baseline(study, harness, seed)})"
     if job.get("bakeoff"):
         count = len(job["bakeoff"])
         headline = (f"{count} branch{'es' if count != 1 else ''} checked against {start_words} "
                     "on the held-back cases, with no search.")
+    elif verdict_doc._not_run(job.get("final") or {}):
+        # Stopped before its first round (persona p5, J1): no search figure, and no "found nothing better".
+        reason = str((job.get("final") or {}).get("skipped") or "the search did not run")
+        headline = reason[0].upper() + reason[1:] + "."
     elif best is None or seed is None:
         headline = "The search has no finished result yet."
     elif best.get("id") == seed.get("id") or not pct or pct <= 0:
@@ -1732,17 +1738,19 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
     rule_note = f"<div class='help' style='margin-top:6px'>{esc(str(final['rule']))}</div>" if final.get("rule") else ""
     check_note = (f"<p class='help'>The best and the starting point, each run {'once' if seeds == 1 else f'{seeds} times'} on every "
                   "held-back case: cases the search never saw.</p>") if seeds else ""
-    attached_html = (f"<h2>{esc(attached[0])}</h2><div class='card'><pre>{esc(attached[1])}</pre></div>" if attached else "")
     rules_html = ("<h2>Rules every combination kept</h2><div class='card'><ul>"
                   + "".join(f"<li>{esc(rule)}</li>" for rule in data.get("rules") or []) + "</ul></div>") if data.get("rules") else ""
     learned = ", ".join(Path(c).stem for c in data["cases"]["training"])
     held = ", ".join(Path(c).stem for c in data["cases"]["test"]) or "none"
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
     kinds = data.get("per_group")
-    headline, advice, state, of = data["headline"], final.get("advice") or "", final.get("state"), ""
-    kinds_html = group_head = ""
+    # The verdict is the only claim (persona p5, J5): its line and advice lead; the search's figure follows,
+    # on the cases the search learned from and not checked -- for a run that never searched, not at all.
+    headline, advice, state, of = final.get("line") or "", final.get("advice") or "", final.get("state"), ""
+    search_html = ("" if final.get("not_run") or data["headline"] == headline
+                   else f"<div class='card search'>{esc(data['headline'])}</div>")
+    kinds_html = ""
     if kinds:
-        group_head = f"<div class='card'><div class='headline'>{esc(data['headline'])}</div></div>"  # the group's search
         # A run per kind of case: the verdict is the run's own; every figure below is one group's, named.
         headline, advice = kinds.get("line") or "", kinds.get("advice") or ""
         state = {"use": "confirmed", "single": "single"}.get(str(kinds.get("decision")), "unclear")
@@ -1754,6 +1762,18 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
                       + (f"<h3>Which cases get which settings</h3><div class='card'><ul>{rule}</ul></div>" if rule else "")
                       + f"<h2>The group {esc(kinds['group'])}</h2><p class='help'>Everything below is the group "
                       f"{esc(kinds['group'])}'s alone: its search, its final check and its figures.</p>")
+    # The verdict's line leads the page: the final check's card says it again only for one group of a run per
+    # kind of case (whose own line it is), or when there is no account of the runs to give instead.
+    final_words = esc(final["line"]) if kinds or not check_note else ""
+    # The file's own name only when the verdict says use it; else what it is (persona p5, J5).
+    use_it = (str(kinds.get("decision")) == "use" if kinds
+              else final.get("state") == "confirmed" and final.get("decision", "use") == "use")
+    if attached and not use_it:
+        attached_html = ("<h2>Settings found, not recommended (the verdict says keep today's)</h2>"
+                         f"<p class='help'>{esc(attached[0])}, as the search found them.</p>"
+                         f"<div class='card'><pre>{esc(attached[1])}</pre></div>")
+    else:
+        attached_html = (f"<h2>{esc(attached[0])}</h2><div class='card'><pre>{esc(attached[1])}</pre></div>" if attached else "")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(data['study'])}: results</title>
@@ -1786,9 +1806,9 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 <div class="advice" data-state="{esc(str(state))}">{esc(advice)}</div>{rule_note}</div>
 {kinds_html}
 <div class="facts">{facts_html}</div>
-{group_head}
+{f"<h2>The search{esc(of)}</h2>{search_html}" if search_html else ""}
 <h2>The final check{esc(of)}</h2>
-<div class="card final" data-state="{esc(str(final.get('state')))}">{esc(final['line'])}{check_note}</div>
+<div class="card final" data-state="{esc(str(final.get('state')))}">{final_words}{check_note}</div>
 {by_case}
 <h2>Every measure{esc(of)}</h2>
 <div class="card wrap"><table><thead><tr><th rowspan="2">Measure</th><th class="n group" colspan="2">Cases the search learned from</th><th class="n group" colspan="2">Held-back cases</th></tr>
@@ -1907,6 +1927,9 @@ def writing(run_dir: Path, job: dict[str, Any]) -> dict[str, int] | None:
     run's own event log, which every child's writing appends to."""
     if job.get("phase") != "search":
         return None
+    plan = job.get("plan") or {}
+    if "ai_change_s" in plan and not float(plan.get("ai_change_s") or 0) > 0:
+        return None  # a study that writes no AI changes: its children are drawn in an instant (persona p5, J6)
     path = run_dir / "events.jsonl"
     try:
         with path.open("rb") as handle:
@@ -1916,7 +1939,7 @@ def writing(run_dir: Path, job: dict[str, Any]) -> dict[str, int] | None:
             tail = handle.read().decode("utf-8", errors="replace").splitlines()
     except OSError:
         return None
-    done = 0
+    done, by_ai = 0, False
     for line in reversed(tail if size <= WRITING_TAIL else tail[1:]):  # the first line may be cut
         try:
             event = json.loads(line)
@@ -1927,10 +1950,13 @@ def writing(run_dir: Path, job: dict[str, Any]) -> dict[str, int] | None:
             return None
         if kind == "candidate_bred":
             done += 1
+            by_ai = by_ai or str(event.get("operator") or "") not in MODEL_FREE_OPERATORS
         elif kind == "generation_started":
             planned = event.get("children_planned")
             if not isinstance(event.get("generation"), int) or event["generation"] < 1 or not isinstance(planned, int):
                 return None
+            if done and not by_ai:
+                return None  # every child so far was drawn without the AI: nothing is being written
             return {"done": min(done, planned), "planned": planned}
     return None
 
@@ -2097,7 +2123,11 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
                 # Not "better": nothing claims that before the final check does.
                 line += f" · {_best_says(pct, goal)} so far, not checked yet"
         facts.update({"left_s": left, "hours": hours, "continued": _continued(job) or bool(job.get("resumed_at")),
-                      "finish_at": finish_at})
+                      "finish_at": finish_at,
+                      # Which: more time asked for ("Continued: 10 min more"), or a restart after a stop or a
+                      # crash -- never "after a restart" for a continuation (persona p5, J6).
+                      "added_h": float(job["hours_added"]) if _continued(job) and job.get("hours_added") else None,
+                      "restarted": bool(job.get("resumed_at")) and not _continued(job)})
         if state == "check":
             facts["check"] = _check_progress(run_dir, job, plan, study)
         ahead = pace(((document.get("progress") or {}).get("series") or []), plan, job)
@@ -2114,8 +2144,11 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
             facts["branch"] = branch  # what `study pr` made for this run
         if final.get("skipped"):
             reason = str(final["skipped"]).split(":")[0].split(",")[0]  # "the starting point stayed the best"
-            return _with_verdict(root, run_dir, document_of, {"kind": "finished", "run": run_dir.name,
-                                                              "line": f"finished · {reason}", **facts, "decision": "skipped"})
+            card = {"kind": "finished", "run": run_dir.name, "line": f"finished · {reason}", **facts, "decision": "skipped"}
+            if verdict_doc._not_run(final):
+                # "finished · the search did not run": the card offers Continue, never "nothing better" (J1).
+                card.update({"not_run": True, "tone": "warn"})
+            return _with_verdict(root, run_dir, document_of, card)
         comparison = verdict_doc._check_of(run_dir, final)[0]  # marks a change no run told from today's
         results = (comparison or {}).get("per_candidate") or {}
         own = results.get(final.get("candidate") or "") or {}

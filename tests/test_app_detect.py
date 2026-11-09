@@ -69,3 +69,18 @@ def test_the_interpreter_running_evolvekit_is_asked_for_real():
         assert mine["ok"] is False and mine["message"].endswith("no pyvrp")
     else:
         pytest.skip("this interpreter has PyVRP")
+
+
+def test_a_python_with_another_pyvrp_says_what_it_found_and_where(tmp_path, monkeypatch):
+    # Persona p5, J3: "PyVRP 0.13.4 found in <path>; this harness needs PyVRP 0.14.x" -- never "not found".
+    import subprocess
+
+    from evolvekit.harness import probe
+
+    python = _interpreter(tmp_path / "old env")
+    answer = subprocess.CompletedProcess([], 0, stdout='{"python": "3.12.10", "found": true, "version": "0.13.4"}\n',
+                                         stderr="")
+    monkeypatch.setattr(probe.subprocess, "run", lambda *a, **k: answer)
+    said = probe.probe_application(PYVRP, str(python))
+    assert not said.ok and said.version == "0.13.4"
+    assert said.message == f"PyVRP 0.13.4 found in {python}; this harness needs PyVRP 0.14.x"
