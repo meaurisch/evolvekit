@@ -126,7 +126,7 @@ def test_the_final_check_as_far_as_it_got(tmp_path):
     from evolvekit.stats import log_gain
 
     own = verdict_summary([log_gain(b, n, "minimize") for b, n in ((100, 98), (200, 194), (300, 297))],
-                          prior_scale=None, direction="minimize")
+                          direction="minimize")
     assert (c["mean"], c["ci95"], c["chance"], c["worst"]) == (own["mean"], own["ci95"], own["chance"], own["worst"]),         "the verdict's own quantity: log gains through verdict_summary, not a mean of percentages"
 
 

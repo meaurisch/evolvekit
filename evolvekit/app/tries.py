@@ -59,8 +59,7 @@ def tree_run(run_dir: Path) -> bool:
 
 def _stamp(run_dir: Path) -> tuple[Any, ...]:
     out = []
-    for name in ("events.jsonl", "runs.jsonl", "confirm/final/events.jsonl", "confirm/final/comparison.json", "job.json",
-                 CONFIG):
+    for name in ("events.jsonl", "runs.jsonl", "confirm/final/events.jsonl", "job.json", CONFIG):
         path = run_dir / name
         try:
             st = path.stat()
@@ -267,9 +266,8 @@ def _now_h(t0: datetime, events: list[dict[str, Any]]) -> float:
 def _check(run_dir: Path, objective: str, minimize: bool) -> dict[str, Any] | None:
     """The final check as far as it got: pairs done, per-case gains, and the
     summary -- the verdict's own (`confirm.verdict_summary`) over the cases'
-    log gains, with the prior the last written comparison used (from the data
-    before there is one), so the numbers are the quantity the verdict reads."""
-    from evolvekit.confirm import PRIOR_FROM_DATA, verdict_summary
+    log gains, so the numbers are the quantity the verdict reads."""
+    from evolvekit.confirm import verdict_summary
 
     events = _lines(run_dir / "confirm" / "final" / "events.jsonl")
     if not events:
@@ -292,22 +290,9 @@ def _check(run_dir: Path, objective: str, minimize: bool) -> dict[str, Any] | No
             if gain is not None:
                 per.setdefault(case, []).append(gain)
     gains = {case: fmean(v) for case, v in per.items()}
-    prior_scale, prior = _prior_written(run_dir)
-    summary = (verdict_summary(list(gains.values()), prior_scale=prior_scale, direction=direction,
-                               prior=prior or PRIOR_FROM_DATA) if gains else {})
+    summary = verdict_summary(list(gains.values()), direction=direction) if gains else {}
     return {"pairs": sum(len(v) for v in per.values()), "runs_per_case": planned, "cases": len(gains),
             "per_case": {k: round(pct_from_log(v, direction), 4) for k, v in gains.items()},
             "mean": summary.get("mean"), "ci95": summary.get("ci95"), "chance": summary.get("chance"),
             "worst": summary.get("worst")}
 
-
-def _prior_written(run_dir: Path) -> tuple[float | None, str | None]:
-    """The prior scale and its label of the final check's last written comparison, if any."""
-    try:
-        written = json.loads((run_dir / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None, None
-    scale = written.get("prior_scale") if isinstance(written, dict) else None
-    if isinstance(scale, (int, float)) and scale > 0:
-        return float(scale), str(written.get("prior") or "") or None
-    return None, None

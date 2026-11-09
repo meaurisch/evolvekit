@@ -23,7 +23,7 @@ from typing import Any, Hashable, Mapping, Sequence
 
 __all__ = [
     "t_cdf", "wilcoxon_signed_rank", "paired_summary", "per_instance_means",
-    "log_gain", "pct_from_log", "margin_log", "Posterior", "posterior_mean_t", "PRIOR_EFFECT_SCALE",
+    "log_gain", "pct_from_log", "margin_log", "Posterior", "posterior_mean_t",
 ]
 
 # Two-sided 95 % critical values of Student's t, by degrees of freedom.
@@ -194,26 +194,16 @@ def per_instance_means(gains: Mapping[Hashable, float]) -> list[float]:
     return [fmean(values) for values in groups.values()]
 
 
-PRIOR_EFFECT_SCALE = math.log(1.5)
-"""The prior's sd of the true mean gain, on the log scale: a 50 % change is
-a large effect, whatever the run-to-run noise (`posterior_mean_t`)."""
-
-_KAPPA0_FLOOR = 1e-6
-"""The smallest prior weight on the mean: the prior never weighs exactly nothing."""
-
-
 @dataclass(frozen=True)
 class Posterior:
     """The posterior of the true mean gain: Student's t with `df` degrees of
-    freedom, location `mu` and scale `scale` (log units), from `n` cases and
-    a prior of scale `prior_scale`. `scale == 0` only when there was no spread
-    at all, neither in the cases nor in the prior: the mean is then known."""
+    freedom, location `mu` and scale `scale` (log units), from `n` cases.
+    `scale == 0` only when every case moved by exactly the same amount."""
 
     n: int
     mu: float
     scale: float
     df: int
-    prior_scale: float
 
     def p_above(self, x: float) -> float:
         """The probability that the true mean gain is above `x`."""
@@ -254,37 +244,23 @@ def _t90(df: int) -> float:
     return (low + high) / 2.0
 
 
-def posterior_mean_t(d: Sequence[float], prior_scale: float) -> Posterior:
-    """The Normal-inverse-gamma update of the per-case gains `d` (log units).
+def posterior_mean_t(d: Sequence[float]) -> Posterior:
+    """The posterior of the true mean of the per-case gains `d` (log units)
+    under the reference prior p(mu, sigma^2) ~ 1 / sigma^2 -- no prior
+    information on the mean or the spread, whatever the spread's source:
 
-    The prior: mu | sigma^2 ~ N(0, sigma^2 / kappa0), sigma^2 ~ Scaled-Inv-chi^2(1,
-    sigma0^2) with sigma0 = `prior_scale` (the run-to-run spread) and kappa0 =
-    sigma0^2 / tau0^2, tau0 = log 1.5 (`PRIOR_EFFECT_SCALE`), floored at 1e-6: the
-    prior on the mean has a sd of about tau0 whatever the noise, so the
-    chance grows with the evidence and is never capped by the prior. Then
+        mu | d ~ Student-t(n - 1, location dbar, scale s / sqrt(n))
 
-        kappa_n = kappa0 + n;  mu_n = n * dbar / kappa_n;  nu_n = 1 + n
-        nu_n * sigma_n^2 = sigma0^2 + S + kappa0 * n / kappa_n * dbar^2
-        mu | d ~ Student-t(nu_n, mu_n, sigma_n / sqrt(kappa_n))
-
-    with S the sum of squared deviations from dbar. With no spread at all
-    (sigma0 = 0 and S = 0) the mean is known: scale 0, never a division by 0."""
+    with dbar the mean and s the sample sd of `d`. Its chance of a gain is
+    the one-sided t level, read as a posterior under this stated prior. With
+    no spread at all (s = 0) the mean is known: scale 0, never a division by
+    0. Raises `ValueError` with fewer than two gains: one case gives no spread."""
     n = len(d)
-    if n == 0:
-        raise ValueError("posterior_mean_t: no gains to update on")
-    if prior_scale < 0 or not math.isfinite(prior_scale):
-        raise ValueError(f"posterior_mean_t: the prior scale must be a finite number >= 0, got {prior_scale}")
+    if n < 2:
+        raise ValueError(f"posterior_mean_t: needs at least two gains, got {n}")
     dbar = fmean(d)
-    spread = sum((x - dbar) ** 2 for x in d)
-    sigma0_2 = prior_scale * prior_scale
-    kappa0 = max(sigma0_2 / (PRIOR_EFFECT_SCALE * PRIOR_EFFECT_SCALE), _KAPPA0_FLOOR)
-    kappa_n = kappa0 + n
-    mu = n * dbar / kappa_n
-    nu = 1 + n
-    if sigma0_2 == 0 and spread == 0:
-        return Posterior(n=n, mu=mu, scale=0.0, df=nu, prior_scale=prior_scale)
-    sigma_n2 = (sigma0_2 + spread + kappa0 * n / kappa_n * dbar * dbar) / nu
-    return Posterior(n=n, mu=mu, scale=math.sqrt(sigma_n2 / kappa_n), df=nu, prior_scale=prior_scale)
+    s = stdev(d)
+    return Posterior(n=n, mu=dbar, scale=s / math.sqrt(n), df=n - 1)
 
 
 def _sign(direction: str) -> float:

@@ -20,7 +20,7 @@ from evolvekit.confirm import (
     USE_MARGIN_PCT,
     Comparison,
     _analyse,
-    _prior_of,
+    _run_noise_of,
     confirm,
     decide,
     decision_of,
@@ -150,38 +150,39 @@ def test_per_instance_means_average_the_seeds_within_each_instance():
     assert per_instance_means({}) == []
 
 
-def test_the_posterior_is_the_normal_inverse_gamma_update():
-    """Decision 1: kappa0 = sigma0^2 / tau0^2 with tau0 = log 1.5, then the NIG update as written."""
+def test_the_posterior_is_students_t_under_the_reference_prior():
+    """Decision 11: p(mu, sigma^2) ~ 1/sigma^2 gives mu | d ~ t(n - 1, dbar, s / sqrt(n))."""
     from evolvekit.stats import posterior_mean_t
 
-    d, prior = [0.02, 0.01, 0.03, -0.01], 0.02
-    n, dbar = 4, 0.0125
-    kappa0 = prior ** 2 / math.log(1.5) ** 2
-    S = sum((x - dbar) ** 2 for x in d)
-    post = posterior_mean_t(d, prior)
-    assert post.n == 4 and post.df == 5 and post.mu == pytest.approx(n * dbar / (kappa0 + n))
-    sigma2 = (prior ** 2 + S + (kappa0 * n / (kappa0 + n)) * dbar ** 2) / 5
-    assert post.scale == pytest.approx(math.sqrt(sigma2) / math.sqrt(kappa0 + n))
-    assert post.p_above(0.0) == pytest.approx(1 - t_cdf((0.0 - post.mu) / post.scale, 5))
+    d = [0.02, 0.01, 0.03, -0.01]
+    dbar, s = statistics.fmean(d), statistics.stdev(d)
+    post = posterior_mean_t(d)
+    assert post.n == 4 and post.df == 3 and post.mu == pytest.approx(0.0125)
+    assert post.scale == pytest.approx(s / 2)
+    assert post.p_above(0.0) == pytest.approx(1 - t_cdf(-dbar / (s / 2), 3))
+    assert post.p_above(0.0) == pytest.approx(paired_summary(d)["chance"]), "the one-sided t level, read as a posterior"
     low, high = post.interval95()
-    assert (low + high) / 2 == pytest.approx(post.mu) and high - low == pytest.approx(2 * 2.571 * post.scale, rel=1e-3)
+    assert (low, high) == pytest.approx(tuple(paired_summary(d)["ci95"]))
+    assert high - low == pytest.approx(2 * 3.182 * post.scale, rel=1e-3)
     assert post.p_above(post.quantile_low(0.05)) == pytest.approx(0.95, abs=1e-6)
     with pytest.raises(ValueError):
-        posterior_mean_t([], 0.1)
+        posterior_mean_t([])
     with pytest.raises(ValueError):
-        posterior_mean_t([0.1], -0.1)
+        posterior_mean_t([0.1])
 
 
 def test_the_chance_shown_is_the_chance_the_rule_reads():
-    s = verdict_summary([0.013, 0.006, 0.019], prior_scale=None, direction="minimize")
-    assert s["prior"] == "from the data" and s["prior_scale"] == pytest.approx(statistics.stdev([0.013, 0.006, 0.019]))
+    d = [0.013, 0.006, 0.019]
+    s = verdict_summary(d, direction="minimize")
+    assert s["prior"] == "reference" and "prior_scale" not in s
     assert decide(s) == s["decision"] == "use"
+    assert s["chance"] == pytest.approx(0.9611, abs=1e-4) and s["chance_margin"] == pytest.approx(0.9868, abs=1e-4)
     assert s["chance"] >= USE_CHANCE and s["chance_margin"] >= USE_MARGIN_CHANCE
     assert s["worst"] >= -USE_MARGIN_PCT, "use means the worst case shown is within 1 %"
     assert s["ci95"][0] <= s["worst"] <= s["mean"], "worst is the 5 % quantile, inside the 95 % range"
+    assert s["mean"] == pytest.approx(100 * (1 - math.exp(-statistics.fmean(d)))), "the mean shown is the cases' mean"
     assert s["frequentist"]["label"].startswith("frequentist")
-    assert s["ci95"][0] <= s["mean"] <= s["ci95"][1] and s["ci95"][0] <= s["paired_mean"] <= s["ci95"][1]
-    assert "sd" not in s and s["log"]["sd"] == pytest.approx(statistics.stdev([0.013, 0.006, 0.019])), \
+    assert "sd" not in s and s["log"]["sd"] == pytest.approx(statistics.stdev(d)), \
         "the spread is on the log scale and said so: no top-level sd beside percent figures"
 
 
@@ -190,53 +191,51 @@ def test_use_holds_exactly_when_the_chance_and_the_worst_case_the_page_shows_say
     rng = random.Random(7)
     for _ in range(300):
         d = [rng.gauss(rng.uniform(-0.02, 0.04), rng.uniform(0.001, 0.03)) for _ in range(rng.randint(2, 8))]
-        s = verdict_summary(d, prior_scale=rng.choice([None, 0.01, 0.03]), direction=rng.choice(["minimize", "maximize"]))
+        s = verdict_summary(d, direction=rng.choice(["minimize", "maximize"]))
         rule = s["chance"] >= USE_CHANCE and s["worst"] >= -USE_MARGIN_PCT - 1e-9
         assert (s["decision"] == "use") == rule, s
 
 
 def test_no_spread_is_no_division():
-    """Review Focus 1, as decision 1 re-derives it: with every effect equal and no
-    prior spread the mean is known -- no division by zero, and the rule decides."""
-    zero = verdict_summary([0.0, 0.0, 0.0], prior_scale=None, direction="minimize")
+    """Review Focus 1, as decisions 1 and 11 rule: with every effect equal the mean is
+    known -- no division by zero, and the rule decides."""
+    zero = verdict_summary([0.0, 0.0, 0.0], direction="minimize")
     assert zero["chance"] == 0.5 and zero["decision"] == "keep"
-    same = verdict_summary([0.02, 0.02, 0.02], prior_scale=None, direction="minimize")
+    same = verdict_summary([0.02, 0.02, 0.02], direction="minimize")
     assert same["chance"] == 1.0 and same["decision"] == "use"
-    down = verdict_summary([-0.02, -0.02, -0.02], prior_scale=None, direction="maximize")
+    down = verdict_summary([-0.02, -0.02, -0.02], direction="maximize")
     assert down["chance"] == 0.0 and down["decision"] == "worse"
-    noisy = verdict_summary([0.02, 0.02, 0.02], prior_scale=0.02, direction="minimize")
-    assert 0.5 < noisy["chance"] < 1.0, "a prior spread leaves doubt, finite and below 1"
+    near = verdict_summary([0.02, 0.021, 0.019], direction="minimize")
+    assert 0.99 < near["chance"] < 1.0, "a little spread leaves a little doubt, finite and below 1"
 
 
-def test_the_chance_is_not_capped_by_the_prior():
-    assert verdict_summary([0.05, 0.052, 0.048], prior_scale=None, direction="minimize")["chance"] > 0.99
-    assert verdict_summary([0.26, 0.265], prior_scale=0.01, direction="maximize")["chance"] > 0.975, \
+def test_the_chance_is_not_capped():
+    assert verdict_summary([0.05, 0.052, 0.048], direction="minimize")["chance"] > 0.99
+    assert verdict_summary([0.26, 0.265], direction="maximize")["chance"] > 0.975, \
         "two cases of a 30 % gain with a small spread can say more than 39 in 40"
 
 
 def test_the_rule_decides_on_the_posterior():
-    assert decide(verdict_summary([-0.09, 0.115, -0.004], prior_scale=None, direction="minimize")) == "keep"
-    assert decide(verdict_summary([-0.02, -0.02, -0.02], prior_scale=None, direction="minimize")) == "worse"
-    assert decide(verdict_summary([-0.015, -0.010, -0.012, -0.008], prior_scale=None, direction="minimize")) == "worse"
-    assert decide(verdict_summary([0.05, 0.052, 0.048], prior_scale=None, direction="minimize")) == "use"
-    assert decide(verdict_summary([-0.08, 0.01, 0.012], prior_scale=None, direction="minimize")) == "keep"
-    single = verdict_summary([0.004], prior_scale=None, direction="minimize")
+    assert decide(verdict_summary([-0.09, 0.115, -0.004], direction="minimize")) == "keep"
+    assert decide(verdict_summary([-0.02, -0.02, -0.02], direction="minimize")) == "worse"
+    assert decide(verdict_summary([-0.015, -0.010, -0.012, -0.008], direction="minimize")) == "worse"
+    assert decide(verdict_summary([0.05, 0.052, 0.048], direction="minimize")) == "use"
+    assert decide(verdict_summary([-0.08, 0.01, 0.012], direction="minimize")) == "keep"
+    single = verdict_summary([0.004], direction="minimize")
     assert decide(single) == single["decision"] == "single" and single["chance"] is None
     assert single["verdict"] == "one instance: no chance can be given"
-    nothing = verdict_summary([], prior_scale=None, direction="minimize")
+    nothing = verdict_summary([], direction="minimize")
     assert decide(nothing) == nothing["decision"] == "none" and nothing["verdict"] == "nothing to compare"
 
 
 def test_the_sentence_says_the_decision_and_its_numbers():
-    use = verdict_summary([0.05, 0.052, 0.048], prior_scale=None, direction="minimize")
-    assert use["verdict"].startswith("probably better: a chance of a gain of 1.00, and of losing more than 1 % of 0.00")
-    assert use["verdict"].endswith("(prior from the data)")
-    worse = verdict_summary([-0.015, -0.010, -0.012, -0.008], prior_scale=0.01, direction="minimize",
-                            prior="from the search's repeated runs")
-    assert worse["verdict"].startswith("probably WORSE: a chance of a gain of 0.0")
-    assert worse["verdict"].endswith("(prior from the search's repeated runs)") and worse["prior_scale"] == 0.01
-    keep = verdict_summary([-0.09, 0.115, -0.004], prior_scale=None, direction="minimize")
-    assert keep["verdict"].startswith("not proven: a chance of a gain of 0.")
+    use = verdict_summary([0.05, 0.052, 0.048], direction="minimize")
+    assert use["verdict"] == ("probably better: a chance of a gain of 1.00, and of losing more than 1 % of 0.00 "
+                              "(reference prior)")
+    worse = verdict_summary([-0.015, -0.010, -0.012, -0.008], direction="minimize")
+    assert worse["verdict"] == "probably WORSE: a chance of a gain of 0.00 (reference prior)"
+    keep = verdict_summary([-0.09, 0.115, -0.004], direction="minimize")
+    assert keep["verdict"].startswith("not proven: a chance of a gain of 0.54")
 
 
 def test_a_comparison_written_before_the_posterior_decides_as_it_did():
@@ -249,18 +248,18 @@ def test_a_comparison_written_before_the_posterior_decides_as_it_did():
 
 
 def test_decision_of_reads_identical_then_levels_then_the_summary():
-    use = verdict_summary([0.05, 0.052, 0.048], prior_scale=None, direction="minimize")
+    use = verdict_summary([0.05, 0.052, 0.048], direction="minimize")
     assert decision_of({"summary": use}) == "use"
     assert decision_of({"summary": use, "identical": True}) == "keep"
     assert decision_of({"summary": use, "levels": {"confirmed": False}}) == "keep"
     assert decision_of({"summary": {"n": 0}, "levels": {"confirmed": True}}) == "use"
 
 
-def test_the_prior_is_the_starting_points_run_to_run_spread_when_it_was_measured():
-    assert _prior_of({"kpi_cv": {"cost": 0.012}}, "cost") == (0.012, "from the search's repeated runs")
-    assert _prior_of({"kpi_cv": {"cost": 0.0}}, "cost") == (None, "from the data")
-    assert _prior_of({"kpi_cv": {"cost": None}}, "cost") == (None, "from the data")
-    assert _prior_of({}, "cost") == (None, "from the data")
+def test_the_run_to_run_noise_is_recorded_when_the_search_measured_it():
+    assert _run_noise_of({"kpi_cv": {"cost": 0.012}}, "cost") == 0.012
+    assert _run_noise_of({"kpi_cv": {"cost": 0.0}}, "cost") is None
+    assert _run_noise_of({"kpi_cv": {"cost": None}}, "cost") is None
+    assert _run_noise_of({}, "cost") is None
 
 
 def _spread_of(n: int, *, mean: float, sd: float) -> list[float]:
@@ -273,18 +272,18 @@ def _spread_of(n: int, *, mean: float, sd: float) -> list[float]:
 def test_the_decision_is_monotone_in_the_mean_gain():
     order = {"worse": 0, "keep": 1, "use": 2}
     shape = [0.01, -0.02, 0.015, 0.0]
-    seen = [order[decide(verdict_summary([x + k / 1000 for x in shape], prior_scale=0.02, direction="minimize"))]
+    seen = [order[decide(verdict_summary([x + k / 1000 for x in shape], direction="minimize"))]
             for k in range(-80, 81)]
     assert seen == sorted(seen) and seen[0] == 0 and seen[-1] == 2
 
 
 def test_the_chance_grows_with_the_cases_for_a_fixed_mean_and_spread():
-    chances = [verdict_summary(_spread_of(n, mean=0.01, sd=0.02), prior_scale=0.02, direction="minimize")["chance"]
+    chances = [verdict_summary(_spread_of(n, mean=0.01, sd=0.02), direction="minimize")["chance"]
                for n in range(2, 31)]
     assert all(a < b for a, b in zip(chances, chances[1:]))
 
 
-def _a_study(rng: random.Random, *, gains: list[float], run_sd: float, prior_scale: float):
+def _a_study(rng: random.Random, *, gains: list[float], run_sd: float):
     """A synthetic final check of len(gains) held-back cases with these true log gains: each
     (case, run) has its own draw, fixed up front, so adding runs extends the same study.
     Returns `look(runs_per_case) -> result`, the real `_analyse` of the first runs."""
@@ -293,8 +292,7 @@ def _a_study(rng: random.Random, *, gains: list[float], run_sd: float, prior_sca
     def look(runs: int) -> dict:
         comparison = Comparison(label="sim", objective="cost", direction="minimize", stage="full",
                                 seeds=list(range(runs)), instances=[f"case{i}" for i in range(len(gains))],
-                                baseline_id="seed", candidates=["c"], prior_scale=prior_scale,
-                                prior="from the search's repeated runs")
+                                baseline_id="seed", candidates=["c"], run_noise=run_sd or None)
         for i, gain in enumerate(gains):
             for s in range(runs):
                 e_base, e_mine = draws[i][s]
@@ -310,43 +308,76 @@ def _a_study(rng: random.Random, *, gains: list[float], run_sd: float, prior_sca
     return look
 
 
-def _final_answer(look, *, runs: int = 3) -> str:
-    """The product's looks: the check adds a run per case while the answer is open (up to 12),
-    then one recheck with twice the runs when the answer is not use."""
+def _final_answer(look, *, runs: int = 3, most: int = 12) -> str:
+    """The product's looks, as `execute._extend_check` takes them (decision 12): look 1 after
+    the planned runs; while it is open, every run up to the cap at once and look 2, whatever it
+    says; then one recheck with twice the runs when the answer is not use."""
     from evolvekit.confirm import runs_can_help  # A1.3; until then it always says yes
 
     result = look(runs)
-    while decision_of(result) == "keep" and runs < 12 and runs_can_help(result):
-        runs += 1
+    if decision_of(result) == "keep" and runs < most and runs_can_help(result):
+        runs = most
         result = look(runs)
-    if decision_of(result) != "use" and runs < 12:
-        result = look(min(2 * runs, 12))
+    if decision_of(result) != "use" and runs < most:
+        result = look(min(2 * runs, most))
     return decision_of(result)
 
 
-def test_a_null_study_says_use_in_under_one_in_ten_with_extension_and_a_recheck(capsys):
-    rng = random.Random(20261108)
-    uses = sum(_final_answer(_a_study(rng, gains=[rng.gauss(0.0, 0.005) for _ in range(4)],
-                                      run_sd=0.02, prior_scale=0.02)) == "use" for _ in range(200))
+NULL_SETTINGS = {
+    # name: (sd of the cases' true log gains around 0, run-to-run sd of a run's log objective)
+    "runs noisier than cases": (0.005, 0.02),
+    "cases noisier than runs": (0.02, 0.005),
+    "no replicate runs (every run of a case alike)": (0.02, 0.0),
+}
+
+
+def _null_use_rate(setting: str, studies: int, seed: int = 20261108) -> float:
+    """The share of `studies` seeded null studies of `setting` that say use."""
+    case_sd, run_sd = NULL_SETTINGS[setting]
+    rng = random.Random(seed)
+    uses = sum(_final_answer(_a_study(rng, gains=[rng.gauss(0.0, case_sd) for _ in range(4)], run_sd=run_sd)) == "use"
+               for _ in range(studies))
+    return uses / studies
+
+
+@pytest.mark.parametrize("setting", list(NULL_SETTINGS))
+def test_a_null_study_says_use_in_under_one_in_ten_with_extension_and_a_recheck(setting, capsys):
+    """Decisions 11 and 12, the fast guard: with no true mean gain, 4 held-back cases x 3 runs,
+    the extension's runs added at once when the answer is open (look 2) and one recheck, "use"
+    in under 10 % of 1000 seeded studies, in each setting. The slow test below holds the margin."""
+    rate = _null_use_rate(setting, 1000)
     with capsys.disabled():
-        print(f"\nfalse use with no true gain, 4 cases x 3 runs, extension and a recheck: {uses / 200:.3f}")
-    assert uses < 20, f"{uses} of 200 studies with no true gain said use"
+        print(f"\nfalse use, {setting}, 4 cases x 3 runs, extension and a recheck (1000 studies): {rate:.3f}")
+    assert rate < 0.10, f"{rate:.3f} of 1000 null studies said use"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("setting", list(NULL_SETTINGS))
+def test_a_null_study_says_use_in_under_one_in_ten_two_standard_errors_clear(setting, capsys):
+    """The same, on 6000 seeded studies per setting, so that 10 % is more than two standard
+    errors above the measured rate (about 8.7 % when runs are noisier than cases)."""
+    studies = 6000
+    rate = _null_use_rate(setting, studies)
+    se = math.sqrt(rate * (1 - rate) / studies)
+    with capsys.disabled():
+        print(f"\nfalse use, {setting}, 4 cases x 3 runs, extension and a recheck ({studies} studies): "
+              f"{rate:.4f} +- {se:.4f}")
+    assert rate + 2 * se < 0.10, f"{rate:.4f} of {studies} null studies said use (2 SE = {2 * se:.4f})"
 
 
 def test_a_null_study_with_quiet_runs_reports_its_false_use_rate(capsys):
     """Not asserted: with runs much quieter than the 1 % margin the margin leg does not
     bind, and only P(gain > 0) >= 0.95 stands between the null and use (open question 5)."""
     rng = random.Random(11)
-    uses = sum(_final_answer(_a_study(rng, gains=[0.0] * 4, run_sd=0.002, prior_scale=0.002)) == "use"
-               for _ in range(200))
+    uses = sum(_final_answer(_a_study(rng, gains=[0.0] * 4, run_sd=0.002)) == "use" for _ in range(200))
     with capsys.disabled():
         print(f"\nfalse use with quiet runs (0.2 %), 4 cases x 3 runs, extension and a recheck: {uses / 200:.3f}")
 
 
 def test_a_three_percent_gain_on_four_cases_reports_its_power(capsys):
     rng = random.Random(3)
-    uses = sum(_final_answer(_a_study(rng, gains=[rng.gauss(0.03, 0.005) for _ in range(4)],
-                                      run_sd=0.02, prior_scale=0.02)) == "use" for _ in range(200))
+    uses = sum(_final_answer(_a_study(rng, gains=[rng.gauss(0.03, 0.005) for _ in range(4)], run_sd=0.02)) == "use"
+               for _ in range(200))
     with capsys.disabled():
         print(f"\npower of a 3 % gain on 4 held-back cases x 3 runs, with extension and a recheck: {uses / 200:.2f}")
     assert 0 <= uses <= 200
@@ -769,8 +800,8 @@ def test_comparison_json_records_the_prior_and_how_often_the_answer_was_read(tmp
     again = confirm(load_config(config_path), run_dir, seeds=[1001, 1003], label="final", log=lambda m: None)
     written = json.loads((run_dir / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
     assert first.looks == 1 and again.looks == 2 and written["looks"] == 2
-    assert written["prior"] == "from the data", "the hand-written seed row has no kpi_cv"
-    assert written["prior_scale"] is None
+    assert written["prior"] == "reference"
+    assert written["run_noise"] is None, "the hand-written seed row has no kpi_cv"
     summary = written["per_candidate"]["g003-c0012"]["summary"]
     assert {"chance", "chance_margin", "worst", "ci95", "frequentist", "posterior", "decision"} <= set(summary)
     markdown = (run_dir / "confirm" / "final" / "comparison.md").read_text(encoding="utf-8")

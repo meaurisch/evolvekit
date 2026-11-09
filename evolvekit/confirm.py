@@ -96,8 +96,8 @@ RULE_WORDS = (
 )
 """The rule in one sentence, as the page states it."""
 
-PRIOR_FROM_RUNS = "from the search's repeated runs"
-PRIOR_FROM_DATA = "from the data"
+PRIOR = "reference"
+"""The posterior's prior, as `comparison.json` names it: p(mu, sigma^2) ~ 1 / sigma^2."""
 FREQUENTIST_LABEL = "frequentist 95 % confidence interval and Wilcoxon test, for engineers"
 
 
@@ -146,32 +146,31 @@ def runs_can_help(result: dict[str, Any]) -> bool:
     return True
 
 
-def _prior_of(seed_row: dict[str, Any], objective: str) -> tuple[float | None, str]:
-    """The prior scale of the per-case log gains and its label: the starting
-    point's run-to-run coefficient of variation of the objective when the
-    search measured one (to first order, the sd of the log objective), else
-    None: `verdict_summary` then takes the spread of the gains themselves."""
+def _run_noise_of(seed_row: dict[str, Any], objective: str) -> float | None:
+    """The starting point's run-to-run noise of the objective, for engineers:
+    its coefficient of variation when the search measured one (to first
+    order, the sd of the log objective), else None. It is recorded, not a
+    prior: the posterior's spread is the cases' own (`posterior_mean_t`)."""
     cv = (seed_row.get("kpi_cv") or {}).get(objective) if isinstance(seed_row.get("kpi_cv"), dict) else None
     if isinstance(cv, (int, float)) and math.isfinite(cv) and cv > 0:
-        return float(cv), PRIOR_FROM_RUNS
-    return None, PRIOR_FROM_DATA
+        return float(cv)
+    return None
 
 
-def verdict_summary(d: Sequence[float], *, prior_scale: float | None, direction: str,
-                    prior: str | None = None) -> dict[str, Any]:
+def verdict_summary(d: Sequence[float], *, direction: str) -> dict[str, Any]:
     """The one place that decides: per-case log gains `d` to the numbers a
     person is shown and the decision they are read by.
 
-    The posterior of the true mean gain (`stats.posterior_mean_t`) with the
-    given prior scale, or -- `prior_scale=None` -- the sample sd of `d`
-    itself, labelled "from the data". `mean` is the posterior mean, `ci95`
-    its 95 % credible interval, `chance` P(gain > 0), `chance_margin`
-    P(gain > the 1 % margin) and `worst` the 5 % quantile, the one-sided
-    bound the rule reads -- all in percent of the starting point's value
-    (`pct_from_log`); `log` and `posterior` keep the log-scale numbers, and
-    `paired_mean` the plain mean of the cases. The frequentist interval and
-    Wilcoxon test are under `frequentist`, for engineers. `decision` is
-    `decide` of this summary and `verdict` says it in a sentence."""
+    The posterior of the true mean gain under the reference prior
+    (`stats.posterior_mean_t`: Student's t with n - 1 degrees of freedom
+    around the cases' mean, scale s / sqrt(n)). `mean` is its mean (the
+    cases' mean), `ci95` its 95 % credible interval, `chance` P(gain > 0),
+    `chance_margin` P(gain > the 1 % margin) and `worst` the 5 % quantile,
+    the one-sided bound the rule reads -- all in percent of the starting
+    point's value (`pct_from_log`); `log` and `posterior` keep the log-scale
+    numbers. The frequentist interval and Wilcoxon test are under
+    `frequentist`, for engineers. `decision` is `decide` of this summary and
+    `verdict` says it in a sentence."""
     d = [float(x) for x in d]
     n = len(d)
     wins, losses = sum(1 for x in d if x > 0), sum(1 for x in d if x < 0)
@@ -181,44 +180,38 @@ def verdict_summary(d: Sequence[float], *, prior_scale: float | None, direction:
         out["decision"] = decide(out)
         return out
     if n == 1:
-        out = {"n": 1, "mean": pct_from_log(d[0], direction), "paired_mean": pct_from_log(d[0], direction),
-               "ci95": None, "chance": None, "chance_margin": None, "worst": None, "wins": wins, "losses": losses,
-               "log": {"mean": d[0], "sd": None, "ci95": None}, "verdict": "one instance: no chance can be given"}
+        out = {"n": 1, "mean": pct_from_log(d[0], direction), "ci95": None, "chance": None, "chance_margin": None,
+               "worst": None, "wins": wins, "losses": losses, "log": {"mean": d[0], "sd": None, "ci95": None},
+               "verdict": "one instance: no chance can be given"}
         out["decision"] = decide(out)
         return out
-    sd = statistics.stdev(d)
-    label = PRIOR_FROM_DATA if prior_scale is None else (prior or PRIOR_FROM_RUNS)
-    scale = sd if prior_scale is None else float(prior_scale)
-    post = posterior_mean_t(d, scale)
+    post = posterior_mean_t(d)
     low, high = post.interval95()
     worst_log = post.quantile_low(0.05)
     chance = post.p_above(0.0)
     chance_margin = post.p_above(margin_log(USE_MARGIN_PCT, direction))
-    dbar = fmean(d)
     out = {
         "n": n,
         "mean": pct_from_log(post.mu, direction),
-        "paired_mean": pct_from_log(dbar, direction),
         "ci95": [pct_from_log(low, direction), pct_from_log(high, direction)],
         "chance": chance,
         "chance_margin": chance_margin,
         "worst": pct_from_log(worst_log, direction),
         "wins": wins, "losses": losses,
-        "log": {"mean": post.mu, "paired_mean": dbar, "sd": sd, "ci95": [low, high], "worst": worst_log},
-        "prior_scale": scale,
-        "prior": label,
+        "log": {"mean": post.mu, "sd": statistics.stdev(d), "ci95": [low, high], "worst": worst_log},
+        "prior": PRIOR,
         "posterior": {"mu": post.mu, "scale": post.scale, "df": post.df},
         "frequentist": {**_pct_summary(paired_summary(d), direction), "label": FREQUENTIST_LABEL},
     }
     decision = decide(out)
     lose = f"losing more than {USE_MARGIN_PCT:g} % of {1 - chance_margin:.2f}"
     if decision == "use":
-        verdict = f"probably better: a chance of a gain of {chance:.2f}, and of {lose} (prior {label})"
+        verdict = f"probably better: a chance of a gain of {chance:.2f}, and of {lose}"
     elif decision == "worse":
-        verdict = f"probably WORSE: a chance of a gain of {chance:.2f} (prior {label})"
+        verdict = f"probably WORSE: a chance of a gain of {chance:.2f}"
     else:
-        verdict = f"not proven: a chance of a gain of {chance:.2f}, and of {lose} (prior {label})"
-    out["decision"], out["verdict"] = decision, verdict
+        verdict = f"not proven: a chance of a gain of {chance:.2f}, and of {lose}"
+    out["decision"], out["verdict"] = decision, verdict + " (reference prior)"
     return out
 
 
@@ -245,10 +238,10 @@ class Comparison:
     levels: list[dict[str, Any]] = field(default_factory=list)
     """`evaluate.score.levels`, described: the comparison is then made level
     by level as well (`_analyse_levels`). Empty for a single objective."""
-    prior_scale: float | None = None
-    """The prior scale of the per-case log gains (`_prior_of`); None: from the data."""
-    prior: str = PRIOR_FROM_DATA
-    """Where the prior scale came from, in words."""
+    run_noise: float | None = None
+    """The starting point's run-to-run noise of the objective (`_run_noise_of`), for engineers."""
+    prior: str = PRIOR
+    """The posterior's prior, by name."""
     looks: int = 1
     """How many times this comparison's answer has been read (written): a
     check extended or run again under one label reads it again."""
@@ -258,7 +251,7 @@ class Comparison:
             "label": self.label, "objective": self.objective, "direction": self.direction,
             "stage": self.stage, "seeds": self.seeds, "instances": self.instances,
             "baseline_id": self.baseline_id, "candidates": self.candidates,
-            "prior": self.prior, "prior_scale": self.prior_scale, "looks": self.looks,
+            "prior": self.prior, "run_noise": self.run_noise, "looks": self.looks,
             "levels": self.levels, "per_candidate": self.per_candidate,
         }
 
@@ -408,13 +401,12 @@ def confirm(
     work.mkdir(parents=True, exist_ok=True)
     events = EventLog(out_dir)
     heartbeat = Heartbeat(out_dir, session=events.session)
-    prior_scale, prior = _prior_of(seed_row, config.evaluate.score.objective)
     comparison = Comparison(
         label=label, objective=config.evaluate.score.objective, direction=config.evaluate.score.direction,
         stage=stage.id, seeds=list(seeds), instances=list(stage.instance_names()),
         baseline_id=str(seed_row["id"]), candidates=[str(r["id"]) for r in chosen],
         levels=[level.describe() for level in config.evaluate.score.levels],
-        prior_scale=prior_scale, prior=prior, looks=_looks_before(out_dir) + 1,
+        run_noise=_run_noise_of(seed_row, config.evaluate.score.objective), looks=_looks_before(out_dir) + 1,
     )
 
     def observer_for(name: str) -> Callable[..., None]:
@@ -707,15 +699,13 @@ def _analyse(comparison: Comparison) -> None:
         failed = sum(1 for r in comparison.runs if r["configuration"] in (cid, BASELINE) and not r["ok"])
         planned = len(comparison.instances) * len(comparison.seeds)
         totals = {name: sum(r[name] for r in per_instance) for name in (*_PAIR_COUNTS, "failed_pairs")}
-        summary = verdict_summary(log_gains, prior_scale=comparison.prior_scale, direction=direction,
-                                  prior=comparison.prior)
+        summary = verdict_summary(log_gains, direction=direction)
         summary["verdict"] += _counted_as(totals, largest, direction)
         comparison.per_candidate[cid] = {
             "per_instance": per_instance,
             "log_gains": log_gains,
             "summary": summary,
-            "finished_only": verdict_summary(finished_only, prior_scale=comparison.prior_scale, direction=direction,
-                                             prior=comparison.prior),
+            "finished_only": verdict_summary(finished_only, direction=direction),
             "failure_counted_as_log": largest,
             "failure_counted_as_pct": _failure_sizes(largest, direction),
             "pairs": sum(r["pairs"] for r in per_instance),
@@ -919,10 +909,10 @@ def render_markdown(comparison: Comparison) -> str:
         if s.get("chance") is not None and s.get("ci95"):
             interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]"
             head = (
-                f"**Mean improvement {s['mean']:+.3f} %** (the posterior mean; the paired mean is "
-                f"{s['paired_mean']:+.3f} %), 95 % credible interval {interval} over {s['n']} instance(s); "
+                f"**Mean improvement {s['mean']:+.3f} %** (the paired mean, the posterior's), "
+                f"95 % credible interval {interval} over {s['n']} instance(s); "
                 f"{s['wins']} better, {s['losses']} worse; chance of a gain {s['chance']:.2f}, of losing more than "
-                f"{USE_MARGIN_PCT:g} % {1 - s['chance_margin']:.2f}; prior {s['prior']}. **{verdict}.**"
+                f"{USE_MARGIN_PCT:g} % {1 - s['chance_margin']:.2f}; prior {s.get('prior', PRIOR)}. **{verdict}.**"
             )
         else:
             head = f"**Mean improvement {s['mean']:+.3f} %** over {s['n']} instance(s). **{verdict}.**"
