@@ -1102,8 +1102,12 @@ def _status_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], documen
         # The check adds a run per case at a time while the answer is open
         # (`execute._extend_check`); `check.seeds` says how many it is on.
         on = int((job.get("check") or {}).get("seeds") or plan.get("check_seeds") or DEFAULT_CHECK_SEEDS)
-        now_line = (f"The final check: {_runs_word(on)} per case so far on the held-back cases; "
-                    "it adds runs while time remains and the answer is open.")
+        if (job.get("check") or {}).get("limited_by") == "cases":
+            now_line = (f"The final check: {_runs_word(on)} per case on the held-back cases; more runs would "
+                        "not change the answer: it is set by the held-back cases.")
+        else:
+            now_line = (f"The final check: {_runs_word(on)} per case so far on the held-back cases; "
+                        "it adds runs while time remains and the answer is open.")
     elif stage and isinstance(current, int):
         # The cases of the stage that is running: a quick look runs on a few of the study's cases.
         per_combination = int(stage.get("runs_planned") or 0) // max(1, int(stage.get("candidates") or 1))

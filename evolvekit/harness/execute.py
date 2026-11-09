@@ -39,7 +39,7 @@ import yaml
 from evolvekit import resources
 from evolvekit.config import load_config
 from evolvekit.app.detach import no_window_flags
-from evolvekit.confirm import ConfirmStopped, confirm, decision_of
+from evolvekit.confirm import LIMITED_BY_CASES, ConfirmStopped, confirm, decision_of, runs_can_help
 from evolvekit.evaluate.process import read_tail, run_bounded
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import (
@@ -1024,7 +1024,10 @@ def _extend_check(
     """The final check with `plan.check_seeds` runs per case, its answer read
     once (look 1); while that answer is still open (`keep`), seeds remain,
     the time left pays for at least one more run per case and nothing asked
-    for a stop, every run the seeds and the time allow is added at once and
+    for a stop, and more runs could still help (`confirm.runs_can_help`: the
+    runs' own noise is a real share of what keeps it open; else the log says
+    the cases set the answer and `check.limited_by` is "cases"), every run
+    the seeds and the time allow is added at once and
     the answer is read once more (look 2) -- the answer, whatever it says.
     Never a look in between: stopping the moment an answer looks good would
     say "use" for a change that is no better far more often than the rule
@@ -1047,6 +1050,12 @@ def _extend_check(
         return comparison, result
 
     comparison, result = look(seeds)
+    if extend and _decision(result) == "keep" and not result.get("identical") and not runs_can_help(result):
+        # The runs' noise is a small part of what keeps the answer open (A1.3): only more
+        # held-back cases could firm it up, so no run is added.
+        log("final check: " + LIMITED_BY_CASES)
+        job.update(check={"seeds": seeds, "limited_by": "cases"})
+        extend = False
     added = _runs_to_add(result, seeds, seed_cost_s, time_left_s, stop) if extend else 0
     if added:
         seeds += added
@@ -1064,7 +1073,7 @@ def _runs_to_add(result: dict[str, Any], seeds: int, seed_cost_s: float, time_le
     answer is still open (`keep`) and nothing asked for a stop; else as many
     as the seeds left and the time left pay for. A change every run of which
     gave exactly today's result is never extended: more runs cannot open it.
-    (The seam for A1.3: whether more runs can help at all belongs here.)"""
+    (Whether the runs can help at all is `_extend_check`'s, before this.)"""
     if _decision(result) != "keep" or result.get("identical") or stop.is_set():
         return 0
     left = len(CHECK_SEEDS) - seeds

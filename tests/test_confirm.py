@@ -849,3 +849,29 @@ def test_export_hands_over_the_winner(tmp_path, capsys):
     assert "def configure" in capsys.readouterr().out
     assert main(["export", "--run-dir", str(run_dir), "--candidate", "nope"]) == 1
     assert main(["export", "--run-dir", str(run_dir), "--format", "flags"]) == 1
+
+
+def test_the_share_of_the_runs_is_within_over_within_plus_between():
+    from evolvekit.confirm import within_share
+
+    rows = [{"log_gain": 0.10, "seed_var": 0.0004, "pairs": 4}, {"log_gain": -0.08, "seed_var": 0.0004, "pairs": 4},
+            {"log_gain": 0.01, "seed_var": 0.0004, "pairs": 4}]
+    within = 0.0001
+    between = statistics.variance([0.10, -0.08, 0.01]) - within
+    assert within_share(rows) == pytest.approx(within / (within + between))
+    assert within_share(rows[:1]) is None, "one case has no spread between cases"
+    assert within_share([{**r, "seed_var": None} for r in rows]) is None, "one run per case: unknown"
+    assert within_share([{"log_gain": 0.0, "seed_var": 0.0, "pairs": 3}] * 3) == 0.0
+    # Decision 7: the gains actually used (`pairs`), not the case's total, divide the variance.
+    fewer = [{**r, "pairs": 2} for r in rows]
+    assert within_share(fewer) > within_share(rows)
+
+
+def test_runs_dominated_by_their_own_noise_are_called_case_limited_in_under_one_in_ten_checks():
+    """With no difference between cases the share test stops wrongly when var(d) > 4 x within,
+    an F(3, 8) tail of about 5 %."""
+    from evolvekit.confirm import runs_can_help
+
+    rng = random.Random(25)
+    limited = sum(not runs_can_help(_a_study(rng, gains=[0.0] * 4, run_sd=0.02)(3)) for _ in range(400))
+    assert limited < 40, f"{limited} of 400"

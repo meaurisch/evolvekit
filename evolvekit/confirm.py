@@ -154,10 +154,38 @@ def decision_of(result: dict[str, Any]) -> str:
     return decide(result["summary"])
 
 
+CASES_LIMIT_SHARE = 0.25
+LIMITED_BY_CASES = ("the answer is set by the held-back cases, not by the runs: "
+                    "hold back more cases for a firmer answer")
+
+
+def within_share(per_instance: Sequence[dict[str, Any]]) -> float | None:
+    """The share of the spread of the mean gain that more runs could shrink.
+
+    `E[var(d_i)] = tau^2 + mean(sigma_i^2 / n_i)`: the cases' own spread plus
+    the runs' noise left in each case's mean. `within` is that second part
+    (each case's variance of its gains over the gains it used), `between` the
+    method-of-moments tau^2, and the share is `within / (within + between)`:
+    only `within` falls with more runs. None when it cannot be told (fewer
+    than two cases with a gain, or no case with a run-to-run variance);
+    0.0 when nothing varies at all (more runs add nothing)."""
+    gains = [r["log_gain"] for r in per_instance if r.get("log_gain") is not None]
+    parts = [r["seed_var"] / max(1, int(r.get("pairs") or 1)) for r in per_instance if r.get("seed_var") is not None]
+    if len(gains) < 2 or not parts:
+        return None
+    within = fmean(parts)
+    between = max(0.0, statistics.variance(gains) - within)
+    if within + between <= 0:
+        return 0.0
+    return within / (within + between)
+
+
 def runs_can_help(result: dict[str, Any]) -> bool:
-    """Whether more runs per case could still open the answer. A1.3 splits
-    the spread into its within- and between-case shares; until then, yes."""
-    return True
+    """Whether more runs per case could still open the answer: unless the
+    cases' own spread is most of it (`within_share` under `CASES_LIMIT_SHARE`),
+    in which case only more held-back cases could."""
+    share = within_share(result.get("per_instance") or [])
+    return share is None or share >= CASES_LIMIT_SHARE
 
 
 def _run_noise_of(seed_row: dict[str, Any], objective: str) -> float | None:

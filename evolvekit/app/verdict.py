@@ -26,7 +26,9 @@ at a longer limit); `how_it_ran`, only when fewer rounds ran than planned (or al
 of them, but some combinations repeated one already tried) or its AI budget
 was used up, says so in a sentence (`how_it_ran`). `why_keep`, only on a
 `keep` whose held-back cases all moved the goal's way while its range still
-allows a loss, says in one sentence why it is still keep (`why_keep`). `spent`, on a run
+allows a loss, says in one sentence why it is still keep (`why_keep`; when the check found
+that only more held-back cases could firm the answer, `limited_by: "cases"` and that sentence is
+its fallback). `spent`, on a run
 with AI, is what its AI spent (`ai_spent`): `{usd, cap_usd, line}`, or
 `{requests, line}` for a provider that counts requests. The page
 (`jobs.results`), the command line and the report all render from it, so they
@@ -59,8 +61,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, RULE_WORDS, USE_CHANCE, decide, identical_runs,
-                               is_posterior, t_cdf)
+from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, LIMITED_BY_CASES, RULE_WORDS, USE_CHANCE, decide,
+                               identical_runs, is_posterior, t_cdf)
 
 __all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "why_keep"]
@@ -549,6 +551,11 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     # another level may be what kept it (fix round 1, I1).
     why = (why_keep(document["decision"], words, document["by_case"], goal["direction"])
            if named and not candidates and not levels and "levels" not in result else "")
+    if (job.get("check") or {}).get("limited_by") == "cases":
+        # The check found that only more held-back cases could firm the answer (A1.3).
+        document["limited_by"] = "cases"
+        if not why and decision == "keep":
+            why = LIMITED_BY_CASES[0].upper() + LIMITED_BY_CASES[1:] + "."
     if why:
         document["why_keep"] = why
     document["changed"] = [{"name": c["name"], "label": c["label"], "from": c["old_text"], "to": c["new_text"]}

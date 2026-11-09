@@ -812,3 +812,16 @@ def test_a_time_below_the_harness_own_is_said_in_the_report_and_the_plan(use_run
     study.limits.time_per_case_s = 5
     save_study(study, root)
     assert "time_note" not in build_verdict(root, run), "above the harness's own time: nothing to say"
+
+
+def test_a_check_limited_by_its_cases_says_so_in_place_of_more_runs(run_of):
+    root, run = run_of("keep")
+    job_path = root / "runs" / run / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["check"] = {"seeds": 3, "limited_by": "cases"}
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    v = build_verdict(root, run)
+    assert v["limited_by"] == "cases"
+    assert v["why_keep"] == ("The answer is set by the held-back cases, not by the runs: hold back more cases "
+                             "for a firmer answer.")
+    assert jobs.results(root, run, document_of)["final"]["line"] == v["line"]

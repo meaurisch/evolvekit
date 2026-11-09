@@ -4,6 +4,8 @@ run, the search and the final check (`evolvekit/harness/execute.py`)."""
 from __future__ import annotations
 
 import json
+import math
+import random
 import shutil
 import sqlite3
 import threading
@@ -14,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evolvekit.confirm import verdict_summary
+from evolvekit.confirm import BASELINE, Comparison, _analyse, verdict_summary
 from evolvekit.harness.execute import (
     Job, _extend_check, continue_study, final_check, preview, read_job, read_preview, resume_study, run_study, run_test,
 )
@@ -331,3 +333,46 @@ def test_a_check_of_an_explicit_number_of_runs_is_never_extended(tmp_path):
                              stop=threading.Event(), time_left_s=lambda: 0.0,
                              confirm=_confirm_recording(calls, settled_at=99), extend=False)
     assert calls == [3] and seeds == 3
+
+
+def _confirm_of_cases(calls: list[int], *, case_gains: list[float], run_sd: float):
+    """A `confirm` that runs nothing: the real comparison (`confirm._analyse`) of held-back
+    cases whose true log gains are `case_gains`, each run noisy by `run_sd`."""
+    def fake_confirm(config, run_dir, *, seeds, instances, label, log, stop):
+        calls.append(len(seeds))
+        comparison = Comparison(label="final", objective="cost", direction="minimize", stage="full",
+                                seeds=list(seeds), instances=list(instances), baseline_id="seed", candidates=["c1"])
+        for instance, gain in zip(instances, case_gains):
+            for seed in seeds:
+                rng = random.Random(f"{instance}/{seed}")
+                comparison.runs += [
+                    {"configuration": BASELINE, "instance": instance, "seed": seed, "ok": True,
+                     "kpis": {"cost": 100.0 * math.exp(rng.gauss(0.0, run_sd))}},
+                    {"configuration": "c1", "instance": instance, "seed": seed, "ok": True,
+                     "kpis": {"cost": 100.0 * math.exp(-gain + rng.gauss(0.0, run_sd))}},
+                ]
+        _analyse(comparison)
+        return comparison
+    return fake_confirm
+
+
+def test_the_check_stops_adding_runs_when_the_cases_set_the_answer(tmp_path):
+    """A toy whose cases differ by far more than its runs: more runs cannot open the answer."""
+    calls: list[int] = []
+    lines: list[str] = []
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    _, seeds = _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lines.append,
+                             stop=threading.Event(), time_left_s=lambda: 1e9,
+                             confirm=_confirm_of_cases(calls, case_gains=[0.10, -0.08, 0.01], run_sd=0.001))
+    assert calls == [3] and seeds == 3
+    assert job.state["check"] == {"seeds": 3, "limited_by": "cases"}
+    assert "final check: the answer is set by the held-back cases, not by the runs: hold back more cases "            "for a firmer answer" in lines
+
+
+def test_the_check_adds_runs_when_the_runs_are_what_is_unsure(tmp_path):
+    calls: list[int] = []
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lambda _m: None,
+                  stop=threading.Event(), time_left_s=lambda: 1e9,
+                  confirm=_confirm_of_cases(calls, case_gains=[0.004, 0.0, 0.002], run_sd=0.05))
+    assert calls == [3, 12] and "limited_by" not in job.state["check"]
