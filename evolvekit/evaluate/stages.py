@@ -1,9 +1,11 @@
-"""The two stage kinds: `builtin-static` and `command`.
+"""The three stage kinds: `builtin-static`, `builtin-build` and `command`.
 
 `builtin-static` is the only rung allowed to hard-reject: a syntax error, a
 forbidden import, a missing required function, or a module that blows up on
 import means the candidate never enters the archive. Everything downstream is
-a penalty or a `failure_score`, never a `None`.
+a penalty or a `failure_score`, never a `None` -- except `builtin-build`, which
+a tree problem with `problem.tree.build` has right after it: a change that
+does not build is refused too, with the build's own last words as the feedback.
 
 The static stage never `exec`s candidate code in this process -- v1 did, and
 that is one unsandboxed `import os` away from a bad afternoon. The optional
@@ -14,17 +16,20 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import math
 import shlex
+import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, stdev
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from evolvekit.config import ProblemConfig, StageConfig, embedded_params
 from evolvekit.evaluate.cache import EvalCache
@@ -33,11 +38,20 @@ from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
 from evolvekit.evaluate.types import StageOutcome
 from evolvekit.stopping import AnyEvent
 
+if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
+    from evolvekit.tree import Tree
+
 __all__ = [
     "run_static_stage",
+    "run_tree_static_stage",
+    "run_build_stage",
+    "restore_build",
+    "build_command",
     "run_command_stage",
     "static_checks",
     "build_argv",
+    "render_app",
+    "on_tree",
     "Configuration",
     "UnitContext",
     "STDERR_LIMIT",
@@ -157,6 +171,229 @@ def run_static_stage(
     )
 
 
+def run_tree_static_stage(
+    tree_path: Path,
+    diff: str,
+    error: str | None,
+    stage: StageConfig,
+    problem: ProblemConfig,
+    *,
+    prefix: str,
+) -> StageOutcome:
+    """Stage 0 for a tree problem: the change applied, it changes only the open
+    files, and every Python file it changes still parses. Nothing is imported.
+
+    `tree_path` is `{tree}`, the repo's folder inside the candidate's worktree;
+    `error` what materialising it said, when it could not be made. `prefix` is
+    that folder relative to the repository (`Repo.prefix`).
+    """
+    from evolvekit.tree import changed_files, touches_only
+
+    started = time.perf_counter()
+    assert problem.tree is not None
+    problems: list[str] = []
+    if error is not None:
+        problems.append(error)
+    outside = touches_only(diff, problem.tree.open, prefix=prefix)
+    if outside:
+        problems.append(
+            f"changes files outside the open files: {', '.join(outside)} "
+            f"(only {', '.join(problem.tree.open)} may change)"
+        )
+    if error is None:
+        for name in changed_files(diff):
+            if not name.endswith(".py") or not name.startswith(prefix):
+                continue
+            relative = name[len(prefix):]
+            path = Path(tree_path) / relative
+            if not path.is_file():
+                continue  # deleted by the change
+            try:
+                ast.parse(path.read_bytes(), filename=relative)
+            except SyntaxError as exc:
+                problems.append(f"SyntaxError in {relative}: {exc.msg} (line {exc.lineno})")
+            except ValueError as exc:  # a null byte
+                problems.append(f"SyntaxError in {relative}: {exc}")
+    return StageOutcome(
+        stage_id=stage.id,
+        ok=not problems,
+        kpis={"static_problems": float(len(problems))},
+        failure="; ".join(problems) if problems else None,
+        duration_s=time.perf_counter() - started,
+    )
+
+
+# --- builtin-build ---------------------------------------------------------------
+
+_BUILT: tuple[str, str, str, str] | None = None
+"""What the shared interpreter holds now, as `(build, interpreter, tree folder, commit)`, or
+`None` when nobody knows. In memory and for this process only (decision 31):
+nothing on disk claims a build, so a resumed run builds again. One entry, not a
+set: a build that installs into one interpreter replaces the one before."""
+_BUILT_LOCK = threading.Lock()
+
+
+def build_command(template: str, *, tree: Path, python: str | None = None) -> list[str]:
+    """`problem.tree.build` as argv: split first, then `{tree}` and `{python}`
+    substituted (as `build_argv` does, so a Windows path keeps its backslashes
+    and a folder with a space stays one argument). `{python}` is `python`
+    (`problem.tree.python`: the application's Python for a python harness),
+    evolvekit's own interpreter when it is not given. Other braces are the
+    command's own."""
+    tokens = shlex.split(template, posix=True)
+    if not tokens:
+        raise ValueError("the build command is empty")
+    interpreter = python or sys.executable
+    return [token.replace("{tree}", str(tree)).replace("{python}", interpreter) for token in tokens]
+
+
+def render_app(template: str, tree: Path) -> str:
+    """`problem.tree.app` for one candidate: `{tree}` is the candidate's tree
+    folder, and the result is what a command stage's `{app}` becomes."""
+    return str(Path(template.replace("{tree}", str(tree))))
+
+
+def on_tree(problem: ProblemConfig, made: "Tree | None") -> dict[str, str | None]:
+    """What a command stage on a candidate's tree takes beyond its folder:
+    `app` (what `{app}` is, `None` when `problem.tree.app` names nothing) and
+    `source_id` (the tree's commit, which keys the cache). Empty for a
+    skeleton or parameters problem, or a candidate without a tree; spread
+    into `run_command_stage` or a `Job`."""
+    if made is None or problem.tree is None:
+        return {}
+    app = render_app(problem.tree.app, made.path) if problem.tree.app else None
+    return {"app": app, "source_id": made.commit}
+
+
+def _tree_source(source_id: str | None, app: str | None, candidate: Path) -> str | None:
+    """What stands for a tree candidate in a cache key: its commit, and the
+    program inside the tree relative to the tree's folder -- so the same
+    commit in two folders is one entry, and another `problem.tree.app` is not."""
+    if source_id is None or app is None:
+        return source_id
+    try:
+        inside = Path(app).relative_to(candidate).as_posix()
+    except ValueError:  # a program outside the tree is the same file in every folder
+        inside = app
+    return f"{source_id}:{inside}"
+
+
+def _last_line(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1][:300] if lines else ""
+
+
+def _forget_build() -> None:
+    global _BUILT
+    with _BUILT_LOCK:
+        _BUILT = None
+
+
+def run_build_stage(
+    tree: "Tree",
+    stage: StageConfig,
+    problem: ProblemConfig,
+    *,
+    cancel: "threading.Event | AnyEvent | None" = None,
+    time_left_s: float | None = None,
+) -> StageOutcome:
+    """Run `problem.tree.build` in a candidate's tree (design §5.1, §5.3).
+
+    Once per commit: when the shared interpreter already holds this tree's
+    build, nothing runs and the outcome is `cached`. A failure is `build: exit
+    code N: <its last stderr line>` (or `build: no answer within T s`) with the
+    stderr tail; the cascade makes it a hard reject. The bound is the stage's
+    timeout (`problem.tree.build_timeout_s`), or `time_left_s` when the study
+    has less time left than that; a build the study's time or `cancel` ends is
+    abandoned, not failed, and its whole process tree is killed (`run_bounded`).
+    """
+    global _BUILT
+    assert problem.tree is not None and problem.tree.build
+    key = (problem.tree.build, problem.tree.python, os.path.normcase(os.path.abspath(tree.path)), tree.commit)
+    with _BUILT_LOCK:
+        if _BUILT == key:
+            return StageOutcome(stage_id=stage.id, ok=True, cached=True)
+        _BUILT = None  # from here on the interpreter holds whatever this build leaves
+    limit, short = stage.timeout, False
+    if time_left_s is not None and time_left_s < limit:
+        limit, short = max(0.0, time_left_s), True
+    if cancel is not None and cancel.is_set():
+        return StageOutcome(stage_id=stage.id, ok=False, abandoned=True,
+                            failure="called off before it started: the run was stopped")
+    if limit <= 0:
+        return StageOutcome(stage_id=stage.id, ok=False, abandoned=True,
+                            failure="the study's time ran out before this built")
+    started = time.perf_counter()
+    try:
+        argv = build_command(problem.tree.build, tree=tree.path, python=problem.tree.python)
+    except ValueError as exc:
+        return StageOutcome(stage_id=stage.id, ok=False, failure=f"build: bad command: {exc}")
+    # Beside the command stages' logs (`<work>/stage_out/`), not in `trees/`.
+    logs = tree.worktree.parent.parent / "stage_out"
+    stdout_path = logs / f"{tree.worktree.name}.{stage.id}.stdout.log"
+    stderr_path = logs / f"{tree.worktree.name}.{stage.id}.stderr.log"
+    run = run_bounded(argv, timeout=limit, cwd=tree.path, stdout_path=stdout_path, stderr_path=stderr_path,
+                      cancel=cancel)  # type: ignore[arg-type]  # anything with `is_set()`
+    stderr, stdout = read_tail(stderr_path, STDERR_LIMIT), read_tail(stdout_path, STDERR_LIMIT)
+    fields = dict(stage_id=stage.id, stderr=stderr, stdout=stdout, duration_s=time.perf_counter() - started,
+                  argv=tuple(argv), stdout_log=str(stdout_path), stderr_log=str(stderr_path))
+    if run.cancelled:
+        return StageOutcome(ok=False, abandoned=True, failure="called off: the run was stopped while this built",
+                            **fields)
+    if run.timed_out and short:
+        return StageOutcome(ok=False, abandoned=True, failure="the study's time ran out while this built", **fields)
+    if run.error is not None:
+        return StageOutcome(ok=False, failure=f"build: could not run {argv[0]!r}: {run.error}", **fields)
+    if run.timed_out:
+        return StageOutcome(ok=False, failure=f"build: no answer within {limit:g} s", **fields)
+    if run.returncode != 0:
+        said = _last_line(stderr) or _last_line(stdout)
+        return StageOutcome(ok=False, failure=f"build: exit code {run.returncode}" + (f": {said}" if said else ""),
+                            **fields)
+    with _BUILT_LOCK:
+        _BUILT = key
+    return StageOutcome(ok=True, **fields)
+
+
+def restore_build(problem: ProblemConfig, *, log: Callable[[str], None]) -> None:
+    """Build the engineer's own checkout (the folder `problem.tree.repo` names)
+    back into the shared interpreter (decision 31), so it never points at a
+    candidate's tree once that tree is removed.
+
+    Called in a `finally` wherever candidates were built: the search, the final
+    check, a preflight. Only a build that names `{python}` installs into the
+    shared interpreter (`problem.tree.python`); any other (a program's `make -C {tree}`) builds inside
+    each tree, and is never run in the engineer's own folder. A failure is one
+    warning through `log`, never raised: it must not hide what the run itself
+    ended with.
+    """
+    tree = problem.tree
+    if tree is None or not tree.build or "{python}" not in tree.build:
+        return
+    _forget_build()
+    checkout = Path(tree.repo)
+    log(f"building {checkout} back into the application's Python")
+    try:
+        argv = build_command(tree.build, tree=checkout, python=tree.python)
+        with tempfile.TemporaryDirectory(prefix="evolvekit-build-", ignore_cleanup_errors=True) as scratch:
+            out, err = Path(scratch) / "build.stdout.log", Path(scratch) / "build.stderr.log"
+            run = run_bounded(argv, timeout=tree.build_timeout_s, cwd=checkout, stdout_path=out, stderr_path=err)
+            said = _last_line(read_tail(err, STDERR_LIMIT)) or _last_line(read_tail(out, STDERR_LIMIT))
+        if run.error is not None:
+            reason: str | None = f"could not run {argv[0]!r}: {run.error}"
+        elif run.timed_out:
+            reason = f"no answer within {tree.build_timeout_s:g} s"
+        elif run.returncode != 0:
+            reason = f"exit code {run.returncode}" + (f": {said}" if said else "")
+        else:
+            reason = None
+    except Exception as exc:  # noqa: BLE001 - a warning, whatever it was
+        reason = str(exc) or type(exc).__name__
+    if reason is not None:
+        log(f"warning: {checkout} could not be built back into the application's Python (build: {reason}); "
+            f"it may still run a removed combination's code. Run the build there yourself: {tree.build}")
+
+
 def _import_check(candidate_path: Path, timeout: float) -> str | None:
     """Import the candidate in a child interpreter. Returns stderr on failure."""
     snippet = (
@@ -268,6 +505,7 @@ def build_argv(
     params_flags: list[str] | None = None,
     params_json: Path | None = None,
     instance: str | None = None,
+    app: str | None = None,
 ) -> list[str]:
     """Split the template first, substitute second.
 
@@ -285,6 +523,10 @@ def build_argv(
     to happen after the split. `{params_json}` is the path of a JSON file with
     the same values, for a solver that would rather read a file. Only as a
     whole token, though: see `embedded_params`, which the config check shares.
+
+    For a tree problem, `{candidate}` is the candidate's tree folder and
+    `{app}` the program inside it (`render_app` of `problem.tree.app`); a
+    command that names `{app}` when there is none is refused here.
     """
     tokens = shlex.split(command, posix=True)
     if not tokens:
@@ -292,6 +534,8 @@ def build_argv(
     embedded = embedded_params(command)
     if embedded is not None:
         raise ValueError(embedded)
+    if app is None and any(field == "app" for token in tokens for field in _fields(token)):
+        raise ValueError("{app}: the problem names no program in the tree (problem.tree.app)")
     flags = list(params_flags or [])
     mapping = {
         "candidate": str(candidate),
@@ -301,6 +545,7 @@ def build_argv(
         "python": sys.executable,
         "instance": instance or "",
         "params_json": str(params_json) if params_json is not None else "",
+        "app": app or "",
     }
     argv: list[str] = []
     for token in tokens:
@@ -309,6 +554,14 @@ def build_argv(
         else:
             argv.append(token.format(**mapping))
     return argv
+
+
+def _fields(token: str) -> list[str]:
+    """The placeholders a token names (`{{` and `}}` are literal braces)."""
+    try:
+        return [field for _, field, _, _ in string.Formatter().parse(token) if field is not None]
+    except ValueError:  # an unbalanced brace: `format` says so with the token itself
+        return []
 
 
 def run_command_stage(
@@ -324,6 +577,8 @@ def run_command_stage(
     configuration: "Configuration | None" = None,
     cache: "EvalCache | None" = None,
     cancel: "threading.Event | None" = None,
+    app: str | None = None,
+    source_id: str | None = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -342,6 +597,9 @@ def run_command_stage(
 
     `cancel`, once set, stops the run in flight and starts no other: the
     outcome is then *abandoned*, not failed (`evolvekit/stopping.py`).
+
+    For a tree problem, `app` is what `{app}` becomes and `source_id` the
+    tree's commit, which keys the cache instead of the folder.
     """
     if stage.seeds <= 1:
         return _run_once(
@@ -357,6 +615,8 @@ def run_command_stage(
             configuration=configuration,
             cache=cache,
             cancel=cancel,
+            app=app,
+            source_id=source_id,
         )
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
@@ -373,6 +633,8 @@ def run_command_stage(
             configuration=configuration,
             cache=cache,
             cancel=cancel,
+            app=app,
+            source_id=source_id,
         )
         outcomes.append(outcome)
         if not outcome.ok:
@@ -465,6 +727,8 @@ def _run_once(
     unit: "UnitContext | None" = None,
     cache: "EvalCache | None" = None,
     cancel: "threading.Event | AnyEvent | None" = None,
+    app: str | None = None,
+    source_id: str | None = None,
 ) -> StageOutcome:
     """One evaluator run, announced to `observer` before and after.
 
@@ -500,6 +764,7 @@ def _run_once(
             seed=seed,
             private=private,
             cwd=cwd,
+            source_id=_tree_source(source_id, app, candidate_path),
         )
         known = cache.load(key, stage.id, private, timeout=stage.timeout)
         if known is not None and _missing_required(known.kpis, required_kpis) is not None:
@@ -520,6 +785,7 @@ def _run_once(
             configuration=configuration,
             unit=unit,
             cancel=halt,
+            app=app,
         )
         outcome.host_busy = load.stop()
     if cache is not None and key is not None and not outcome.cached:
@@ -536,6 +802,7 @@ def _run_once(
                 out=out_path,
                 seed=seed,
                 instance=unit.instance if unit is not None else None,
+                app=app,
                 **_substitutions(configuration),
             )
         )
@@ -584,6 +851,7 @@ def _execute_once(
     configuration: "Configuration | None" = None,
     unit: "UnitContext | None" = None,
     cancel: "threading.Event | AnyEvent | None" = None,
+    app: str | None = None,
 ) -> StageOutcome:
     """Run one external evaluator and read the KPI JSON it wrote to `{out}`."""
     started = time.perf_counter()
@@ -597,6 +865,7 @@ def _execute_once(
             out=out_path,
             seed=seed,
             instance=unit.instance if unit is not None else None,
+            app=app,
             **_substitutions(configuration),
         )
     except (ValueError, KeyError, IndexError) as exc:

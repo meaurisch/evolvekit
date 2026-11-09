@@ -301,7 +301,10 @@ def context(root: Path, study: Study, harness: Harness, *, screen: str = "", run
     where the consultant is: the screen, and the run's words and numbers
     when a run is in view. `document_of` is the server's cached status
     document; without one the status is built afresh."""
-    del home  # the keys and settings are the provider's business, not the model's
+    # The keys and settings are the provider's business, not the model's: only the plan line reads the
+    # models (which provider writes the changes, so how long each takes), never a key.
+    models = jobs.ai_models(home) if home is not None and study.budget.ai_enabled else None
+    del home
     tables = {
         name: {"source": t.source, "describe": t.describe,
                "columns": {c: {"type": col.type, "unit": col.unit, "describe": col.describe,
@@ -332,7 +335,7 @@ def context(root: Path, study: Study, harness: Harness, *, screen: str = "", run
         f"## The study so far\n{json.dumps(so_far, indent=1)}\n\n"
         f"## The preview case, summarised (no rows)\n"
         + (json.dumps(summary, indent=1, default=str) if summary else "(no preview yet)")
-        + "\n\n## Where the consultant is\n" + _where(root, study, harness, screen, run, document_of)
+        + "\n\n## Where the consultant is\n" + _where(root, study, harness, screen, run, document_of, models)
     )
 
 
@@ -342,7 +345,8 @@ def _status_document(run_dir: Path) -> Any:
     return build_status(run_dir)
 
 
-def _where(root: Path, study: Study, harness: Harness, screen: str, run: str | None, document_of: Any) -> str:
+def _where(root: Path, study: Study, harness: Harness, screen: str, run: str | None, document_of: Any,
+           models: dict[str, Any] | None = None) -> str:
     """The screen, and what it shows: a run's status and results in the words
     and numbers of the Running and Results pages (per case: the case's file
     name and its numbers, never a row), the plan's words, the test run's
@@ -360,7 +364,7 @@ def _where(root: Path, study: Study, harness: Harness, screen: str, run: str | N
             plan_line = str(plan.get("summary") or "") or _plan_numbers(plan)
             lines.append("The run:\n" + json.dumps(_run_words(status, results), indent=1, default=str))
     if not plan_line:
-        plan_line = _plan_line(root, study, harness)
+        plan_line = _plan_line(root, study, harness, models)
     if plan_line:
         lines.append(f"The plan: {plan_line}")
     test = work.test_run_state(root)
@@ -432,14 +436,14 @@ def _plan_numbers(plan: dict[str, Any]) -> str:
     return ", ".join(p for p in parts if p)
 
 
-def _plan_line(root: Path, study: Study, harness: Harness) -> str:
-    """The plan in words, as the Limits step shows it."""
+def _plan_line(root: Path, study: Study, harness: Harness, models: dict[str, Any] | None = None) -> str:
+    """The plan in words, as the Limits step shows it (`models`: the ones the run is compiled with)."""
     from evolvekit.harness.execute import plan_for, read_preview
 
     measured = read_preview(root)
     timing = measured if measured and measured.get("ok") else {"overhead_s": 0.0, "wall_s": study.limits.time_per_case_s}
     try:
-        return plan_for(study, harness, timing).summary()
+        return plan_for(study, harness, timing, models=models).summary()
     except (HarnessError, ValueError, ZeroDivisionError):
         return ""
 

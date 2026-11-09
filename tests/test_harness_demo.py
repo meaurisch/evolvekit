@@ -38,7 +38,7 @@ def _last_json(completed: subprocess.CompletedProcess) -> dict:
 def test_the_demo_harness_loads_with_its_templates():
     harness = load_harness(DEMO)
     assert harness.id == "demo-tour" and harness.application.kind == "program"
-    assert set(harness.templates) == {"tune", "stop-weights"}
+    assert set(harness.templates) == {"tune", "stop-weights", "faster"}
     assert harness.recommended == ["neighbours", "restart_after", "accept_worse", "init"]
 
 
@@ -84,6 +84,35 @@ def test_a_stop_weights_study_solves_a_case_end_to_end(tmp_path):
     assert db.execute("SELECT COUNT(*) FROM tour").fetchone() == (30,)
     length, weighted = db.execute("SELECT length, weighted_length FROM summary").fetchone()
     assert weighted > length, "the solver saw the heavier northern legs"
+
+
+def test_a_code_study_passes_the_solver_no_flag_for_a_setting_it_does_not_fix(tmp_path):
+    """Persona round 1, B1: the runner passed `--init random` (the harness's default) to a branch whose
+    change was `--init`'s default, so the change never ran. A code study hands the runner only the
+    settings it fixes, and the runner passes a flag for those alone."""
+    from evolvekit.harness.study import SettingChoice
+
+    seen = tmp_path / "argv.json"
+    app = tmp_path / "argv solver.py"  # records its command line, then runs the real solver
+    app.write_text(
+        "import json, runpy, sys\n"
+        f"open({str(seen)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+        f"sys.argv = [{str(SOLVER)!r}] + sys.argv[1:]\n"
+        f"runpy.run_path({str(SOLVER)!r}, run_name='__main__')\n", encoding="utf-8")
+    harness = load_harness(DEMO)
+    study = study_from_template(harness, "faster", "F")
+    study.code.repo, study.training = str(SOLVER.parent), ["cases/north-south-30.json"]
+    for fixed in ({}, {"neighbours": 12}):
+        study.settings = {name: SettingChoice(mode="fixed", value=value) for name, value in fixed.items()}
+        _, study_run = compile_study(study, harness, Plan.fixed(), bakeoff=True)
+        (tmp_path / "study-run.json").write_text(json.dumps(study_run), encoding="utf-8")
+        completed = subprocess.run(
+            [sys.executable, str(DEMO / "runner.py"), "--app", str(app), "solve", "--case", str(SAMPLE), "--seed", "1",
+             "--study", "study-run.json", "--time-limit", "0.3"],
+            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", timeout=120)
+        assert _last_json(completed)["kpis"]["tour_length"] > 0
+        flags = [a for a in json.loads(seen.read_text(encoding="utf-8")) if a.startswith("--")]
+        assert flags == ["--instance", "--seed", "--time-limit", "--print-tour"] + [f"--{n}" for n in fixed], flags
 
 
 def test_the_changed_request_can_be_exported(tmp_path):

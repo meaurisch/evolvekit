@@ -4,7 +4,7 @@
 # `kind: program` path end to end. See README.md.
 harness: 1
 id: demo-tour
-version: 1.0.0
+version: 1.1.0
 title: Demo tour
 summary: A small travelling-salesman solver with a command line, to try evolvekit on in minutes.
 
@@ -16,6 +16,15 @@ application:
   help: >
     It comes with evolvekit: examples/cli-solver/solver.py in the evolvekit folder.
     A .py program is run with the Python that runs evolvekit.
+
+# The source a code study may change: the solver itself, in the evolvekit
+# repository. `repo` is relative to this folder; a study records its own
+# absolute path when it is set up.
+code:
+  label: The solver's source
+  repo: ../../examples/cli-solver
+  open: [solver.py]
+  app: "{tree}/solver.py"
 
 cases:
   label: tour request

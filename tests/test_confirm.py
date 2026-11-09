@@ -140,6 +140,32 @@ def test_a_summary_gives_the_chance_of_a_gain_and_the_worst_case():
     assert decide(paired_summary([3.0, 3.1, 2.9, -1.4])) == "keep", "chance is high but the worst case is beyond 1 %"
 
 
+def test_a_candidate_whose_every_run_equals_the_baseline_is_marked_identical():
+    """Persona round 1, B2: every paired run of a branch gave exactly the starting point's result (its
+    change never ran), and the comparison still gave it a chance and a range. `identical` says so; the
+    decision is keep, and the check does not add runs to an answer more runs cannot open."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse, render_markdown
+    from evolvekit.harness.execute import _decision
+
+    comparison = Comparison(label="final", objective="length", direction="minimize", stage="full", seeds=[1, 2, 3],
+                            instances=["a", "b"], baseline_id="g000-c0001", candidates=["same", "other"])
+    for instance, size in (("a", 10.0), ("b", 20.0)):
+        for seed in (1, 2, 3):
+            value = size + seed / 10
+            for who, mine in ((BASELINE, value), ("same", value), ("other", value - (0.01 if (instance, seed) == ("b", 3) else 0))):
+                comparison.runs.append({"configuration": who, "instance": instance, "seed": seed, "ok": True,
+                                        "kpis": {"length": mine}})
+    _analyse(comparison)
+    same, other = comparison.per_candidate["same"], comparison.per_candidate["other"]
+    assert same["identical"] is True and other["identical"] is False, "one run apart is a difference"
+    assert _decision(same) == "keep"
+    assert render_markdown(comparison).count("Every run gave exactly the baseline's result") == 1
+    # A run that failed is not a run that gave today's result.
+    comparison.runs = [r for r in comparison.runs if not (r["configuration"] == "same" and (r["instance"], r["seed"]) == ("a", 1))]
+    _analyse(comparison)
+    assert comparison.per_candidate["same"]["identical"] is False
+
+
 # -- the comparison --------------------------------------------------------
 
 

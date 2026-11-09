@@ -6,15 +6,16 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import shutil
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
 from evolvekit.app import AppError
 from evolvekit.harness import HarnessError
+from evolvekit.harness.plan import plan_notes
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
 from evolvekit.env import LoadedEnv, load_env_files
@@ -432,6 +433,14 @@ def build_parser() -> argparse.ArgumentParser:
     s_app.add_argument("--detect", action="store_true", help="list the applications found on this computer")
     s_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_app.add_argument("--json", action="store_true", help="print JSON and nothing else")
+    s_code = study.add_parser("code", help="say where a code study's source is, from which base, and what to improve")
+    s_code.add_argument("slug", help="the study's name in the library home")
+    s_code.add_argument("--repo", help="the source folder (default: the harness's own, while its folder is there)")
+    s_code.add_argument("--from", dest="from_ref", metavar="REF",
+                        help="the base: a branch, tag or commit, or `working` for the files as they are (default: HEAD)")
+    s_code.add_argument("--brief", help="what the search should improve, in a sentence")
+    s_code.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_code.add_argument("--json", action="store_true", help='print {"ok", "repo", "from", "message"} and nothing else')
     s_list = study.add_parser("list", help="the studies in the library home")
     s_list.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_list.add_argument("--json", action="store_true", help='print a list of {"slug", "name", "harness", "state"}')
@@ -451,6 +460,15 @@ def build_parser() -> argparse.ArgumentParser:
     s_start.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
     s_start.add_argument("--home", help=home_help)
     s_start.add_argument("--json", action="store_true", help='print {"run", "started"|"queued"} (one JSON document per line)')
+    s_bake = study.add_parser("bakeoff", help="check given branches of a code study against its starting point "
+                                              "on the held-back cases, with no search")
+    s_bake.add_argument("slug", help="the study's name in the library home")
+    s_bake.add_argument("--ref", dest="refs", action="append", required=True, metavar="REF",
+                        help="a branch, tag or commit of the source to compare (once per branch)")
+    s_bake.add_argument("--wait", action="store_true", help="then wait until the run has ended, as study wait does")
+    s_bake.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
+    s_bake.add_argument("--home", help=home_help)
+    s_bake.add_argument("--json", action="store_true", help='print {"run", "started"|"queued", "refs"} (one JSON document per line)')
     s_stop = study.add_parser("stop", help="ask the study's running run to stop, or take back a queued one")
     s_stop.add_argument("slug", help="the study's name in the library home")
     s_stop.add_argument("--home", help=home_help)
@@ -482,6 +500,21 @@ def build_parser() -> argparse.ArgumentParser:
     form = s_report.add_mutually_exclusive_group()
     form.add_argument("--markdown", action="store_true", help="the report as Markdown")
     form.add_argument("--json", action="store_true", help="the verdict document (the default)")
+    s_export = study.add_parser("export", help="a code study's result as a file: --diff writes the best combination's patch")
+    s_export.add_argument("slug", help="the study's name in the library home")
+    s_export.add_argument("--diff", action="store_true", help="the best combination's change, as runs/<id>/best.patch")
+    s_export.add_argument("--run", help="a run's id (default: the latest)")
+    s_export.add_argument("--home", help=home_help)
+    s_export.add_argument("--json", action="store_true", help='print {"patch"} and nothing else')
+    s_pr = study.add_parser("pr", help="a code study's best change as a branch, pushed, with a PR whose body is the "
+                                       "report; prints what it will do, and does it only with --yes")
+    s_pr.add_argument("slug", help="the study's name in the library home")
+    s_pr.add_argument("--run", help="a run's id (default: the latest)")
+    s_pr.add_argument("--base", metavar="BRANCH", help="the branch the PR goes into (default: the repository's default)")
+    s_pr.add_argument("--draft", action="store_true", help="open the PR as a draft")
+    s_pr.add_argument("--yes", action="store_true", help="do it: make the branch, push it, open the PR")
+    s_pr.add_argument("--home", help=home_help)
+    s_pr.add_argument("--json", action="store_true", help="print the plan (and with --yes what was done) as JSON")
     s_open = study.add_parser("open", help="print the study's address in the app (starting the app if none runs) and open it")
     s_open.add_argument("slug", help="the study's name in the library home")
     s_open.add_argument("--no-browser", action="store_true", help="only print the address")
@@ -966,7 +999,10 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
             return 2
         _advance_step(home.study_root(slug), len(STEPS))  # ready: the Set up's last step, Review and start
         print("ready: no problems")
-        print(_plan_line(home.load(slug)[1]))
+        study = home.load(slug)[1]
+        print(_plan_line(study))
+        for note in plan_notes(len(study.test)):  # a note, not a problem: the study runs as it is
+            print(f"note: {note}")
         _say_next(args, f"study start {slug}")
         return 0
     if command == "application":
@@ -989,6 +1025,19 @@ def _study_library_command(command: str, args: argparse.Namespace) -> int:
             print(answer["message"], file=sys.stderr)
             return 1
         _advance_step(home.study_root(slug), _STEP_AFTER_APPLICATION)
+        return 0
+    if command == "code":
+        answer = home.set_code(slug, _full_path(args.repo) if args.repo else None, args.from_ref, args.brief)
+        if args.json:
+            print(json.dumps(answer))
+        if not answer["ok"]:
+            print(answer["message"], file=sys.stderr)
+            return 1
+        if not args.json:
+            _, study, harness = home.load(slug)
+            files = study.code.open or list(harness.code.open)
+            print(f"source: {answer['repo']} (from {answer['from']}); files: {', '.join(files)}")
+        _say_next(args, f"study check {slug}")
         return 0
     files: list[Path] = []
     for value in args.add:
@@ -1109,10 +1158,22 @@ def _plan_line(study) -> str:
 
 
 def _say_verdict(document: dict) -> None:
-    """The verdict's sentence, then what to do about it, one per line."""
+    """The verdict's sentence, then what to do about it, one per line; for a
+    bake-off each branch's own line by its ref; then how much of the plan
+    ran when the run ran less of it than planned."""
     print(document["line"])
+    headline = str(document["line"])
+    for candidate in document.get("candidates") or []:
+        words = str(candidate.get("line", ""))
+        if words and (words in headline or words[:1].lower() + words[1:] in headline):
+            continue  # the headline already says this branch's line (a bake-off of one branch)
+        print(f"  {candidate.get('ref')}: {words}")
     if document.get("advice"):
         print(document["advice"])
+    if document.get("how_it_ran"):
+        print(document["how_it_ran"])
+    if (document.get("spent") or {}).get("line"):
+        print(document["spent"]["line"])  # "AI: $0.87 of $1.00": a fact, as the report says it
 
 
 OPEN_WAIT_S = 15.0
@@ -1171,6 +1232,58 @@ def _verdict_command(command: str, args: argparse.Namespace) -> int:
         print(render_report(document, jobs.results(root, document["run"], build_status), root=root), end="")
     else:
         print(json.dumps(document))
+    return 0
+
+
+def _change_command(command: str, args: argparse.Namespace) -> int:
+    """`study export --diff` and `study pr` (design §5.6): a code study's best change as a
+    patch, or as a branch, a push and a PR -- the last two only with `--yes`. A refusal
+    before anything is done exits 2; a failure while doing it exits 1."""
+    from evolvekit.harness import pr
+
+    if command == "export" and not args.diff:
+        print("name what to export: --diff (the best combination's change as a patch)", file=sys.stderr)
+        return 2
+    def failed(exc: HarnessError, code: int, extra: dict | None = None) -> int:
+        """The sentence on stderr; with `--json` also `{"ok": false, "error", "state"}` on stdout."""
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(exc), "state": getattr(exc, "state", "none"), **(extra or {})}))
+        print(exc, file=sys.stderr)
+        return code
+
+    root = _home(args).study_root(args.slug)
+    try:
+        if command == "export":
+            patch = pr.export_diff(root, args.run)
+        else:
+            plan = pr.plan_pr(root, args.run, base=args.base, draft=args.draft)
+    except HarnessError as exc:
+        return failed(exc, 2)
+    if command == "export":
+        print(json.dumps({"ok": True, "patch": str(patch)}) if args.json else patch)
+        return 0
+    if not args.yes:
+        if args.json:
+            print(json.dumps({"ok": True, **plan.to_json(), "done": False}))
+            return 0
+        for line in pr.describe(plan):
+            print(line)
+        print("nothing was done: run it again with --yes to do this")
+        return 0
+    if not args.json:
+        for line in pr.describe(plan):
+            print(line)
+        sys.stdout.flush()
+    try:
+        done = pr.open_pr(plan)
+    except HarnessError as exc:
+        return failed(exc, 1, {"branch": getattr(exc, "branch", plan.branch), "commit": getattr(exc, "commit", None)})
+    if args.json:
+        print(json.dumps({"ok": True, **plan.to_json(), **done, "done": True}))
+        return 0
+    print(f"made the branch {done['branch']} at {done['commit'][:12]}")
+    print(f"pushed it to {plan.remote}" if done["pushed"] else "not pushed: there is no remote")
+    print(f"PR: {done['url']}" if done["url"] else done["note"])
     return 0
 
 
@@ -1278,6 +1391,8 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
     if command == "watch":
         return _watch(home, slug, args.every, args.json)
     root, study, _ = home.load(slug)
+    if command == "bakeoff":
+        return _bakeoff(home, root, study, args)
     if command == "start":
         answer = jobs.start(home, root)
         run = answer["run"]
@@ -1305,10 +1420,50 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         return 0
     if args.json:
         print(json.dumps(jobs.status(root, _run_of(root, args.run), build_status)))
-    elif args.run:
-        print(jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status)["line"])  # noqa: SLF001
     else:
-        print(jobs.state_line(root, study, build_status)["line"])
+        card = (jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status) if args.run  # noqa: SLF001
+                else jobs.state_line(root, study, build_status))
+        print(card["line"])
+        if (card.get("pace") or {}).get("line"):
+            print(card["pace"]["line"])  # a live search: how many of the planned rounds its pace buys
+        if card.get("kind") == "running" and (card.get("spent") or {}).get("line"):
+            print(card["spent"]["line"])  # a live search with AI: what it spent so far, of its cap
+        verdict = card.get("verdict") or {}
+        if verdict.get("line"):
+            # A finished run: the verdict's own words under the card's, each branch's for a bake-off.
+            _say_verdict(verdict)
+        if (card.get("branch") or {}).get("line"):
+            print(card["branch"]["line"])  # what `study pr` made for this run
+        earlier = card.get("earlier") or {}
+        if earlier.get("says"):
+            print(earlier["says"])  # a later run must not hide an earlier use
+            if (earlier.get("branch") or {}).get("line"):
+                print(earlier["branch"]["line"])
+    return 0
+
+
+def _bakeoff(home, root: Path, study, args: argparse.Namespace) -> int:
+    """`study bakeoff SLUG --ref A --ref B`: the app's "Compare branches"; a refusal exits 2."""
+    from evolvekit.app import jobs
+
+    try:
+        answer = jobs.start(home, root, bakeoff=list(args.refs))
+    except AppError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    run, count = answer["run"], len(args.refs)
+    if answer.get("queued"):
+        other = jobs._waiting_for(root) or "another study"  # noqa: SLF001 - the name the app's card shows
+        document = {"run": run, "queued": True, "refs": list(args.refs)}
+        line = (f"queued behind {other}; it starts when that study finishes "
+                "(the app or `evolvekit study wait` starts it)")
+    else:
+        document = {"run": run, "started": True, "refs": list(args.refs)}
+        line = f"started run {run}: {count} branch{'es' if count != 1 else ''} against {study.code.from_ref}"
+    print(json.dumps(document) if args.json else line, flush=True)
+    if args.wait:
+        return _wait(home, args.slug, args.timeout, args.json, args)
+    _say_next(args, f"study wait {args.slug}", f"study open {args.slug}")
     return 0
 
 
@@ -1359,12 +1514,14 @@ def cmd_study(args: argparse.Namespace) -> int:
                   file=sys.stderr)
         _say_next(args, f"study cases {slug} --add <files> --hold-back N")
         return 0
-    if command in ("application", "list", "check", "cases"):
+    if command in ("application", "code", "list", "check", "cases"):
         return _study_library_command(command, args)
-    if command in ("start", "stop", "status", "watch", "wait"):
+    if command in ("start", "bakeoff", "stop", "status", "watch", "wait"):
         return _study_run_command(command, args)
     if command in ("verdict", "report"):
         return _verdict_command(command, args)
+    if command in ("export", "pr"):
+        return _change_command(command, args)
     if command == "open":
         return _study_open(args)
     folder = _study_root(args.directory, args)
@@ -1379,16 +1536,35 @@ def cmd_study(args: argparse.Namespace) -> int:
         return 0
     study, harness = load_study(folder), execute.study_harness(folder)
     require_valid(study, harness, root=folder)
+    models = _study_models(args, study, keys=command == "run")
     if command == "compile":
-        plan = execute.plan_for(study, harness, execute.measured(folder))
-        run_dir = write_run(study, harness, plan, folder, args.run_id or datetime.now().strftime("%Y%m%d-%H%M%S"))
+        plan = execute.plan_for(study, harness, execute.measured(folder), models=models)
+        if not args.run_id:
+            # Nothing was asked to be kept: compile to prove it works, then leave no folder
+            # in runs/ -- it holds only runs that were started (persona round 4, F2).
+            scratch = f".compile-{os.getpid()}"
+            runs_existed = (folder / "runs").is_dir()
+            try:
+                write_run(study, harness, plan, folder, scratch, models=models)
+            finally:
+                shutil.rmtree(folder / "runs" / scratch, ignore_errors=True)
+                if not runs_existed:
+                    try:
+                        (folder / "runs").rmdir()
+                    except OSError:
+                        pass
+            print(f"compiled, nothing written (give --run-id to keep the files): {plan.summary()}")
+            if not Path(args.directory).is_dir():
+                _say_next(args, f"study start {args.directory}")
+            return 0
+        run_dir = write_run(study, harness, plan, folder, args.run_id, models=models)
         print(f"compiled into {run_dir}: {plan.summary()}")
         if not Path(args.directory).is_dir():  # a name in the library home: start it as the skills say
             _say_next(args, f"study start {args.directory}")
             return 0
         print(f"run it with  python -m evolvekit run --config {run_dir / 'evolvekit.yaml'} --run-dir {run_dir}")
         return 0
-    job = execute.run_study(folder, args.run_id)
+    job = execute.run_study(folder, args.run_id, models=models)
     print(f"study run {job.get('run_id')}: {job['phase']}"
           + (f" -- {job.get('error')}" if job.get("error") else ""))
     final = job.get("final") or {}
@@ -1398,6 +1574,26 @@ def cmd_study(args: argparse.Namespace) -> int:
     elif final.get("skipped"):
         print(f"final check: {final['skipped']}")
     return 0 if job["phase"] in ("done", "stopped") else 1
+
+
+def _study_models(args: argparse.Namespace, study, *, keys: bool = False) -> dict | None:
+    """The models a study with AI search help is compiled with: the ones
+    `study start` takes from Settings in the library home; None without AI.
+    With `keys` (`study run`, which searches in this process) the home's keys
+    go into the environment, where the providers read them. No key for the
+    chosen provider is refused in the words `study start` uses."""
+    if not study.budget.ai_enabled:
+        return None
+    from evolvekit.app import jobs
+
+    home = _home(args)
+    models = jobs.ai_models(home)
+    if models is None:
+        raise HarnessError("budget.ai: AI search help is on, and there is no key for it: add one in Settings, "
+                           "or turn AI help off")
+    if keys:
+        home.export_keys()
+    return models
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

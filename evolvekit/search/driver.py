@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from evolvekit import __version__
-from evolvekit.budget import BudgetGuard, StopDecision, StopPolicy
+from evolvekit.budget import AI_USED_UP, BudgetGuard, StopDecision, StopPolicy
 from evolvekit.candidate import (
     SEED_OPERATOR,
     BlockError,
@@ -43,18 +43,21 @@ from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage, race_warnings
 from evolvekit.evaluate.signature import BehaviourIndex
+from evolvekit.evaluate.stages import restore_build
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration
 from evolvekit.providers import Provider, build_provider
+from evolvekit.providers.base import CallCapped, supports_call_cap
 from evolvekit.search.archive import Archive
 from evolvekit.search.breadth import AdaptiveBreadth
 from evolvekit.search.novelty import NoveltyIndex, NoveltyVerdict, build_near_backend
 from evolvekit.search.operators import (
     OPERATOR_ROLES,
     OperatorResult,
+    TreeContext,
     param_cross,
     param_lhs,
     param_lhs_typed,
@@ -184,19 +187,32 @@ class Driver:
             signatures=self.behaviour,
             on_event=self._on_evaluation,
             stop=self.run_stop.event,
+            time_left=self.run_stop.left_s,
         )
         self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
         self.breadth = AdaptiveBreadth.from_config(config.search)
         self._log_sink = log or (lambda _msg: None)
         self._providers = providers or {}
 
-        skeleton = config.problem.skeleton_source()
-        self.prefix, self.seed_block, self.suffix = extract_block(
-            skeleton, config.problem.block_start, config.problem.block_end
-        )
-        self.skeleton_source = skeleton
+        key: Callable[[str], str] | None = None
+        if config.problem.tree is not None:
+            # A tree problem: a candidate is a diff against the base, the seed
+            # the empty diff, and two diffs are the same change when they
+            # normalise alike. Only here is `evolvekit.tree` (and git) needed.
+            from evolvekit import tree
+
+            self.repo: tree.Repo | None = tree.Repo(config.problem.tree.repo)
+            self.prefix = self.suffix = self.seed_block = self.skeleton_source = ""
+            key = tree.normalise_diff
+        else:
+            self.repo = None
+            skeleton = config.problem.skeleton_source()
+            self.prefix, self.seed_block, self.suffix = extract_block(
+                skeleton, config.problem.block_start, config.problem.block_end
+            )
+            self.skeleton_source = skeleton
         self.archive: list[Candidate] = []
-        self.grid = Archive.from_config(config.search.archive)
+        self.grid = Archive.from_config(config.search.archive, tree=self.repo is not None)
         near_cfg = config.search.novelty.near
         self._embed_context: tuple[str, int] = ("startup", 0)
         self.novelty = NoveltyIndex(
@@ -206,6 +222,7 @@ class Driver:
                 on_call=self._bill_embedding,
             ),
             threshold=near_cfg.threshold,
+            key=key,
         )
         self.scratchpad = Scratchpad(self.ledger.run_dir, config.search.scratchpad_every)
         self.results: dict[str, EvalResult] = {}
@@ -215,6 +232,10 @@ class Driver:
         self._provider_failures = 0
         self._provider_halt: str | None = None
         self._dead_ends: list[str] = []
+        self._told: set[str] = set()
+        """The run-log notes said once per run (`_agent_patch`, `_calling`)."""
+        self._ai_out: str | None = None
+        """Why no more AI changes are written (`_ai_room`): the search ends after its round."""
         self._parent_notes: dict[str, str] = {}
         """One artefact per parent that bred a behavioural twin, spent on that
         parent's next prompt. The parent's children counter has already been
@@ -245,7 +266,8 @@ class Driver:
         number of workers -- those may change between sessions of one run."""
         config = self.config
         space = config.problem.parameters
-        return {
+        tree_problem = config.problem.tree
+        identity = {
             "skeleton_sha": hashlib.sha256(self.skeleton_source.encode("utf-8")).hexdigest()[:16],
             "parameters": [
                 {"name": p.name, "type": p.type, "choices": list(p.choices)} for p in space
@@ -266,6 +288,16 @@ class Driver:
                 for stage in config.evaluate.stages
             ],
         }
+        if tree_problem is not None:
+            # Only for a tree, so a skeleton run's identity reads as it always did.
+            # `build` and `app` change what a command runs, so what a score means; so does
+            # the interpreter a build installs into -- only when the build names `{python}`,
+            # so a program harness's run resumes from a moved evolvekit.
+            identity["tree"] = {"base": tree_problem.base, "open": list(tree_problem.open),
+                                "build": tree_problem.build, "app": tree_problem.app}
+            if "{python}" in tree_problem.build:
+                identity["tree"]["python"] = tree_problem.python
+        return identity
 
     def _check_same_problem(self) -> None:
         """Refuse to continue a run directory with a different problem.
@@ -287,8 +319,9 @@ class Driver:
         if recorded is None:
             return  # a run directory from before this was recorded
         now = _comparable(self._problem_identity())
-        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "levels", "gates", "stages")
-                   if recorded.get(key) != now[key]]
+        changed = [key for key in ("objective", "direction", "skeleton_sha", "parameters", "levels", "gates", "stages",
+                                   "tree")
+                   if recorded.get(key) != now.get(key)]
         if not changed:
             return
         detail = []
@@ -307,7 +340,9 @@ class Driver:
              "objective": f"the objective is now {now['objective']!r}, was {recorded.get('objective')!r}",
              "direction": f"the direction is now {now['direction']!r}",
              "gates": "the gates changed (evaluate.gates), so earlier candidates were judged by other rules",
-             "levels": "the levels changed (evaluate.score.levels), so earlier scores rank by other rules"}[key]
+             "levels": "the levels changed (evaluate.score.levels), so earlier scores rank by other rules",
+             "tree": "the source's starting commit, its open files, its build, its program or its Python "
+                     "changed"}[key]
             for key in changed if key != "stages"
         ]
         raise ValueError(
@@ -390,6 +425,34 @@ class Driver:
             )
         return self._providers[role]
 
+    def _calling(self, role: str) -> Provider:
+        """`provider(role)` for a call: a provider that can be told the most one
+        reply may spend (claude-cli) is told what is left of `budget.max_usd`
+        with every reply (`CallCapped`); one whose CLI cannot take it is named
+        once in the run's log."""
+        provider = self.provider(role)
+        if not supports_call_cap(provider):
+            return provider
+        note_for = getattr(provider, "act_cap_note", None)
+        note = note_for() if callable(note_for) else None
+        if note and note not in self._told:  # once per run, not per call
+            self._told.add(note)
+            self.log(f"warning: {note}")
+        return CallCapped(provider, lambda: self.budget.config.max_usd - self.budget.state.usd)
+
+    def _ai_room(self) -> bool:
+        """Whether one more AI call fits in what is left of `budget.max_usd`
+        (`BudgetGuard.room_for_a_call`). The first time it does not, the run's
+        log says so and the search ends after its round: no more AI changes are
+        written, and the run goes to its final check."""
+        verdict = self.budget.room_for_a_call()
+        if verdict.allowed:
+            return True
+        if self._ai_out is None and (verdict.reason or "").startswith(AI_USED_UP):
+            self._ai_out = verdict.reason
+            self.log(f"{verdict.reason}; no more AI changes: the round ends and the run goes to its final check")
+        return False
+
     def _bill_embedding(self, tokens: int, texts: int) -> None:
         """Charge one embedding call to whichever child provoked it."""
         candidate_id, generation = self._embed_context
@@ -408,7 +471,14 @@ class Driver:
         self._counter += 1
         return f"g{generation:03d}-c{self._counter:04d}"
 
-    def _make_source(self, block: str) -> str:
+    def _make_source(self, block: str, candidate_id: str = "") -> str:
+        """A skeleton's candidate: its module's text. A tree's: the path of its
+        folder (`{tree}`), which the cascade makes when it evaluates it."""
+        if self.repo is not None:
+            from evolvekit import tree
+
+            folder = tree.tree_dir(self.ledger.run_dir, candidate_id)
+            return str(folder / self.repo.prefix if self.repo.prefix else folder)
         return splice_block(
             self.skeleton_source,
             block,
@@ -455,11 +525,11 @@ class Driver:
         rows = [self._settle_competes(row) for row in self.ledger.runs()]
         if not rows:
             return 0
-        self.grid = Archive.from_records(rows, self.config.search.archive)
+        self.grid = Archive.from_records(rows, self.config.search.archive, tree=self.repo is not None)
         last_generation = 0
         for row in rows:
             candidate = Candidate.from_record(row)
-            candidate.source = self._make_source(candidate.block)
+            candidate.source = self._make_source(candidate.block, candidate.id)
             self.archive.append(candidate)
             self.by_id[candidate.id] = candidate
             if not candidate.rejected:
@@ -514,6 +584,7 @@ class Driver:
             # The time limit is the run's: earlier sessions' hours count.
             self.run_stop.start(used_s=active_seconds(recorded))
             self.heartbeat.start(phase="starting")
+            summary: RunSummary | None = None
             try:
                 if lock.reclaimed_from:
                     self.log(
@@ -532,6 +603,18 @@ class Driver:
                 raise
             finally:
                 self.run_stop.close()
+                if self.repo is not None and summary is None:
+                    # A crash or Ctrl+C skips `_finalise`, and a tree left
+                    # behind stays registered in the engineer's repository.
+                    # Best effort: it never hides the real error.
+                    try:
+                        self._remove_trees()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"evolvekit: the run's trees were not all removed ({exc})", file=sys.stderr)
+                if self.repo is not None and self.config.problem.tree.build:
+                    # The search built candidates into the shared interpreter:
+                    # it is pointed back at the engineer's checkout (decision 31).
+                    restore_build(self.config.problem, log=self.log)
             best = summary.best
             self.events.emit(
                 "run_finished",
@@ -641,6 +724,9 @@ class Driver:
             if not verdict.allowed:
                 summary.stop_reason = verdict.reason or "budget exhausted"
                 break
+            if self.config.search.uses_llm and not self._ai_room() and self._ai_out:
+                summary.stop_reason = self._ai_out
+                break
             if decision.stop:
                 summary.stop_reason = decision.reason or "stop policy"
                 break
@@ -715,6 +801,9 @@ class Driver:
                     f"since-improvement=${point.usd_since_improvement:.4f}  "
                     f"window({point.window})={point.gain_line}"
                 )
+            if self._ai_out:
+                summary.stop_reason = self._ai_out
+                break
             if decision.stop:
                 summary.stop_reason = decision.reason or "stop policy"
                 break
@@ -778,7 +867,7 @@ class Driver:
                 continue
             if child.id in self.by_id:
                 continue  # recorded before the run died
-            child.source = self._make_source(child.block)
+            child.source = self._make_source(child.block, child.id)
             suffix = child.id.rsplit("c", 1)[-1]
             if suffix.isdigit():
                 self._counter = max(self._counter, int(suffix))
@@ -794,6 +883,8 @@ class Driver:
 
     def _finalise(self, summary: RunSummary) -> RunSummary:
         summary.best = self.best
+        if self.repo is not None:
+            self._remove_trees()
         summary.rejected = sum(1 for c in self.archive if c.rejected)
         summary.no_ops = self.grid.no_ops
         summary.duplicates = self.grid.duplicates
@@ -812,6 +903,21 @@ class Driver:
         summary.children_per_generation = self.children_per_generation
         self._snapshot_archive()
         return summary
+
+    def _remove_trees(self) -> None:
+        """Every tree of the run, the best's included: the safety net behind
+        `_drop_trees` (a crash, a stop in the middle of a round). The final
+        check makes its own, and `study export --diff` and `study pr` rebuild
+        the change from the recorded block. A tree still held open by another
+        program stays, and is said so once; never an error."""
+        from evolvekit import tree
+
+        tree.remove_all(self.ledger.run_dir)
+        root = tree.tree_dir(self.ledger.run_dir, "-").parent
+        if not root.is_dir():
+            return
+        for folder in sorted(p for p in root.iterdir() if p.is_dir()):
+            self.log(f"a combination's folder is still in use and stays: {folder}")
 
     # -- resume: what the run directory has already used up -------------
 
@@ -912,11 +1018,12 @@ class Driver:
             print(f"evolvekit: archive.json not refreshed ({exc}); the run goes on", file=sys.stderr)
 
     def _seed_candidate(self) -> Candidate:
+        candidate_id = self._next_id(0)
         return Candidate(
-            id=self._next_id(0),
+            id=candidate_id,
             generation=0,
             block=self.seed_block,
-            source=self.skeleton_source,
+            source=self.skeleton_source if self.repo is None else self._make_source("", candidate_id),
             operator=SEED_OPERATOR,
             model="human",
             provider="human",
@@ -1073,7 +1180,8 @@ class Driver:
                 id=c.id,
                 summary=self._summary_of(c),
                 score_line=self._score_line(c),
-                block=c.block if operator == "crossover" else None,
+                # On a tree an inspiration is shown as its change (a diff), for every operator.
+                block=c.block if operator == "crossover" or self.repo is not None else None,
             )
             for c in picks
         ]
@@ -1131,6 +1239,8 @@ class Driver:
         for slot, operator in enumerate(plan):
             if not self.budget.check().allowed or self._provider_is_dead() or self.run_stop.triggered:
                 break
+            if _role_of(operator) != "none" and not self._ai_room():
+                break  # what is left could not pay for this call: the round ends here
             # A big step is an escape from the *front* of the search, so it
             # starts from the best candidate rather than from a sampled cell.
             parent = (best or pool[0]) if operator == "big_step" else pool[slot % len(pool)]
@@ -1150,7 +1260,7 @@ class Driver:
             # Nothing to cross with yet: one cell, or one elite. Mutate instead
             # of pretending, and say so in the record.
             operator = "rewrite"
-        role = "strong" if operator == "big_step" else OPERATOR_ROLES.get(operator, "small")
+        role = _role_of(operator)
 
         outcome, verdict, attempts = self._propose(
             operator, parent, inspirations, candidate_id, generation, role
@@ -1160,7 +1270,7 @@ class Driver:
             id=candidate_id,
             generation=generation,
             block=outcome.block if outcome.ok else parent.block,
-            source=self._make_source(outcome.block if outcome.ok else parent.block),
+            source=self._make_source(outcome.block if outcome.ok else parent.block, candidate_id),
             operator=outcome.mode if outcome.ok and outcome.mode else operator,
             model=(
                 outcome.completion.model
@@ -1174,9 +1284,10 @@ class Driver:
             role=role,
             inspiration_ids=[i.id for i in inspirations],
         )
-        if outcome.completion is not None:
+        # A failed agent call is billed (it carries a completion) and still counts as a failure; a reply stopped at its cap does not.
+        if outcome.completion is not None and not outcome.provider_error:
             self._provider_failures = 0
-        elif outcome.provider_error:
+        elif outcome.provider_error and not _stopped_at_cap(outcome):
             self._provider_failures += 1
             self._provider_halt = outcome.error or "provider error"
         if not outcome.ok:
@@ -1242,7 +1353,7 @@ class Driver:
         attempts = 0
         self._embed_context = (candidate_id, generation)
         hint = self._compose_hint(parent)
-        outcome = self._invoke(operator, parent, inspirations, role, hint)
+        outcome = self._invoke(operator, parent, inspirations, role, hint, candidate_id)
         attempts += 1
         self._bill(outcome, candidate_id, generation, operator, role)
         self._trace(outcome, candidate_id, parent, operator, role, attempt=attempts)
@@ -1255,13 +1366,16 @@ class Driver:
         )
         if verdict.novel or not self.config.search.novelty_retry or role == "none":
             return outcome, verdict, attempts
-        if not self.budget.check().allowed:
+        if operator == "agent_patch":
+            # A whole agent run is not re-asked for a duplicate: the next round's brief shows it.
+            return outcome, verdict, attempts
+        if not self._ai_room():
             return outcome, verdict, attempts
 
         # One re-prompt, ever. The first real run showed the small model
         # handing back the same program three times; asking twice is worth the
         # cheap call, asking a third time is how v1 built its token bill.
-        retry = self._invoke(operator, parent, inspirations, role, verdict.retry_hint)
+        retry = self._invoke(operator, parent, inspirations, role, verdict.retry_hint, candidate_id)
         attempts += 1
         self._bill(retry, candidate_id, generation, operator, role)
         self._trace(retry, candidate_id, parent, operator, role, attempt=attempts)
@@ -1282,6 +1396,7 @@ class Driver:
         inspirations: list[Inspiration],
         role: str,
         hint: str | None,
+        candidate_id: str,
     ) -> OperatorResult:
         if operator == "param_lhs":
             seed = self.rng.randrange(1 << 30)
@@ -1298,10 +1413,12 @@ class Driver:
             if operator == "param_cross":
                 return param_cross(space, parent, self._mate_for(parent), seed=seed)
             return param_tpe(space, parent, self._observations(), seed=seed)
+        if operator == "agent_patch":
+            return self._agent_patch(parent, role, candidate_id)
         return run_operator(
             operator,
             config=self.config,
-            provider=self.provider(role),
+            provider=self._calling(role),
             model_role=role,
             parent=parent,
             parent_result=self.results.get(parent.id),
@@ -1311,7 +1428,99 @@ class Driver:
             inspirations=inspirations,
             scratchpad=self.scratchpad.text or None,
             extra_instruction=hint,
+            tree=self._tree_context(candidate_id),
         )
+
+    AGENT_FAILURES = 3
+    """The most recent failures an agent's brief shows."""
+
+    def _agent_patch(self, parent: Candidate, role: str, candidate_id: str) -> OperatorResult:
+        """A coding agent on the parent's tree (`search/agent_patch.py`): shown the
+        archive's best and worst and the last failures, bounded by the study's time
+        left and what is left of `budget.max_usd`, ended by a Stop request."""
+        from evolvekit.search.agent_patch import agent_patch
+
+        context = self._tree_context(candidate_id)
+        if context is None:  # `config._tree_rules` refuses agent_patch without a tree
+            return OperatorResult(operator="agent_patch", messages=[],
+                                  error="agent_patch changes a source tree, and this problem has none")
+        best = self.best
+        competing = [c for c in self.archive if _competes(c) and c.fitness is not None]
+        worst = min(competing, key=lambda c: (c.fitness, c.id)) if competing else None
+        left_usd = self.budget.config.max_usd - self.budget.state.usd
+        provider = self._calling(role)
+        note_for = getattr(provider, "act_cap_note", None)
+        note = note_for() if callable(note_for) else None
+        if note and note not in self._told:  # once per run, not per call
+            self._told.add(note)
+            self.log(f"warning: {note}")
+        return agent_patch(
+            config=self.config,
+            provider=provider,
+            model_role=role,
+            parent=parent,
+            parent_result=self.results.get(parent.id),
+            context=context,
+            best=best,
+            worst=None if worst is None or (best is not None and worst.id == best.id) else worst,
+            failures=self._failures(),
+            time_left_s=self.run_stop.left_s(),
+            left_usd=max(0.0, left_usd),
+            cancel=self.run_stop.event,
+        )
+
+    def _failures(self) -> list[str]:
+        """The archive's last `AGENT_FAILURES` failures, oldest first, each the
+        candidate's id, its reason and its feedback's tail (`FAILURE_LIMIT` at most)."""
+        from evolvekit.prompts import FAILURE_LIMIT
+
+        found: list[str] = []
+        for candidate in reversed(self.archive):
+            failure = (candidate.last_failure or "").strip()
+            if not failure:
+                continue
+            head, _, rest = failure.partition("\n")
+            if head.startswith("stage "):  # the stage's own feedback is the fuller tail
+                stage = head[len("stage "):].split(":", 1)[0]
+                rest = (candidate.feedback or {}).get(stage) or rest
+            lead = f"{candidate.id}: {head}"
+            room = max(0, FAILURE_LIMIT - len(lead) - 1)
+            found.append(f"{lead}\n{rest[-room:]}" if rest.strip() and room else lead[:FAILURE_LIMIT])
+            if len(found) == self.AGENT_FAILURES:
+                break
+        return list(reversed(found))
+
+    def _tree_context(self, candidate_id: str) -> TreeContext | None:
+        """For a tree problem: where the operator checks the parent out (a draft
+        beside the candidate's own tree), and the run's last refused changes."""
+        if self.repo is None:
+            return None
+        problem = self.config.problem.tree
+        assert problem is not None
+        return TreeContext(self.ledger.run_dir, self.repo, problem.base, tuple(problem.open),
+                           f"{candidate_id}.draft", refusals=self._refusals())
+
+    def _refusals(self) -> tuple:
+        """The most recent candidates the build or the static check refused, oldest
+        first: a refused candidate is never a parent, so without this its build's
+        stderr would never reach the model."""
+        from evolvekit.tree_prompts import REFUSALS_SHOWN, Refusal
+
+        hard = {s.id for s in self.config.evaluate.stages if s.kind in ("builtin-static", "builtin-build")}
+        found: list[Refusal] = []
+        for candidate in reversed(self.archive):
+            failure = candidate.last_failure or ""
+            if not candidate.rejected or not failure.startswith("stage "):
+                continue
+            head, _, rest = failure.partition("\n")
+            stage = head[len("stage "):].split(":", 1)[0]
+            if stage not in hard:
+                continue
+            tail = (candidate.feedback or {}).get(stage) or rest
+            found.append(Refusal(candidate.id, candidate.reject_reason or head, tail))
+            if len(found) == REFUSALS_SHOWN:
+                break
+        return tuple(reversed(found))
 
     def _bill(
         self,
@@ -1330,6 +1539,8 @@ class Driver:
             generation=generation,
             operator=operator,
         )
+        if usage.priced_from == "cap":
+            self.log(f"        {candidate_id} the agent's cost was not reported; charged its cap ${usage.usd:.2f}")
         self.budget.spend(usd=usage.usd, tokens=usage.input_tokens + usage.output_tokens)
 
     def _trace(
@@ -1355,6 +1566,7 @@ class Driver:
                 "role": role,
                 "attempt": attempt,
                 **({"params": outcome.meta["params"]} if "params" in outcome.meta else {}),
+                **({"dropped": outcome.meta["dropped"]} if "dropped" in outcome.meta else {}),
             },
         )
 
@@ -1363,7 +1575,7 @@ class Driver:
     def _maybe_refresh_scratchpad(self, generation: int) -> None:
         if not self.config.search.uses_llm:
             return  # the scratchpad is written by the small model
-        if not self.scratchpad.due(generation) or not self.budget.check().allowed:
+        if not self.scratchpad.due(generation) or not self._ai_room():
             return
         elites = self.grid.elites()[:8]
         if not elites:
@@ -1375,7 +1587,7 @@ class Driver:
         ]
         text, completion, messages, error = self.scratchpad.refresh(
             config=self.config,
-            provider=self.provider("small"),
+            provider=self._calling("small"),
             entries=entries,
             generation=generation,
         )
@@ -1413,12 +1625,27 @@ class Driver:
         resumed run evaluates it again, its finished runs from the cache."""
         if not candidates:
             return False
-        results = self.cascade.evaluate_generation(candidates, self._archive_scores())
+        tree_problem = self.config.problem.tree
+        if tree_problem is not None and tree_problem.build:
+            # A build installs one tree where the commands find it, so two
+            # candidates cannot be evaluated at once: one after the other, in
+            # order (a stage's `workers` still run one candidate's cases together).
+            prior = self._archive_scores()
+            results: dict[str, EvalResult] = {}
+            for candidate in candidates:
+                results.update(self.cascade.evaluate_generation([candidate], prior))
+                self._drop_trees([candidate])
+                if any(result.abandoned for result in results.values()):
+                    return True
+        else:
+            results = self.cascade.evaluate_generation(candidates, self._archive_scores())
+            self._drop_trees(candidates)
         if any(result.abandoned for result in results.values()):
             return True
         for candidate in candidates:
             result = results[candidate.id]
             self.results[candidate.id] = result
+            candidate.commit = result.commit
             candidate.score = result.score
             candidate.params = result.params
             candidate.competes = result.competes
@@ -1447,6 +1674,24 @@ class Driver:
             if not candidate.rejected:
                 self.novelty.add(candidate.id, candidate.block)
             self._record(candidate)
+        return False
+
+    def _drop_trees(self, candidates: Sequence[Candidate]) -> None:
+        """Each candidate's tree, removed once its evaluation has finished: no
+        reader needs it after that (an operator checks the parent out as a
+        draft, the final check makes its own trees, and `study export --diff`
+        and `study pr` rebuild the change from the recorded block)."""
+        if self.repo is None:
+            return
+        from evolvekit import tree
+
+        for candidate in candidates:
+            self._remove_tree(tree, candidate.id)
+
+    def _remove_tree(self, tree, candidate_id: str) -> bool:
+        if tree.remove(self.ledger.run_dir, candidate_id):
+            return True
+        self.log(f"a combination's folder is still in use and stays: {tree.tree_dir(self.ledger.run_dir, candidate_id)}")
         return False
 
     def _note_behavioural_twin(self, candidate: Candidate) -> None:
@@ -1481,6 +1726,11 @@ class Driver:
         self.archive.append(candidate)
         self.by_id[candidate.id] = candidate
         self.ledger.record_run(candidate.to_record())
+
+
+def _role_of(operator: str) -> str:
+    """The model role an operator calls ("none": it calls no model)."""
+    return "strong" if operator == "big_step" else OPERATOR_ROLES.get(operator, "small")
 
 
 def _fmt(value: float | None) -> str:
@@ -1538,3 +1788,9 @@ def _fingerprint_line(block: str, limit: int = 90) -> str:
         return ""
     line = code[-1]
     return line if len(line) <= limit else line[: limit - 3] + "..."
+
+
+def _stopped_at_cap(outcome: OperatorResult) -> bool:
+    """A reply the backend stopped at its spending cap: billed, but the backend is alive."""
+    raw = outcome.completion.raw if outcome.completion is not None else None
+    return bool(raw) and raw.get("stopped_at") == "error_max_budget_usd"

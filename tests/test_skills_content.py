@@ -27,7 +27,8 @@ PLACEHOLDERS = {"SLUG": "gate-study", "NAME": "Gate", "ID": "demo-tour", "T": "t
 GROUPS = ("study", "harness", "skill")
 VERDICT_KEYS = ("schema", "study", "run", "phase", "decision", "reason", "line", "advice", "measure", "held_back",
                 "mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words", "levels", "learned_from", "rule",
-                "by_case", "changed", "files", "started_at", "finished_at", "elapsed_s", "rounds", "combinations")
+                "by_case", "changed", "files", "started_at", "finished_at", "elapsed_s", "rounds", "combinations",
+                "planned", "how_it_ran", "spent")
 REPORTING_RULE = "Report only the verdict's line and its advice, word for word, and add no sentence that claims more."
 PRE_VERDICT_RULE = 'Until the verdict exists, write no "better", "improved", "faster" or "cheaper", and no percentage.'
 SDK_RULE = "Never edit `evk_harness.py`"
@@ -183,7 +184,7 @@ SAMPLES = sorted((ROOT / "harnesses" / "demo-tour" / "samples").glob("*.json"))
 VENDORS = ("claude", "anthropic", "copilot", "github", "openai", "codex", "cursor", "gemini", "chatgpt",
            "microsoft", "azure", "openrouter")
 STUDY_STEPS = ["1. Ground", "2. Interview", "3. Make the study", "4. Show the plan", "5. Start and hand over",
-               "6. Report the verdict", "When it goes wrong"]
+               "6. Report the verdict", "Code studies", "When it goes wrong"]
 COMPLETENESS = (
     "Ask only what the request did not say.",
     "A request that answers every question is complete: go on without asking.",
@@ -566,3 +567,34 @@ def test_study_skill_says_the_direction_without_better():
     assert DIRECTION_WORDS in _section(body, "2. Interview")
     rest = body.replace(DIRECTION_WORDS, "").replace(PRE_VERDICT_RULE, "")
     assert not re.search(r"\bbetter\b", rest, re.I), "no 'better' outside the pinned rule sentences"
+
+
+THIN_CHECK_NOTE = ("When `study check` or `study compile` ends with a note on the held-back cases (\"With H held-back "
+                   "cases a 'use' is unlikely: …\"), say that note with the plan line, word for word, and offer to hold "
+                   "back more cases; it does not stop the start.")
+SPENT_FACT = ("The line `AI: $… of $…` (or `AI: N requests`) after the advice is a fact, not a claim: you may quote it "
+              "beside the line and the advice.")
+
+
+def test_the_study_skill_says_the_thin_check_note_with_the_plan_and_may_quote_the_spend():
+    """Persona round 2, D2 and D3: the plan step says the note before the start; the report step may
+    quote what the AI spent, which claims nothing. The reference names `spent` and each branch's `by_case`."""
+    body = _body(STUDY)
+    assert THIN_CHECK_NOTE in _section(body, "4. Show the plan")
+    assert SPENT_FACT in _section(body, "6. Report the verdict")
+    section = _section(_text(REFERENCE), "The verdict document")
+    candidates = next(line for line in section.splitlines() if line.startswith("| `candidates`"))
+    assert "`by_case`" in candidates
+
+
+PR_NOTE = ("When it prints a `note:` line (a final check on too few held-back cases), repeat that note in your "
+           "reply, word for word, before any `--yes`.")
+
+
+def test_the_study_skill_repeats_study_prs_thin_check_note():
+    """Persona round 3, E3: a 'use' on 2 held-back cases went to a PR without the note said again."""
+    section = _section(_body(STUDY), "Code studies")
+    assert PR_NOTE in section and section.index(PR_NOTE) > section.index("evolvekit study pr SLUG")
+    commands = _section(_text(REFERENCE), "Commands")
+    row = next(line for line in commands.splitlines() if line.startswith("| `evolvekit study pr SLUG"))
+    assert "a `note:` line under it" in row, "the reference's row says when study pr prints a note"

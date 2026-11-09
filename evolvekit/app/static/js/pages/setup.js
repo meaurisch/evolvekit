@@ -1,5 +1,6 @@
 /* evolvekit app: Set up (option A) — ready to start?
-   One screen: three summaries (What to tune, Goal, Time), each with Change
+   One screen: three summaries (What to tune, or for a code study What may
+   change: code; Goal; Time), each with Change
    opening a drawer; the plan bar with its fixes; a test run; Start. One
    click away in the "more" row: held-back cases, runs per case, rules,
    measures, data changes, AI help. What to tune and the goal come from the
@@ -56,6 +57,8 @@
   function study() { return st.doc.study; }
   function settingsList() { return st.h.settings || []; }
   function vary() { return study().vary || { settings: {}, data: {} }; }
+  /** `vary` with `part` changed: what the drawers save, so a code study keeps its `vary.code`. */
+  function varyWith(part) { return Object.assign({}, vary(), part); }
   function modeOf(name) {
     var v = (vary().settings || {})[name];
     if (v == null || v === "default") return "default";
@@ -107,7 +110,7 @@
   // ------------------------------------------------------------------ the summaries
   function tuneSummary() {
     var all = settingsList().length, n = tuned().length;
-    if (!all) return null;
+    if (!all || vary().code) return null;
     var per = st.plan && n ? Math.floor(st.plan.combinations / n) : null;
     return { kicker: "What to tune", value: n ? n + " of " + all + " settings" : "No settings tuned", state: n || isData() ? "complete" : "missing",
       sub: n ? (per != null ? "About " + per + " tries each. Others keep today’s values." : "Recommended first.") : "Pick what may change.", action: n ? "Change" : "Pick settings", act: "tune" };
@@ -130,6 +133,18 @@
     var tomorrow = done && done.toDateString() !== new Date().toDateString();
     return { kicker: "Time", value: value, sub: done ? "Done around " + done.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) + (tomorrow ? " tomorrow." : ".") : "", act: "time" };
   }
+  function codeSummary() {
+    var h = st.h.code, c = vary().code;
+    if (!h || !c) return null;
+    var folder = c.repo ? c.repo.replace(/[\\/]+$/, "").split(/[\\/]/).pop() : "";
+    var files = (c.open && c.open.length ? c.open : h.open || []).join(", ");
+    return { kicker: "What may change: code", value: folder ? folder + " · from " + (c.from || "HEAD") : "No source folder yet",
+      sub: files + " · " + (c.brief || "No brief yet: say what the search should improve."),
+      state: vary().code && vary().code.repo && c.brief ? "complete" : "missing", action: c.repo ? "Change" : "Say where", act: "code" };
+  }
+  /** A code study that has never run: its own branches can be compared before any search (a run's
+      page offers it afterwards). */
+  function neverRunCode() { return !!(st.h.code && vary().code) && !(st.doc.runs || []).length; }
   function dataSummary() {
     var data = vary().data || {}, n = Object.keys(data).length;
     if (!n && !isData()) return null;
@@ -160,8 +175,12 @@
       return EK.button(text, { kind: i === 0 ? "secondary" : "quiet", act: "fix", arg: i, describedby: "fix-" + i });
     });
     var details = (p.fixes || []).map(function (f, i) { return html`<p class="type-small ink-2" id="fix-${i}">${f.kind === "fewer" ? "Top " + f.keep.length : "More time"}: ${f.detail}</p>`; });
+    // The time the plan counts for each change the AI writes (0 without AI), and what to hear before
+    // the start besides the plan: too few held-back cases for a firm answer. Neither stops the start.
+    var ai = p.ai_change_s > 0 ? html`<p class="type-small ink-2">The plan counts about ${Math.round(p.ai_change_s)} s for each change the AI writes.</p>` : "";
+    var notes = (p.notes || []).map(function (note) { return EK.notice("info", note); });
     return html`${bar}${fixes.length ? html`<div class="actions">${fixes}</div>${details}` : ""}
-      ${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}`;
+      ${ai}${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}${notes}`;
   }
 
   function testRun() {
@@ -203,7 +222,7 @@
       : st.plan && st.plan.warning ? "Ready, but the plan is thin" : "Ready to start?";
     var why = missing ? problems[0].text : blocked ? "Fix the plan first." : failed ? "Fix the test run first." : t.state === "running" ? "Start works while the test runs." : "";
     var can = !missing && !blocked && !failed;
-    var rows = [tuneSummary(), dataSummary(), goalSummary(), timeSummary()].filter(Boolean);
+    var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary()].filter(Boolean);
     var c = study().cases || {}, rules = (study().constraints || []).length, measures = Object.keys(study().kpis || {}).length;
     var lim = study().limits || {}, ai = ((study().budget || {}).ai || {}).enabled;
     var more = html`<div class="more-row">
@@ -214,7 +233,7 @@
       ${(Object.keys(st.h.levers || {}).length && !dataSummary()) ? EK.link("Data changes (" + Object.keys(vary().data || {}).length + ")", { act: "data" }) : ""}
       ${EK.link("AI help: " + (ai ? "on" : "off"), { act: "time", arg: "ai" })}
       ${EK.link("Save as zip", { href: EK.withToken(EK.studyPath(st.slug, "/download/study")), download: true })}</div>`;
-    var notice = missing ? EK.notice("error", problems[0].text, problems[0].step === 5 ? { text: "Pick a goal", act: "goal" } : problems[0].step === 4 ? { text: "Fix it", act: "tune" } : { text: "Fix it", act: "time" }) : "";
+    var notice = missing ? EK.notice("error", problems[0].text, problems[0].step === 5 ? { text: "Pick a goal", act: "goal" } : problems[0].step === 4 ? { text: "Fix it", act: problems[0].key.indexOf("vary.code") === 0 ? "code" : "tune" } : { text: "Fix it", act: "time" }) : "";
     var preview = d.preview || {};
     var previewLine = preview.state === "running" ? EK.notice("info", "Timing one case to plan the study…")
       : preview.state === "failed" || preview.state === "interrupted" ? EK.notice("warning", "The timing run did not finish: " + (preview.error || "the plan is an estimate."), { text: "Try again", act: "preview" }) : "";
@@ -223,7 +242,7 @@
       <div class="summary-rows">${rows.map(EK.summaryRow)}</div>
       <section aria-label="Plan" class="sub-section">${planBlock()}</section>
       ${testRun()}
-      <div class="actions">${EK.button("Start", { act: "start", disabled: !can })}${EK.button("Save for later", { kind: "secondary", act: "later" })}<span class="type-small ink-2">${why}</span></div>
+      <div class="actions">${EK.button("Start", { act: "start", disabled: !can })}${EK.button("Save for later", { kind: "secondary", act: "later" })}${neverRunCode() ? EK.button("Compare branches", { kind: "secondary", act: "branches" }) : ""}<span class="type-small ink-2">${why}</span></div>
       ${more}</div></div>`, acts(main));
   }
 
@@ -231,6 +250,7 @@
   function acts(main) {
     return {
       tune: function () { tuneDrawer(main); },
+      code: function () { codeDrawer(main); },
       goal: function () { goalPicker(main); },
       time: function (el) { timeDrawer(main, el && el.getAttribute("data-arg")); },
       rules: function () { rulesDrawer(main); },
@@ -261,7 +281,8 @@
           EK.go(EK.studyHref(st.slug));
         }).catch(EK.fail);
       },
-      later: function () { EK.toast("done", "Saved. It waits on Home."); EK.go("#/"); }
+      later: function () { EK.toast("done", "Saved. It waits on Home."); EK.go("#/"); },
+      branches: function () { EK.branchesDrawer(st.slug, ((study().cases || {}).test || []).length); }
     };
   }
 
@@ -326,7 +347,7 @@
         if (mode === "default") delete settings[name];
         else if (mode === "tune") settings[name] = "tune";
         else settings[name] = { fixed: s.default };
-        save({ vary: { settings: settings, data: vary().data || {} } }, main);
+        save({ vary: varyWith({ settings: settings, data: vary().data || {} }) }, main);
       },
       segkey: segKey,
       info: function (el) {
@@ -340,7 +361,7 @@
         if (lo == null || hi == null || lo >= hi) { EK.toast("error", "From must be below To"); return; }
         var settings = Object.assign({}, vary().settings || {});
         settings[name] = { tune: true, low: lo, high: hi };
-        save({ vary: { settings: settings, data: vary().data || {} } }, main);
+        save({ vary: varyWith({ settings: settings, data: vary().data || {} }) }, main);
       },
       fixed: function (el) {
         var name = el.getAttribute("data-arg"), s = settingsList().filter(function (x) { return x.name === name; })[0], v = el.value;
@@ -348,16 +369,16 @@
         if (value == null) { EK.toast("error", "A number, please"); return; }
         var settings = Object.assign({}, vary().settings || {});
         settings[name] = { fixed: s.type === "int" ? Math.round(value) : value };
-        save({ vary: { settings: settings, data: vary().data || {} } }, main);
+        save({ vary: varyWith({ settings: settings, data: vary().data || {} }) }, main);
       },
       group: function (el) { st.group = el.getAttribute("data-arg"); EK.refreshDrawer({ body: body() }); },
       "show-all": function () { st.all = true; EK.refreshDrawer({ body: body() }); },
       recommended: function () {
         var settings = {};
         settingsList().forEach(function (s) { if (recRank(s) != null) settings[s.name] = "tune"; });
-        save({ vary: { settings: settings, data: vary().data || {} } }, main);
+        save({ vary: varyWith({ settings: settings, data: vary().data || {} }) }, main);
       },
-      none: function () { save({ vary: { settings: {}, data: vary().data || {} } }, main); },
+      none: function () { save({ vary: varyWith({ settings: {}, data: vary().data || {} }) }, main); },
       "input-file": function (el) {
         var f = el.files[0], name = el.getAttribute("data-arg");
         if (!f) return;
@@ -385,6 +406,51 @@
     var next = btns[(i + (ev.key === "ArrowRight" || ev.key === "ArrowDown" ? 1 : btns.length - 1)) % btns.length];
     next.focus();
     next.click();
+  }
+
+  // ------------------------------------------------------------------ What may change: code
+  function codeDrawer(main) {
+    var h = st.h.code || {}, c = vary().code || {};
+    var draft = { repo: c.repo || st.doc.code_proposal || "", from: c.from || "HEAD", brief: c.brief || "" }, said = "";
+    var files = (c.open && c.open.length ? c.open : h.open || []).join(", ");
+    function body() {
+      var proposed = !c.repo && st.doc.code_proposal && draft.repo === st.doc.code_proposal;
+      return html`<p class="type-small ink-2">The search may change ${files} and nothing else.</p>
+        <form class="sub-section" data-submit="save">
+          ${EK.textInput({ id: "code-repo", label: h.label || "The source folder", mono: true, value: draft.repo, invalid: said || null,
+            hint: proposed ? "The folder the application’s setup names. Change it when your copy is elsewhere." : "The full path of the folder, inside a git repository." })}
+          <div>${EK.button("Choose the folder", { kind: "quiet", size: "s", act: "browse" })}</div>
+          ${EK.textInput({ id: "code-from", label: "Start from", mono: true, value: draft.from,
+            hint: "A branch, a tag or a commit of the source; working for its files as they are now." })}
+          ${EK.textInput({ id: "code-brief", label: "What the search should improve", multiline: true, rows: 3, value: draft.brief,
+            placeholder: "Shorter tours in the same time" })}
+          <div class="actions">${EK.button("Use this source", { type: "submit" })}</div></form>`;
+    }
+    function read() {
+      draft.repo = document.getElementById("code-repo").value.trim().replace(/^"|"$/g, "");
+      draft.from = document.getElementById("code-from").value.trim();
+      draft.brief = document.getElementById("code-brief").value.trim();
+    }
+    var dacts = {
+      browse: function () {
+        read();
+        EK.post("/api/pick-file", { kind: "folder", title: "The source folder" }).then(function (r) {
+          if (r && r.path) { draft.repo = r.path; said = ""; EK.refreshDrawer({ body: body() }); }
+        }).catch(function (err) { if (err.status !== 501) EK.fail(err); });
+      },
+      save: function () {
+        read();
+        EK.post(EK.studyPath(st.slug, "/code"), { repo: draft.repo, from: draft.from, brief: draft.brief }).then(function (res) {
+          st.doc = res.study;
+          if (!res.code.ok) { said = res.code.message; EK.refreshDrawer({ body: body() }); return; }
+          EK.closeDrawer();
+          EK.toast("done", "Source saved");
+          return refresh(main);
+        }).catch(EK.fail);
+      }
+    };
+    EK.openDrawer({ kind: "code", title: "What may change: code", sub: "Where the source is, where the search starts, and what it should improve",
+      wide: true, dims: true, body: body(), acts: dacts, backLabel: "Back to Set up" });
   }
 
   // ------------------------------------------------------------------ Goal
@@ -717,11 +783,11 @@
       remove: function (el) {
         var n = el.getAttribute("data-arg"), data = Object.assign({}, vary().data), gone = data[n];
         delete data[n];
-        save({ vary: { settings: vary().settings || {}, data: data } }, main).then(function () {
+        save({ vary: varyWith({ settings: vary().settings || {}, data: data }) }, main).then(function () {
           EK.refreshDrawer({ body: body() });
           EK.undo("Data change removed.", function () {
             var back = Object.assign({}, vary().data); back[n] = gone;
-            return save({ vary: { settings: vary().settings || {}, data: back } }, main).then(function () { if (EK.drawerKind() === "data") EK.refreshDrawer({ body: body() }); });
+            return save({ vary: varyWith({ settings: vary().settings || {}, data: back }) }, main).then(function () { if (EK.drawerKind() === "data") EK.refreshDrawer({ body: body() }); });
           });
         });
       },

@@ -222,9 +222,251 @@ def test_verdict_files_list_existing_downloads(use_run):
 
 
 @pytest.mark.parametrize("p,words", [(0.996, "almost certain"), (0.95, "about 19 in 20"), (0.897, "under 9 in 10"),
-                                     (0.5, "about 10 in 20"), (0.04, "1 in 20 or less"), (None, "")])
+                                     (0.5, "about 10 in 20"), (0.04, "less than 1 in 20"), (None, ""),
+                                     (0.98, "better than 19 in 20"), (0.96, "about 19 in 20"), (0.03, "less than 1 in 20")])
 def test_chance_words_table(p, words):
     assert _chance_words(p) == words
+
+
+SAME_SETTINGS = ("No difference in any run: every run of this change gave exactly today's result, so the study "
+                 "may not exercise it: the setting may not reach the program.")
+
+
+def _same_run(tmp_path: Path, *, flagged: bool, apart: bool = False) -> tuple[Path, str]:
+    """A finished run whose final check gave the best exactly the starting point's result in every
+    run, on two held-back cases. `flagged`: the comparison says so itself (`identical`), as `confirm`
+    writes it now; else only its runs show it, as in a comparison written before. `apart`: one run
+    differs, so it is an ordinary result."""
+    root, run = _run_of(tmp_path, "keep")
+    folder = root / "runs" / run / "confirm" / "final"
+    seeds, cases = [1001, 1002, 1003], ["town-40", "region-60"]
+    rows = []
+    for case in cases:
+        for seed in seeds:
+            value = 50.0 + seed / 1000
+            rows.append({"configuration": "baseline", "instance": case, "seed": seed, "ok": True, "kpis": {"tour_length": value}})
+            rows.append({"configuration": "c1", "instance": case, "seed": seed, "ok": True,
+                         "kpis": {"tour_length": value - (0.1 if apart and seed == 1003 else 0.0)}})
+    (folder / "results.json").write_text(json.dumps(rows), encoding="utf-8")
+    summary = {"n": 2, "mean": 0.0, "sd": 0.0, "ci95": [-0.0, 0.0], "chance": 0.5, "worst": -0.0}
+    result = {"summary": summary, "per_instance": [{"instance": c, "improvement_pct": 0.0} for c in cases]}
+    if flagged:
+        result["identical"] = not apart
+    (folder / "comparison.json").write_text(json.dumps({
+        "objective": "tour_length", "direction": "minimize", "seeds": seeds, "instances": cases,
+        "per_candidate": {"c1": result}}), encoding="utf-8")
+    return root, run
+
+
+@pytest.mark.parametrize("flagged", [True, False])
+def test_a_change_no_run_told_from_today_has_no_figures(tmp_path, capsys, flagged):
+    """Persona round 1, B2: every paired run gave exactly today's result, and the verdict still said
+    "a chance of about 10 in 20 of a gain ... between -0.0 % worse and 0.0 % better". Now: keep, the
+    line that says nothing changed in any run, and no chance or range anywhere -- the document, the
+    page, the report and `study status`."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import main
+
+    root, run = _same_run(tmp_path, flagged=flagged)
+    v = build_verdict(root, run)
+    assert v["decision"] == "keep" and v["line"] == SAME_SETTINGS
+    assert v["advice"] == "Keep today's settings (Demo tour's own defaults) for now: nothing in these runs tells the change from today's."
+    assert not {"mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words", "levels"} & set(v)
+    page = jobs.results(root, run, document_of)["final"]
+    assert page["line"] == SAME_SETTINGS and page.get("mean") is None and page.get("chance") is None
+    report = render_report(v)
+    assert SAME_SETTINGS in report and "95 % interval" not in report and "Chance of a gain" not in report
+    capsys.readouterr()
+    assert main(["study", "status", root.name, "--home", str(root.parents[1])]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "finished · no difference in any run" and out[1] == SAME_SETTINGS
+
+
+def test_one_run_apart_is_an_ordinary_result(tmp_path):
+    root, run = _same_run(tmp_path, flagged=False, apart=True)
+    v = build_verdict(root, run)
+    assert v["line"] != SAME_SETTINGS and v["line"].startswith("Not proven on 2 held-back cases: ")
+    assert "chance" in v and "-0.0" not in v["line"], "F6: a bound that rounds to zero has no sign"
+
+
+def test_the_no_difference_line_names_what_may_not_reach_the_program():
+    from evolvekit.app.verdict import no_difference_line
+
+    assert no_difference_line("code change") == (
+        "No difference in any run: every run of this change gave exactly today's result, so the study may not "
+        "exercise it: a fixed setting, or a code path these cases never reach, can leave a change without effect."), "persona round 2, D7: a code path these cases never reach, not only a fixed setting"
+    assert no_difference_line("settings") == SAME_SETTINGS
+    assert no_difference_line("data changes").endswith(" may not exercise it: the data change may not reach the program.")
+
+
+@pytest.mark.parametrize("low,high,words", [
+    (-0.0, 0.0, "somewhere between 0.0 % worse and 0.0 % better"),
+    (-0.04, 0.03, "somewhere between 0.0 % worse and 0.0 % better"),
+    (0.0, -0.0, "somewhere between 0.0 % worse and 0.0 % better"),
+    (-1.26, 2.0, "somewhere between 1.3 % worse and 2.0 % better"),
+    (-3.0, -0.04, "likely between 0.0 % and 3.0 % worse"),
+])
+def test_a_range_that_rounds_to_zero_never_says_minus_zero(low, high, words):
+    """Persona round 1, F6: "-0.0 % worse"."""
+    from evolvekit.app.report import _between
+    from evolvekit.app.verdict import _span, number_text
+
+    assert _span(low, high) == words
+    assert "-0.0" not in _between(low, high, "lower") and "-0.0" not in _between(low, high, "higher")
+    assert number_text(-0.04) == "0.0" and number_text(-0.06) == "-0.1" and number_text(-0.0, 3) == "0.000"
+
+
+def _short_run(tmp_path: Path, *, ai: bool, stop: str, generations: int = 2) -> tuple[Path, str]:
+    import yaml
+
+    root, run = _run_of(tmp_path, "keep")
+    run_dir = root / "runs" / run
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job["plan"] = {"hours": 0.167, "rounds": 11, "combinations": 132}
+    job["search"] = {"generations": generations, "stop_reason": stop, "aborted": False}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    with (run_dir / "runs.jsonl").open("a", encoding="utf-8") as handle:
+        for n in range(23):  # 25 combinations, the starting point among them
+            handle.write(json.dumps({"id": f"x{n}", "operator": "mutate", "score": -99.0, "kpis": {"tour_length": 99.0}}) + "\n")
+    copy = run_dir / "study.yaml"
+    data = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    data["budget"]["ai"] = {"enabled": ai, "max_usd": 1.0}
+    copy.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return root, run
+
+
+TIME_LIMIT = "time limit: another round would not finish within 0.1484 h (0.12 h used; a round has taken up to 0.07 h)"
+
+
+def test_a_search_that_ran_short_of_its_plan_says_so(tmp_path, capsys):
+    """Persona round 1, F2: the plan said 11 rounds and 132 combinations; 2 rounds and 25 ran, the time
+    ran out, and nobody said so afterwards."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import _say_verdict
+
+    root, run = _short_run(tmp_path, ai=True, stop=TIME_LIMIT)
+    v = build_verdict(root, run)
+    said = ("Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; "
+            "the AI's replies took longer than the plan assumed.")
+    assert v["how_it_ran"] == said and v["planned"] == {"rounds": 11, "combinations": 132}
+    page = jobs.results(root, run, document_of)  # the Study page's Details say how it ran, in the same words
+    assert page["how_it_ran"] == said and page["planned"] == {"rounds": 11, "combinations": 132}
+    report = render_report(v)
+    how = report.split("## How it ran", 1)[1]
+    assert said.rstrip(".") in how and "- Rounds:" not in how and "- Combinations tried:" not in how
+    capsys.readouterr()
+    _say_verdict(v)
+    assert capsys.readouterr().out.splitlines()[-2:] == [said, "AI: $0.00 of $1.00"], "then what the AI spent (D3)"
+    assert build_verdict(*_short_run(tmp_path / "b", ai=False, stop=TIME_LIMIT))["how_it_ran"].endswith(
+        "the time ran out; the rounds took longer than the plan assumed.")
+
+
+@pytest.mark.parametrize("stop,generations", [(TIME_LIMIT, 11), ("stopped on request", 2), ("no improvement for 3 rounds", 4)])
+def test_a_plan_that_happened_or_another_stop_says_nothing_of_it(tmp_path, stop, generations):
+    v = build_verdict(*_short_run(tmp_path, ai=True, stop=stop, generations=generations))
+    assert "how_it_ran" not in v
+
+
+RAW_SEED, RAW_BEST = 7.888410522186774, 7.408278547681725
+"""The persona's run: the starting point's and the best's plain averages over the cases learned from."""
+
+
+def test_the_best_so_far_is_one_figure_that_never_moves_while_the_best_stays(tmp_path, monkeypatch, capsys):
+    """Persona round 1, F3: the app said "Best so far: 8.99 % better" while `study status` said "0.4 %
+    lower", and the app's figure fell. One function gives the best so far: on the cases learned from,
+    on the base of the verdict's learned-from figure -- the status document's `best.pct`, `study
+    status`'s line and, once the run is done, `learned_from.pct` agree."""
+    import os
+
+    from evolvekit.app.verdict import best_so_far
+    from evolvekit.cli import main
+    from evolvekit.harness.study import load_study
+
+    root, run = _run_of(tmp_path, "keep")
+    run_dir = root / "runs" / run
+    rows = [  # `tour_length` is each case as a percentage of the starting point's, averaged: another base
+        {"id": "seed", "operator": "human-seed", "score": -100.0, "kpis": {"tour_length": 100.0, "tour_length_raw": RAW_SEED}},
+        {"id": "g1", "operator": "mutate", "score": -99.6, "kpis": {"tour_length": 99.6, "tour_length_raw": 7.867}},
+        {"id": "c1", "operator": "mutate", "score": -93.6, "kpis": {"tour_length": 93.6, "tour_length_raw": RAW_BEST}},
+    ]
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    learned = (RAW_SEED - RAW_BEST) / RAW_SEED * 100
+    done = build_verdict(root, run)
+    assert done["learned_from"]["pct"] == pytest.approx(learned)
+    goal = jobs._goal(load_study(root), jobs.load_harness(root / "harness"))  # noqa: SLF001
+    assert best_so_far(run_dir, goal) == {"id": "c1", "pct": pytest.approx(learned)}
+    # The same run while it searches, with a status document whose own figure is on the other base.
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job.update(phase="search", pid=os.getpid(), started_at=jobs._now().isoformat())  # noqa: SLF001
+    job.pop("final"), job.pop("search")
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
+
+    def status(_run_dir: Path) -> dict:
+        return {"progress": {"best": {"id": "c1"}, "improvement": {"pct": 6.4, "verdict": "within noise"}}}
+
+    best = jobs.status(root, run, status)["best"]
+    assert best["pct"] == pytest.approx(learned)
+    # The app's strip and card say it in `study status`'s words, from the server: never formatted twice.
+    assert best["id"] == "c1" and best["says"] == "6.1 % lower tour length"
+    card = jobs.run_line(root, load_study(root), run_dir, status)
+    assert card["best_pct"] == pytest.approx(learned) and " · 6.1 % lower tour length so far, not checked yet" in card["line"]
+    assert card["best_says"] == "6.1 % lower tour length"
+    # A combination still being measured has no row yet: the figure stays until it has one.
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "eval_finished", "candidate_id": "g2-half", "instance": "a", "ok": True,
+                                 "kpis": {"tour_length": 1.0}}) + "\n")
+    assert best_so_far(run_dir, goal)["pct"] == pytest.approx(learned)
+    monkeypatch.setattr("evolvekit.cli.build_status", status)
+    capsys.readouterr()
+    assert main(["study", "status", root.name, "--home", str(root.parents[1])]) == 0
+    assert "6.1 % lower tour length so far" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("decision,checked", [("keep", True), ("pending", False), ("stopped", False)])
+def test_a_finished_runs_best_is_said_in_finished_words(tmp_path, decision, checked):
+    """Persona round 2, D5: after the verdict the Study page's Details still said "So far ... The results
+    say whether it held". A finished run's best line is past: the search's best, on the cases it learned
+    from, and whether the final check is the answer or it was never checked."""
+    root, run = _run_of(tmp_path, decision)
+    run_dir = root / "runs" / run
+    rows = [
+        {"id": "seed", "operator": "human-seed", "score": -100.0, "kpis": {"tour_length": 100.0, "tour_length_raw": RAW_SEED}},
+        {"id": "c1", "operator": "mutate", "score": -93.6, "kpis": {"tour_length": 93.6, "tour_length_raw": RAW_BEST}},
+    ]
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    def status(_run_dir: Path) -> dict:
+        return {"progress": {"best": {"id": "c1"}, "improvement": {"pct": 6.4, "verdict": "within noise"}}}
+
+    line = jobs.status(root, run, status)["best"]["line"]
+    assert not line.startswith("So far") and "The results say whether it held" not in line, line
+    assert line.startswith("The search's best was 6.1 % lower tour length than the starting point"), line
+    assert "on the 3 cases the search learned from" in line, line
+    if checked:
+        assert line.endswith("The final check's verdict is the answer on the cases the search never saw."), line
+    else:
+        assert line.endswith("It was not checked on cases the search never saw."), line
+
+
+def test_a_done_run_without_its_comparison_does_not_point_to_a_final_check(tmp_path):
+    """The verdict says "There is no final check for this run"; the best line must not name one."""
+    root, run = _run_of(tmp_path, "keep")
+    run_dir = root / "runs" / run
+    rows = [
+        {"id": "seed", "operator": "human-seed", "score": -100.0, "kpis": {"tour_length": 100.0, "tour_length_raw": RAW_SEED}},
+        {"id": "c1", "operator": "mutate", "score": -93.6, "kpis": {"tour_length": 93.6, "tour_length_raw": RAW_BEST}},
+    ]
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    for found in run_dir.rglob("comparison.json"):
+        found.unlink()
+
+    def status(_run_dir: Path) -> dict:
+        return {"progress": {"best": {"id": "c1"}, "improvement": {"pct": 6.4, "verdict": "within noise"}}}
+
+    line = jobs.status(root, run, status)["best"]["line"]
+    assert line.endswith("It was not checked on cases the search never saw."), line
+    assert "final check" not in line, line
 
 
 @pytest.mark.slow
@@ -254,3 +496,60 @@ def test_final_check_writes_exports(tmp_path):
     assert "--neighbours" in (downloads / "settings_flags.txt").read_text(encoding="utf-8")
     v = build_verdict(folder, "r1")
     assert {"runs/r1/downloads/settings_json.json", "runs/r1/downloads/settings_flags.txt"} <= set(v["files"])
+
+
+SPENT = [0.1308835, 0.084216, 0.0062953, 0.0539862, 0.0552962, 0.0546002, 0.0148953, 0.0072853, 0.0530502, 0.0568059,
+         0.0107453, 0.0534011, 0.0297458, 0.051386, 0.00534, 0.0380658, 0.0511728, 0.00543, 0.0098885, 0.062312,
+         0.0151285, 0.00568, 0.0130085, 0.00535]
+"""Persona round 2's usage.jsonl: 24 AI changes, $0.87 in all of its $1 cap."""
+
+
+def _usage(run_dir: Path, rows: list[dict]) -> None:
+    (run_dir / "usage.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_the_ai_spend_is_a_fact_of_the_verdict_the_report_and_the_status(tmp_path, capsys):
+    """Persona round 2, D3: "$0.87 of my $1, summed from usage.jsonl, is not shown anywhere". It is a fact,
+    not a claim: the verdict document's `spent`, the report's How it ran, `study verdict`, `study status`."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import main
+
+    root, run = _short_run(tmp_path, ai=True, stop="no improvement for 3 rounds", generations=11)
+    run_dir = root / "runs" / run
+    _usage(run_dir, [{"operator": "diff", "provider": "claude-cli", "usd": usd} for usd in SPENT])
+    v = build_verdict(root, run)
+    assert v["spent"] == {"usd": pytest.approx(sum(SPENT)), "cap_usd": 1.0, "line": "AI: $0.87 of $1.00"}
+    assert "- AI: $0.87 of $1.00" in render_report(v).split("## How it ran", 1)[1]
+    assert jobs.results(root, run, document_of)["spent"] == v["spent"], "the page's Details read the same"
+    home = str(root.parents[1])
+    for argv in (["study", "verdict", root.name], ["study", "status", root.name]):
+        capsys.readouterr()
+        assert main([*argv, "--home", home]) == 0
+        assert capsys.readouterr().out.splitlines()[-1] == "AI: $0.87 of $1.00"
+    # A run that counts requests, not dollars: how many; a run without AI says nothing of it.
+    _usage(run_dir, [{"operator": "diff", "provider": "copilot-cli", "usd": 0.0, "requests": 1.0}] * 3
+           + [{"operator": "diff", "provider": "copilot-cli", "usd": 0.0}])
+    assert build_verdict(root, run)["spent"] == {"requests": 4.0, "line": "AI: 4 requests"}
+    assert "spent" not in build_verdict(*_short_run(tmp_path / "b", ai=False, stop="no improvement for 3 rounds"))
+
+
+def test_a_live_search_carries_its_ai_spend(tmp_path, monkeypatch):
+    """D3: the status document says the spend while the run searches, for the app's strip."""
+    import os
+
+    import yaml
+
+    root, run = _short_run(tmp_path, ai=True, stop="")
+    run_dir = root / "runs" / run
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job.update({"phase": "search", "pid": os.getpid(), "started_at": jobs._now().isoformat()})  # noqa: SLF001
+    job.pop("finished_at", None)
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
+    _usage(run_dir, [{"operator": "agent_patch", "provider": "claude-cli", "usd": 0.42}])
+    assert jobs.status(root, run, document_of)["spent"] == {"usd": 0.42, "cap_usd": 1.0, "line": "AI: $0.42 of $1.00"}
+    copy = run_dir / "study.yaml"
+    data = yaml.safe_load(copy.read_text(encoding="utf-8"))
+    data["budget"]["ai"] = {"enabled": False}
+    copy.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    assert jobs.status(root, run, document_of)["spent"] is None

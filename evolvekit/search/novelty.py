@@ -162,7 +162,7 @@ def normalise_block(block: str) -> str:
     """The block's canonical form: no docstrings, no comments, no local names."""
     try:
         tree = ast.parse(block)
-    except SyntaxError:
+    except (SyntaxError, ValueError):  # ValueError: a null byte, or a lone surrogate (a diff's non-UTF-8 byte)
         return "\n".join(
             line.rstrip() for line in block.strip().splitlines() if line.strip()
         )
@@ -178,7 +178,7 @@ def novelty_hash(block: str) -> str:
         # Unparseable: fall back to the plain text fingerprint, which at least
         # still catches a byte-identical repeat.
         return block_hash(block)
-    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(normalised.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
 
 
 # --------------------------------------------------------------------------
@@ -195,7 +195,7 @@ def node_type_sequence(block: str) -> list[str]:
     """
     try:
         tree = ast.parse(block)
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return []
     transformer = _Canonicaliser(_protected_names(tree))
     canonical = ast.fix_missing_locations(transformer.visit(tree))
@@ -434,16 +434,26 @@ class NoveltyIndex:
     by_hash: dict[str, str] = field(default_factory=dict)
     near: "NearBackend | None" = None
     threshold: float = 0.97
+    key: Callable[[str], str] | None = None
+    """What a block is compared by, when it is not code: for a tree problem the
+    normalised diff (`tree.normalise_diff`), hashed as text. `None`: the
+    structure of the block (`novelty_hash`)."""
+
+    def _digest(self, block: str) -> str:
+        if self.key is None:
+            return novelty_hash(block)
+        # A diff may hold bytes that are not UTF-8, kept as lone surrogates.
+        return hashlib.sha256(self.key(block).encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
 
     def add(self, candidate_id: str, block: str) -> str:
-        digest = novelty_hash(block)
+        digest = self._digest(block)
         self.by_hash.setdefault(digest, candidate_id)
         if self.near is not None:
             self.near.add(candidate_id, block)
         return digest
 
     def lookup(self, block: str) -> str | None:
-        return self.by_hash.get(novelty_hash(block))
+        return self.by_hash.get(self._digest(block))
 
     def closest(self, block: str) -> tuple[str | None, float]:
         """The nearest thing the run has kept, and how near. `(None, 0.0)` when
@@ -468,8 +478,8 @@ class NoveltyIndex:
         constants" would be a category error, and on the embedding method it
         would also buy a vector for a child no model wrote.
         """
-        digest = novelty_hash(block)
-        if digest == novelty_hash(parent_block):
+        digest = self._digest(block)
+        if digest == self._digest(parent_block):
             return NoveltyVerdict("no_op", parent_id)
         twin = self.by_hash.get(digest)
         if twin is not None:

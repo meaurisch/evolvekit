@@ -13,8 +13,30 @@ are a held-back case's means over the final check's runs and `change_pct` is
 the paired mean of the runs' changes (the statistic of `mean_pct`), so the two
 need not agree with each other. `combinations` counts every combination the
 search measured, the starting point among them: a plan of 2 combinations a
-round for 2 rounds gives 5. The page (`jobs.results`), the
-command line and the report all render from it, so they cannot disagree.
+round for 2 rounds gives 5. `planned` holds the plan's `rounds` and
+`combinations`; `how_it_ran`, only when the search stopped on time with fewer
+rounds than planned or its AI budget was used up, says so in a sentence
+(`how_it_ran`). `spent`, on a run
+with AI, is what its AI spent (`ai_spent`): `{usd, cap_usd, line}`, or
+`{requests, line}` for a provider that counts requests. The page
+(`jobs.results`), the command line and the report all render from it, so they
+cannot disagree.
+
+A change every paired run of which gave exactly the starting point's result
+(`confirm.identical_runs`) is `keep` with `no_difference_line` and no figures
+at all: no range or chance can say anything about a change no run exercised.
+
+A bake-off's document (a run of `study bakeoff`) also holds `candidates`:
+`[{"ref", "commit", "decision", "line", "mean_pct", "ci95_pct", "worst_pct",
+"chance", "by_case"}]`, one per branch in the order given, each against the
+starting point by the same rule (numbers absent while there is no answer, and
+for a branch that changed no run, which has `same: true` instead); `by_case`
+is that branch's held-back rows, in the keys of the run's own `by_case`. Its own
+`decision` and `line` are the chosen branch's -- the largest mean among those
+whose decision is `use` -- said as one of N, or `keep` with "None of the N
+branches is shown to beat the starting point." and then no figures, held-back
+rows or changes of its own: no unnamed branch speaks for the run. The key
+exists only on bake-off runs.
 
 The words themselves -- the chance in twentieths, the decision of a run made
 before runs decided, and the sentences of the final check -- live here too.
@@ -27,9 +49,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, t_cdf
+from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, t_cdf
 
-__all__ = ["DECISIONS", "SCHEMA", "build_verdict"]
+__all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "no_difference_line",
+           "number_text"]
 
 SCHEMA = 1
 """Bumped when a key of the document changes meaning."""
@@ -56,28 +79,38 @@ def _better_word(direction: str) -> str:
     return "lower" if direction == "lower" else "higher"
 
 
+def number_text(value: float, digits: int = 1) -> str:
+    """`value` to `digits` places, never "-0.0": a value that rounds to zero
+    has no sign."""
+    text = f"{value:.{digits}f}"
+    return text[1:] if text.startswith("-") and float(text) == 0 else text
+
+
 def _span(low: float, high: float) -> str:
     """A 95 % interval of an improvement in percent, in words."""
     if low > 0:
-        return f"likely between {low:.1f} % and {high:.1f} % better"
+        return f"likely between {number_text(low)} % and {number_text(high)} % better"
     if high < 0:
-        return f"likely between {-high:.1f} % and {-low:.1f} % worse"
-    return f"somewhere between {-low:.1f} % worse and {high:.1f} % better"
+        return f"likely between {number_text(-high)} % and {number_text(-low)} % worse"
+    return f"somewhere between {number_text(-low)} % worse and {number_text(high)} % better"
 
 
 def _chance_words(p: float | None) -> str:
-    """A chance of a gain in twentieths: "about 19 in 20", with "almost
-    certain" and "1 in 20 or less" at the ends; nothing for no chance."""
+    """A chance of a gain in twentieths: "about 19 in 20", never sounding
+    certain: "better than 19 in 20" above it, "less than 1 in 20" below 1 in 20,
+    and "almost certain" from 0.995; nothing for no chance."""
     if p is None:
         return ""
     if p >= 0.995:
         return "almost certain"
-    if p <= 0.05:
-        return "1 in 20 or less"
+    if p < 0.05:
+        return "less than 1 in 20"
     if p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
         # 0.897 would round to "about 18 in 20", which reads like the rule's
         # 9 in 10 when the rule said no: say which side of it the chance is.
         return f"under {round(USE_CHANCE * 10)} in 10"
+    if round(p * 20) >= 20:
+        return "better than 19 in 20"
     return f"about {round(p * 20)} in 20"
 
 
@@ -93,6 +126,39 @@ def _chance_of(summary: dict[str, Any]) -> float | None:
     if sd > 0:
         return t_cdf(mean / (sd / math.sqrt(n)), n - 1)
     return 1.0 if mean > 0 else 0.0 if mean < 0 else 0.5
+
+
+_NOT_REACHED = {
+    # A code change: a setting the study fixes can override it, and so can code the cases never run
+    # (persona round 2: a restart to the best tour when the current tour always is the best).
+    "code change": "a fixed setting, or a code path these cases never reach, can leave a change without effect",
+    "settings": "the setting may not reach the program",
+    "data changes": "the data change may not reach the program",
+}
+
+
+TODAYS_CODE_LINE = "This branch is today's code (the same commit as the starting point): there is nothing to compare."
+
+
+def no_difference_line(what: str) -> str:
+    """The line of a change every paired run of which gave exactly today's
+    result: no chance or range, and why the study may not exercise it --
+    for a code study, for settings, for data changes (`jobs._what`)."""
+    why = _NOT_REACHED.get(what, "the change may not reach the program")
+    return ("No difference in any run: every run of this change gave exactly today's result, "
+            f"so the study may not exercise it: {why}.")
+
+
+def _identical(comparison: dict[str, Any], runs: list[dict[str, Any]]) -> None:
+    """Mark each candidate of a comparison written before `confirm` said so
+    (`identical`), from the check's own runs (`results.json`)."""
+    kpis = [str(comparison.get("objective") or "")] + [str(level.get("kpi")) for level in comparison.get("levels") or []
+                                                         if isinstance(level, dict)]
+    kpis = [k for k in dict.fromkeys(kpis) if k]
+    for cid, result in (comparison.get("per_candidate") or {}).items():
+        if isinstance(result, dict) and "identical" not in result:
+            result["identical"] = identical_runs(runs, cid, kpis, list(comparison.get("instances") or []),
+                                                 list(comparison.get("seeds") or []))
 
 
 def _decision_of(final: dict[str, Any], summary: dict[str, Any]) -> str:
@@ -117,11 +183,11 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     rule that decided in a third: the app says "use it" only by `decide`."""
     final = job.get("final") or {}
     new = f"the new {what}"
-    they = "it is" if what.startswith("combination") else "they are"
+    they = "it is" if what.startswith(("combination", "code")) else "they are"
     # Anything but "use" says the action outright, as the page does: keep today's settings, then why.
-    keep = {"settings": "Keep today's settings", "data changes": "Keep today's data"}.get(
-        what, "Keep today's settings and data")
-    if baseline and what != "data changes":
+    keep = {"settings": "Keep today's settings", "data changes": "Keep today's data",
+            "code change": "Keep today's code"}.get(what, "Keep today's settings and data")
+    if baseline and what not in ("data changes", "code change"):
         keep += f" ({baseline})"
     if final.get("skipped"):
         reason = str(final["skipped"])
@@ -149,6 +215,12 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "decision": decision, "chance": chance,
             "chance_words": _chance_words(chance), "worst_pct": worst, "rule": RULE_WORDS}
     use_advice = f"Use {new}: {they} probably better on cases the search never saw."
+    if result.get("identical"):
+        # Every paired run gave exactly today's result: no range or chance can say anything about a
+        # change that was never exercised, so the line gives none.
+        return {**base, "mean": None, "ci95": None, "chance": None, "chance_words": "", "worst_pct": None,
+                "decision": "keep", "state": "same", "line": no_difference_line(what),
+                "advice": f"{keep} for now: nothing in these runs tells the change from today's."}
     if "levels" in result:
         levels = result["levels"]
         decision = final.get("decision") or ("use" if levels.get("confirmed") else "keep")
@@ -205,7 +277,10 @@ def _check_of(run_dir: Path, final: dict[str, Any]) -> tuple[dict[str, Any] | No
     if not final.get("comparison"):
         return None, []
     path = run_dir / final["comparison"]
-    return jobs._read(path), jobs._read_list(path.parent / "results.json")
+    comparison, runs = jobs._read(path), jobs._read_list(path.parent / "results.json")
+    if isinstance(comparison, dict):
+        _identical(comparison, runs)
+    return comparison, runs
 
 
 def _run_facts(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
@@ -243,9 +318,12 @@ def _by_case(run_dir: Path, goal: dict[str, Any], seed_id: str, best_id: str, ca
 def _changed(root: Path, study: Any, harness: Any, seed: dict[str, Any] | None,
              best: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Every setting and data change the study tuned: the starting value, the
-    best's, both as people write them, and whether it changed."""
+    best's, both as people write them, and whether it changed. A code study's
+    one row is the change to its source: from the base, to the best's diff in lines."""
     from evolvekit.app import jobs
 
+    if getattr(study, "code", None) is not None:
+        return [_code_row(study, harness, seed, best)]
     changed = []
     starting = (seed or {}).get("params") or {}
     found = (best or {}).get("params") or {}
@@ -275,6 +353,23 @@ def _changed(root: Path, study: Any, harness: Any, seed: dict[str, Any] | None,
     return changed
 
 
+def _code_row(study: Any, harness: Any, seed: dict[str, Any] | None, best: dict[str, Any] | None) -> dict[str, Any]:
+    """`{"name": "code", "label", "from": "<ref> (<base[:7]>)", "to": "+N −M lines in <file or N files>"}`,
+    in the keys `_changed`'s rows have."""
+    from evolvekit import tree  # only a code study's verdict reads a diff
+
+    base = str((seed or {}).get("commit") or "")
+    old = study.code.from_ref + (f" ({base[:7]})" if base else "")
+    block = str((best or {}).get("block") or "")
+    stat = tree.diff_stat(block)
+    files = stat["files"]
+    where = files[0] if len(files) == 1 else f"{len(files)} files"
+    new = f"+{stat['added']} −{stat['removed']} lines in {where}" if files else "no change"
+    label = harness.code.label if getattr(harness, "code", None) is not None else "The source"
+    return {"name": "code", "label": label, "help": "", "old": base or None, "new": (best or {}).get("commit"),
+            "old_text": old, "new_text": new, "changed": bool(block.strip())}
+
+
 # ---------------------------------------------------------------------------
 # the document
 # ---------------------------------------------------------------------------
@@ -287,7 +382,7 @@ def _decision_word(words: dict[str, Any], final: dict[str, Any]) -> str:
         return str(words.get("decision") or "use")
     if state == "skipped":
         return "none" if _STAYED_BEST in str(final.get("skipped") or "") else "skipped"
-    return {"unclear": "keep", "missing": "pending", "stopped": "stopped", "single": "single",
+    return {"unclear": "keep", "same": "keep", "missing": "pending", "stopped": "stopped", "single": "single",
             "worse": "worse"}.get(str(state), "pending")
 
 
@@ -359,10 +454,13 @@ def _files(root: Path, run_dir: Path) -> list[str]:
 
 def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str, Any], words: dict[str, Any],
               comparison: dict[str, Any] | None, held: list[dict[str, Any]], changed: list[dict[str, Any]],
-              facts: dict[str, Any], learned_pct: float | None) -> dict[str, Any]:
+              facts: dict[str, Any], learned_pct: float | None, *, baseline: str = "",
+              check_runs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """The verdict document of a run from what the page computes too:
     `words` (`_final_words`), the held-back rows of `_by_case`, `_changed`
-    and `_run_facts`."""
+    and `_run_facts`. A bake-off's document also lists its `candidates`
+    (`baseline` is the starting point in words, for their sentences; each
+    branch's held-back rows come from `check_runs`, the final check's runs)."""
     from evolvekit.app import jobs
 
     final = job.get("final") or {}
@@ -373,6 +471,13 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     if decision in ("skipped", "none"):
         document["reason"] = str(final.get("skipped") or "")
     document["line"], document["advice"] = words.get("line", ""), words.get("advice", "")
+    seed_row = next((r for r in jobs._rows(run_dir) if r.get("operator") == "human-seed"), None)
+    candidates = (_candidates(job, comparison, goal, jobs._what(study), baseline, str((seed_row or {}).get("commit") or ""),
+                              check_runs or [])
+                  if job.get("bakeoff") else None)
+    named = True
+    if candidates:
+        decision, named = _bakeoff_headline(document, job, candidates, jobs._what(study))
     candidate = final.get("candidate") or next(iter((comparison or {}).get("per_candidate") or {}), None)
     result = ((comparison or {}).get("per_candidate") or {}).get(candidate) or {}
     levels = _levels(study, harness, result["levels"]) if isinstance(result.get("levels"), dict) else []
@@ -381,28 +486,196 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                            _measure_of(study, harness, goal["kpi"], goal["direction"]))
     seeds = len((comparison or {}).get("seeds") or []) or final.get("seeds") or None
     document["held_back"] = {"cases": len(study.test), "runs_per_case": seeds}
-    if decision not in _NO_ANSWER:
+    # A change every run of which gave exactly today's result has no figures: no range, no chance.
+    same = words.get("state") == "same"
+    if decision not in _NO_ANSWER and named and not same:
         document.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"), "worst_pct": words.get("worst_pct"),
                          "chance": words.get("chance"), "chance_words": words.get("chance_words", "")})
-    if levels:
+    if levels and named and not same:
         document["levels"] = levels
-    document["learned_from"] = {"cases": len(study.training), "pct": learned_pct}
+    # A bake-off with no branch shown ahead names no branch: no figure of an unnamed one here either.
+    document["learned_from"] = {"cases": len(study.training), "pct": learned_pct if named else None}
     document["rule"] = RULE_WORDS
-    # A case's change is the comparison's own: the paired mean over the final check's runs, the
-    # statistic the line is made of -- not the change of the means, which can differ by a few tenths.
-    paired = {} if "levels" in result else {
-        str(r.get("instance")): r["improvement_pct"] for r in result.get("per_instance") or []
-        if isinstance(r, dict) and _number(r.get("improvement_pct")) is not None}
-    held = [{**row, "change_pct": paired.get(row["case"], row["change_pct"])} for row in held]
-    document["by_case"] = [{"name": row["case"], "start": row["start"], "best": row["best"],
-                            "change_pct": row["change_pct"], "outcome": _outcome(row)} for row in held]
+    document["by_case"] = _held_rows(result, held)
     document["changed"] = [{"name": c["name"], "label": c["label"], "from": c["old_text"], "to": c["new_text"]}
                            for c in changed if c["changed"]]
+    if not named:
+        # A bake-off with no branch shown ahead: no unnamed branch speaks for the run. Each branch's
+        # figures are in `candidates`, with its ref.
+        document["by_case"], document["changed"] = [], []
     document["files"] = _files(root, run_dir)
     document.update({"started_at": job.get("started_at") or (facts["started"].isoformat() if facts["started"] else None),
                      "finished_at": facts["finished_at"], "elapsed_s": facts["used_s"],
                      "rounds": (job.get("search") or {}).get("generations"), "combinations": facts["tried"]})
+    plan = jobs._plan(run_dir, job)
+    if not job.get("bakeoff"):
+        document["planned"] = {"rounds": plan.get("rounds"), "combinations": plan.get("combinations")}
+    ran = how_it_ran(job, plan, facts["tried"], bool(study.budget.ai_enabled))
+    if ran:
+        document["how_it_ran"] = ran
+    spent = ai_spent(run_dir, study, job)
+    if spent is not None:
+        document["spent"] = spent
+    if candidates is not None:
+        document["candidates"] = candidates
     return _clean(document)
+
+
+def _held_rows(result: dict[str, Any], held: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The document's `by_case` rows from `_by_case`'s held-back rows of one
+    candidate, whose comparison result is `result`. A case's change is the
+    comparison's own: the paired mean over the final check's runs, the
+    statistic the line is made of -- not the change of the means, which can
+    differ by a few tenths."""
+    paired = {} if "levels" in result else {
+        str(r.get("instance")): r["improvement_pct"] for r in result.get("per_instance") or []
+        if isinstance(r, dict) and _number(r.get("improvement_pct")) is not None}
+    rows = [{**row, "change_pct": paired.get(row["case"], row["change_pct"])} for row in held]
+    return [{"name": row["case"], "start": row["start"], "best": row["best"], "change_pct": row["change_pct"],
+             "outcome": _outcome(row)} for row in rows]
+
+
+AI_BUDGET_STOPS = ("the AI budget was used up", "budget.max_usd reached")
+"""How a search's stop reason starts when its AI budget ended it (`budget.AI_USED_UP`, `BudgetGuard.check`)."""
+
+
+def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool) -> str:
+    """When a search stopped on time with fewer rounds than its plan said, the
+    sentence that says so: "Ran 2 of the 11 planned rounds (25 combinations,
+    about 132 planned): the time ran out; the AI's replies took longer than the
+    plan assumed." When its AI budget ended it: "Ran 2 of the 3 planned rounds
+    (…): the AI budget was used up.", or "The AI budget was used up in round 4
+    (…)." when no planned round was left out. Empty when the plan happened, for
+    a bake-off (no search), and for a run continued with more time (its plan is
+    the continuation's)."""
+    search = job.get("search") or {}
+    done, planned = search.get("generations"), plan.get("rounds")
+    if job.get("bakeoff") or job.get("continued_at") or not isinstance(done, int) or not isinstance(planned, int):
+        return ""
+    reason = str(search.get("stop_reason") or "")
+    combinations = []
+    if isinstance(tried, int):
+        combinations.append(f"{tried} combination{'s' if tried != 1 else ''}")
+    if isinstance(plan.get("combinations"), int):
+        combinations.append(f"about {plan['combinations']} planned")
+    counts = f" ({', '.join(combinations)})" if combinations else ""
+    rounds = f"Ran {done} of the {planned} planned round{'s' if planned != 1 else ''}"
+    if reason.startswith(AI_BUDGET_STOPS):
+        if done < planned:
+            return f"{rounds}{counts}: the AI budget was used up."
+        return f"The AI budget was used up in round {done}{counts}."
+    if done >= planned or not reason.startswith("time limit"):
+        return ""
+    why = "the AI's replies took longer than the plan assumed" if ai else "the rounds took longer than the plan assumed"
+    return f"{rounds}{counts}: the time ran out; {why}."
+
+
+COUNTS_REQUESTS = ("copilot-cli",)
+"""The providers whose AI counts requests against a plan, not dollars."""
+
+
+def ai_spent(run_dir: Path, study: Any, job: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """What the run's AI spent, from its own usage records (`usage.jsonl`):
+    `{"usd", "cap_usd", "line"}` with the line "AI: $0.87 of $1.00" (the cap is
+    the one the run was compiled with, `compile.ai_cap_usd`); for a provider
+    that counts requests, `{"requests", "line"}`, "AI: 14 requests" (a record
+    from before records said so counts one). None for a run without AI (a study
+    without AI help, a bake-off). A fact, not a claim about any result."""
+    from evolvekit.harness.compile import ai_cap_usd
+    from evolvekit.ledger import read_jsonl
+
+    if not getattr(study.budget, "ai_enabled", False) or (job or {}).get("bakeoff"):
+        return None
+    rows = list(read_jsonl(run_dir / "usage.jsonl"))
+    if any(str(r.get("provider")) in COUNTS_REQUESTS for r in rows):
+        requests = sum(float(r["requests"]) if _number(r.get("requests")) is not None else 1.0
+                       for r in rows if str(r.get("provider")) in COUNTS_REQUESTS)
+        return {"requests": requests, "line": f"AI: {requests:g} request{'s' if requests != 1 else ''}"}
+    usd = sum(_number(r.get("usd")) or 0.0 for r in rows)
+    cap = ai_cap_usd(study)
+    return {"usd": usd, "cap_usd": cap, "line": f"AI: ${usd:.2f} of ${cap:.2f}"}
+
+
+def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str,
+                baseline: str, base_commit: str = "", check_runs: list[dict[str, Any]] | None = None
+                ) -> list[dict[str, Any]]:
+    """A bake-off's branches in the order they were given, each with its own
+    decision and line against the starting point: `_final_words` as if the
+    final check had checked that one alone; and its `by_case`, each held-back
+    case's figures as the search verdict's `by_case` gives them (`_held_rows`),
+    from the final check's runs (`check_runs`). A branch that is the starting
+    point itself has no rows: there is nothing to compare."""
+    from evolvekit.app import jobs
+
+    final = job.get("final") or {}
+    decisions = final.get("decisions") or {}
+    out = []
+    for entry in job.get("bakeoff") or []:
+        cid = str(entry.get("id") or "")
+        own = {**final, "candidate": cid}
+        own.pop("decision", None)
+        if cid in decisions:
+            own["decision"] = decisions[cid]
+        words = _final_words({**job, "final": own}, comparison, goal, what, baseline)
+        decision = _decision_word(words, own)
+        row: dict[str, Any] = {"ref": entry.get("ref"), "commit": entry.get("commit"), "decision": decision,
+                               "line": words.get("line", "")}
+        if base_commit and entry.get("commit") == base_commit:
+            # The branch is the starting point itself (e.g. `main` when the study starts from HEAD = main).
+            row.update({"decision": "keep", "same": True, "today": True, "line": TODAYS_CODE_LINE})
+        elif words.get("state") == "same":
+            row["same"] = True  # every run gave exactly today's result: no figures
+        elif decision not in _NO_ANSWER:
+            row.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"),
+                        "worst_pct": words.get("worst_pct"), "chance": words.get("chance")})
+        if not row.get("today") and goal.get("kpi") and cid:
+            result = ((comparison or {}).get("per_candidate") or {}).get(cid) or {}
+            row["by_case"] = _held_rows(result, jobs._by_case(check_runs or [], BASELINE, cid, goal["kpi"],
+                                                              goal["direction"]))
+        out.append(row)
+    return out
+
+
+def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
+                      candidates: list[dict[str, Any]], what: str = "code change") -> tuple[str, bool]:
+    """Decision 32: a bake-off's own decision and line are those of the branch
+    it chose (the largest mean among those whose own decision is `use`), said
+    as one of N ("Of 2 branches, <ref>: ..."; "<ref>: ..." for one branch);
+    with one held-back case the chosen branch's own `single` line, named the
+    same way. When no branch is `use` the starting point stays (`keep`, "None of
+    the N branches is shown to beat the starting point.") and no branch's
+    figures speak for the run. A check with no answer yet (stopped, pending)
+    keeps its own words. Returns the decision and whether the run's own figures
+    are those of a branch the line names."""
+    count = len(candidates)
+    branches = f"{count} branch{'es' if count != 1 else ''}"
+    chosen_id = str((job.get("final") or {}).get("candidate") or "")
+    chosen = next((c for e, c in zip(job.get("bakeoff") or [], candidates) if str(e.get("id")) == chosen_id), None)
+
+    def named(c: dict[str, Any]) -> str:
+        line = str(c["line"])
+        return (f"{c['ref']}: " if count == 1 else f"Of {branches}, {c['ref']}: ") + line[:1].lower() + line[1:]
+
+    if chosen is not None and chosen["decision"] in ("use", "single"):
+        document["decision"], document["line"] = chosen["decision"], named(chosen)
+        if chosen["decision"] == "use":
+            document["advice"] = f"Use the code of {chosen['ref']}: it is probably better on cases no branch was made for."
+        return str(document["decision"]), True
+    if any(c["decision"] in ("keep", "worse") for c in candidates):
+        document["decision"] = "keep"
+        document["line"] = (f"None of the {branches} is shown to beat the starting point." if count != 1
+                            else f"{candidates[0]['ref']} is not shown to beat the starting point.")
+        if all(c.get("same") for c in candidates) and (count == 1 or not any(c.get("today") for c in candidates)):
+            # No run of any branch differed from today's: the headline says that, not "not shown to beat".
+            document["line"] = (candidates[0]["line"] if count == 1 else
+                                f"No difference in any run: every run of each of the {count} branches gave exactly today's "
+                                "result, so the study may not exercise their changes: "
+                                f"{_NOT_REACHED.get(what, 'the changes may not reach the program')}.")
+        if chosen is not None and chosen.get("same") and not all(c.get("same") for c in candidates):
+            # The chosen branch changed nothing in any run, the others did: its advice is not the run's.
+            document["advice"] = "Keep today's code for now: the gain is not proven."
+        return "keep", False
+    return str(document["decision"]), True
 
 
 def _best_of(job: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -418,6 +691,34 @@ def _best_of(job: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] 
     return next((r for r in rows if r.get("id") == best_id), None) if best_id else None
 
 
+def best_so_far(run_dir: Path, goal: dict[str, Any], rows: list[dict[str, Any]] | None = None,
+                job: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The search's best so far as one figure, `{"id", "pct"}`: by how many
+    percent the best beats the starting point on the cases the search learns
+    from, in the base and the sign of the verdict's `learned_from.pct` -- which
+    is this figure once the run is done. `study status`, the status document
+    (`jobs.status`'s `best.pct`) and the app's status strip all take it from
+    here. While the run is live the best is the search's ranking's first (the
+    one the final check will check), else the one the run checked. The figure
+    comes from the best's own row in `runs.jsonl`, written once its
+    evaluation finished on every case, so it never moves while the best stays
+    the same. `pct` is None before there is a starting point and a best to
+    compare; 0.0 while the starting point is the best. `goal` is `jobs._goal`'s;
+    `rows` and `job` are the run's when the caller read them already."""
+    from evolvekit.app import jobs
+    from evolvekit.leaderboard import rank
+
+    rows = jobs._rows(run_dir) if rows is None else rows
+    job = jobs.phase(run_dir) if job is None else job
+    seed = next((r for r in rows if r.get("operator") == "human-seed"), None)
+    if job.get("phase") in jobs.ACTIVE:
+        ranked = rank(rows, 1)
+        best = ranked[0] if ranked else None
+    else:
+        best = _best_of(job, rows)
+    return {"id": (best or {}).get("id"), "pct": _learned_pct(seed, best, goal)}
+
+
 def _learned_pct(seed: dict[str, Any] | None, best: dict[str, Any] | None, goal: dict[str, Any]) -> float | None:
     """By how many percent the best beat the starting point on the cases the search learned from."""
     from evolvekit.app import jobs
@@ -426,9 +727,9 @@ def _learned_pct(seed: dict[str, Any] | None, best: dict[str, Any] | None, goal:
         measured = (row or {}).get("kpis") or {}
         return measured.get(f"{goal['kpi']}_raw", measured.get(goal["kpi"]))
 
-    if seed is None or best is None or not goal["kpi"]:
+    if seed is None or best is None or not goal.get("kpi"):
         return None
-    return jobs._improvement(value(seed), value(best), goal["direction"])
+    return jobs._improvement(value(seed), value(best), goal.get("direction") or "lower")
 
 
 def build_verdict(root: Path, run: str | None = None) -> dict[str, Any]:
@@ -450,8 +751,10 @@ def build_verdict(root: Path, run: str | None = None) -> dict[str, Any]:
     seed, best = jobs._seed_and_best(run_dir, {}, rows)[0], _best_of(job, rows)
     final = job.get("final") or {}
     comparison, check_runs = _check_of(run_dir, final)
-    words = _final_words(job, comparison, goal, jobs._what(study), jobs._baseline(study, harness, seed))
+    baseline = jobs._baseline(study, harness, seed)
+    words = _final_words(job, comparison, goal, jobs._what(study), baseline)
     candidate = str(final.get("candidate") or "")
     held = _by_case(run_dir, goal, "", "", candidate, check_runs, learned=False)["held"]
     return _document(root, run_dir, study, harness, job, words, comparison, held,
-                     _changed(root, study, harness, seed, best), _run_facts(run_dir, job), _learned_pct(seed, best, goal))
+                     _changed(root, study, harness, seed, best), _run_facts(run_dir, job), _learned_pct(seed, best, goal),
+                     baseline=baseline, check_runs=check_runs)

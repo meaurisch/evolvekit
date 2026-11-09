@@ -7,13 +7,16 @@ This page is for the person (or the AI coding tool) who writes one. Using
 harnesses is in the README, under
 [Harnesses and studies](../README.md#harnesses-and-studies).
 
-Two harnesses in this repository are the worked examples:
+Three harnesses in this repository are the worked examples:
 
 - [`harnesses/demo-tour/`](../harnesses/demo-tour/) — `kind: program`: a
   command-line solver that evolvekit's own Python drives. Small; start here.
 - [`harnesses/pyvrp/`](../harnesses/pyvrp/) — `kind: python`: PyVRP in its own
   Python, with request loading, unit conversion, a lever applied in code, and
   drift detection. The full picture.
+- [`harnesses/prompt-tune/`](../harnesses/prompt-tune/) — `kind: program`
+  with only a `code:` section to vary: a code study changes the prompt file
+  the example pipeline reads.
 
 ## With an AI coding tool
 
@@ -184,6 +187,60 @@ settings` or `for: data`; any other name goes to the runner's `export` hook.
 **Defaults** are the study wizard's starting values: `time_per_case_s`,
 `retries`, `budget_hours`, `test_share`, `runs_per_case`.
 
+## The `code:` section
+
+Optional: what a code study may change in the application's source (the
+README's [Code studies](../README.md#code-studies) is how a study uses it).
+It sits beside the settings, levers and measures of the same harness: one
+harness per application, and a study picks what it varies.
+
+```yaml
+code:
+  label: The solver's source          # what the app calls the source
+  repo: ../../examples/cli-solver     # a folder inside a git repository: relative to this folder, or absolute
+  open: [solver.py, "lib/**/*.py"]    # what a study may change: globs relative to repo
+  app: "{tree}/solver.py"             # kind: program — the program inside a combination's folder
+  # kind: python instead:
+  # build: "{python} -m pip install -q -e {tree}"
+  # build_timeout_s: 600
+```
+
+- **`repo`** names a folder inside a git repository; it may be the
+  repository's top. A combination's folder (`{tree}`) is that same folder in
+  a checkout of the whole repository at the starting commit, and `open`,
+  `app` and `build` are relative to it. Here `repo` is only a default,
+  relative to the harness folder as you wrote it: a study records its own
+  absolute path in `vary.code.repo` (`study code`, or the app's Set up, which
+  proposes this default while the folder the study was made from still has
+  the harness). The copy pinned in a study never resolves `repo`;
+  `harness check` resolves it against the folder it checks.
+- **`open`** lists what a study may change, as globs relative to `repo`:
+  `*` and `?` within a folder, `**/` across folders. Each must stay inside
+  `repo` (no `..`, no absolute path) and match at least one committed file.
+  A change that touches any other file is refused before it runs: keep the
+  benchmark, the tests and the cases out of `open`. Everything in `open` is
+  shown to a model whole, at most 2000 lines in all, so name the files that
+  matter rather than a whole folder.
+- **A `python` harness** needs `build` and takes no `app`: the build installs
+  a combination's folder into the application's Python, so `solve` imports
+  the changed code. `{tree}` is the folder, `{python}` the study's
+  application Python. Because that Python is shared, a study tries one
+  combination at a time, and after every run that built combinations the
+  build is run once more on the engineer's own folder (only for a build that
+  names `{python}`), so the interpreter never points at a removed folder.
+- **A `program` harness** needs `app`, the program inside the folder, with
+  `{tree}` in it; `build` is optional (`make -C {tree}`, run inside each
+  folder, where `{python}` is the Python that runs evolvekit). Without a
+  build, combinations run side by side as in a settings study; with one,
+  one at a time.
+- **`build_timeout_s`** (default 600) bounds one build. A build that fails
+  or runs out of time refuses that combination, with the last lines it
+  printed as the reason.
+- **Settings in a code study:** only the settings the study fixes are
+  passed; leave the rest to the program. `solve` gets no value for any
+  other setting, so a branch that changes a default is measured with it
+  (see `runner.py` below).
+
 ## Tables: the vocabulary
 
 A study never sees the application's own data structures. It sees tables, and
@@ -241,7 +298,14 @@ if __name__ == "__main__":
   can change: the SDK edits those cells and never your native object. Keep
   whatever else you need in `case.native`.
 - `settings` holds every setting — the study's base values with the tuned
-  ones on top — and `time_limit_s` is the study's time per case.
+  ones on top — and `time_limit_s` is the study's time per case. **In a
+  code study, only the settings the study fixes are passed; leave the rest
+  to the program.** A setting the study does not fix is absent from
+  `settings` (pass no flag for it, or let your own defaults stand), so each
+  combination and the starting point run with their own code's defaults —
+  a harness default passed as a flag would override a default the changed
+  code sets, and the change would never run. So `solve` must cope with a
+  setting that is not there; the three shipped runners do.
 - **Keep to the time limit.** A run that has not finished by 1.5 times the
   limit plus 30 seconds is stopped and counts as failed. If the application
   can hang for some settings, run it in a process of its own and stop that
@@ -303,9 +367,11 @@ warns when a study template aims a data study at a marked KPI.
 `samples/` holds three to ten small cases that solve within a second or two,
 with the script that makes them next to them; the check solves up to three.
 `templates/<id>.yaml` are partial `study.yaml` files — `title`, `summary`,
-`vary`, `constraints`, `kpis`, `goal`, `guardrails` — and loading the harness
-compiles every one of them. `vary: {settings: recommended}` tunes the
-recommended settings.
+`vary`, `constraints`, `kpis`, `goal`, `guardrails`, `limits`, `budget` — and
+loading the harness compiles every one of them. `vary: {settings:
+recommended}` tunes the recommended settings; `vary: {code: {from: HEAD,
+brief: …}}` makes a code study (demo-tour's `templates/faster.yaml`), whose
+source folder each study then names.
 
 ## What `harness check` runs
 
@@ -314,12 +380,28 @@ recommended settings.
 2. The application probe: the program's version, or the Python module and
    its version.
 3. `describe`, and drift.
-4. On up to three samples: `inspect`; a solve at the defaults; every KPI
+4. With `code:`, from cheap to expensive, stopping at the first failure:
+   `code.repo` — the folder is inside a git repository with a commit;
+   `code.open` — every glob matches a file committed at `HEAD` (a staged
+   file is not enough); `code.checkout` — a clean checkout of `HEAD`, as a
+   worktree in a scratch folder that is removed afterwards (the checkout
+   step never writes your folder; the restore build runs in it);
+   `code.build` — that checkout builds within `build_timeout_s`;
+   `code.samples` — the first sample solves from it (a
+   warning when there are no samples); `code.settings` — that sample solves
+   again with no settings at all, since a code study passes only the settings
+   it fixes, so `solve` must read each one with a fallback
+   (`settings.get(name, default)`); it adds no line when it passes. With a
+   build, `code.restore` warns
+   when building your own folder back into the application's Python failed,
+   and a passing line says `code studies on this harness try one combination
+   at a time`: a note, which leaves the exit code as it is.
+5. On up to three samples: `inspect`; a solve at the defaults; every KPI
    finite; the tables against the declaration; every KPI template with its
    first choice. On the first sample also: every lever at a value in range,
    changing exactly the selected cells (or, in code, at least one row); every
    export.
-5. Three random settings vectors.
+6. Three random settings vectors.
 
 ## Sharing
 

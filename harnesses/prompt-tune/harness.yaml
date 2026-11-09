@@ -1,0 +1,53 @@
+# The prompt-tune harness: evolvekit's example prompt pipeline
+# (examples/prompt-pipeline/pipeline.py) behind the harness SDK. Its "code" is
+# a prompt file, prompts/system.md: a code study changes the text the
+# application reads, and the scores say what that did. See README.md.
+harness: 1
+id: prompt-tune
+version: 1.0.0
+title: Prompt tune
+summary: An example pipeline that answers evaluation items from a prompt file; a study changes the prompt.
+
+application:
+  kind: program
+  label: The prompt pipeline (pipeline.py)
+  probe: "{app} --version"
+  expect: "prompt-pipeline (\\d+\\.\\d+)"
+  help: >
+    It comes with evolvekit: examples/prompt-pipeline/pipeline.py in the evolvekit folder.
+    A .py program is run with the Python that runs evolvekit.
+
+# The source a code study may change: the system prompt, in the evolvekit
+# repository. `repo` is relative to this folder; a study records its own
+# absolute path when it is set up.
+code:
+  label: The system prompt
+  repo: ../../examples/prompt-pipeline
+  open: [prompts/system.md]
+  app: "{tree}/pipeline.py"
+
+cases:
+  label: evaluation item
+  formats: [.json]
+  describe: >
+    A JSON file with the question and the answer expected, `{"input": "...", "expected": "..."}`.
+
+time_limit: {accepts: false}
+
+tables:
+  result:
+    source: solution
+    describe: One row about the answer.
+    columns:
+      score: {type: float, describe: "The answer's score, from 0 to 1"}
+
+kpis:
+  score:
+    label: Score
+    direction: higher
+    help: The answer's score on the evaluation item, from 0 to 1.
+    measure: true
+
+defaults:
+  time_per_case_s: 10
+  test_share: 0.3

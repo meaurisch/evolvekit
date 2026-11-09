@@ -86,6 +86,18 @@ def test_the_best_so_far_line_counts_full_looks_only(tmp_path):
     assert {c["id"] for c in d["combinations"] if c["best"]} == {"g001-c0003"}
 
 
+def test_a_full_look_half_done_never_sets_the_best_so_far_line(tmp_path):
+    """Persona round 1, F3: the app's best so far fell (8.99 %, then 7.97 %) while the best stayed: a
+    full look half done counted as the mean of the cases it had. It counts once it finished (its row)."""
+    run = a_run(tmp_path, finished=False)
+    with (run / "events.jsonl").open("a", encoding="utf-8") as handle:
+        for item in evaluation("g001-c0006", "full", "a", 50, 28):  # 50 % on its first case, two to go
+            handle.write(json.dumps(item) + "\n")
+    d = digest(run)
+    assert next(c for c in d["combinations"] if c["id"] == "g001-c0006")["pct"] == pytest.approx(50.0)
+    assert [b["id"] for b in d["best"]] == ["g000-c0001", "g001-c0003"], "not before its row is written"
+
+
 def test_better_means_higher_when_the_goal_is_to_maximise(tmp_path):
     d = digest(a_run(tmp_path, minimize=False))
     by = {c["id"]: c for c in d["combinations"]}

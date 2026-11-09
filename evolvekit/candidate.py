@@ -63,7 +63,7 @@ def complexity_of(block: str) -> int:
     """AST node count -- the Phase B archive's second grid axis."""
     try:
         return sum(1 for _ in ast.walk(ast.parse(block)))
-    except SyntaxError:
+    except (SyntaxError, ValueError):  # ValueError: a null byte, or a lone surrogate (a diff's non-UTF-8 byte)
         return -1
 
 
@@ -72,7 +72,7 @@ def block_hash(block: str) -> str:
     normalised = "\n".join(
         line.rstrip() for line in block.strip().splitlines() if line.strip()
     )
-    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(normalised.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
 
 
 @dataclass
@@ -157,6 +157,10 @@ class Candidate:
     never ranked, archived or bred from. True by default because a row written
     before this field existed says nothing either way; `Driver.resume` settles
     those with `cascade.finished_final_stage`."""
+    commit: str | None = None
+    """For a tree problem (`problem.tree`): the commit the candidate's diff made
+    on the base -- the base itself for the empty diff. `None` for a skeleton,
+    and for a candidate refused before its tree was made."""
 
     @property
     def complexity(self) -> int:

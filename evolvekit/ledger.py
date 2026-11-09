@@ -49,7 +49,7 @@ class UsageRecord:
     input_tokens: int
     output_tokens: int
     usd: float
-    priced_from: str  # "provider" or "table"
+    priced_from: str  # "provider", "table", or "cap" (an agent call that reported no cost: its cap)
 
 
 def _now() -> str:
@@ -118,9 +118,14 @@ class Ledger:
             input_tokens=completion.input_tokens,
             output_tokens=completion.output_tokens,
             usd=price_completion(completion, model_cfg),
-            priced_from="provider" if completion.usd is not None else "table",
+            priced_from=str((completion.raw or {}).get("priced_from")
+                            or ("provider" if completion.usd is not None else "table")),
         )
-        self._append(self.usage_path, asdict(usage))
+        record = asdict(usage)
+        if completion.requests is not None:
+            # Requests counted against a plan rather than dollars (copilot-cli): what the run spent.
+            record["requests"] = float(completion.requests)
+        self._append(self.usage_path, record)
         return usage
 
     def record_embedding(

@@ -120,6 +120,8 @@ class EvalResult:
     included -- without a failure; see `cascade.finished_final_stage`. Only such
     a score is comparable with another, so only such a candidate is ranked,
     archived or bred from. `score` stays finite either way."""
+    commit: str | None = None
+    """For a tree problem: the commit of the candidate's tree, once it was made."""
 
     @property
     def max_kpi_cv(self) -> float:

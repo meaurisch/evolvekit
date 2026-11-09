@@ -30,13 +30,13 @@ from evolvekit.app import AppError
 from evolvekit.env import parse_env
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import runner_command
-from evolvekit.harness.library import HarnessEntry, create_study, find_harnesses, install_harness, slugify
-from evolvekit.harness.manifest import Harness, load_harness
+from evolvekit.harness.library import ORIGIN, HarnessEntry, create_study, find_harnesses, install_harness, slugify
+from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
 from evolvekit.harness.probe import probe_application
-from evolvekit.harness.study import Study, load_study, save_study, study_problems
+from evolvekit.harness.study import CodeVary, Study, load_study, save_study, study_problems
 from evolvekit.ledger import _atomic_write
 
-__all__ = ["STEPS", "Home", "safe_name", "set_application", "split_words"]
+__all__ = ["STEPS", "Home", "code_proposal", "safe_name", "set_application", "split_words"]
 
 STEPS = ("Question", "Application", "Cases", "What may change", "Goal", "Limits and budget", "Review and start")
 _STEP_OF = {
@@ -378,6 +378,7 @@ class Home:
         Nothing is deleted at once: `restore_study` brings it back until
         `clean_trash` empties it after `TRASH_DAYS`."""
         root = self.study_root(slug)
+        _remove_trees(root)
         self.trash_dir().mkdir(exist_ok=True)
         base = f"{slug}~{datetime.now().strftime(_STAMP)}"
         entry, number = base, 2
@@ -465,6 +466,8 @@ class Home:
                     shutil.copytree(root / part, new_root / part, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
                 else:
                     (new_root / part).mkdir()
+            if (root / ORIGIN).is_file():  # where its harness came from, for Set up's proposal
+                shutil.copyfile(root / ORIGIN, new_root / ORIGIN)
             study.name = name
             save_study(study, new_root)
         except OSError as exc:
@@ -575,6 +578,57 @@ class Home:
         if answer["ok"]:
             self.remember_application(str(Path(answer["path"])))
         return answer
+
+    def set_code(self, slug: str, repo: str | None = None, from_ref: str | None = None,
+                 brief: str | None = None) -> dict[str, Any]:
+        """Say where a code study's source is (`vary.code`), and from which base.
+        No `repo`: the harness's own (`code_proposal`). The answer is `{ok, repo,
+        from, message}`; with `ok` false nothing is written. A program harness's
+        study without an application gets the program inside the source
+        (decision D10), so the preview and the plan's timing have one to run."""
+        root, study, pinned = self.load(slug)
+        if pinned.code is None:
+            raise AppError("vary.code: the harness has no code section, so this study cannot change code")
+        repo = str(repo or "").strip().strip('"')
+        if not repo:
+            repo = code_proposal(root, pinned) or ""
+            if not repo:
+                raise AppError("vary.code.repo: say where the source is: give --repo PATH")
+        if not Path(repo).is_absolute():
+            raise AppError(f"give the full path to the source; {repo!r} is relative")
+        existing = study.code or CodeVary()
+        from_ref = str(from_ref or "").strip() or existing.from_ref or "HEAD"
+        from evolvekit import tree  # only a code study needs git
+
+        try:
+            located = tree.Repo(repo)
+        except tree.TreeError as exc:
+            return {"ok": False, "repo": repo, "from": from_ref, "message": str(exc)}
+        try:
+            if from_ref != "working":  # `working` is a snapshot, taken when a run is written
+                tree.resolve_commit(located, from_ref)
+        except tree.TreeError as exc:
+            return {"ok": False, "repo": repo, "from": from_ref, "message": f"vary.code.from: {exc}"}
+        repo = str(located.path)
+        study.code = CodeVary(repo=repo, from_ref=from_ref, open=list(existing.open),
+                              brief=" ".join(str(brief).split()) if brief is not None else existing.brief)
+        if pinned.application.kind == "program" and pinned.code.app:
+            from evolvekit.evaluate.stages import render_app
+
+            # The program this method filled in for the old source follows the
+            # source; a program the engineer named by hand stays theirs.
+            filled = bool(existing.repo and study.application_path
+                          and tree.same_path(study.application_path, render_app(pinned.code.app, Path(existing.repo))))
+            if not study.application_path or filled:
+                program = Path(render_app(pinned.code.app, Path(repo)))
+                if program.is_file():
+                    probe = probe_application(pinned, str(program))
+                    study.application_path = str(program)
+                    study.application_version = (probe.version or "") if probe.ok else ""
+                else:  # never the old source's program beside the new source's trees
+                    study.application_path, study.application_version = "", ""
+        save_study(study, root)
+        return {"ok": True, "repo": repo, "from": from_ref, "message": f"source: {repo} (from {from_ref})"}
 
     def add_cases(self, slug: str, files: list[Path], *, hold_back: int | None = None) -> dict[str, Any]:
         """Put the files in the study as cases (a file the harness cannot read
@@ -857,7 +911,54 @@ class Home:
             "suggested_test": self.suggested_test_count(slug),
             "split_words": split_words(len(study.test), len(cases)),
             "inputs": dict(study.inputs),
+            "code_proposal": code_proposal(root, harness) if study.code is not None else None,
         }
+
+
+def _remove_trees(root: Path) -> None:
+    """A code study's runs' trees, removed from the engineer's repository before
+    the study is moved (a crashed run, or a tree held open, may have left one):
+    best effort, never a reason for the delete to fail. A settings study never
+    imports `evolvekit.tree`."""
+    try:
+        if load_study(root).code is None:
+            return
+        from evolvekit import tree
+
+        runs = root / "runs"
+        folders = [run for run in sorted(runs.iterdir()) if run.is_dir()] if runs.is_dir() else []
+        for run in list(folders):  # a final check's trees are under confirm/<label>
+            confirm = run / "confirm"
+            folders += [label for label in sorted(confirm.iterdir()) if label.is_dir()] if confirm.is_dir() else []
+    except Exception:  # noqa: BLE001 -- the delete goes ahead; `git worktree prune` clears what is left
+        return
+    for folder in folders:
+        try:
+            tree.remove_all(folder)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def code_proposal(root: Path, harness: Harness) -> str | None:
+    """Where the study in `root` would find its source by default: the harness's
+    `code.repo`, resolved against the folder the study's harness came from
+    (`ORIGIN`) while that folder still holds the same harness with a `code:`
+    section; else `None`. The pinned copy in `<root>/harness/` is never used
+    for this: its relative `repo` named a folder from somewhere else."""
+    try:
+        origin = Path((Path(root) / ORIGIN).read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not str(origin) or not (origin / "harness.yaml").is_file():
+        return None
+    try:
+        source = load_harness(origin, check_templates=False)
+    except HarnessError:
+        return None
+    if source.id != harness.id or source.code is None:
+        return None
+    repo = resolve_code_repo(origin, source.code)
+    return str(repo) if repo.is_dir() else None
 
 
 def set_application(root: Path, path: str) -> dict[str, Any]:

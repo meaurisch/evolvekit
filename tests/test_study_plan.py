@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 import pytest
@@ -149,3 +150,61 @@ def test_a_short_study_gives_its_check_fewer_runs_per_case_never_below_three():
     quarter_hour = make_plan(training=5, test=3, runs_per_case=1, time_limit_s=20, hours=0.25, workers=4)
     # 135 s buys 3 seeds (3.4): the floor of three; C = 100, S = 755, c = 4 -> 7.1 rounds.
     assert quarter_hour.check_seeds == 3 and quarter_hour.rounds >= 6
+
+
+GATE = dict(training=5, test=2, runs_per_case=1, time_limit_s=2, overhead_s=0.294, hours=0.167, workers=3,
+            pin_cpus=[2, 4, 6])
+"""Persona round 2's code study: 5 cases learned from, 2 held back, 2 s a case, ten minutes."""
+
+
+def test_the_plan_of_a_study_with_ai_counts_the_time_of_each_ai_change():
+    """Persona round 2, D1: the plan promised about 11 rounds and 132 combinations; 2 rounds and 25 ran,
+    because each AI change took time the plan ignored (agent_patch about 19 s, diff about 8 s)."""
+    from evolvekit.harness.compile import OPERATORS_CODE, OPERATORS_CODE_AGENT, OPERATORS_WITH_AI
+    from evolvekit.harness.plan import AGENT_CHANGE_S, AI_CHANGE_S, ai_seconds
+
+    assert (AI_CHANGE_S, AGENT_CHANGE_S) == (10.0, 30.0)
+    assert ai_seconds(OPERATORS_CODE_AGENT) == (20.0, 20.0)  # half agent_patch, half diff: 20 s a child
+    assert ai_seconds(OPERATORS_CODE) == (10.0, 10.0)
+    assert ai_seconds(OPERATORS_WITH_AI) == pytest.approx((3.0, 10.0))  # 3 in 10 children ask the AI
+    assert ai_seconds({"param_lhs": 1.0}) == (0.0, 0.0) and ai_seconds(None) == (0.0, 0.0)
+
+    before = make_plan(**GATE)
+    assert (before.children, before.rounds, before.ai_change_s) == (12, 11, 0.0), "without AI: today's plan"
+    plan = make_plan(**GATE, operators=OPERATORS_CODE_AGENT)
+    # T = 2.294; with 20 s of AI a child, R(c) = ceil(5c/3) * T + 20c. No c reaches 6 rounds at any number of
+    # check seeds (k = 3: C = 4T, S = 571.14 - 9.18 = 561.96, B = 2T, R(4) = 7T + 80 = 96.06 -> 5.8), so 3 rounds
+    # with k = 3: c = 7 gives R = 12T + 140 = 167.53 -> 3.3; c = 8 gives 14T + 160 = 192.12 -> 2.9.
+    assert (plan.check_seeds, plan.children, plan.rounds, plan.combinations) == (3, 7, 3, 21)
+    assert plan.round_s == pytest.approx(12 * 2.294 + 140) and plan.ai_change_s == 20.0
+    assert plan.to_json()["ai_change_s"] == 20.0
+    settings = make_plan(**GATE, operators=OPERATORS_WITH_AI)  # a settings study with AI: 3 s a child
+    assert settings.round_s == pytest.approx(math.ceil(settings.children * 5 / 3) * 2.294 + 3.0 * settings.children)
+    assert settings.ai_change_s == 10.0
+
+
+def test_the_plan_line_names_the_ai_assumption():
+    from evolvekit.harness.compile import OPERATORS_CODE_AGENT
+
+    plan = make_plan(**GATE, operators=OPERATORS_CODE_AGENT)
+    text = plan.summary(datetime(2026, 11, 8, 5, 38))
+    assert text.startswith("about 3 rounds, about 21 combinations tried (assumes about 20 s for each AI change), "
+                           "a final check on 2 held-back cases with 3 runs each")
+    assert "assumes about" not in make_plan(**GATE).summary(), "no AI, no assumption"
+
+
+THIN = "With 2 held-back cases a 'use' is unlikely: the worst case stays wide. Hold back more cases for a firmer answer."
+
+
+def test_too_few_held_back_cases_for_a_firm_answer_is_a_note_with_the_plan():
+    """Persona round 2, D2: nobody said before the run that 2 held-back cases can practically never reach
+    "use"; examples/cli-solver/README.md says so ("Hold back more instances than that for a claim")."""
+    from evolvekit.harness.plan import THIN_CHECK_CASES, plan_notes
+
+    assert THIN_CHECK_CASES == 3 and plan_notes(2) == [THIN]
+    assert plan_notes(1) == [THIN.replace("2 held-back cases", "1 held-back case")]
+    assert plan_notes(0) == [] and plan_notes(3) == [], "no final check, or enough cases: no note"
+    plan = make_plan(**GATE)
+    assert plan.notes == [THIN] and plan.to_json()["notes"] == [THIN]
+    assert plan.summary(datetime(2026, 11, 8, 5, 38)).endswith("; done around 05:48. " + THIN)
+    assert THIN not in _plan().summary(), "three held back: no note"

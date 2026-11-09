@@ -122,7 +122,8 @@ saved as you go.
    this computer*; *Other* lists what it found, browses, or takes a pasted
    path.
 2. **Kind of study** — the harness's templates (better settings, better
-   data), or blank.
+   data, or a change to the application's code, such as the demo's
+   *Shorter tours by changing the solver*), or blank.
 3. **Cases** — the requests to work on: drop files or a folder, choose
    them, give a folder's path, or use the harness's samples. Every file is read
    at once; one that cannot be read is named and left out. A few cases are
@@ -156,11 +157,33 @@ opens a drawer on the right (full screen on a phone):
   per case, retries, and optional AI search help with a cap. Experts can set
   the combinations per round and the rounds here too.
 
+A **code study** — one whose template changes the application's source —
+shows **What may change: code** in place of *What to tune*: the source
+folder and the commit it starts from, the files the search may change, and
+the brief. Its drawer asks three things: the **source folder** (proposed from
+the harness's own folder while the folder the study was made from still has
+it; *Choose the folder*, or paste the full path of a folder inside a git
+repository), **Start from** (a branch, a tag or a commit, or `working` for
+the files as they are now, uncommitted changes included — nothing in the
+folder is written), and **What the search should improve**, in your words.
+The search may change those files and nothing else. A code study needs AI
+search help (under **Time**): the model proposes each change, and with
+*Claude Code here* as the provider (Settings) the coding agent also edits
+the files itself, with shell access to a worktree of your repository (the
+README's *Code studies* says what it can reach). With *GitHub Copilot CLI*
+the model proposes each change only: its agent is not verified yet. A study changes code or tunes settings,
+not both yet.
+
 Under them the **plan bar** shows what the time buys — the rounds of search,
 then the final check, and when it will be done. When that is thin for what
 you tune it says so and offers fixes with their consequences (*Tune the top
 9* — the harness's recommended ones first; *Allow 22 h*), and when it is too
-little to learn anything it says why. *Test run* tries the study once on the
+little to learn anything it says why. A study with AI help says the time the
+plan counts for each change the AI writes (*about 20 s*), since the AI's
+writing takes a round's time too. With only one or two held-back cases a
+note under the plan says that a *use* is unlikely and to hold back more cases
+for a firmer answer (the plan's `notes`); it does not stop the start, and the
+Study page repeats it while the run waits and runs. *Test run* tries the study once on the
 smallest case before anything is spent. One click away below: the held-back
 cases, runs per case, **Rules** (combinations that may not be tried),
 **Measures** (your own measures in SQL, for experts, and limits a combination
@@ -171,8 +194,10 @@ must keep), **Data changes** and AI help.
 ![The Study page](app/study-light.png)
 
 The **status strip** at the top says the study's one answer right now —
-*Searching · round 7 of 12 · Best so far: 1.95 % better · Not checked yet* —
-and becomes the verdict when the final check has decided. Nothing says *use
+*Searching · round 7 of 12 · Best so far: 1.9 % lower cost on the cases it
+learned from · Not checked yet* — and becomes the verdict when the final check
+has decided. The best so far is one figure, the one `evolvekit study status`
+prints, in its words; the Home card says the same. Nothing says *use
 it* before then. Once there is a verdict, the strip's headline and the
 sentence under it are the verdict's own `line` and `advice`, word for word,
 as `evolvekit study verdict` prints them: the page never composes its own.
@@ -182,6 +207,16 @@ answer yet*. The app decides by one fixed rule, stated under the answer:
 least 9 in 10 and the worst plausible case within 1 % of today. Every
 estimate shows its likely range as a band through *today*, with both ends
 marked, *worst* and *best*, and the dashed 1 % limit.
+
+While a round's changes are being written by the AI the strip says so —
+*Writing changes: 7 of 12.* — until that round's runs begin. Under a live
+run's sentence the strip gives two facts as the status document says them:
+what the AI has spent of its cap (*AI: $0.42 of $1.00*, or *AI: 4 requests*
+for a provider that counts requests), and after the first round, when the
+pace so far buys fewer rounds than planned, *At this pace about 2 of the 11
+planned rounds will run.* Neither is a claim about the result. Details shows
+the spend too, and once the run is finished the verdict's own figure among
+its facts.
 
 - **Use it** (the strip turns orange): *Probably better: 1.4 % lower cost
   on 3 held-back cases, a chance of about 19 in 20; …*, then *Use the new
@@ -202,12 +237,15 @@ marked, *worst* and *best*, and the dashed 1 % limit.
 
 Below the strip three linked views:
 
-- **Tries** — every combination by when it finished and how much better
-  than today; the orange line is the best so far, on full looks only (all
+- **Tries** — every combination by when it finished and its change against
+  today, on the cases it learned from (its axis: *% change vs today, on the
+  cases it learned from (not checked)*); the orange line is the best so far, on full looks only (all
   study cases), so a lucky quick look on a few cases never sets it; rings at
-  *now* are tries still running.
+  *now* are tries still running. The line averages each case's change, so its
+  legend says so: it can differ by a few tenths from the strip's figure,
+  which compares the plain averages as the verdict does.
 - **Cases** — a row per study case, a dot per try, and how many tries beat
-  today on it.
+  today on it (*ahead of today*, never *better*: these are not checked).
 - **Settings** — one panel per tuned setting: the value tried across, the
   result up, today's value dashed and the band of values that did well; the
   settings that moved the result most come first.
@@ -219,10 +257,28 @@ settings — are marked on the Tries plot. *Details* shows one combination in
 full: every setting it changed, its result case by case, and for a run that
 failed, what it printed and how it was started.
 
+In a code study a combination is a change to the source. Its card's last
+line says how big it is — *+3 −1 lines in solver.py*, or *No change: today's
+code* for the starting point — and *Details* shows the change itself under
+*What it changed*: the diff as it is, in monospace, added lines on a green
+tint and removed ones on a red one. The third view is **Code** in place of
+Settings: every combination's change, the best first, each with *Details*.
+The page speaks of code throughout: the Tries plot's zero line is *Today's
+code*, and **Code to keep** (or **The code change to use**) shows the source
+against today's code (*HEAD (e973d92)* → *+18 −9 lines in solver.py*) with
+*Show the change*. The verdict's answer for a code study
+speaks of the code (*Keep today's code …*), and the change is taken away
+from the command line: `study export SLUG --diff` writes it as a patch, and
+`study pr SLUG` makes a branch and a pull request of it (only with `--yes`;
+see the README's [Code studies](../README.md#code-studies)).
+
 Every figure for a combination is written as the report writes it: one
 decimal and the measure's own direction, never *better* — the chosen
 combination's chip reads *Combination 2 · 7.5 % lower on the cases it
-learned from, not checked*. The held-back table under *Details* gives each
+learned from, not checked*. Once the final check has decided, the chip shows
+no figure: on the combination it checked it says the decision (*Combination
+17 · final check: keep*), on any other just its number. The view tabs' counts
+follow the plot as the run goes. The held-back table under *Details* gives each
 case's change as the verdict computes it, the mean of the paired runs.
 
 | Dark | Phone |
@@ -240,7 +296,24 @@ check runs again), *Start a new study from this*, *Compare with…*; and
 **Details** — the set-up, every held-back case and every case the search
 learned from, every measure, and *What went wrong*: failed runs grouped with
 what to do about them, and the combinations that had them, each with its
-output. *Past runs* lists every run of the study with its verdict.
+output; a search that ran fewer rounds than planned says so there, and a
+finished run's best so far is said as past (*The search's best was … The
+final check's verdict is the answer on the cases the search never saw.*, or
+*It was not checked …*). *Past
+runs* lists every run of the study with its verdict. When the latest run
+does not say use and an earlier run of the study did, the header (on the
+latest run's page), Home's card and `study status` add one line: *An earlier
+run (<id>) says use: <its verdict line>*. A run `study pr` made a branch for
+says so in its header and in `study status`: *Branch <name> pushed to
+<remote>*, or *made, not pushed* (from `runs/<id>/pr.json`). The page keeps up with
+the study while it is open: a run started elsewhere (a bake-off from the
+terminal) is shown as soon as it starts, when the page showed the newest run,
+and *Past runs* and its list follow every run that starts or ends. It asks
+for the study's runs as often as the runs route says (`poll_s`: every 5 s
+while a run is live, every 10 s when none is). A
+bake-off's strip lists each branch's own line under the verdict; a branch
+whose every run gave today's result says *No difference in any run* and has
+no band, there and on *Compare branches*.
 
 The app runs one study at a time. A study started while another runs waits
 its turn and starts by itself; a run that was continued after it died says
@@ -254,6 +327,24 @@ by label: the goal, the answer, the likely range, the held-back cases they
 share (one dot per side on one axis), what changed and the set-up. Two
 studies with different goals are shown, but not ranked; a side without a
 final check says its number may not hold on new cases.
+
+**Compare branches.** A code study's Study page offers *Compare branches*
+whenever no run is live (a run that is done, stopped or failed), and Set up
+offers it beside *Start* before the study's first run: a drawer that takes the names of your own
+branches (or tags, or commits), one per line, and checks each against the
+starting point on the held-back cases, with no search and no AI — as
+`study bakeoff SLUG --ref A --ref B` does. Only the open files may differ: a
+branch that changes another file, or whose change does not apply on the
+starting commit, is refused with a sentence saying what to do. When that run
+ends, *See the branches side by side* opens the Compare page for it: the
+starting point's column (*Today's code*), then one column per branch with its
+commit, its mark, its own verdict line word for word, under it each
+held-back case's change (the mean of the paired runs, *4.1 % lower* or *the
+same*; none for a branch at the starting commit) and its likely range,
+and the rule each was judged by. The headline is the run's own verdict: the
+branch with the largest gain among those that pass the rule, named as one of
+the branches compared, or *None of the 2 branches is shown to beat the
+starting point.*, and today's code stays.
 
 ## The assistant
 
@@ -348,14 +439,30 @@ fates folded in), `assistant/cancel`, `assistant/cards` (what became of a
 card: `{turn, index, state}`), `cards` (`{card}` adds one and refuses it
 with the reason; `{cards: [...], turn}` adds a whole answer in the right
 order and answers with every card's `ok` and `problem`, recording the applied
-ones by their `index` in the turn), `plan`, `tune-only`, `test-run`, `start` (with
+ones by their `index` in the turn), `plan`, `tune-only`, `test-run`, `code`
+(a `POST` with `{repo, from, brief}`: a code study's `vary.code`, answered with
+`{code: {ok, message, …}, study}`), `bakeoff` (a `POST` with `{refs: [...]}`:
+the branches compared with no search; 409 with the sentence when one is
+refused), `start` (with
 `{"resume": RUN}`: that run goes on where it stopped; while another study
 runs, the run is queued and the server starts it later), `stop` (on a queued
 run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,
 with N runs per case), `continue` (`{"run": RUN, "hours": H}`: a finished
 run searches on for H hours more, at most 48, then checks again; 409 while
-anything runs), `status`, `results`, `tries` (every try of a run, digested for the
-Study page's three views: `evolvekit/app/tries.py`), `download/{export}`
+anything runs), `status` (its `best` is the best so far as `study status` says it:
+`pct`, `says` in words such as "6.1 % lower tour length", and the combination's
+`id`; `spent` is the AI's spend of its cap, `pace` after the first round the
+rounds the pace so far buys when fewer than planned, `writing` how many of a
+round's changes the AI has written, and `notes` what to hear besides the plan,
+each with its `line` or sentences as the strip shows them), `runs` (every run
+as it is now and the newest, `{runs, latest, poll_s, earlier}`: the open Study page asks
+it again after `poll_s` seconds, 5 while a run is live and 10 when none is, so a
+run started elsewhere, such as a bake-off from the terminal, or a run that
+ended shows without a reload; a run's `branch` is what `study pr` made for it,
+and `earlier` the newest earlier run that said use when the latest does not),
+`results`, `tries` (every try of a run, digested for the
+Study page's three views: `evolvekit/app/tries.py`; in a code study each
+carries `diff_stat`, and `tries/{combination}` its `diff`), `download/{export}`
 (`download/report?view=1` opens the report in the browser; `download/study`
 is the study as a zip) and `next`; and each run's dashboard at
 `/studies/{name}/runs/{run}/dashboard/`. Managing studies: `DELETE
@@ -387,14 +494,18 @@ names:
 | `line`, `advice` | the verdict's one sentence, as the Study page shows it, and the sentence after it |
 | `measure` | `{"kpi", "label", "unit", "direction"}` of the measure that decided |
 | `held_back` | `{"cases", "runs_per_case"}` |
-| `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point; absent with `pending`, `stopped` and `skipped` |
+| `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point; absent with `pending`, `stopped` and `skipped`, and on a `keep` whose every run gave exactly today's result (its `line` begins "No difference in any run"; the page shows that line and no band) |
 | `levels` | with goals in order of importance: one entry per goal with the same keys, `deciding: true` on the one that decided |
 | `learned_from` | `{"cases", "pct"}`: the cases the search learned from, labelled as such |
 | `rule` | the fixed rule, in words |
 | `by_case` | one row per held-back case: `name`, `start`, `best`, `change_pct`, `outcome` (`better`, `worse`, `same`, `failed`) |
 | `changed` | the settings and data changes of the best combination: `name`, `label`, `from`, `to` |
+| `candidates` | only on a bake-off's run (`study bakeoff`): one entry per branch in the order given, `ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance` — each against the starting point by the same rule; `same: true` and no figures on a branch whose every run gave exactly today's result; `by_case`, the branch's held-back rows in the keys of `by_case` (none on a branch at the starting commit) |
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
+| `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
+| `how_it_ran` | only when the search stopped on time with fewer rounds than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …" — the Study page shows it under Details |
+| `spent` | only on a run with AI help: what its AI spent, from the run's `usage.jsonl`: `{"usd", "cap_usd", "line"}` with the line "AI: $0.87 of $1.00", or `{"requests", "line"}` ("AI: 14 requests") for a provider that counts requests; a fact, not a claim |
 
 The page is plain HTML, CSS and JavaScript with no build step, under
 `evolvekit/app/static/`: `app.html` (the shell), `css/tokens.css` (every

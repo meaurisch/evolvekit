@@ -37,6 +37,7 @@ __all__ = [
     "FORMAT",
     "Application",
     "CasesSpec",
+    "Code",
     "Column",
     "Defaults",
     "Export",
@@ -50,6 +51,7 @@ __all__ = [
     "TemplateParam",
     "TimeLimit",
     "load_harness",
+    "resolve_code_repo",
 ]
 
 FORMAT = 1
@@ -170,6 +172,72 @@ class Application:
             if groups < 1:
                 raise HarnessError(f"{path}.expect: needs a group for the version, e.g. 'solver (\\d+\\.\\d+)'")
         return Application(kind=kind, label=label, probe=probe, expect=expect, help=help_text)
+
+
+@dataclass(frozen=True)
+class Code:
+    """The source a code study may change (design §5.1).
+
+    `repo` is kept as written: relative to the harness folder, or absolute. Only
+    `harness check` (against the folder it checks) and the app's Set up (as a
+    proposal) resolve it, with `resolve_code_repo`; a study's pinned copy of the
+    harness never does -- the study records its own absolute `vary.code.repo`.
+    """
+
+    label: str
+    repo: str
+    """A folder inside a git repository, as written in harness.yaml."""
+    open: tuple[str, ...]
+    """What a study may change: globs relative to `repo`."""
+    build: str = ""
+    """Run in a candidate's tree before it is used; `{tree}` and `{python}` stand for
+    the tree's folder and the application's Python (a python harness) or evolvekit's."""
+    build_timeout_s: float = 600.0
+    app: str = ""
+    """A program harness: the program inside a candidate's tree, as `{tree}/...`."""
+
+    @staticmethod
+    def parse(raw: Any, kind: str) -> "Code":
+        path = "code"
+        data = _mapping(raw, path)
+        _known(data, {"label", "repo", "open", "build", "build_timeout_s", "app"}, path)
+        label = _text(_required(data, "label", path), f"{path}.label")
+        repo = _text(_required(data, "repo", path), f"{path}.repo")
+        files = data.get("open")
+        if files is not None and not isinstance(files, list):
+            raise HarnessError(f"{path}.open: expected a list of files or globs such as [solver.py], got {files!r}")
+        if not files:
+            raise HarnessError(f"{path}.open: name at least one file a study may change, such as [solver.py]")
+        open_ = []
+        for index, entry in enumerate(files):
+            glob = _text(entry, f"{path}.open[{index}]")
+            parts = glob.replace("\\", "/").split("/")
+            if glob.startswith(("/", "\\")) or ".." in parts or re.match(r"^[A-Za-z]:", glob):
+                raise HarnessError(f"{path}.open: {glob!r} must stay inside code.repo (a path relative to it)")
+            open_.append(glob)
+        build = _text(data.get("build"), f"{path}.build", empty=True)
+        timeout = _number(data.get("build_timeout_s", 600.0), f"{path}.build_timeout_s", positive=True)
+        app = _text(data.get("app"), f"{path}.app", empty=True)
+        if kind == "python":
+            if app:
+                raise HarnessError(f"{path}.app: a python harness runs the application's Python; its code reaches "
+                                   "it through code.build")
+            if not build:
+                raise HarnessError(f"{path}.build: a python harness needs a build that installs a tree into the "
+                                   "application's Python, such as '{python} -m pip install -q -e {tree}'")
+        else:
+            if not app:
+                raise HarnessError(f"{path}.app: a program harness names its program inside the tree, such as "
+                                   "'{tree}/solver.py'")
+            if "{tree}" not in app:
+                raise HarnessError(f"{path}.app: must contain {{tree}}, which stands for a candidate's tree, "
+                                   f"got {app!r}")
+        return Code(label=label, repo=repo, open=tuple(open_), build=build, build_timeout_s=timeout, app=app)
+
+
+def resolve_code_repo(folder: Path, code: Code) -> Path:
+    """`code.repo` against the harness folder it was written for (an absolute `repo` stays itself)."""
+    return (Path(folder) / code.repo).resolve()
 
 
 @dataclass(frozen=True)
@@ -596,6 +664,8 @@ class Harness:
     defaults: Defaults
     templates: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Study templates, by id (the file's stem): partial `study.yaml` documents."""
+    code: Code | None = None
+    """The source a code study may change (`code:`), or `None`."""
 
     @property
     def key(self) -> str:
@@ -711,7 +781,7 @@ def _load_harness(root: Path, *, check_templates: bool = True) -> Harness:
     _known(
         data,
         {"harness", "id", "version", "title", "summary", "application", "cases", "inputs", "time_limit",
-         "seeds", "settings", "tables", "levers", "kpis", "kpi_templates", "exports", "defaults"},
+         "seeds", "settings", "tables", "levers", "kpis", "kpi_templates", "exports", "defaults", "code"},
         "<root>",
     )
     if data.get("harness") != FORMAT:
@@ -724,13 +794,14 @@ def _load_harness(root: Path, *, check_templates: bool = True) -> Harness:
         raise HarnessError(f"version: three numbers such as 1.0.0, got {version!r}")
     tables = {name: Table.parse(name, spec) for name, spec in _mapping(data.get("tables"), "tables").items()}
     settings = {name: Setting.parse(name, spec) for name, spec in _mapping(data.get("settings"), "settings").items()}
+    application = Application.parse(_required(data, "application", "<root>"))
     harness = Harness(
         root=root.resolve(),
         id=harness_id,
         version=version,
         title=_text(_required(data, "title", "<root>"), "title"),
         summary=_text(data.get("summary", ""), "summary", empty=True),
-        application=Application.parse(_required(data, "application", "<root>")),
+        application=application,
         cases=CasesSpec.parse(_required(data, "cases", "<root>")),
         inputs={name: InputSpec.parse(name, spec) for name, spec in _mapping(data.get("inputs"), "inputs").items()},
         time_limit=TimeLimit.parse(data.get("time_limit") or {"accepts": False}),
@@ -746,6 +817,7 @@ def _load_harness(root: Path, *, check_templates: bool = True) -> Harness:
         exports={name: Export.parse(name, spec) for name, spec in _mapping(data.get("exports"), "exports").items()},
         defaults=Defaults.parse(data.get("defaults")),
         templates=_templates(root),
+        code=Code.parse(data["code"], application.kind) if data.get("code") is not None else None,
     )
     for name, kpi in harness.kpis.items():
         if kpi.guard is not None and kpi.guard["kpi"] not in harness.kpis:

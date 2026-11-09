@@ -199,3 +199,93 @@ Design §4.4 and §8 for project 2, in
 ### PR
 
 [meaurisch/evolvekit#73](https://github.com/meaurisch/evolvekit/pull/73) — `agent/2-skills` against `master`, stacked on #72, opened 2026-11-07. **PASS** (every task built and reviewed; gate 1864 passed, 4 skipped; gate script 6/6 and 2/2 on the shipped tree; persona A 8/10, B 8/10 at round 3, no blocker).
+
+## Project 3 — Code studies
+
+Branch `agent/3-code` from `agent/2-skills` (9caaa61). Plan:
+[2026-11-07-agent-3-code.md](../plans/2026-11-07-agent-3-code.md), expanded
+to step level on this branch (1800 lines, 13 tasks), then the builder
+check by a fresh reviewer; the choices are in the plan's "Decisions" (D1–D23
+by the planner, 24–40 by the controller). The build runs the bake-off
+milestone first (Tasks 1, 2, 3, 4, 6, 7, 8), then mutation (5, 9), then
+10–13.
+
+### Decisions
+
+The ones a reader should know (all in the plan with their reasons):
+
+- **Code alone in this project.** §5.2 lets a study vary code together with
+  settings, but nothing says how one candidate carries both; `study check`
+  refuses the mix with a sentence. A recorded deviation, for the owner.
+- **The bake-off's diff is the branch's own change** (`git diff
+  base...ref`, from the merge-base), not `base..ref`, so a branch cut from
+  an older base is not measured as reverting the base's newer commits. A
+  recorded deviation from §5.5's wording.
+- **A bake-off chooses, but never says "the best branch"**: the chosen
+  candidate (largest mean among those whose own verdict is `use`) carries
+  the top line, prefixed "Of N branches, `<ref>`: "; with none `use`, the
+  verdict keeps today's; the report says how many branches were compared.
+- **A bake-off branch that touches files outside `open` is refused**, with
+  how to include them.
+- **"One combination at a time" is a passing note** in `harness check`, not
+  a warning, so the check can still end at exit 0.
+- **The shared interpreter is put back** after any build into the
+  engineer's Python; the build cache is in memory only.
+- **`study pr` after `from: working`** branches from `HEAD` with the
+  candidate's diff applied; it does not refuse on a non-`use` verdict (the
+  verdict's line comes first and `--yes` is needed).
+- **An agent call's time is bounded by the study's time left**, and a Stop
+  ends a running call; the brief is a file named in a short prompt.
+- **Every agent call is billed**: its cap is the smaller of the budget left
+  and `act_max_usd` ($0.50); a call that reports no cost is charged its cap;
+  the token cap counts uncached input and output.
+- **Files the agent adds outside the open files are dropped** from the
+  change and named; an edit of any other tracked file still refuses it.
+- **The coding-agent operator runs with claude-cli only** for now. Copilot's
+  agent is not verified against a real Copilot CLI, so a code study on
+  copilot-cli gets the diff operator alone, and a config naming the agent
+  with it is refused. The agent's environment carries no git-host token.
+- **No candidate tree stays**: each goes when its evaluation ends, the
+  best's included (a recorded deviation from §5.3, which keeps the best's;
+  `study export --diff` and `study pr` rebuild it from the recorded diff).
+  The base snapshot is one ref per commit, `refs/evolvekit/base-<commit>`,
+  documented with how to delete it.
+- **A hand-written config must pin its base** (`base: working` is refused;
+  studies pin it for you).
+
+The final whole-branch review (most capable model): with fixes, 0 Critical,
+2 Important (the Copilot agent had no git denials and kept git-host tokens;
+the README's agent paragraph predated the billing fix), 7 minors. One fix
+wave took them all, plus two deferred minors; its re-review found nothing
+open.
+
+### Gate
+
+| Commit | Command | Result |
+|---|---|---|
+| b8aae3b | `python tasks.py check`, nothing else running | exit 0: **2069 passed, 4 skipped** in 19:43 |
+| dd58f55 | `python tasks.py check`, nothing else running (after the persona gate's fixes) | exit 0: **2159 passed, 4 skipped** in 21:41 |
+
+### Persona gate
+
+The engineer of design §8 asks a fresh, isolated coding agent, one sentence each, to improve the solver's code,
+to compare two prepared branches against `main`, and to open a PR if a verdict says to use a change. Materials
+rebuilt from nothing each round. Log: [2026-11-07-code-gate-log.md](2026-11-07-code-gate-log.md).
+
+| Round | Code | Score | Blocker | What it found |
+|---|---|---|---|---|
+| 1 | b8aae3b | 5/10 | yes | the bake-off ran a branch with its changed default overridden by the harness's flags and called it "not proven"; the plan ignored the AI's time; two "best so far" figures; stale Study page |
+| 2 | 808e305 | 7/10 | none | no warning before the run that two held-back cases rarely reach "use"; AI spend not shown; the no-difference hint blamed a fixed setting |
+| 3 | f6c8d5b | 7/10 | none | the recorded change was a whole-file line-ending rewrite (+151 -124 against the real +35 -8); the AI spend passed its cap ($1.03 of $1.00); a later run hid an earlier "use" |
+| 4 | 52d7649 | **8/10** | none | **pass**; "about 20 in 20" sounds certain; compile-only run folders; a stale redraw |
+
+The fixes, in short: in a code study only the settings the study fixes reach the program; a change that makes no
+difference in any run is said so, with no figures; the plan counts the AI's time and re-estimates live; a note
+before the run when the held-back cases are too few; the AI spend shown and kept within its cap; the recorded
+change follows the repository's line-ending rules, so the review surface is the commit; an earlier "use" stays
+visible; no "better" over unchecked figures anywhere. Each wave had its own review; all approved.
+
+### PR
+
+[meaurisch/evolvekit#74](https://github.com/meaurisch/evolvekit/pull/74), stacked on #73; opened 2026-11-08 from `agent/3-code` (dd58f55 plus the logs).
+

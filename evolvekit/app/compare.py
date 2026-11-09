@@ -38,8 +38,9 @@ def _side(home: Any, ref: str, document_of: jobs.DocumentOf) -> dict[str, Any]:
         raise AppError(f"the study {slug!r} has not been run yet: there is nothing to compare", 404)
     data = jobs.results(root, run, document_of)  # an unknown run is a 404 here
     goal, final, context = data["goal"], data["final"], data["context"]
+    what = jobs._kind_of(jobs.run_study_of(root, jobs._run_dir(root, run)))  # noqa: SLF001 - settings, data, both or code
     return {
-        "slug": slug, "name": data["study"], "run": run, "harness": data["harness"],
+        "slug": slug, "name": data["study"], "run": run, "harness": data["harness"], "what": what,
         "goal": {"says": goal["says"], "direction": goal["direction"]},
         "_goal_kpi": goal.get("kpi", ""),
         "headline": data["headline"],

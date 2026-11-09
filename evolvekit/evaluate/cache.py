@@ -124,11 +124,18 @@ class EvalCache:
         seed: int,
         private: bool,
         cwd: Path | None = None,
+        source_id: str | None = None,
     ) -> str:
-        try:
-            source = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
-        except OSError:
-            source = str(candidate_path)
+        """`source_id`, when given, stands for the candidate instead of its
+        file's content: a tree candidate is a folder, keyed by its commit, so
+        the same commit checked out in two folders is one entry."""
+        if source_id is not None:
+            source = f"source:{source_id}"
+        else:
+            try:
+                source = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+            except OSError:
+                source = str(candidate_path)
         described = json.dumps(
             [stage_id, command, list(reading), list(flags), source, list(inputs), instance, seed, private,
              _files_read(cwd, command, inputs, instance)],

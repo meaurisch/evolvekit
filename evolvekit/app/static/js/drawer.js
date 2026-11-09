@@ -92,6 +92,30 @@
     });
   };
 
+  /** "Compare branches" for a code study (the Study page once no run is live, and Set up before
+      its first run): branch names, one per line, each checked against the starting point with no
+      search, on the `held` held-back cases. */
+  EK.branchesDrawer = function (slug, held) {
+    var draft = "", said = "";
+    function body() {
+      return html`<p class="type-small ink-2">Each branch is run against the starting point on the ${EK.plural(held, "held-back case")}, with no search. Only the open files may differ.</p>
+        <form class="sub-section" data-submit="go">
+          ${EK.textInput({ id: "bake-refs", label: "Branches, one per line", mono: true, multiline: true, rows: 4, value: draft, invalid: said || null,
+            hint: "Names of branches, tags or commits of the source." })}
+          <div class="actions">${EK.button("Compare them", { type: "submit" })}</div></form>`;
+    }
+    EK.openDrawer({ kind: "branches", title: "Compare branches", sub: "Your own branches against the starting point", body: body(),
+      acts: { go: function () {
+        draft = document.getElementById("bake-refs").value;
+        var refs = draft.split(/\r?\n/).map(function (r) { return r.trim(); }).filter(Boolean);
+        EK.post(EK.studyPath(slug, "/bakeoff"), { refs: refs }).then(function (res) {
+          EK.closeDrawer();
+          EK.toast("done", res.queued ? "Queued: it starts when the running study finishes" : "Comparing " + EK.plural(refs.length, "branch", "branches"));
+          EK.go(EK.studyHref(slug, res.run));
+        }).catch(function (err) { said = err.message; EK.refreshDrawer({ body: body() }); });
+      } } });
+  };
+
   // ------------------------------------------------------------------ Ask Pepper
   var KIND_WORD = { setting: "What to tune", data_change: "Data change", constraint: "Rule", kpi: "Measure", weighted: "Measure",
     goal: "Goal", guardrail: "Rule", unknown: "Note" };

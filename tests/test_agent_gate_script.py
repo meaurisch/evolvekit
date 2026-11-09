@@ -52,9 +52,28 @@ def test_build_fixture_layout(tmp_path):
     assert len((repo / "README.md").read_text(encoding="utf-8").splitlines()) == 2
     assert home.is_dir() and list(home.iterdir()) == []
     assert not (repo / ".claude" / "settings.json").exists(), "an untrusted workspace ignores it: the flags carry the run"
+    assert load_harness(repo / "harness").code.repo == "..", "the harness's source is the fixture's own solver.py"
+    log = subprocess.run(["git", "log", "--format=%s", "--name-only"], cwd=repo, capture_output=True, text=True,
+                         check=True).stdout.splitlines()
+    assert log[0] == "fixture" and "solver.py" in log and "harness/harness.yaml" in log, "one commit, of everything"
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True)
+    assert status.stdout == "", "nothing left uncommitted"
     bare = tmp_path / "bare"
     build_fixture(bare, home=tmp_path / "home2", harness=False)
     assert not (bare / "harness").exists() and (bare / "solver.py").is_file()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_fixture_harness_checks_its_code(tmp_path):
+    repo = tmp_path / "a repo"
+    build_fixture(repo, home=tmp_path / "home")
+    check = subprocess.run([sys.executable, "-m", "evolvekit", "harness", "check", "harness", "--app", "solver.py",
+                            "--samples", "1", "--json"], capture_output=True, text=True, cwd=repo)
+    found = {c["id"]: c for c in json.loads(check.stdout)["checks"]}
+    assert found["code.repo"]["ok"] and found["code.open"]["message"] == "code.open matches 1 file(s): solver.py"
+    assert found["code.samples"]["ok"], found["code.samples"]
+    assert check.returncode == 0, [c for c in found.values() if not c["ok"]]
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
@@ -207,8 +226,8 @@ def test_fixture_prints_bash_lines(tmp_path, capsys):
 DROPPED = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_PID", "CLAUDE_EFFORT",
            "CLAUDE_PREVIEW_PORT"]
 KEPT = ["CLAUDE_CODE_GIT_BASH_PATH", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
-        "ANTHROPIC_API_KEY", "CLAUDE_CLI_PATH"]
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY", "CLAUDE_CLI_PATH"]
 
 
 def _session_env(monkeypatch):
@@ -225,7 +244,7 @@ def test_gate_env_drops_the_launching_sessions_identity_and_keeps_the_sign_in(tm
     upper = {k.upper() for k in env}
     assert not set(DROPPED) & upper
     assert set(KEPT) <= upper
-    assert set(agent_gate.KEEP) == set(KEPT[:6])
+    assert set(agent_gate.KEEP) == set(KEPT[:8])
     assert env["EVOLVEKIT_HOME"] == str(tmp_path / "home")
 
 

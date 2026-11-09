@@ -235,7 +235,8 @@
         ${c.menu ? html`<div class="menu-wrap">${EK.iconButton("more", "More for " + c.name, { act: "menu", arg: menuId, haspopup: "menu", expanded: "false", cls: "card-more" })}
           ${EK.menu("Study", c.menu, menuId)}</div>` : ""}</div>
       <div class="card-mid"><div class="card-words"><p class="type-body card-head">${EK.figures(c.head || "")}</p>
-        ${c.sub ? html`<p class="type-small ink-2">${c.sub}</p>` : ""}</div>
+        ${c.sub ? html`<p class="type-small ink-2">${c.sub}</p>` : ""}
+        ${c.note ? html`<p class="type-small card-note">${EK.figures(c.note)}</p>` : ""}</div>
         ${c.pepper ? html`<div class="card-pepper">${EK.pepper(c.pepper, 48)}</div>` : ""}</div>${vis}${actions}</article>`;
   };
 
@@ -380,10 +381,10 @@
   };
 
   // ------------------------------------------------------------------ Study
-  /** ViewTabs: Tries · Cases · Settings. */
-  EK.viewTabs = function (current, counts) {
-    var out = ["tries", "cases", "settings"].map(function (k) {
-      var on = k === current, word = { tries: "Tries", cases: "Cases", settings: "Settings" }[k];
+  /** ViewTabs: Tries · Cases · Settings, or Tries · Cases · Code for a code study (`keys`). */
+  EK.viewTabs = function (current, counts, keys) {
+    var out = (keys || ["tries", "cases", "settings"]).map(function (k) {
+      var on = k === current, word = { tries: "Tries", cases: "Cases", settings: "Settings", code: "Code" }[k];
       return html`<button type="button" role="tab" class="tab${on ? " is-on" : ""}" id="tab-${k}" aria-selected="${on ? "true" : "false"}" aria-controls="view-panel"
         tabindex="${on ? "0" : "-1"}" data-act="view" data-arg="${k}" data-key="tabkey">${word}${counts && counts[k] != null ? html`<span class="tab-count">${counts[k]}</span>` : ""}</button>`;
     });
@@ -398,8 +399,11 @@
     o = o || {};
     var pct = o.pct != null ? o.pct : c.pct;
     var said = c.failed || pct == null ? "did not finish" : EK.change(pct, o.direction);
+    // After the final check's decision (o.after): its word on the checked one, no figure on any.
+    var text = o.after != null ? html`${o.after ? " · " + o.after : ""}`
+      : html` · ${said}<span class="wide-only"> on the cases it learned from, not checked</span>`;
     return html`<div class="chip"><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.5"/></svg>
-      <span class="chip-text"><span class="wide-only">Combination </span><span class="phone-only">No. </span>${c.n} · ${said}<span class="wide-only"> on the cases it learned from, not checked</span></span>
+      <span class="chip-text"><span class="wide-only">Combination </span><span class="phone-only">No. </span>${c.n}${text}</span>
       <button type="button" class="chip-close" aria-label="Stop following combination ${c.n}" data-act="unchoose">${EK.gl("close", 14)}</button></div>`;
   };
 

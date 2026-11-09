@@ -6,25 +6,38 @@ the loop does not need (streaming, tools, session ids) stops here.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
     "Message",
     "Completion",
+    "AgentError",
+    "AgentResult",
+    "CallCapped",
     "Provider",
     "EmbeddingProvider",
     "ProviderError",
     "split_system",
     "estimate_tokens",
     "embedding_tokens",
+    "supports_act",
+    "supports_call_cap",
 ]
 
 Message = dict[str, str]
 
 
 class ProviderError(RuntimeError):
-    """A backend failed to produce a usable completion."""
+    """A backend failed to produce a usable completion. `completion`, when the
+    call ran and said what it cost (a reply stopped at its spending cap): what
+    the failed call is billed."""
+
+    def __init__(self, *args: Any, completion: Completion | None = None) -> None:
+        super().__init__(*args)
+        self.completion = completion
 
 
 @dataclass(frozen=True)
@@ -49,6 +62,53 @@ class Completion:
         return self.input_tokens + self.output_tokens
 
 
+@dataclass(frozen=True)
+class AgentResult:
+    """What one `act` call did: the agent's last words and what it cost.
+
+    `ok` is false when the agent stopped at a limit (turns, money) before it
+    said it was done; its edits are still in the folder and are used as they
+    are (decision D14). A call that could not run, or failed outright, raises
+    `ProviderError` instead (`AgentError` when it ran, with what it cost).
+
+    `input_tokens` is the uncached prompt only: an agent session re-reads its
+    whole context every turn, and counting cache reads would spend
+    `budget.max_tokens` in a few calls. The cached tokens are kept apart, for
+    the record; `usd` bounds the money."""
+
+    ok: bool
+    text: str
+    usd: float | None = None
+    requests: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+
+
+class AgentError(ProviderError):
+    """An `act` call that ran and then failed: a timeout, a Stop request, a
+    crash, an error the agent reported. What it cost, when the tool said so
+    (`usd`, `requests`, the tokens); `unreported` when nothing came back, so
+    the operator charges the call's cap rather than nothing."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        usd: float | None = None,
+        requests: float | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        unreported: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.usd = usd
+        self.requests = requests
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.unreported = unreported
+
+
 @runtime_checkable
 class Provider(Protocol):
     """Structural type for all backends."""
@@ -68,6 +128,42 @@ class Provider(Protocol):
         assistant, `{"type": "json_object"}`): passed through by the backends
         whose API has it, accepted and ignored by the others."""
         ...
+
+
+def supports_act(provider: object) -> bool:
+    """The optional agent capability (design §5.4), asked for like `embed`:
+
+        act(brief: str, *, cwd: Path, model: str, timeout_s: float,
+            read_dirs: Sequence[Path] = (), max_usd: float | None = None,
+            cancel: threading.Event | None = None) -> AgentResult
+
+    A coding agent edits the files under `cwd` as `brief` asks, may read the
+    folders `read_dirs` names, spends at most `max_usd` when the tool can be
+    told so, and is ended (its whole process tree) when `cancel` is set."""
+    return callable(getattr(provider, "act", None))
+
+
+def supports_call_cap(provider: object) -> bool:
+    """Whether the provider's `complete` takes `max_usd`, the most one call may
+    spend (claude-cli, which passes it on when the installed CLI can take it)."""
+    try:
+        return "max_usd" in inspect.signature(provider.complete).parameters  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+class CallCapped:
+    """`provider` with every completion told the most it may spend, `left()` --
+    what is left of `budget.max_usd`. Everything else is the provider's own."""
+
+    def __init__(self, provider: Any, left: Callable[[], float]) -> None:
+        self._provider, self._left = provider, left
+
+    def complete(self, messages: list[Message], **kwargs: Any) -> Completion:
+        return self._provider.complete(messages, max_usd=max(0.0, float(self._left())), **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
 
 
 @runtime_checkable

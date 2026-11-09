@@ -1,5 +1,5 @@
 /* evolvekit app: the Study page's three views, drawn from GET …/tries.
-   triesPlot   every try by when it finished and how much better than today;
+   triesPlot   every try by when it finished and its % change vs today (not checked);
                the best-so-far line (full looks only); rings for tries
                running now; the chosen combination and its family.
    casesView   a row per study case, a dot per try, the tally of wins.
@@ -90,7 +90,9 @@
       '<text x="' + (l - 8) + '" y="' + f(Y(0) + 4) + '" text-anchor="end" style="fill:var(--ink-2);font:500 11px var(--mono)">0</text>' +
       '<text x="' + (l + 6) + '" y="' + f(Y(0) + 15) + '" style="fill:var(--ink-1);font:700 10px var(--sans);letter-spacing:.12em">' + esc((o.keepWord || "TODAY’S SETTINGS").toUpperCase()) + "</text>");
     out.push(axisHours(end, W, X, H, phone));
-    out.push('<text x="' + l + '" y="12" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">% BETTER THAN TODAY</text>');
+    // Every point here is unchecked, and the axis says so: no claim before the verdict (persona round 3, E5).
+    out.push('<text x="' + (phone ? 2 : l) + '" y="12" style="fill:var(--ink-2);font:600 ' + (phone ? 9 : 10) + 'px var(--sans)">' +
+      "% change vs today, on the cases it learned from (not checked)</text>");
     (d.restarts || []).forEach(function (h) {
       out.push('<line x1="' + f(X(h)) + '" y1="' + (base - 16) + '" x2="' + f(X(h)) + '" y2="' + base + '" style="stroke:var(--ink-2)" stroke-width="1.2"/>' +
         (phone ? "" : '<text x="' + f(X(h) + 4) + '" y="' + (base - 6) + '" style="fill:var(--ink-2);font:600 10px var(--sans)">restarted</text>'));
@@ -156,14 +158,15 @@
       });
     }
     var n = d.cases.length;
-    var aria = "Every try so far, by time and by how much better than today; the orange line is the best so far on all " + n + " study cases" +
+    var aria = "Every try so far, by time and by its % change vs today on the cases it learned from (not checked); the orange line is the best so far on all " + n + " study cases" +
       (done ? "" : "; rings at now are tries still running") + ". Use the arrow keys to go from try to try, Enter to follow one.";
     return { svg: '<svg class="plot" viewBox="0 0 ' + W + " " + H + '" width="100%" role="img" tabindex="0" aria-label="' + esc(aria) + '" data-plot="tries">' + out.join("") + "</svg>", points: points };
   };
 
   EK.triesLegend = function (d, o) {
     var quick = d.quick_cases && d.quick_cases < d.cases.length && d.combinations.some(function (c) { return !c.full && !c.base; });
-    var it = [["line", "best so far"], ["full", "full look, " + d.cases.length + " cases"]];
+    // The line is each case's change averaged: not the strip's best so far (the plain averages), so said.
+    var it = [["line", "best so far, each case’s change averaged"], ["full", "full look, " + d.cases.length + " cases"]];
     if (quick) it.push(["quick", "quick look, " + d.quick_cases + " cases"]);
     it.push(["x", "did not finish"]);
     if (!d.done) it.push(["ring", "running"]);
@@ -202,16 +205,16 @@
     var W = o.W, phone = !!o.phone, rowH = phone ? 30 : 34, l = phone ? 64 : 200, r = phone ? 54 : 120, top = 34;
     var cases = d.cases, n = cases.length, H = top + n * rowH + 26;
     var res = EK.caseResults(d), A = -6, B = 6;
-    // As drawn: worse than -6 % is pinned to the left edge; the better side grows with the best result, up to +20 %.
+    // As drawn: worse than -6 % is pinned to the left edge; the ahead side grows with the best result, up to +20 %.
     Object.keys(res).forEach(function (k) { if (res[k].full) B = Math.max(B, Math.min(20, Math.ceil(res[k].pct))); });
     function X(v) { return l + (Math.max(A, Math.min(B, v)) - A) / (B - A) * (W - l - r); }
     function Y(i) { return top + i * rowH + rowH / 2; }
     var out = [], points = [];
     out.push('<line x1="' + f(X(0)) + '" y1="' + (top - 6) + '" x2="' + f(X(0)) + '" y2="' + (top + n * rowH) + '" style="stroke:var(--ink-1)" stroke-width="1.5"/>' +
       '<text x="' + f(X(0)) + '" y="' + (top - 12) + '" text-anchor="middle" style="fill:var(--ink-1);font:700 10px var(--sans);letter-spacing:.12em">TODAY</text>' +
-      '<text x="' + l + '" y="' + (top - 12) + '" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">← WORSE</text>' +
-      '<text x="' + (W - r) + '" y="' + (top - 12) + '" text-anchor="end" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">BETTER →</text>' +
-      (phone ? "" : '<text x="' + (W - r + 16) + '" y="' + (top - 12) + '" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">BETTER IN</text>'));
+      '<text x="' + l + '" y="' + (top - 12) + '" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">← BEHIND</text>' +
+      '<text x="' + (W - r) + '" y="' + (top - 12) + '" text-anchor="end" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">AHEAD →</text>' +
+      (phone ? "" : '<text x="' + (W - r + 16) + '" y="' + (top - 12) + '" style="fill:var(--ink-2);font:700 10px var(--sans);letter-spacing:.12em">AHEAD IN</text>'));
     var step = B - A > 24 ? 5 : 2;
     for (var v = Math.ceil(A / step) * step; v <= B; v += step) {
       if (v === 0) continue;
@@ -243,7 +246,7 @@
         pts.forEach(function (q) { out.push('<circle cx="' + f(q[0]) + '" cy="' + f(q[1]) + '" r="5" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.5"/>'); });
       }
     }
-    var aria = "One row per study case; each dot is one try on that case, left worse, right better than today. Use the arrow keys to go from try to try.";
+    var aria = "One row per study case; each dot is one try on that case, left behind today, right ahead of it (not checked). Use the arrow keys to go from try to try.";
     return { svg: '<svg class="plot" viewBox="0 0 ' + W + " " + H + '" width="100%" role="img" tabindex="0" aria-label="' + esc(aria) + '" data-plot="cases">' + out.join("") + "</svg>", points: points, tallies: tallies };
   };
 

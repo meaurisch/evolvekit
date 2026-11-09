@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 from statistics import fmean, quantiles
-from typing import Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
@@ -31,11 +31,17 @@ from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
     STDERR_LIMIT,
     Configuration,
+    on_tree,
+    run_build_stage,
     run_command_stage,
     run_static_stage,
+    run_tree_static_stage,
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
 from evolvekit.ledger import _atomic_write
+
+if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
+    from evolvekit.tree import Repo, Tree
 
 __all__ = [
     "Cascade",
@@ -158,12 +164,16 @@ class Cascade:
         signatures: BehaviourIndex | None = None,
         on_event: Callable[..., Any] | None = None,
         stop: threading.Event | None = None,
+        time_left: Callable[[], float | None] | None = None,
     ) -> None:
         self.config = config
         self.stop = stop
         """The run's own stop (`evolvekit/stopping.py`): once set, evaluations
         in flight are stopped, none is started, and what did not finish is
         abandoned rather than failed."""
+        self.time_left = time_left
+        """The run's time left in seconds (`None`: no time budget): what a
+        build may take at most, beside `problem.tree.build_timeout_s`."""
         self.on_event = on_event
         """`on_event(type, **fields)`, called for every evaluator run as it starts
         and ends. The driver points it at the run's event log."""
@@ -195,6 +205,16 @@ class Cascade:
         }
         """Per stage, what `evaluate.score.levels` are measured from: the
         seed's values (`evaluate/levels.py`). On disk for the same reason."""
+        self._trees: dict[str, Tree] = {}
+        """Per candidate, its worktree (`problem.tree`): made by `_materialise`."""
+        self._tree_errors: dict[str, str] = {}
+        """Per candidate whose tree could not be made, why: the static stage
+        refuses it with that sentence."""
+        self.repo: Repo | None = None
+        if config.problem.tree is not None:
+            from evolvekit import tree
+
+            self.repo = tree.Repo(config.problem.tree.repo)
 
     # -- public ----------------------------------------------------------
 
@@ -209,6 +229,10 @@ class Cascade:
             c.id: EvalResult(score=self.config.evaluate.failure_score) for c in candidates
         }
         paths = {c.id: self._materialise(c) for c in candidates}
+        for cid in paths:
+            made = self._trees.get(cid)
+            if made is not None:
+                results[cid].commit = made.commit
 
         stages = self.config.evaluate.stages
         alive = [c.id for c in candidates]
@@ -341,13 +365,55 @@ class Cascade:
         )
 
     def _materialise(self, candidate: Candidate) -> Path:
+        if self.repo is not None:
+            return self._materialise_tree(candidate)
         path = self.candidates_dir / f"{candidate.id}.py"
         path.write_text(candidate.source, encoding="utf-8", newline="\n")
         return path
 
+    def _materialise_tree(self, candidate: Candidate) -> Path:
+        """The candidate's diff as a worktree with a commit; its folder is `{tree}`.
+
+        A diff that does not apply makes no tree: the static stage refuses the
+        candidate with the reason, and the path returned does not exist."""
+        from evolvekit import tree
+
+        assert self.repo is not None and self.config.problem.tree is not None
+        cid = candidate.id
+        self._trees.pop(cid, None)
+        self._tree_errors.pop(cid, None)
+        try:
+            made = tree.materialise(
+                self.work_dir.parent, repo=self.repo, base=self.config.problem.tree.base,
+                diff=candidate.block, candidate_id=cid,
+            )
+        except tree.TreeError as exc:
+            self._tree_errors[cid] = str(exc)
+            folder = tree.tree_dir(self.work_dir.parent, cid)
+            return folder / self.repo.prefix if self.repo.prefix else folder
+        self._trees[cid] = made
+        return made.path
+
+    def _on_tree(self, candidate_id: str) -> dict[str, str | None]:
+        """`app` and `source_id` for a command stage on the candidate's tree
+        (`on_tree`); nothing for a skeleton or parameters problem."""
+        return on_tree(self.config.problem, self._trees.get(candidate_id))
+
     def _run_stage(
         self, stage: StageConfig, candidate: Candidate, path: Path
     ) -> StageOutcome:
+        if stage.kind == "builtin-build":
+            # Only a candidate whose tree was made gets here: the static stage
+            # refused the others.
+            return run_build_stage(
+                self._trees[candidate.id], stage, self.config.problem, cancel=self.stop,
+                time_left_s=self.time_left() if self.time_left is not None else None,
+            )
+        if stage.kind == "builtin-static" and self.repo is not None:
+            return run_tree_static_stage(
+                path, candidate.block, self._tree_errors.get(candidate.id), stage, self.config.problem,
+                prefix=self.repo.prefix,
+            )
         if stage.kind == "builtin-static":
             return run_static_stage(path, candidate.source, stage, self.config.problem)
         if self._final_stage_blocked(stage):
@@ -368,6 +434,7 @@ class Cascade:
             configuration=self._configurations.get(candidate.id),
             cache=self.cache,
             cancel=self.stop,
+            **self._on_tree(candidate.id),
         )
         if self._is_final(stage) and self.budget is not None and not outcome.abandoned:
             self.budget.record_full_eval()
@@ -436,6 +503,7 @@ class Cascade:
                         candidate_path=paths[c.id],
                         configuration=self._configurations.get(c.id),
                         observer=self._observer(c.id, stage, private=private),
+                        **self._on_tree(c.id),
                     )
                     for c in admitted
                 ],
@@ -661,9 +729,14 @@ class Cascade:
             return
         if not outcome.ok:
             result.last_failure = _artefact(outcome)
-            if stage.kind == "builtin-static":
+            if stage.kind in ("builtin-static", "builtin-build"):
                 result.rejected = True
                 result.reject_reason = outcome.failure
+            said = outcome.stderr if outcome.stderr.strip() else outcome.stdout
+            if stage.kind == "builtin-build" and said.strip():
+                # What the next prompt shows: the build's own last words
+                # (a build tool that reports on stdout, when stderr is empty).
+                result.feedback[stage.id] = said[-FEEDBACK_LIMIT:]
             result.score = self.config.evaluate.failure_score
             result.ranking_score = result.score
             return
@@ -675,8 +748,8 @@ class Cascade:
         result.kpi_cv.update(outcome.kpi_cv)
         if outcome.text_feedback:
             result.feedback[stage.id] = outcome.text_feedback
-        if stage.kind == "builtin-static":
-            # No objective KPI here; a static pass carries no score of its own.
+        if stage.kind in ("builtin-static", "builtin-build"):
+            # No objective KPI here; a static pass or a build carries no score of its own.
             return
         if self.config.evaluate.score.levels:
             score, penalty_total, terms = self._level_score(stage.id, result.kpis), 0.0, {}
@@ -732,6 +805,7 @@ class Cascade:
                     configuration=self._configurations.get(cid),
                     cache=self.cache,
                     cancel=self.stop,
+                    **self._on_tree(cid),
                 )
             )
             result = results[cid]

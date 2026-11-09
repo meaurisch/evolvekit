@@ -32,9 +32,9 @@
     return "caterpillar"; // stopped or failed in the search
   };
 
-  /** "Keep today's settings" or "Keep today's data", by what the study changes. */
+  /** "Keep today's settings", "Keep today's data" or "Keep today's code", by what the study changes. */
   EK.keepWords = function (s) {
-    return s && s.what === "data" ? "Keep today’s data" : "Keep today’s settings";
+    return s && s.what === "data" ? "Keep today’s data" : s && s.what === "code" ? "Keep today’s code" : "Keep today’s settings";
   };
 
   /** "on cost as PyVRP counts it (lower)": the goal's measure and which way is better. */
@@ -94,8 +94,9 @@
         c.sub = "Nothing lost" + (s.finish_at ? " · done around " + s.finish_at : "");
       } else {
         c.kicker = s.phase === "starting" ? "Starting" : "Running" + (round ? " · " + round : "");
-        c.head = s.best_pct != null && s.best_pct > 0 ? "Best so far: " + EK.better(s.best_pct) : "Nothing better yet";
-        c.sub = "Not checked yet" + (s.finish_at ? " · done around " + s.finish_at : "");
+        // The best so far in `study status`'s words (the server's `best_says`), on the cases it learned from.
+        c.head = s.best_says ? "Best so far: " + s.best_says : "Nothing better yet";
+        c.sub = (s.best_says ? "On the cases it learned from, not checked yet" : "Not checked yet") + (s.finish_at ? " · done around " + s.finish_at : "");
       }
       c.timeline = { rounds: r.planned || Math.max(1, (r.done || 0) + 1), done: r.done || 0, running: s.phase === "check" ? null : (r.done || 0) + 1,
         check: s.phase === "check" && s.check ? [s.check.done, s.check.planned] : null };
@@ -108,8 +109,8 @@
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
     } else if (s.kind === "stopped") {
       c.kicker = s.check_stopped ? "Final check stopped" : "Stopped" + (r.done ? " · round " + (r.done + 1) : "");
-      c.head = s.check_stopped ? "No answer yet" : s.best_pct != null && s.best_pct > 0 ? "Best so far: " + EK.better(s.best_pct) : "Stopped by you";
-      c.sub = s.check_stopped ? "The runs so far are kept." : "Not checked yet";
+      c.head = s.check_stopped ? "No answer yet" : s.best_says ? "Best so far: " + s.best_says : "Stopped by you";
+      c.sub = s.check_stopped ? "The runs so far are kept." : s.best_says ? "On the cases it learned from, not checked yet" : "Not checked yet";
       c.timeline = { rounds: r.planned || Math.max(1, r.done || 1), done: r.done || 0, stoppedAt: (r.done || 0) + 1 };
     } else if (s.kind === "failed") {
       c.kicker = "Stopped by an error";
@@ -124,6 +125,8 @@
       c.sub = s.line || "";
       c.pepper = null;
     }
+    // A later run must not hide an earlier use: "An earlier run (<id>) says use: <its verdict line>".
+    if (s.earlier && s.earlier.says) c.note = s.earlier.says;
     if (s.archived) c.kicker = "Archived · " + c.kicker.charAt(0).toLowerCase() + c.kicker.slice(1);
     if (!c.href) c.href = s.kind === "broken" ? "#/" : EK.studyHref(s.slug, null);
     return c;

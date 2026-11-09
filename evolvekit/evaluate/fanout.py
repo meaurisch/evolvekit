@@ -62,6 +62,10 @@ class Job:
     candidate_path: Path
     configuration: Configuration | None = None
     observer: Observer | None = None
+    app: str | None = None
+    """For a tree problem: what `{app}` is, the program inside this tree."""
+    source_id: str | None = None
+    """For a tree problem: the tree's commit, which keys the cache."""
 
 
 @dataclass(frozen=True)
@@ -164,6 +168,8 @@ def run_instance_stage(
                         cancel=halt,
                     ),
                     cache=cache,
+                    app=job.app,
+                    source_id=job.source_id,
                 )
                 board.ran(job.candidate_id, outcome)
                 if outcome.ok or halt.is_set() or (board.failed(job.candidate_id) and not keep_going):

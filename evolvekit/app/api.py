@@ -19,6 +19,7 @@ from evolvekit.app.server import FileResponse, Request, route
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import plan_for, read_preview
 from evolvekit.harness.manifest import Harness
+from evolvekit.harness.plan import plan_notes
 from evolvekit.harness.study import SettingChoice, save_study
 
 __all__ = ["ROUTES", "describe_harness"]
@@ -87,6 +88,10 @@ def describe_harness(harness: Harness) -> dict[str, Any]:
         "templates": {tid: {"title": str(t.get("title") or tid), "summary": str(t.get("summary") or "").strip()}
                       for tid, t in harness.templates.items()},
         "exports": {name: {"label": e.label, "for": e.applies_to} for name, e in harness.exports.items()},
+        # What a code study may change; `repo` as written (Set up proposes it resolved: `code_proposal`).
+        "code": None if harness.code is None else {
+            "label": harness.code.label, "repo": harness.code.repo, "open": list(harness.code.open),
+            "build": harness.code.build, "app": harness.code.app},
         "defaults": {"time_per_case_s": harness.defaults.time_per_case_s, "retries": harness.defaults.retries,
                      "budget_hours": harness.defaults.budget_hours, "test_share": harness.defaults.test_share,
                      "runs_per_case": harness.defaults.runs_per_case},
@@ -132,7 +137,7 @@ def _templates(harness: Harness) -> list[dict[str, Any]]:
     listed = []
     for tid, template in harness.templates.items():
         vary = template.get("vary") or {}
-        kind = "data" if vary.get("data") else "settings"
+        kind = "code" if vary.get("code") else "data" if vary.get("data") else "settings"
         listed.append({"id": tid, "title": str(template.get("title") or tid),
                        "summary": " ".join(str(template.get("summary") or "").split()), "kind": kind})
     return sorted(listed, key=lambda t: (t["kind"] != "settings", t["title"]))
@@ -188,6 +193,7 @@ def _document(req: Request, slug: str) -> dict[str, Any]:
     document["test_run"] = work.test_run_state(root, req.server)
     document["runs"] = jobs.runs(root)
     document["state"] = jobs.state_line(root, study, req.server.status_document)
+    document["notes"] = plan_notes(len(study.test))  # too few held-back cases for a firm answer, before any run
     return document
 
 
@@ -264,6 +270,20 @@ def application(req: Request) -> dict[str, Any]:
     slug = req.params["slug"]
     answer = req.home.set_application(slug, str(req.json().get("path") or ""))
     return {"probe": answer, "study": _document(req, slug)}
+
+
+def code(req: Request) -> dict[str, Any]:
+    """Where a code study's source is: JSON `{repo, from, brief}`, each optional
+    (`repo` empty: the harness's own). The answer is `Home.set_code`'s, with the study."""
+    slug = req.params["slug"]
+    if jobs.running(req.home.study_root(slug)):
+        raise AppError("the study is running; stop it before changing it", 409)
+    body = req.json()
+    brief = body.get("brief")
+    if brief is not None and not isinstance(brief, str):
+        raise AppError("brief: a sentence")
+    answer = req.home.set_code(slug, str(body.get("repo") or ""), str(body.get("from") or "") or None, brief)
+    return {"code": answer, "study": _document(req, slug)}
 
 
 def pick_file(req: Request) -> dict[str, Any]:
@@ -354,8 +374,9 @@ def plan(req: Request) -> dict[str, Any]:
     measured = read_preview(root)
     estimated = not (measured and measured.get("ok"))
     timing = measured if not estimated else {"overhead_s": 0.0, "wall_s": study.limits.time_per_case_s}
+    models = jobs.ai_models(req.home) if study.budget.ai_enabled else None  # what `study start` compiles with
     try:
-        chosen = plan_for(study, pinned, timing)  # type: ignore[arg-type]
+        chosen = plan_for(study, pinned, timing, models=models)  # type: ignore[arg-type]
     except (HarnessError, ValueError, ZeroDivisionError) as exc:
         raise AppError(f"no plan yet: {exc}") from None
     tunables = len(study.tunables())
@@ -372,7 +393,7 @@ def plan(req: Request) -> dict[str, Any]:
                 "detail": (", ".join(pinned.settings[n].label for n in ranked[:keep] if n in pinned.settings)
                            + f": about {chosen.combinations // keep} tries each. The others keep their starting values."),
             })
-        hours = _hours_for(study, pinned, timing, GOOD * tunables)
+        hours = _hours_for(study, pinned, timing, GOOD * tunables, models)
         if hours is not None and hours > study.budget.hours:
             fixes.append({"kind": "time", "hours": hours, "label": f"Allow {_hours_words(hours)} in total",
                           "detail": f"About {GOOD * tunables} combinations for all {tunables}."})
@@ -384,7 +405,8 @@ THIN, GOOD = 6, 10
 """Combinations per thing tuned: below THIN the plan is thin; GOOD is what a fix aims for."""
 
 
-def _hours_for(study: Any, harness: Any, timing: dict[str, Any], combinations: int) -> float | None:
+def _hours_for(study: Any, harness: Any, timing: dict[str, Any], combinations: int,
+               models: dict[str, Any] | None = None) -> float | None:
     """The least total time, in quarter hours up to two days, whose plan tries `combinations`."""
     import dataclasses
 
@@ -392,7 +414,7 @@ def _hours_for(study: Any, harness: Any, timing: dict[str, Any], combinations: i
         hours = quarters / 4
         trial = dataclasses.replace(study, budget=dataclasses.replace(study.budget, hours=hours))
         try:
-            if plan_for(trial, harness, timing).combinations >= combinations:
+            if plan_for(trial, harness, timing, models=models).combinations >= combinations:
                 return hours
         except (HarnessError, ValueError, ZeroDivisionError):
             return None
@@ -548,6 +570,24 @@ def start(req: Request) -> dict[str, Any]:
     return jobs.start(req.home, root, resume=resume)
 
 
+def bakeoff(req: Request) -> dict[str, Any]:
+    """`{"refs": ["branch", ...]}`: a run with no search that checks each branch
+    against the starting point on the held-back cases (`jobs.start(bakeoff=)`)."""
+    root, _, _ = req.home.load(req.params["slug"])
+    refs = req.json().get("refs")
+    if not isinstance(refs, list) or not refs or not all(isinstance(r, str) and r.strip() for r in refs):
+        raise AppError("refs: name at least one branch")
+    return jobs.start(req.home, root, bakeoff=[r.strip() for r in refs])
+
+
+def verdict(req: Request) -> dict[str, Any]:
+    """The verdict document of a run (`?run=`, else the latest): design 3.4."""
+    from evolvekit.app.verdict import build_verdict
+
+    root, _, _ = req.home.load(req.params["slug"])
+    return build_verdict(root, _run(req, root))
+
+
 def stop(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
     return jobs.stop(root, _run(req, root))
@@ -575,6 +615,23 @@ def status(req: Request) -> dict[str, Any]:
     return jobs.status(root, _run(req, root), req.server.status_document)
 
 
+RUNS_POLL_LIVE_S, RUNS_POLL_IDLE_S = 5, 10
+"""How often the open Study page asks for the runs: while a run is live, and while none is."""
+
+
+def runs_of(req: Request) -> dict[str, Any]:
+    """Every run of the study as it is now (`jobs.runs`, no status document read) and the newest:
+    what the open Study page asks every few seconds, so it notices a run that started or ended.
+    `poll_s` is when to ask again: RUNS_POLL_LIVE_S while a run is queued or live, else RUNS_POLL_IDLE_S.
+    A finished run's line is kept between calls (`jobs.run_line`), so asking costs little."""
+    root, _, _ = req.home.load(req.params["slug"])
+    listed = jobs.runs(root)
+    live = any(r.get("phase") in (*jobs.ACTIVE, "queued") for r in listed)
+    earlier = jobs.earlier_use(root, listed[-1]) if listed else None  # the header's "An earlier run … says use"
+    return {"runs": listed, "latest": jobs.latest_run(root), "poll_s": RUNS_POLL_LIVE_S if live else RUNS_POLL_IDLE_S,
+            "earlier": earlier}
+
+
 def tries_of(req: Request) -> dict[str, Any]:
     """Every try of a run, for the Study page's Tries, Cases and Settings views (`tries.digest`)."""
     root, _, _ = req.home.load(req.params["slug"])
@@ -585,7 +642,8 @@ def tries_of(req: Request) -> dict[str, Any]:
 
 def try_of(req: Request) -> dict[str, Any]:
     """One combination of a run in full: what it set, every run of it, and what a
-    failed run printed (the last lines of its output) and was started with."""
+    failed run printed (the last lines of its output) and was started with; in a
+    code study its `diff` against the starting point (`None` in any other run)."""
     from evolvekit.status import candidate_detail
 
     root, _, _ = req.home.load(req.params["slug"])
@@ -595,7 +653,8 @@ def try_of(req: Request) -> dict[str, Any]:
         raise AppError(f"there is no combination {req.params['combination']!r} in this run", 404)
     keep = ("id", "generation", "operator", "parent_id", "rejected", "reject_reason", "last_failure", "gated",
             "stages_reached", "kpis", "parameters", "evaluations")
-    return {key: detail.get(key) for key in keep}
+    diff = str(detail.get("block") or "") if tries.tree_run(run_dir) else None
+    return {**{key: detail.get(key) for key in keep}, "diff": diff}
 
 
 def results(req: Request) -> dict[str, Any]:
@@ -645,6 +704,7 @@ ROUTES = [
     route("POST", "/api/studies/{slug}/duplicate")(duplicate_study),
     route("GET", "/api/studies/{slug}/harness")(study_harness),
     route("POST", "/api/studies/{slug}/application")(application),
+    route("POST", "/api/studies/{slug}/code")(code),
     route("PUT", "/api/studies/{slug}/cases/{name}")(put_case),
     route("DELETE", "/api/studies/{slug}/cases/{name}")(delete_case),
     route("POST", "/api/studies/{slug}/cases/{name}/restore")(restore_case),
@@ -668,11 +728,14 @@ ROUTES = [
     route("POST", "/api/studies/{slug}/test-run")(start_test_run),
     route("GET", "/api/studies/{slug}/test-run")(test_run),
     route("POST", "/api/studies/{slug}/start")(start),
+    route("POST", "/api/studies/{slug}/bakeoff")(bakeoff),
     route("POST", "/api/studies/{slug}/stop")(stop),
     route("POST", "/api/studies/{slug}/final-check")(final_check),
     route("POST", "/api/studies/{slug}/continue")(continue_run),
     route("GET", "/api/studies/{slug}/status")(status),
+    route("GET", "/api/studies/{slug}/runs")(runs_of),
     route("GET", "/api/studies/{slug}/results")(results),
+    route("GET", "/api/studies/{slug}/verdict")(verdict),
     route("GET", "/api/studies/{slug}/tries")(tries_of),
     route("GET", "/api/studies/{slug}/tries/{combination}")(try_of),
     route("GET", "/api/studies/{slug}/download/{export}")(download),

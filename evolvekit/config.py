@@ -11,8 +11,9 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 import yaml
@@ -26,6 +27,7 @@ __all__ = [
     "DEFAULT_SIGNATURE_IGNORE",
     "Config",
     "ProblemConfig",
+    "TreeConfig",
     "StageConfig",
     "PromoteRule",
     "LevelConfig",
@@ -189,6 +191,71 @@ two numbers and in nothing else."""
 
 
 @dataclass(frozen=True)
+class TreeConfig:
+    """A source tree the search may change (design §5.3): a candidate is a
+    unified diff against `base`, checked out as a git worktree.
+
+    `repo` is a folder inside a git repository (absolute); `open` the files a
+    candidate may change, as globs relative to it. `base` is a commit by the
+    time a config is loaded: a ref is resolved once, here. `working` is
+    refused: a snapshot per load would let a run and its final check start
+    from different files; a study pins it when it writes the run (`write_run`).
+    """
+
+    repo: Path
+    base: str
+    open: tuple[str, ...]
+    build: str = ""
+    """Run in a candidate's tree before it is used (`builtin-build`). With a
+    build, the driver evaluates one candidate at a time."""
+    build_timeout_s: float = 600.0
+    app: str = ""
+    """The program inside a candidate's tree, as `{tree}/...`: what `{app}` is."""
+    python: str = sys.executable
+    """The interpreter `{python}` stands for in `build`: the study's application
+    Python for a python harness, evolvekit's own otherwise."""
+
+    @staticmethod
+    def parse(raw: Any, path: str = "problem.tree") -> "TreeConfig":
+        data = _as_mapping(raw, path)
+        _reject_unknown(data, {"repo", "base", "open", "build", "build_timeout_s", "app", "python"}, path)
+        repo = _as_str(_require(data, "repo", path), f"{path}.repo")
+        if not (PurePosixPath(repo).is_absolute() or PureWindowsPath(repo).is_absolute()):
+            raise ConfigError(f"{path}.repo: give the full path to the source folder; {repo!r} is relative")
+        base = _as_str(_require(data, "base", path), f"{path}.base").strip()
+        files = _as_list(data.get("open"), f"{path}.open")
+        if not files:
+            raise ConfigError(f"{path}.open: name at least one file the search may change")
+        open_ = tuple(_as_str(v, f"{path}.open[{i}]").strip() for i, v in enumerate(files))
+        build = data.get("build") or ""
+        if not isinstance(build, str):
+            raise ConfigError(f"{path}.build: expected a command, got {build!r}")
+        app = data.get("app") or ""
+        if not isinstance(app, str):
+            raise ConfigError(f"{path}.app: expected a path such as '{{tree}}/solver.py', got {app!r}")
+        timeout = _as_positive(data.get("build_timeout_s", 600.0), f"{path}.build_timeout_s")
+        python = data.get("python", sys.executable)
+        if not isinstance(python, str) or not python.strip():
+            raise ConfigError(f"{path}.python: expected the path of a Python interpreter, got {python!r}")
+        # Only a tree problem needs git: imported here, never for a skeleton.
+        from evolvekit import tree
+
+        try:
+            located = tree.Repo(repo)
+        except tree.TreeError as exc:
+            raise ConfigError(f"{path}.repo: {exc}") from None
+        if base.strip() == "working":
+            # A snapshot per load: a run and its final check could start from different files.
+            raise ConfigError(f"{path}.base: pin a commit; studies do this for you")
+        try:
+            base = tree.resolve_commit(located, base)
+        except tree.TreeError as exc:
+            raise ConfigError(f"{path}.base: {exc}") from None
+        return TreeConfig(repo=Path(repo), base=base, open=open_, build=build.strip(),
+                          build_timeout_s=timeout, app=app.strip(), python=python.strip())
+
+
+@dataclass(frozen=True)
 class ProblemConfig:
     """The human-written skeleton and the fenced region the loop may rewrite.
 
@@ -223,9 +290,14 @@ class ProblemConfig:
     an external command. It replaces `skeleton`: the one function a candidate
     may change, `configure()`, is generated from it, its values are validated
     in the static stage and handed to the stage command as `{params}`."""
+    tree: TreeConfig | None = None
+    """A source tree (`TreeConfig`): it replaces `skeleton`, and a candidate is
+    a diff against its base commit instead of an evolve block."""
 
     def skeleton_source(self) -> str:
-        """The skeleton's text: the user's file, or the generated one."""
+        """The skeleton's text: the user's file, or the generated one (none for a tree)."""
+        if self.tree is not None:
+            return ""
         if self.parameters is not None:
             return self.parameters.render_skeleton(self.block_start, self.block_end)
         assert self.skeleton is not None  # `parse` guarantees one of the two
@@ -247,11 +319,23 @@ class ProblemConfig:
             "forbidden_imports",
             "parameters",
             "parameter_constraints",
+            "tree",
         }
         _reject_unknown(data, known, "problem")
         parameters: ParameterSpace | None = None
         skeleton: Path | None = None
-        if data.get("parameters") is not None:
+        tree: TreeConfig | None = None
+        if data.get("tree") is not None:
+            if data.get("skeleton") is not None or data.get("parameters") is not None:
+                # Code and tuned settings in one candidate are left for later (Decision D6).
+                raise ConfigError("problem: give one of `skeleton`, `parameters` or `tree`")
+            if data.get("parameter_constraints") is not None:
+                raise ConfigError(
+                    "problem.parameter_constraints: conditions on the values of `problem.parameters`, "
+                    "and this config declares none. Declare the parameters, or remove the constraints"
+                )
+            tree = TreeConfig.parse(data["tree"])
+        elif data.get("parameters") is not None:
             if data.get("skeleton") is not None:
                 raise ConfigError(
                     "problem: give either `skeleton` (a program with an evolve block) "
@@ -269,9 +353,9 @@ class ProblemConfig:
                 "and this config declares none. Declare the parameters, or remove the constraints"
             )
         else:
-            skeleton = base_dir / _as_str(
-                _require(data, "skeleton", "problem"), "problem.skeleton"
-            )
+            if data.get("skeleton") is None:
+                raise ConfigError("problem: give one of `skeleton`, `parameters` or `tree`")
+            skeleton = base_dir / _as_str(data["skeleton"], "problem.skeleton")
             if not skeleton.is_file():
                 raise ConfigError(f"problem.skeleton: no such file: {skeleton}")
         language = data.get("language", "python")
@@ -304,6 +388,7 @@ class ProblemConfig:
             )
             or (("configure",) if parameters is not None else ()),
             parameters=parameters,
+            tree=tree,
             forbidden_imports=(
                 DEFAULT_FORBIDDEN_IMPORTS
                 if forbidden is None
@@ -369,7 +454,7 @@ class PromoteRule:
         return " or ".join(parts) if parts else "all"
 
 
-STAGE_KINDS = ("builtin-static", "command")
+STAGE_KINDS = ("builtin-static", "builtin-build", "command")
 NORMALIZE_MODES = ("baseline", "none")
 KPI_SOURCES = ("file", "stdout")
 
@@ -563,6 +648,17 @@ class StageConfig:
                 f"{path}.kpis_from: must be one of {list(KPI_SOURCES)}, got {kpis_from!r}"
             )
         kpi_patterns = _parse_kpi_patterns(data.get("kpi_patterns"), f"{path}.kpi_patterns")
+        if kind == "builtin-build":
+            # It runs `problem.tree.build` for `problem.tree.build_timeout_s`
+            # (`_tree_rules`), and has no score to promote by.
+            for key, where in (("command", "problem.tree.build"), ("timeout", "problem.tree.build_timeout_s")):
+                if key in data:
+                    raise ConfigError(f"{path}.{key}: a builtin-build stage takes it from {where}; remove `{key}`")
+            if data.get("promote") is not None:
+                raise ConfigError(
+                    f"{path}.promote: the build stage has no score to rank by, so it promotes everything "
+                    "that builds; remove the `promote` key"
+                )
         if kind == "command":
             if not command.strip():
                 raise ConfigError(f"{path}.command: required when kind is 'command'")
@@ -1089,6 +1185,11 @@ class EvaluateConfig:
                 "by, so it must promote everything it does not reject; remove the "
                 "`promote` key"
             )
+        for i, stage in enumerate(stages):
+            if stage.kind == "builtin-build" and i != 1:
+                raise ConfigError(f"evaluate.stages[{i}].kind: builtin-build comes right after the static stage")
+            if stage.kind == "builtin-build" and not any(s.kind == "command" for s in stages[i + 1:]):
+                raise ConfigError(f"evaluate.stages[{i}]: a build stage needs a command stage after it")
         for i, stage in enumerate(stages[:-1]):
             if stage.private_inputs:
                 raise ConfigError(
@@ -1492,7 +1593,7 @@ class NoveltyConfig:
 
 
 KNOWN_OPERATORS = (
-    "diff", "rewrite", "crossover", "param_lhs", "param_local", "param_cross", "param_tpe",
+    "diff", "rewrite", "crossover", "param_lhs", "param_local", "param_cross", "param_tpe", "agent_patch",
 )
 TYPED_SPACE_OPERATORS = frozenset({"param_local", "param_cross", "param_tpe"})
 """Operators that are arithmetic on a declared `problem.parameters` space."""
@@ -1742,6 +1843,7 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
         base_dir=base_dir,
         source=source,
     )
+    config = _tree_rules(config)
     _check_embedding_route(config)
     _check_parameter_placeholders(config)
     _check_typed_operators(config)
@@ -1751,6 +1853,72 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
             "counts steps between levels, not a quantity a target could be stated in"
         )
     return _expand_instance_patterns(config)
+
+
+def _tree_rules(config: Config) -> Config:
+    """What a tree problem changes about the rest of a config.
+
+    The similarity gate (`search.novelty.near`) compares code structure, and a
+    candidate's block is a diff: it is switched off rather than refused, so a
+    config written with the default (`local`) still loads. A build makes the
+    driver evaluate one candidate at a time, so `top_k_per_generation` would
+    rank a round of one and promote everyone: refused. A `builtin-build` stage
+    runs that build, under its timeout; without a build it has nothing to run.
+    The AI operators on a tree are `diff` and `agent_patch` (decision 37):
+    `rewrite`, `crossover`, `big_step` and scheduled big steps are refused, and
+    `agent_patch` (a coding agent editing the tree) is refused without one,
+    and with a copilot-cli strong model (not verified against a real CLI yet).
+    """
+    tree = config.problem.tree
+    for index, stage in enumerate(config.evaluate.stages):
+        if stage.kind == "builtin-build" and (tree is None or not tree.build):
+            raise ConfigError(
+                f"evaluate.stages[{index}]: a builtin-build stage runs problem.tree.build, and the problem gives none"
+            )
+    if tree is None:
+        if config.search.operators.get("agent_patch", 0) > 0:
+            raise ConfigError(
+                "search.operators.agent_patch: agent_patch changes a source tree, and this problem has none "
+                "(problem.tree)"
+            )
+        return config
+    for name in ("crossover", "rewrite"):
+        if config.search.operators.get(name, 0) > 0:
+            raise ConfigError(
+                f"search.operators.{name}: does not work on a source tree (problem.tree); "
+                "a code study's AI operator is diff -- give it this share"
+            )
+    if (config.search.operators.get("agent_patch", 0) > 0 and config.models is not None
+            and config.models.strong.provider == "copilot-cli"):
+        # Its `act` argv has never run against a real Copilot CLI, and it has no git deny rules.
+        raise ConfigError(
+            "search.operators.agent_patch: agent_patch with copilot-cli is not verified yet; "
+            "use claude-cli for it, or the diff operator"
+        )
+    if config.search.takes_big_steps:
+        raise ConfigError(
+            "search.big_step_every: big steps do not work on a source tree (problem.tree); set it to 0"
+        )
+    if tree.build:
+        listed = config.evaluate.stages
+        if len(listed) < 2 or listed[1].kind != "builtin-build":
+            # Else the search would never build, and the trees' code would not be what runs.
+            raise ConfigError('`problem.tree.build` needs `{"kind": "builtin-build"}` at `evaluate.stages[1]`')
+        stages = tuple(replace(stage, timeout=tree.build_timeout_s) if stage.kind == "builtin-build" else stage
+                       for stage in config.evaluate.stages)
+        config = replace(config, evaluate=replace(config.evaluate, stages=stages))
+        for index, stage in enumerate(config.evaluate.stages):
+            if stage.promote.top_k_per_generation is not None:
+                raise ConfigError(
+                    f"evaluate.stages[{index}]: `promote.top_k_per_generation` cannot be used with "
+                    "`problem.tree.build`: candidates are built one at a time. Use "
+                    "`promote.archive_percentile` instead"
+                )
+    novelty = config.search.novelty
+    if novelty.near.method == "off":
+        return config
+    near = replace(novelty.near, method="off")
+    return replace(config, search=replace(config.search, novelty=replace(novelty, near=near)))
 
 
 def _expand_instance_patterns(config: Config) -> Config:
@@ -1820,6 +1988,7 @@ def _check_parameter_placeholders(config: Config) -> None:
     configuration and the search optimises noise.
     """
     declared = config.problem.parameters is not None
+    tree = config.problem.tree
     for index, stage in enumerate(config.evaluate.stages):
         if stage.kind != "command":
             continue
@@ -1830,6 +1999,17 @@ def _check_parameter_placeholders(config: Config) -> None:
                 f"{path}: uses {uses[0]} but `problem.parameters` declares no "
                 "parameters to substitute"
             )
+        if tree is not None:
+            # `{candidate}` is the candidate's tree, `{app}` the program inside it.
+            # With a build, the tree is installed where the command finds it.
+            if "{app}" in stage.command and not tree.app:
+                raise ConfigError(f"{path}: uses {{app}} but problem.tree.app names no program")
+            if not tree.build and "{candidate}" not in stage.command and "{app}" not in stage.command:
+                raise ConfigError(
+                    f"{path}: must contain the {{candidate}} placeholder (the candidate's tree) or "
+                    "{app} (the program inside it, problem.tree.app)"
+                )
+            continue
         if not declared and "{candidate}" not in stage.command:
             raise ConfigError(f"{path}: must contain the {{candidate}} placeholder")
         if declared and not uses and "{candidate}" not in stage.command:

@@ -13,21 +13,25 @@ harness never changes a study that already exists.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import zipfile
 import zlib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+
+import yaml
 
 from evolvekit.harness import HarnessError
-from evolvekit.harness.manifest import Harness, load_harness
+from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
 from evolvekit.harness.sdk import SDK_PATH
 from evolvekit.harness.study import Study, save_study, study_from_template
 
 __all__ = [
     "BUILT_IN",
+    "ORIGIN",
     "HarnessEntry",
     "copy_harness",
     "create_study",
@@ -36,6 +40,7 @@ __all__ = [
     "install_harness",
     "new_harness",
     "pack_harness",
+    "point_code_repo",
     "slugify",
 ]
 
@@ -46,6 +51,12 @@ samples. Judged from the archive's directory, before anything is written."""
 
 BUILT_IN = Path(__file__).resolve().parents[2] / "harnesses"
 """`harnesses/` of the checkout evolvekit runs from (absent in an installed package)."""
+
+ORIGIN = "harness-origin.txt"
+"""In a study folder: the absolute path of the harness folder the study was made
+from (decision D11), so Set up and `study code` can propose the harness's own
+`code.repo` while that folder still holds the harness. The pinned copy in
+`<study>/harness/` never resolves `code.repo` itself."""
 
 _IGNORED = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".DS_Store", "*.egg-info")
 
@@ -110,6 +121,7 @@ def create_study(folder: str | Path, harness_dir: str | Path, name: str, templat
     study = study_from_template(harness, template, name)
     folder.mkdir(parents=True, exist_ok=True)
     copy_harness(harness_dir, folder / "harness")
+    (folder / ORIGIN).write_text(str(harness_dir.resolve()), encoding="utf-8")
     for sub in ("cases", "inputs"):
         (folder / sub).mkdir(exist_ok=True)
     save_study(study, folder)
@@ -185,6 +197,47 @@ def install_harness(archive: str | Path, home: Path | None = None) -> Harness:
     return load_harness(final)
 
 
+_CODE_REPO = re.compile(r"^(?P<lead>[ \t]+repo:[ \t]*)(?P<value>[^#\r\n]*?)(?P<tail>[ \t]*(?:#.*)?)$")
+
+
+def point_code_repo(folder: str | Path, repo: str) -> None:
+    """Set `code.repo` in `folder/harness.yaml` to `repo`, keeping the file's
+    comments and layout (one line changes). A harness without `code:` is left
+    as it is; a `code:` written in flow style is rewritten whole."""
+    manifest = Path(folder) / "harness.yaml"
+    raw = manifest.read_bytes().decode("utf-8")
+    data = yaml.safe_load(raw) or {}
+    if not isinstance(data.get("code"), dict) or "repo" not in data["code"]:
+        return
+    lines = raw.splitlines(keepends=True)
+    inside = False
+    for index, line in enumerate(lines):
+        if line[:1] not in (" ", "\t", "\r", "\n", "#", ""):
+            inside = line.rstrip("\r\n").rstrip() == "code:"
+            continue
+        match = _CODE_REPO.match(line.rstrip("\r\n")) if inside else None
+        if match:
+            ending = line[len(line.rstrip("\r\n")):]
+            lines[index] = f"{match['lead']}{json.dumps(repo)}{match['tail']}{ending}"
+            manifest.write_bytes("".join(lines).encode("utf-8"))
+            return
+    data["code"]["repo"] = repo
+    manifest.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def _keep_code_repo(source: Path, target: Path) -> None:
+    """A copied harness's relative `code.repo` would name another folder from its
+    new place: write it as the absolute folder it named from `source`."""
+    try:
+        harness = load_harness(source, check_templates=False)
+    except HarnessError:
+        return  # the copy is checked when it is loaded; nothing to keep
+    code = harness.code
+    if code is None or Path(code.repo).is_absolute() or PureWindowsPath(code.repo).is_absolute():
+        return
+    point_code_repo(target, str(resolve_code_repo(harness.root, code)))
+
+
 def new_harness(target: str | Path, *, source: str | Path | None = None, kind: str = "python") -> Path:
     """A new harness folder: a copy of `source` (the closest existing harness)
     or a skeleton of `kind`, with the current SDK and a fresh AGENTS.md."""
@@ -193,6 +246,7 @@ def new_harness(target: str | Path, *, source: str | Path | None = None, kind: s
         raise HarnessError(f"{target}: the folder for a new harness must be new or empty")
     if source is not None:
         shutil.copytree(Path(source), target, ignore=_IGNORED, dirs_exist_ok=True)
+        _keep_code_repo(Path(source), target)
     else:
         from evolvekit.harness.skeleton import write_skeleton
 

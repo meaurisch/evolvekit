@@ -42,7 +42,7 @@ def first_docstring(block: str) -> str:
     """The first paragraph of the block's first docstring, on one line."""
     try:
         tree = ast.parse(block)
-    except SyntaxError:
+    except (SyntaxError, ValueError):  # ValueError: a null byte, or a lone surrogate
         return ""
     text = ast.get_docstring(tree) or ""
     if not text:

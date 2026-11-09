@@ -19,7 +19,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import yaml
 
@@ -32,6 +32,7 @@ from evolvekit.harness.sql import sql_problem, where_problem
 __all__ = [
     "STUDY_FORMAT",
     "Budget",
+    "CodeVary",
     "Constraint",
     "DataChange",
     "GoalLevel",
@@ -307,6 +308,43 @@ class Budget:
 
 
 @dataclass
+class CodeVary:
+    """What a code study changes (design §5.2): the source folder (`repo`,
+    absolute: the folder the harness's `code.repo` names on this machine), the
+    base it starts `from` (a ref of the repository, or `working` for the
+    working tree as it is), the files it may change (`open`, a subset of the
+    harness's; empty for all of them) and the `brief`, what the search is
+    asked to improve in the engineer's words."""
+
+    repo: str = ""
+    from_ref: str = "HEAD"
+    open: list[str] = field(default_factory=list)
+    brief: str = ""
+
+    @staticmethod
+    def parse(raw: Any, path: str = "vary.code") -> "CodeVary":
+        data = _mapping(raw, path)
+        _known(data, {"repo", "from", "open", "brief"}, path)
+        files = data.get("open") or []
+        if not isinstance(files, list):
+            raise HarnessError(f"{path}.open: expected a list of files such as [solver.py], got {files!r}")
+        return CodeVary(
+            repo=str(data.get("repo") or "").strip(),
+            from_ref=str(data.get("from") or "HEAD").strip() or "HEAD",
+            open=[str(f).strip() for f in files if str(f).strip()],
+            brief=" ".join(str(data.get("brief") or "").split()),
+        )
+
+    def to_yaml(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"repo": self.repo, "from": self.from_ref}
+        if self.open:
+            out["open"] = list(self.open)
+        if self.brief:
+            out["brief"] = self.brief
+        return out
+
+
+@dataclass
 class Study:
     name: str
     harness_id: str
@@ -319,6 +357,8 @@ class Study:
     inputs: dict[str, str] = field(default_factory=dict)
     settings: dict[str, SettingChoice] = field(default_factory=dict)
     data: dict[str, DataChange] = field(default_factory=dict)
+    code: CodeVary | None = None
+    """`vary.code`: the source a code study changes; `None` for a settings or data study."""
     constraints: list[Constraint] = field(default_factory=list)
     kpis: dict[str, StudyKpi] = field(default_factory=dict)
     goal: list[GoalLevel] = field(default_factory=list)
@@ -349,7 +389,7 @@ class Study:
         cases = _mapping(data.get("cases"), "cases")
         _known(cases, {"training", "test"}, "cases")
         vary = _mapping(data.get("vary"), "vary")
-        _known(vary, {"settings", "data"}, "vary")
+        _known(vary, {"settings", "data", "code"}, "vary")
         goal = _mapping(data.get("goal"), "goal")
         _known(goal, {"levels"}, "goal")
         limits = _mapping(data.get("limits"), "limits")
@@ -393,6 +433,7 @@ class Study:
                 _name(k, f"vary.data.{k}"): DataChange.parse(v, f"vary.data.{k}")
                 for k, v in _mapping(vary.get("data"), "vary.data").items()
             },
+            code=CodeVary.parse(vary["code"]) if vary.get("code") is not None else None,
             constraints=[Constraint.parse(c, f"constraints[{i}]") for i, c in enumerate(data.get("constraints") or [])],
             kpis={_name(k, f"kpis.{k}"): StudyKpi.parse(v, f"kpis.{k}") for k, v in _mapping(data.get("kpis"), "kpis").items()},
             goal=levels,
@@ -423,6 +464,7 @@ class Study:
             "vary": {
                 "settings": {k: v.to_yaml() for k, v in self.settings.items()},
                 "data": {k: v.to_yaml() for k, v in self.data.items()},
+                **({"code": self.code.to_yaml()} if self.code is not None else {}),
             },
             "constraints": [c.to_yaml() for c in self.constraints],
             "kpis": {k: v.to_yaml() for k, v in self.kpis.items()},
@@ -529,17 +571,80 @@ def resolve_kpi(study: Study, harness: Harness, name: str) -> dict[str, Any]:
             "positive": False, "changes_with_levers": False, **({"rows_sql": kpi.rows_sql} if kpi.rows_sql else {})}
 
 
-def study_problems(study: Study, harness: Harness, *, root: Path | None = None) -> list[str]:
+def _is_absolute(path: str) -> bool:
+    return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
+def _open_lines(code: CodeVary, harness_open: Sequence[str]) -> str | None:
+    """A code study's prompts show the open files whole: past `OPEN_LINES` at the
+    base (the one marked block's lines, when they hold one), the sentence that
+    refuses the study; `None` otherwise, or when the source or the base cannot be
+    read (writing the run says why)."""
+    from evolvekit import tree
+    from evolvekit.config import ProblemConfig
+    from evolvekit.tree_prompts import OPEN_LINES, base_files, open_lines_problem, shown_lines
+
+    try:
+        files = base_files(tree.Repo(code.repo), code.from_ref, code.open or list(harness_open))
+    except tree.TreeError:
+        return None
+    lines = shown_lines(files, ProblemConfig.block_start, ProblemConfig.block_end)
+    return f"vary.code.open: {open_lines_problem(lines)}" if lines > OPEN_LINES else None
+
+
+def _code_problems(study: Study, harness: Harness, root: Path | None, for_search: bool) -> list[str]:
+    """What keeps a code study (`vary.code`) from running: the source first."""
+    code, problems = study.code, []
+    add = problems.append
+    assert code is not None
+    if not code.repo:
+        add("vary.code.repo: say where the source is")
+    elif not _is_absolute(code.repo):
+        add(f"vary.code.repo: give the full path to the source; {code.repo!r} is relative")
+    elif root is not None and not Path(code.repo).is_dir():
+        add(f"vary.code.repo: there is nothing at {code.repo} any more; point the study at the source again")
+    if harness.code is None:
+        add("vary.code: the harness has no code section, so this study cannot change code")
+    if for_search and not code.brief:  # a bake-off generates nothing, so it needs no brief
+        add("vary.code.brief: the brief is empty; say in a sentence what the search should improve")
+    if harness.code is not None and code.open:
+        from evolvekit.tree import glob_pattern
+
+        allowed = [glob_pattern(g) for g in harness.code.open]
+        for name in code.open:
+            if name not in harness.code.open and not any(p.fullmatch(name.replace("\\", "/").removeprefix("./"))
+                                                         for p in allowed):
+                add(f"vary.code.open: {name} is not among the files the harness lets change")
+    if (for_search and harness.code is not None and code.repo and _is_absolute(code.repo)
+            and Path(code.repo).is_dir()):
+        shown = _open_lines(code, harness.code.open)
+        if shown is not None:
+            add(shown)
+    if study.tunables():
+        add("vary: a study changes code or tunes settings, not both yet; fix the settings, or vary code alone")
+    if for_search and not study.budget.ai_enabled:
+        add("budget.ai: a code study searches with an AI model; turn AI search help on, or compare branches with "
+            "study bakeoff")
+    return problems
+
+
+def study_problems(study: Study, harness: Harness, *, root: Path | None = None, for_search: bool = True) -> list[str]:
     """Everything that keeps `study` from running, one sentence each, naming
     the key. Empty for a study that can be compiled. `root` (the study folder)
-    also checks that the cases and inputs are there."""
+    also checks that the cases and inputs are there. `for_search`: the study is
+    to be searched (a bake-off, or the template check, passes False): a code
+    study then needs a model."""
     problems: list[str] = []
     add = problems.append
     if not study.name:
         add("name: give the study a name")
     if (study.harness_id, study.harness_version) != (harness.id, harness.version):
         add(f"harness: the study is for {study.harness_id} {study.harness_version}, this harness is {harness.id} {harness.version}")
-    if harness.application.kind and not study.application_path:
+    # A program harness's code study runs the program inside the source: saying
+    # where the source is (`study code`) says where the application is too.
+    source_first = (study.code is not None and harness.code is not None and harness.application.kind == "program"
+                    and not study.code.repo)
+    if harness.application.kind and not study.application_path and not source_first:
         add("application: say where the application is")
     elif study.application_path:
         where = Path(study.application_path)
@@ -548,6 +653,8 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None) 
                 "and a run starts it from its own folder")
         elif root is not None and not where.exists():
             add(f"application: there is nothing at {study.application_path} any more; point the study at the application again")
+    if study.code is not None:
+        problems += _code_problems(study, harness, root, for_search)
 
     # cases and inputs
     if not study.training:
@@ -620,7 +727,7 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None) 
                 problem = where_problem(db, lever.table, change.where)
                 if problem:
                     add(f"{where}.where: does not run on table {lever.table}: {problem}")
-        if not study.tunables():
+        if not study.tunables() and study.code is None:
             add("vary: choose at least one setting to tune or one data change to try")
         tunables = set(study.tunables())
         for index, constraint in enumerate(study.constraints):
@@ -709,8 +816,8 @@ def study_problems(study: Study, harness: Harness, *, root: Path | None = None) 
     return problems
 
 
-def require_valid(study: Study, harness: Harness, *, root: Path | None = None) -> None:
-    problems = study_problems(study, harness, root=root)
+def require_valid(study: Study, harness: Harness, *, root: Path | None = None, for_search: bool = True) -> None:
+    problems = study_problems(study, harness, root=root, for_search=for_search)
     if problems:
         raise HarnessError(problems[0] + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""))
 
@@ -770,11 +877,13 @@ def check_templates(harness: Harness) -> None:
         except HarnessError as exc:
             raise HarnessError(f"{where}: {exc}") from None
         study.application_path = str(Path.home() / "application")  # never started: only its form counts here
+        if study.code is not None:
+            study.code.repo = str(Path.home() / "source")  # a stand-in too: a study records its own
         study.training = ["cases/a.case", "cases/b.case"]
-        problems = study_problems(study, harness)
+        problems = study_problems(study, harness, for_search=False)
         if problems:
             raise HarnessError(f"{where}: {problems[0]}")
         try:
-            compile_study(study, harness, Plan.fixed())
+            compile_study(study, harness, Plan.fixed(), bakeoff=True)
         except HarnessError as exc:
             raise HarnessError(f"{where}: does not compile: {exc}") from None

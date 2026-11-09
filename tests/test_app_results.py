@@ -63,10 +63,10 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     assert keep["advice"] == "Keep today's settings for now: the gain is not proven."
     worse = words_for([-1.5, -1.0, -1.2, -0.8])
     assert worse["state"] == "worse" and worse["decision"] == "worse"
-    assert worse["line"].startswith("Worse on 4 held-back cases: 1.1 % higher real cost, a chance of 1 in 20 or less of a gain")
+    assert worse["line"].startswith("Worse on 4 held-back cases: 1.1 % higher real cost, a chance of less than 1 in 20 of a gain")
     assert words_for([0.4])["state"] == "single" and words_for([0.4])["decision"] == "single"
     assert words_for([3.0, 3.1, 2.9, -1.4])["decision"] == "keep", "the chance is high, the worst case beyond 1 %"
-    assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "1 in 20 or less"
+    assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "less than 1 in 20" and jobs._chance_words(0.98) == "better than 19 in 20"
     assert jobs._chance_words(0.5) == "about 10 in 20" and jobs._chance_words(None) == ""
     assert jobs._chance_words(0.897) == "under 9 in 10", "a keep never reads like the rule's 9 in 10"
     assert jobs._chance_words(0.9) == "about 18 in 20" and jobs._chance_words(0.947) == "about 19 in 20"
@@ -81,11 +81,11 @@ def test_the_final_check_says_what_to_do():
                                "(somewhere between 10.1 % worse and 11.5 % better).")
     assert unclear["advice"] == "Keep today's settings for now: the gain is not proven."
     confirmed = words([1.2, 5.0], 3.1)
-    assert confirmed["line"] == ("Probably better: 3.1 % lower real cost on 3 held-back cases, a chance of about 20 in 20; "
+    assert confirmed["line"] == ("Probably better: 3.1 % lower real cost on 3 held-back cases, a chance of better than 19 in 20; "
                                  "at least 1.2 % better than your starting point.")
     assert confirmed["advice"] == "Use the new settings: they are probably better on cases the search never saw."
     worse = words([-8.0, -1.0], -4.0)
-    assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of 1 in 20 or less of a gain "
+    assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of less than 1 in 20 of a gain "
                              "(likely between 1.0 % and 8.0 % worse).")
     assert worse["advice"] == "Keep today's settings: the new settings did worse on cases the search never saw."
     single = words(None, 2.0)
@@ -315,7 +315,9 @@ def test_every_run_of_a_study_has_its_line_and_kind(tmp_path):
     last = jobs.run_line(root, study, root / "runs" / "20260103-000000")
     assert last["decision"] == "keep" and last["mean"] == 0.4
     assert [r["decision"] for r in listed] == ["use", "keep", "keep"]
-    assert jobs.state_line(root, study) == jobs.run_line(root, study, root / "runs" / "20260103-000000")
+    state = jobs.state_line(root, study)
+    assert state.pop("earlier")["run"] == "20260101-000000", "persona round 3, E4: a later keep names the earlier use"
+    assert state == jobs.run_line(root, study, root / "runs" / "20260103-000000")
     assert jobs.state_line(root, study)["run"] == "20260103-000000"
 
 
@@ -390,6 +392,10 @@ def test_a_running_run_says_how_far_it_got_only_when_asked(tmp_path, monkeypatch
     (run_dir / "job.json").write_text(json.dumps({"phase": "search", "pid": os.getpid(), "started_at": now.isoformat(),
                                                    "plan": {"hours": 1.0}}), encoding="utf-8")
     (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    # The best so far is read from the rows of the finished combinations (`verdict.best_so_far`): 4.2 % here.
+    (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"id": "seed", "operator": "human-seed", "score": -100.0, "kpis": {"tour_length": 100.0}},
+        {"id": "c1", "operator": "mutate", "score": -95.8, "kpis": {"tour_length": 95.8}}]) + "\n", encoding="utf-8")
     monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
     study = load_study(root)
     plain = jobs.run_line(root, study, run_dir)
@@ -399,3 +405,188 @@ def test_a_running_run_says_how_far_it_got_only_when_asked(tmp_path, monkeypatch
     assert told["line"].endswith(" · 4.2 % lower tour length so far, not checked yet")
     assert "better" not in told["line"]
     assert jobs.runs(root)[0]["line"] == plain["line"], "the list does not read the status document"
+
+
+def test_the_runs_route_says_each_runs_state_now(tmp_path):
+    """Persona round 1, F4: the Study page kept "Past runs (1)" and a finished run as "running · 10 min
+    left" until the engineer went Home and back. `GET /api/studies/<slug>/runs` is what the page asks
+    while it is open: every run as it is now, the newest named, with no status document read."""
+    import json
+
+    from evolvekit.app.server import AppServer
+    from test_app_server import call
+
+    root, home = study_with_runs(tmp_path)
+    finished_run(root / "runs" / "20260101-000000")
+    server = AppServer(home.root, port=0)
+    server.start()
+    try:
+        status, body = call(server, "GET", f"/api/studies/{root.name}/runs")
+        assert status == 200 and body["latest"] == "20260101-000000"
+        assert [(r["id"], r["kind"]) for r in body["runs"]] == [("20260101-000000", "finished")]
+        # A bake-off started from the terminal: a new run, waiting for its turn.
+        newer = root / "runs" / "20260102-000000"
+        newer.mkdir(parents=True)
+        (newer / "job.json").write_text(json.dumps({"phase": "queued", "started_at": "2026-01-02T00:00:00+00:00"}),
+                                        encoding="utf-8")
+        status, body = call(server, "GET", f"/api/studies/{root.name}/runs")
+        assert body["latest"] == "20260102-000000" and [r["kind"] for r in body["runs"]] == ["finished", "queued"]
+        # ...and once it ended, its line is the finished one.
+        finished_run(newer, started="2026-01-02T00:00:00+00:00", decision="keep", mean=0.4)
+        status, body = call(server, "GET", f"/api/studies/{root.name}/runs")
+        assert body["runs"][-1]["kind"] == "finished" and body["runs"][-1]["line"] == "finished · not proven on the held-back cases"
+        assert call(server, "GET", "/api/studies/nope/runs")[0] == 404
+    finally:
+        server.stop()
+
+
+GATE_PLAN = {"hours": 0.167, "rounds": 11, "combinations": 132, "max_hours": 0.14845444444444447, "search_s": 534.436}
+"""Persona round 2's plan: 11 rounds in ten minutes; its first round took 227.7 s."""
+
+
+def _live_search(tmp_path: Path, monkeypatch, plan: dict | None = None) -> tuple[Path, Path]:
+    import json
+    import os
+
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / "20260101-000000"
+    run_dir.mkdir(parents=True)
+    job = {"phase": "search", "pid": os.getpid(), "started_at": jobs._now().isoformat(),  # noqa: SLF001
+           "plan": dict(GATE_PLAN if plan is None else plan)}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(jobs, "run_alive", lambda *a, **k: True)
+    return root, run_dir
+
+
+def _rounds_done(*ends: float):
+    """A status document after len(ends) - 1 rounds: `ends` are the active seconds when each ended, the
+    starting point's first (`progress.series`' `elapsed_s`)."""
+    def document(_run_dir: Path) -> dict:
+        return {"health": {"generation": {"last_finished": len(ends) - 1}},
+                "progress": {"series": [{"generation": g, "elapsed_s": end} for g, end in enumerate(ends)]}}
+    return document
+
+
+def test_after_its_first_round_a_live_search_says_how_many_planned_rounds_its_pace_buys(tmp_path, monkeypatch, capsys):
+    """Persona round 2, D1: "about 11 rounds" were planned and 2 ran; after round 1 (227.7 s) the run can
+    tell: 534.4 s of search, 232.8 s used, a round takes 227.7 s -> one more round, so 2 of the 11."""
+    from evolvekit import cli
+    from evolvekit.harness.study import load_study
+
+    root, run_dir = _live_search(tmp_path, monkeypatch)
+    said = "At this pace about 2 of the 11 planned rounds will run."
+    after_one = _rounds_done(5.077, 232.789)
+    pace = jobs.status(root, run_dir.name, after_one)["pace"]
+    assert pace == {"rounds": 2, "planned": 11, "line": said}
+    card = jobs.run_line(root, load_study(root), run_dir, after_one)
+    assert card["pace"] == pace and said not in card["line"]
+    monkeypatch.setattr(cli, "build_status", after_one)
+    capsys.readouterr()
+    assert cli.main(["study", "status", root.name, "--home", str(root.parents[1])]) == 0
+    assert said in capsys.readouterr().out.splitlines()[1:], "study status says it under the card's line"
+    # Before the first round ends there is no pace to go by; a pace that buys the plan says nothing.
+    assert jobs.status(root, run_dir.name, _rounds_done(5.077))["pace"] is None
+    assert jobs.status(root, run_dir.name, _rounds_done(5.0, 50.0))["pace"] is None
+    # The longest of the last two rounds sets the pace, as the search's own time limit does.
+    assert jobs.status(root, run_dir.name, _rounds_done(5.0, 50.0, 250.0))["pace"]["rounds"] == 3
+
+
+def test_a_search_without_a_time_plan_or_set_by_hand_has_no_pace(tmp_path, monkeypatch):
+    root, run_dir = _live_search(tmp_path, monkeypatch, plan={**GATE_PLAN, "adjusted": ["rounds"]})
+    assert jobs.status(root, run_dir.name, _rounds_done(5.077, 232.789))["pace"] is None
+
+
+THIN_ONE = "With 1 held-back case a 'use' is unlikely: the worst case stays wide. Hold back more cases for a firmer answer."
+
+
+def test_the_thin_final_check_note_is_in_the_study_the_plan_and_the_status(tmp_path, monkeypatch):
+    """Persona round 2, D2: the study's document, its plan and a run's status carry `notes` (one held
+    back here), so the app can say it on Review and start and on the Study page before and during the run."""
+    from evolvekit.app.server import AppServer
+    from test_app_server import call
+
+    root, run_dir = _live_search(tmp_path, monkeypatch)
+    assert jobs.status(root, run_dir.name, _rounds_done(5.077))["notes"] == [THIN_ONE]
+    server = AppServer(root.parents[1], port=0)
+    server.start()
+    try:
+        status, body = call(server, "GET", f"/api/studies/{root.name}")
+        assert status == 200 and body["notes"] == [THIN_ONE]
+        status, body = call(server, "GET", f"/api/studies/{root.name}/plan")
+        assert status == 200 and body["notes"] == [THIN_ONE] and body["summary"].endswith(THIN_ONE)
+    finally:
+        server.stop()
+
+
+def test_the_runs_route_reads_a_finished_runs_check_once(tmp_path, monkeypatch):
+    """I1: the open Study page asks for the runs every 5 s. A finished run's line is read from its final
+    check once, then kept while its job and its check's files stay as they are: a second call reads
+    neither comparison.json nor results.json. A rewritten check is read again."""
+    import json
+    import os
+
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / "20260101-000000"
+    finished_run(run_dir, decision="keep", mean=0.4)
+    first = jobs.runs(root)
+    read: list[str] = []
+    real_read, real_list = jobs._read, jobs._read_list  # noqa: SLF001
+
+    def spy_read(path):
+        read.append(Path(path).name)
+        return real_read(path)
+
+    def spy_list(path):
+        read.append(Path(path).name)
+        return real_list(path)
+
+    monkeypatch.setattr(jobs, "_read", spy_read)
+    monkeypatch.setattr(jobs, "_read_list", spy_list)
+    assert jobs.runs(root) == first
+    assert not {"comparison.json", "results.json"} & set(read), read
+    path = run_dir / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    comparison["per_candidate"]["c1"]["identical"] = True
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+    stamp = path.stat().st_mtime_ns + 10_000_000
+    os.utime(path, ns=(stamp, stamp))
+    assert jobs.runs(root)[0]["line"] == "finished · no difference in any run", "a check written again is read again"
+    assert "comparison.json" in read
+
+
+def test_the_runs_route_says_how_often_to_ask(tmp_path, monkeypatch):
+    """I1: the runs route's `poll_s` is the page's interval: 5 s while a run is live (it notices the end
+    within one), 10 s when none is (it notices a run started from the terminal)."""
+    from types import SimpleNamespace
+
+    from evolvekit.app import api
+    from evolvekit.app.store import Home
+
+    def asked(root: Path) -> dict:
+        return api.runs_of(SimpleNamespace(home=Home(root.parents[1]), params={"slug": root.name}))
+
+    done, _ = study_with_runs(tmp_path / "done")
+    finished_run(done / "runs" / "20260101-000000")
+    assert asked(done)["poll_s"] == 10
+    live, _ = _live_search(tmp_path / "live", monkeypatch)
+    assert asked(live)["poll_s"] == 5
+
+
+def test_while_the_ai_writes_a_rounds_changes_the_status_says_how_many(tmp_path, monkeypatch):
+    """Persona round 2 (for D4): round 1 sat at "Getting ready: preparing the runs." for 3.5 minutes while
+    the AI wrote 12 changes. The run's events say how many are written (`candidate_bred` since the round's
+    `generation_started`, of its `children_planned`); the status says so until the round's runs start."""
+    import json
+
+    root, run_dir = _live_search(tmp_path, monkeypatch)
+    events = [{"type": "run_started"}, {"type": "generation_started", "generation": 0, "children_planned": 0},
+              {"type": "stage_started", "stage": "full"}, {"type": "generation_finished", "generation": 0},
+              {"type": "generation_started", "generation": 1, "children_planned": 12}]
+    events += [{"type": "candidate_bred", "generation": 1, "ok": n != 3} for n in range(7)]
+    (run_dir / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    status = jobs.status(root, run_dir.name, _rounds_done(5.077))
+    assert status["writing"] == {"done": 7, "planned": 12} and status["now"] == "Writing changes: 7 of 12."
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "stage_started", "stage": "full"}) + "\n")
+    assert jobs.status(root, run_dir.name, _rounds_done(5.077))["writing"] is None, "the round's runs started"
