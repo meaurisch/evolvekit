@@ -215,7 +215,7 @@ OPENROUTER_API_KEY=
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m evolvekit",
+        prog=resources.CLI_EXE if resources.is_frozen() else "python -m evolvekit",
         description="LLM-driven evolutionary program search with a hard cost budget.",
     )
     parser.add_argument("--version", action="version", version=f"evolvekit {__version__}")

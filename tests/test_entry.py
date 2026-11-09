@@ -405,3 +405,12 @@ def test_shortcut_is_crlf_utf8_with_chcp(tmp_path, monkeypatch, capsys, frozen):
         assert f'start "" "{bundle / resources.APP_EXE}" --home "{home.resolve()}"' in lines
     else:
         assert f'"{sys.executable}" -m evolvekit app --home "{home.resolve()}"' in lines and "pause" in lines
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_help_names_the_program_it_runs_as(tmp_path, monkeypatch, capsys, frozen):
+    if frozen:
+        fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    usage = capsys.readouterr().out.splitlines()[0]
+    assert usage.startswith(f"usage: {resources.CLI_EXE} " if frozen else "usage: python -m evolvekit ")

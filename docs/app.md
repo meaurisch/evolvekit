@@ -24,15 +24,15 @@ bookmark of the bare address, or the page from an earlier launch, shows one
 sentence asking you to), and the page keeps the key for as long as the tab is
 open. Keep the window it runs in open while you work; closing it stops the
 app, not the studies that are running — they carry on, and the app shows
-them again when it is back. The installed app has no window: stop it with **Stop the app** at the end of Settings
-(or `evolvekit app stop`).
+them again when it is back. The app from the installer has no window: see
+[From the installer](#from-the-installer-windows) for how to stop it.
 
 | Option | Does |
 |---|---|
 | `--home DIR` | the library to use (default: `EVOLVEKIT_HOME`, else `~/evolvekit`) |
 | `--port N` | the first port to try (default 8780) |
 | `--no-browser` | print the address instead of opening a browser |
-| `--shortcut` | Windows: put `evolvekit.cmd` on the desktop, which starts the app with a double-click |
+| `--shortcut` | Windows: put `evolvekit.cmd` on the desktop, which starts the app with a double-click; with the installer, the shortcut starts `evolvekit-app.exe` |
 | `--service` | no browser or console: the app logs to `<home>/app.log` (rotated at 5 MB, two kept) and keeps campaigns' windows; `study open` starts it this way |
 | `stop` | `evolvekit app stop`: stops the app of this library cleanly (exit 1 when it did not stop within 10 s) |
 | `install-startup` / `uninstall-startup` | start `app --service` at logon, or no longer. Windows: registers (or removes) the logon task "evolvekit app" and prints what it runs; macOS and Linux: prints the launchd agent or systemd unit to install, and the commands. On Windows this is not yet tried on a real logon |
@@ -40,6 +40,26 @@ them again when it is back. The installed app has no window: stop it with **Stop
 
 A second `evolvekit app` on the same library opens the first instead of
 starting another.
+
+### From the installer (Windows)
+
+The installer is one zip, `evolvekit-app-<version>-win64.zip`, from whoever
+builds evolvekit for your team (`python tasks.py dist`); it needs no Python.
+Extract it into a folder of your own (Downloads, Desktop, Documents — never
+`C:\Users\<you>\evolvekit`, which is your library) and double-click
+`evolvekit-app.exe`. The exe is unsigned: if SmartScreen says *Windows
+protected your PC*, choose *More info*, then *Run anyway*, for a zip from your
+team only. The browser opens at the app; double-clicking again opens the app
+that is running. If no browser opens, run
+`"<the app's folder>\evolvekit-cli.exe" --no-browser` from a terminal in a
+folder of yours: it prints the address. PyVRP is not inside: install
+`pyvrp-1.0.0.zip`, which comes beside the app's zip, from Home.
+
+**Stopping it:** Settings → *Stop the app*, or `evolvekit app stop`
+(`"<the app's folder>\evolvekit-cli.exe" app stop`). Runs that are going carry on. Your library stays
+`C:\Users\<you>\evolvekit` (or `EVOLVEKIT_HOME`), never the app's folder.
+The README's [For planners: the installer](../README.md#for-planners-the-installer)
+has the rest: the command line, updating and removing.
 
 ### The app as a service
 

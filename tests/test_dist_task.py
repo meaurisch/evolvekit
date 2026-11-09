@@ -2,6 +2,7 @@
 the build is patched, the bundle's file list is read from the checkout."""
 
 import importlib.util
+import re
 import shutil
 import sys
 import zipfile
@@ -51,6 +52,19 @@ def test_dist_task_refuses_a_different_pyinstaller(tmp_path, monkeypatch, capsys
     err = capsys.readouterr().err
     assert "PyInstaller 1.0.0 is installed" in err and f"pins {tasks.pinned_pyinstaller()}" in err
     assert 'pip install -e ".[dist]"' in err
+
+
+@pytest.mark.parametrize("found", ["6.22.3", None])
+def test_dist_task_refuses_without_an_exact_pin(tmp_path, monkeypatch, capsys, found):
+    root = _root(tmp_path, monkeypatch)
+    text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    (root / "pyproject.toml").write_text(re.sub(r'"pyinstaller==[^"]*"', '"pyinstaller>=6"', text), encoding="utf-8")
+    assert tasks.pinned_pyinstaller() is None
+    monkeypatch.setattr(tasks, "_pyinstaller_version", lambda: found)
+    monkeypatch.setattr(tasks.subprocess, "call", _never)
+    assert tasks.dist() == 2
+    err = capsys.readouterr().err
+    assert "the dist extra has no exact pin for pyinstaller" in err and "None" not in err
 
 
 def test_dist_task_refuses_off_windows(tmp_path, monkeypatch, capsys):
@@ -112,6 +126,7 @@ def test_dist_removes_the_old_folder_and_zip(tmp_path, monkeypatch):
     def build(argv, cwd=None):
         if "PyInstaller" in argv:
             assert not old.exists(), "the old folder is gone before PyInstaller runs"
+            assert not target.exists(), "the old zip is gone with it"
             old.mkdir(); (old / "evolvekit-cli.exe").write_bytes(b"x")
         return 0
     monkeypatch.setattr(tasks.subprocess, "call", build)
@@ -123,11 +138,12 @@ def test_dist_removes_the_old_folder_and_zip(tmp_path, monkeypatch):
 def test_dist_fails_when_pyinstaller_fails(tmp_path, monkeypatch):
     root = _root(tmp_path, monkeypatch)
     monkeypatch.setattr(tasks, "_pyinstaller_version", tasks.pinned_pyinstaller)
+    (root / "dist").mkdir(); (root / "dist" / tasks.zip_name(tasks.project_version())).write_bytes(b"stale")
     calls = []
     monkeypatch.setattr(tasks.subprocess, "call", lambda argv, cwd=None: calls.append(argv) or 3)
     assert tasks.dist() == 3
     assert len(calls) == 1, "neither the zip nor the pack after a failed build"
-    assert not (root / "dist" / tasks.zip_name(tasks.project_version())).exists()
+    assert not (root / "dist" / tasks.zip_name(tasks.project_version())).exists(), "no stale zip after a failed build"
 
 
 def test_dist_fails_when_the_pyvrp_pack_fails(tmp_path, monkeypatch):

@@ -32,8 +32,9 @@ PyInstaller comes only through the `dist` extra, into the project's venv:
 .venv\Scripts\python.exe tasks.py dist
 ```
 
-`dist` checks the extra before anything runs: no PyInstaller, or a version
-other than the pin, is an error (exit 2) naming the install command above.
+`dist` checks the extra before anything runs: no exact pin in it ("the dist
+extra has no exact pin for pyinstaller"), no PyInstaller, or a version other
+than the pin, is an error (exit 2); the last two name the install command above.
 Nothing is installed system-wide; the build makes no Defender exclusion,
 registry change or signature.
 
@@ -115,4 +116,12 @@ its path.
 
 The build is never part of `python tasks.py check`: it needs PyInstaller and
 minutes. `tests\dist_smoke.py` proves a built zip works: it unzips it into a
-fresh folder and runs it there under a simulated new profile.
+fresh folder and runs it there under a simulated new profile. Run it alone
+(no gate, no study beside it):
+
+```
+.venv\Scripts\python.exe tests\dist_smoke.py [ZIP] [--pyvrp-python PATH] [--keep]
+```
+
+Its last line is `smoke: all 13 checks passed` (exit 0); a failed check is
+named, with the command's output (exit 1).

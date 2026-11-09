@@ -127,7 +127,12 @@ def dist():
               file=sys.stderr)
         return 2
     install = '.venv\\Scripts\\python.exe -m pip install -e ".[dist]"'
-    found, pinned = _pyinstaller_version(), pinned_pyinstaller()
+    pinned = pinned_pyinstaller()
+    if pinned is None:
+        print("error: the dist extra has no exact pin for pyinstaller: write pyinstaller==X.Y.Z in pyproject.toml "
+              "(packaging/README.md says how to choose it)", file=sys.stderr)
+        return 2
+    found = _pyinstaller_version()
     if found is None:
         print(f"error: the dist extra is not installed: {install}", file=sys.stderr)
         return 2
@@ -136,6 +141,8 @@ def dist():
         return 2
     out = ROOT / "dist"
     folder = out / "evolvekit-app"
+    target = out / zip_name(project_version())
+    target.unlink(missing_ok=True)  # with the old folder: a failed build leaves no stale zip
     if folder.exists():
         try:
             shutil.rmtree(folder)
@@ -150,8 +157,6 @@ def dist():
     )
     if built:
         return built
-    target = out / zip_name(project_version())
-    target.unlink(missing_ok=True)
     unpacked = 0
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(folder.rglob("*")):

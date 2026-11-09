@@ -2258,6 +2258,55 @@ running when the app is closed. It shows the studies made on the command line
 too, and `study open SLUG` takes you to one. [docs/app.md](docs/app.md) is its
 manual.
 
+### For planners: the installer
+
+On Windows the app also comes as one zip that needs nothing else installed:
+no Python, no command line. Nobody publishes it for you: whoever builds
+evolvekit for your team makes it with `python tasks.py dist` and hands it on.
+
+- **Get it:** `evolvekit-app-<version>-win64.zip`, from whoever builds
+  evolvekit for your team. Right-click it → *Extract All*, into a folder of
+  your own: Downloads, Desktop or Documents are fine, and so is a network
+  drive or a read-only folder, since nothing is ever written there. Never
+  extract it into `C:\Users\<you>\evolvekit`: that folder is your library
+  (below), not a place for the app.
+- **Start it:** double-click `evolvekit-app.exe` in the extracted
+  `evolvekit-app` folder. The exe is not signed, so Windows SmartScreen may say
+  *Windows protected your PC*: choose *More info*, then *Run anyway* — only
+  for a zip you got from your team. An antivirus may scan it for a few
+  seconds the first time.
+- **Use it:** the browser opens at the app. The app has no window of its own:
+  it runs until you stop it with *Stop the app* at the end of Settings, and
+  runs that are going carry on when it stops. Double-clicking the exe again
+  opens the app that is running. If no browser opens, open a terminal in a
+  folder of yours (in File Explorer, right-click inside Documents → *Open in
+  Terminal*) and run the exe by its full path,
+  `"<the app's folder>\evolvekit-cli.exe" --no-browser`: it prints the
+  address to open.
+- **Your library** is `C:\Users\<you>\evolvekit` (or `EVOLVEKIT_HOME`): your
+  studies, harnesses and settings, never the app's folder.
+- **PyVRP** comes as its own zip, `pyvrp-1.0.0.zip`, which
+  `python tasks.py dist` writes beside the app's zip: whoever gives you the
+  app gives you that too. Drop it on Home, or use *Add a harness or zip*. The
+  application is still your own: for PyVRP, the Python that has PyVRP
+  installed — Set up lists the ones it finds, or paste its path. The two
+  harnesses built in need no Python at all: demo-tour's solver is in the
+  app's folder at `_internal\examples\cli-solver\solver.py`, prompt-tune's
+  pipeline at `_internal\examples\prompt-pipeline\pipeline.py`.
+- **The command line:** every `evolvekit …` command in this README works as
+  `"<the app's folder>\evolvekit-cli.exe" …`. Work from a folder of your own
+  and run `evolvekit-cli.exe` by its full path: from the app's own folder, a
+  command that would write there (`init`, `run`, `skill install`, …) refuses
+  and says so. Nothing of yours belongs in it, so an update can replace it
+  whole.
+- **Updating:** stop the app (Settings → *Stop the app*), then extract the new
+  zip over the old folder, or into a new one; studies, harnesses and settings
+  stay in your library. **Removing:** delete the folder — first run
+  `evolvekit-cli.exe app uninstall-startup` if you made it start at logon.
+
+On macOS and Linux there is no installer: `pipx install evolvekit`, then
+`evolvekit app`.
+
 ## Adding a problem
 
 1. **Write a skeleton.** A normal Python file with the part you want evolved
