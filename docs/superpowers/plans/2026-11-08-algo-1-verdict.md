@@ -1012,6 +1012,20 @@ re-derive the formula; these are the re-derivations.
     Cost if wrong: the chance is the frequentist one-sided t level read as a posterior under a
     stated flat prior — exactly what S1 asked to be stated, now stated in `comparison.json` and
     the docs.
+12. **The extension reads the answer once, at its end (supersedes the design's "stops the moment
+    it becomes use").** Measured under decision 11 (1000 studies per setting): one look holds
+    the nominal 5 %, but the extension's up-to-ten correlated looks take false "use" to 16 %
+    when runs are noisier than cases (17 % with runs only); the recheck adds almost nothing.
+    The design's claim that the posterior makes stopping on "use" sound is true in the Bayesian
+    sense only, not against a point null, which is what the design's own test checks. So
+    `_extend_check` becomes: read the answer after the first check (look 1); if it is `keep` and
+    A1.3 says runs can help and the other existing conditions hold, add **all** the extension's
+    runs at once — as many as the existing cap and the time allow — then read the answer once
+    more (look 2) and stop, whatever it says. No stopping in between. `looks` counts these reads
+    plus rechecks. The null test asserts < 10 % in every setting of decision 11 and prints each
+    rate; if a setting still fails, stop with the rates. The log and the Study page say "added N
+    runs per held-back case and read the answer again". Cost if wrong: an extension that would
+    have been clear after two runs spends its whole allowance — time, not correctness.
 
 ## Open questions for the builder check
 
