@@ -212,4 +212,6 @@ branches) through the in-app browser, in a fresh home whose path has a space, bu
 ### Gate and PR
 
 - Gate: `python tasks.py check` on 5f04e66, nothing else running: **2914 passed, 5 skipped** in 35:58.
-- PR: PR_A1_PENDING.
+- PR: [meaurisch/evolvekit#79](https://github.com/meaurisch/evolvekit/pull/79), `algo/1-verdict`
+  against `master`, stacked on #78. **PASS.** The session stopped here at the owner's request; A2–A4
+  start from [the handoff prompt](../design/2026-11-09-algorithms-a2-a4-session-prompt.md).

@@ -10,7 +10,7 @@ What exists when you start:
 | Project | Branch | PR | State |
 |---|---|---|---|
 | A0 correctness | `algo/0-correctness` | [#78](https://github.com/meaurisch/evolvekit/pull/78) | built, gate green, open |
-| A1 the verdict | `algo/1-verdict` (from A0) | see the build log's A1 entry | built, gate green, open |
+| A1 the verdict | `algo/1-verdict` (from A0) | [#79](https://github.com/meaurisch/evolvekit/pull/79) | built, gate green, open |
 | A2 noise-aware search | — | — | not started |
 | A3 what the model is told | — | — | not started |
 | A4 allocation and memory | — | — | not started |
