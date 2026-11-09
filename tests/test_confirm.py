@@ -4,6 +4,7 @@ never saw -- and `export`, the winner in a form another program can use."""
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,74 @@ def test_a_summary_gives_the_chance_of_a_gain_and_the_worst_case():
     assert decide(paired_summary([3.0, 3.1, 2.9, -1.4])) == "keep", "chance is high but the worst case is beyond 1 %"
 
 
+def test_a_gain_is_a_log_ratio_and_its_percentage_is_of_the_starting_point():
+    from evolvekit.stats import log_gain, margin_log, pct_from_log
+
+    assert log_gain(100.0, 90.0, "minimize") == pytest.approx(math.log(100 / 90))
+    assert log_gain(100.0, 110.0, "maximize") == pytest.approx(math.log(1.1))
+    assert log_gain(0.0, 90.0, "minimize") is None and log_gain(100.0, -1.0, "maximize") is None
+    # Half as much and twice as much are one step either way: no -50 % against +100 %.
+    assert log_gain(100.0, 50.0, "minimize") == pytest.approx(-log_gain(100.0, 200.0, "minimize"))
+    assert pct_from_log(log_gain(100.0, 90.0, "minimize"), "minimize") == pytest.approx(10.0), "10 % lower"
+    assert pct_from_log(log_gain(100.0, 110.0, "maximize"), "maximize") == pytest.approx(10.0), "10 % higher"
+    for direction in ("minimize", "maximize"):
+        assert pct_from_log(margin_log(1.0, direction), direction) == pytest.approx(-1.0)
+    assert margin_log(1.0, "maximize") == pytest.approx(math.log(0.99)), "the design's x_m"
+    with pytest.raises(ValueError):
+        log_gain(1.0, 2.0, "sideways")
+
+
+def test_the_comparison_averages_log_ratios_not_percentages_of_a_noisy_run():
+    """S4: halving on one case and doubling on another is no change at all on the log
+    scale. In percent of the starting point's run it was +50 % and -100 %: a mean of -25 %."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse
+
+    comparison = Comparison(label="t", objective="cost", direction="minimize", stage="full", seeds=[1],
+                            instances=["a", "b"], baseline_id="g000-c0001", candidates=["c1"])
+    for instance, mine in (("a", 50.0), ("b", 200.0)):
+        comparison.runs += [
+            {"configuration": BASELINE, "instance": instance, "seed": 1, "ok": True, "kpis": {"cost": 100.0}},
+            {"configuration": "c1", "instance": instance, "seed": 1, "ok": True, "kpis": {"cost": mine}},
+        ]
+    _analyse(comparison)
+    result = comparison.per_candidate["c1"]
+    a, b = result["per_instance"]
+    assert a["log_gain"] == pytest.approx(math.log(2)) and b["log_gain"] == pytest.approx(-math.log(2))
+    assert (a["improvement_pct"], b["improvement_pct"]) == (pytest.approx(50.0), pytest.approx(-100.0))
+    assert result["log_gains"] == [pytest.approx(math.log(2)), pytest.approx(-math.log(2))]
+    assert result["summary"]["mean"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_a_case_keeps_the_count_and_the_spread_of_the_gains_it_used():
+    """What the posterior (A1.2) reads per case: the mean log gain, the variance of the
+    gains it is the mean of, and how many there were -- failures imputed, pairs with a
+    value of 0 or below dropped."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse
+
+    comparison = Comparison(label="t", objective="cost", direction="minimize", stage="full", seeds=[1, 2, 3],
+                            instances=["a", "b"], baseline_id="g000-c0001", candidates=["c1"])
+    runs = {  # (instance, seed): (baseline, candidate); None is a failed run
+        ("a", 1): (100.0, 90.0), ("a", 2): (100.0, 80.0), ("a", 3): (100.0, None),
+        ("b", 1): (100.0, 0.0), ("b", 2): (100.0, 95.0), ("b", 3): (None, None),
+    }
+    for (instance, seed), pair in runs.items():
+        for who, value in zip((BASELINE, "c1"), pair):
+            comparison.runs.append({"configuration": who, "instance": instance, "seed": seed, "ok": value is not None,
+                                    "kpis": {} if value is None else {"cost": value}})
+    _analyse(comparison)
+    result = comparison.per_candidate["c1"]
+    a, b = result["per_instance"]
+    largest = math.log(100 / 80)
+    used = [math.log(100 / 90), largest, -largest]
+    assert result["failure_counted_as_log"] == pytest.approx(largest)
+    assert (a["pairs"], a["log_gain"]) == (3, pytest.approx(sum(used) / 3))
+    mean = sum(used) / 3
+    assert a["seed_var"] == pytest.approx(sum((g - mean) ** 2 for g in used) / 2)
+    assert (b["pairs"], b["nonpositive_pairs"], b["both_failed_pairs"]) == (1, 1, 1)
+    assert b["log_gain"] == pytest.approx(math.log(100 / 95)) and b["seed_var"] is None
+    assert result["pairs"] == 4 and result["nonpositive_pairs"] == 1
+
+
 def test_a_candidate_whose_every_run_equals_the_baseline_is_marked_identical():
     """Persona round 1, B2: every paired run of a branch gave exactly the starting point's result (its
     change never ran), and the comparison still gave it a chance and a range. `identical` says so; the
@@ -239,6 +308,7 @@ def test_a_pair_only_the_candidate_failed_counts_as_its_largest_loss(tmp_path):
     assert result["candidate_failed_pairs"] == 1 and result["failed_pairs"] == 1 and result["pairs"] == 9
     worst = result["failure_counted_as_pct"]
     assert worst == pytest.approx(5.0, abs=1.0), "the largest difference measured: about 5 %"
+    assert result["failure_counted_as_log"] == pytest.approx(-math.log(0.95), abs=0.01)
     # About (5 + 5 - 5) / 3 on `medium`, against about 5 on `small`.
     assert medium["improvement_pct"] < by_instance["small"]["improvement_pct"] - 2.0
     assert result["summary"]["mean"] < result["finished_only"]["mean"]
@@ -279,21 +349,24 @@ def test_a_pair_only_the_baseline_failed_counts_for_the_candidate_and_both_faili
     assert "1 pair(s) in which both failed are not in this interval" in verdict
 
 
-def test_a_pair_with_a_baseline_of_zero_is_counted_too(tmp_path):
-    """An improvement in percent of zero is no number; the pair is dropped,
-    and said so, like a failed one."""
+def test_a_pair_with_a_value_of_zero_on_either_side_is_dropped_and_counted(tmp_path):
+    """A log ratio of 0 is no number. Such a pair is dropped and the verdict says
+    how many; a case whose every pair is dropped is not a case of the comparison."""
     config_path = _write_config(tmp_path)
     solver = (tmp_path / "solver.py").read_text(encoding="utf-8")
     (tmp_path / "solver.py").write_text(
-        solver.replace("print(json.dumps({\"cost\": scale", "print(json.dumps({\"cost\": 0.0 if (a.instance, a.x) == (\"small\", 0.0) else scale"),
+        solver.replace("print(json.dumps({\"cost\": scale",
+                       "print(json.dumps({\"cost\": 0.0 if (a.instance, a.x) == (\"small\", 0.0) else scale"),
         encoding="utf-8",
     )
     run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
     comparison = confirm(load_config(config_path), run_dir, seeds=[1001, 1003], log=lambda m: None)
     result = comparison.per_candidate["g003-c0012"]
-    assert result["zero_baseline_pairs"] == 2 and result["failed_pairs"] == 0 and result["pairs"] == 4
-    assert result["per_instance"][0]["zero_baseline_pairs"] == 2
-    assert "2 pair(s) had a baseline of 0 and are not in this interval" in result["summary"]["verdict"]
+    assert result["nonpositive_pairs"] == 2 and result["failed_pairs"] == 0 and result["pairs"] == 4
+    assert result["per_instance"][0]["nonpositive_pairs"] == 2 and result["per_instance"][0]["log_gain"] is None
+    assert result["summary"]["n"] == 2, "small has no comparable pair: it is not a case"
+    assert "2 pair(s) had a value of 0 or below and are not in this comparison" in result["summary"]["verdict"]
+    assert "zero_baseline_pairs" not in json.dumps(comparison.to_json())
 
 
 def test_a_seed_given_twice_is_refused(tmp_path):

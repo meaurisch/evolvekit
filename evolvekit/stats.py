@@ -1,9 +1,13 @@
 """The statistics of a paired comparison: small, exact, standard library.
 
 `confirm` judges a candidate against its baseline with these, and so does the
-live verdict in `status`: per case, the gain is averaged over the seeds
+live verdict in `status`: per run, the gain is a log ratio (`log_gain`), so
+half as much and twice as much are one step either way and the noisy baseline
+run is no denominator; per case, the gain is averaged over the seeds
 (`per_instance_means`); over cases, `paired_summary` gives the mean, its 95 %
-interval (Student's t) and an exact Wilcoxon signed-rank test.
+interval (Student's t) and an exact Wilcoxon signed-rank test. A percentage
+shown to a person is of the starting point's value, from the log quantity
+(`pct_from_log`), and a margin in percent has its log threshold (`margin_log`).
 """
 
 from __future__ import annotations
@@ -12,7 +16,10 @@ import math
 from statistics import fmean, stdev
 from typing import Any, Hashable, Mapping, Sequence
 
-__all__ = ["t_cdf", "wilcoxon_signed_rank", "paired_summary", "per_instance_means"]
+__all__ = [
+    "t_cdf", "wilcoxon_signed_rank", "paired_summary", "per_instance_means",
+    "log_gain", "pct_from_log", "margin_log",
+]
 
 # Two-sided 95 % critical values of Student's t, by degrees of freedom.
 _T95 = (
@@ -180,3 +187,41 @@ def per_instance_means(gains: Mapping[Hashable, float]) -> list[float]:
         group = key[0] if isinstance(key, tuple) else (key,)
         groups.setdefault(group, []).append(gain)
     return [fmean(values) for values in groups.values()]
+
+
+def _sign(direction: str) -> float:
+    """+1 when lower is better, -1 when higher is."""
+    if direction == "minimize":
+        return 1.0
+    if direction == "maximize":
+        return -1.0
+    raise ValueError(f"direction must be 'minimize' or 'maximize', got {direction!r}")
+
+
+def log_gain(base: float, mine: float, direction: str) -> float | None:
+    """The gain of `mine` over `base` as a log ratio, positive when better:
+    `s * (log base - log mine)`, s = +1 to minimise and -1 to maximise. None
+    when either value is 0 or below: their ratio is no number."""
+    sign = _sign(direction)
+    if base <= 0 or mine <= 0:
+        return None
+    return sign * (math.log(base) - math.log(mine))
+
+
+def pct_from_log(d: float, direction: str) -> float:
+    """A log gain in percent of the starting point's value, positive when
+    better: `100 * (exp(d) - 1)` higher when maximising, `100 * (1 - exp(-d))`
+    lower when minimising (a cost cut from 100 to 90 is 10 %). Monotone in
+    `d`, so an interval's ends and quantiles carry over."""
+    if _sign(direction) > 0:
+        return 100.0 * (1.0 - math.exp(-d))
+    return 100.0 * (math.exp(d) - 1.0)
+
+
+def margin_log(margin_pct: float, direction: str) -> float:
+    """The log gain whose percentage is `-margin_pct`: the threshold "lose at
+    most m %" on the log scale -- `log(1 - m/100)` when maximising and
+    `-log(1 + m/100)` when minimising."""
+    if _sign(direction) > 0:
+        return -math.log(1.0 + margin_pct / 100.0)
+    return math.log(1.0 - margin_pct / 100.0)

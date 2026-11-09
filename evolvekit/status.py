@@ -50,7 +50,7 @@ from evolvekit.leaderboard import competes, fitness_of, rank, replay_veto
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
-from evolvekit.stats import paired_summary, per_instance_means
+from evolvekit.stats import log_gain, paired_summary, pct_from_log, per_instance_means
 
 __all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
 
@@ -987,13 +987,19 @@ class _Run:
     def _verdict_per_instance(
         self, a: Mapping[Any, float], b: Mapping[Any, float], shared: Sequence[Any]
     ) -> dict[str, Any]:
-        """Paired over instances: each `(instance, seed)` gain in percent of the
-        baseline's value on that same run -- so a large instance and a small
-        one count alike -- averaged over the seeds within its instance, as
-        `confirm` does. The instance is the case: one instance run on many
-        seeds is one case, not many."""
-        sign = 1.0 if self._direction == "minimize" else -1.0
-        gains = {run: 100.0 * sign * (a[run] - b[run]) / abs(a[run]) for run in shared if a[run]}
+        """Paired over instances: each `(instance, seed)` gain is the log ratio
+        to the baseline's value on that same run -- so a large instance and a
+        small one count alike, and halving and doubling are one step either
+        way -- averaged over the seeds within its instance, as `confirm` does;
+        the mean and the interval are shown in percent of the baseline. A run
+        with a value of 0 or below on either side has no log ratio and is left
+        out. The instance is the case: one instance run on many seeds is one
+        case, not many."""
+        direction = "minimize" if self._direction == "minimize" else "maximize"
+        gains = {
+            run: gain for run in shared
+            if (gain := log_gain(a[run], b[run], direction)) is not None
+        }
         summary = paired_summary(per_instance_means(gains))
         if summary["n"] < 2:
             return {
@@ -1001,22 +1007,23 @@ class _Run:
                 "why": "fewer than two instances to compare: one instance run many times is one case",
                 "n": summary["n"],
             }
-        verdict, clear, worse = _judged(summary)
-        low, high = summary["ci95"]
+        verdict, clear, worse = _judged(summary)  # on the log interval: the same side of zero as in percent
+        mean = pct_from_log(summary["mean"], direction)
+        low, high = (pct_from_log(end, direction) for end in summary["ci95"])
         return {
             "verdict": verdict,
             "why": (
                 f"paired over {len(gains)} shared run(s) on {summary['n']} instance(s): mean gain "
-                f"{summary['mean']:.6g} % per instance, 95 % interval {low:.6g} to {high:.6g} %"
+                f"{mean:.6g} % per instance, 95 % interval {low:.6g} to {high:.6g} %"
                 + (_noise_note(clear, worse))
                 + ". These are the instances and seeds the search selected on, so even a clear "
                 "result is optimistic until it is confirmed on seeds it never saw"
             ),
             "n": summary["n"],
-            "unit": "percent of the baseline, per instance",
-            "mean_gain": summary["mean"],
+            "unit": "percent of the baseline (from log ratios), per instance",
+            "mean_gain": mean,
             "sd_gain": summary["sd"],
-            "ci95": summary["ci95"],
+            "ci95": [low, high],
         }
 
     def progress(self) -> dict[str, Any]:

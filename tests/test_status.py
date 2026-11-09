@@ -423,6 +423,23 @@ def test_the_live_verdict_and_the_final_check_agree_when_no_run_failed(tmp_path)
     assert "never saw" in improvement["why"], "the selection caveat stays"
 
 
+def test_the_live_verdict_per_instance_averages_log_ratios(tmp_path):
+    """S4 in status too: halving on one instance and doubling on another is no gain."""
+    run = RunDir(tmp_path)
+    stages = [STAGES[0], {**STAGES[1], "instances": ["a", "b"]}]
+    run.event("run_started", 1000, objective="cost", direction="minimize", stages=stages,
+              first_generation=1, generations_planned=5, budget={}, stop={})
+    run.row("g000-c0001", 0, 100.0)
+    run.row("g001-c0002", 1, 90.0, parent_id="g000-c0001")
+    for seed in range(2):
+        for instance, mine in (("a", 50.0), ("b", 200.0)):
+            for cid, cost in (("g000-c0001", 100.0), ("g001-c0002", mine)):
+                run.event("eval_finished", 900, candidate_id=cid, stage="full", seed=seed, private=False,
+                          instance=instance, ok=True, duration_s=1.0, kpis={"cost": cost})
+    improvement = build_status(tmp_path, now=NOW)["progress"]["improvement"]
+    assert improvement["n"] == 2 and improvement["mean_gain"] == pytest.approx(0.0, abs=1e-9)
+
+
 def test_one_instance_run_many_times_is_one_case_not_many(tmp_path):
     run = RunDir(tmp_path)
     stages = [STAGES[0], {**STAGES[1], "instances": ["a"]}]

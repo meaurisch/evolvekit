@@ -36,6 +36,8 @@ from typing import Any
 
 import yaml
 
+from evolvekit.stats import log_gain, pct_from_log
+
 __all__ = ["digest", "tree_run"]
 
 _cache: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
@@ -93,10 +95,14 @@ def _moment(text: Any) -> datetime | None:
 
 
 def _gain(start: float, value: float, minimize: bool) -> float | None:
-    """Percent better than `start`: positive when `value` is better."""
-    if not isinstance(start, (int, float)) or not isinstance(value, (int, float)) or start == 0:
+    """Percent better than `start`, positive when `value` is better: the log
+    ratio the final check averages, in percent of `start` (`pct_from_log`).
+    None when either is 0 or below: their ratio is no number."""
+    if not isinstance(start, (int, float)) or not isinstance(value, (int, float)):
         return None
-    return (start - value) / abs(start) * 100.0 if minimize else (value - start) / abs(start) * 100.0
+    direction = "minimize" if minimize else "maximize"
+    gain = log_gain(float(start), float(value), direction)
+    return None if gain is None else pct_from_log(gain, direction)
 
 
 def digest(run_dir: Path) -> dict[str, Any]:

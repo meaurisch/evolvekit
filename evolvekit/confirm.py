@@ -15,11 +15,14 @@ instance and every given seed -- under the stage's own `workers`, `pin_cpus`,
 (instance, seed) are queued next to each other, so that whatever the machine
 does over the hours (a laptop throttles) happens to all of them alike.
 
-The unit of the statistics is the instance. Per instance, the relative
-difference to the baseline is averaged over the seeds; over instances that
-gives a mean with a 95 % confidence interval (paired, Student's t) and an exact
-Wilcoxon signed-rank test. A confidence interval that includes zero is reported
-as what it is.
+The unit of the statistics is the instance. Per instance, the log ratio to the
+baseline -- `log base - log mine` when lower is better, the other way round
+when higher is -- is averaged over the seeds; over instances that gives a mean
+with a 95 % confidence interval (paired, Student's t) and an exact Wilcoxon
+signed-rank test. Every percentage is of the baseline's value, from the log
+quantity, so halving and doubling are one step either way and the noisy
+baseline run is no denominator. A confidence interval that includes zero is
+reported as what it is.
 
 Two searches of one problem -- another operator mix, a model among the
 operators, last month's run -- are compared the same way: `ID@OTHER_RUN_DIR`
@@ -40,6 +43,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -56,6 +60,7 @@ from evolvekit.leaderboard import rank
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import run_lock
 from evolvekit.stats import _betainc, _t95, paired_summary, t_cdf, wilcoxon_signed_rank  # noqa: F401  (re-exported: importers below)
+from evolvekit.stats import log_gain, pct_from_log
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
     from evolvekit.tree import Tree
@@ -456,7 +461,7 @@ def _materialise(
 
 
 _PAIR_COUNTS = ("finished_pairs", "candidate_failed_pairs", "baseline_failed_pairs", "both_failed_pairs",
-                "zero_baseline_pairs")
+                "nonpositive_pairs")
 
 
 def identical_runs(runs: Sequence[dict[str, Any]], candidate: str, kpis: Sequence[str],
@@ -486,19 +491,28 @@ def identical_runs(runs: Sequence[dict[str, Any]], candidate: str, kpis: Sequenc
 
 
 def _analyse(comparison: Comparison) -> None:
-    """Per candidate: the per-instance improvements and their summary.
+    """Per candidate: the per-instance gains and their summary.
+
+    The gain of a pair is the log ratio `s * (log base - log mine)`, s = +1
+    to minimise and -1 to maximise; per instance its mean over the seeds
+    (`log_gain`, with `seed_var` the variance of the gains it is the mean of
+    and `pairs` their count), shown as `improvement_pct`, in percent of the
+    baseline's value. The summary is over the instances' log gains, its
+    mean, interval and worst case shown in percent too (`log` keeps them on
+    the log scale).
 
     A failed run is part of the result, not a gap in it. When only one side of
     an (instance, seed) pair failed or timed out, that side lost the pair: it
-    is counted as a difference as large as the largest one measured anywhere
+    is counted as a log gain as large as the largest one measured anywhere
     in this comparison -- a loss when the candidate failed, a win when the
     baseline did -- so a configuration that fails often cannot be judged on its
     lucky runs, and a failure never weighs less than a real result. A pair in
-    which both failed, or whose baseline is 0 (a percentage of it is no
-    number), says nothing about either and is left out. Every kind is counted,
-    and the summary over finished pairs alone is kept beside the result.
+    which both failed, or with a value of 0 or below on either side (a log
+    ratio of it is no number), says nothing about either and is left out.
+    Every kind is counted, and the summary over finished pairs alone is kept
+    beside the result.
     """
-    objective, sign = comparison.objective, (1.0 if comparison.direction == "minimize" else -1.0)
+    objective, direction = comparison.objective, comparison.direction
     table: dict[str, dict[tuple[str, int], float]] = {}
     for run in comparison.runs:
         if run["ok"] and objective in run["kpis"]:  # a retry that went through replaces the failure before it
@@ -506,24 +520,22 @@ def _analyse(comparison: Comparison) -> None:
     base = table.get(BASELINE, {})
     kpis = list(dict.fromkeys([objective, *(str(level["kpi"]) for level in comparison.levels)]))
 
-    def gain(key: tuple[str, int], mine: dict[tuple[str, int], float]) -> float:
-        return 100.0 * sign * (base[key] - mine[key]) / abs(base[key])
-
     for cid in comparison.candidates:
         mine = table.get(cid, {})
-        measured = [gain(k, mine) for k in base.keys() & mine.keys() if base[k] != 0]
-        largest = max((abs(g) for g in measured), default=None)
+        measured = [log_gain(base[k], mine[k], direction) for k in base.keys() & mine.keys()]
+        largest = max((abs(g) for g in measured if g is not None), default=None)
         per_instance, finished_only = [], []
         for instance in comparison.instances:
             counts = dict.fromkeys(_PAIR_COUNTS, 0)
             gains, finished, pairs = [], [], []
             for key in [(instance, s) for s in comparison.seeds]:
                 if key in base and key in mine:
-                    if base[key] == 0:
-                        counts["zero_baseline_pairs"] += 1
+                    gain = log_gain(base[key], mine[key], direction)
+                    if gain is None:
+                        counts["nonpositive_pairs"] += 1
                         continue
                     counts["finished_pairs"] += 1
-                    finished.append(gain(key, mine))
+                    finished.append(gain)
                     pairs.append((base[key], mine[key]))
                 elif key in base:
                     counts["candidate_failed_pairs"] += 1
@@ -541,25 +553,30 @@ def _analyse(comparison: Comparison) -> None:
             )
             if finished:
                 finished_only.append(fmean(finished))
+            mean = fmean(gains) if gains else None
             per_instance.append({
                 "instance": instance, "pairs": len(gains),
                 "baseline": fmean(b for b, _ in pairs) if pairs else None,
                 "candidate": fmean(c for _, c in pairs) if pairs else None,
-                "improvement_pct": fmean(gains) if gains else None,
+                "log_gain": mean,
+                "seed_var": statistics.variance(gains) if len(gains) >= 2 else None,
+                "improvement_pct": pct_from_log(mean, direction) if mean is not None else None,
                 "pair_wins": sum(1 for g in gains if g > 0),
                 **counts,
             })
-        differences = [r["improvement_pct"] for r in per_instance if r["improvement_pct"] is not None]
+        log_gains = [r["log_gain"] for r in per_instance if r["log_gain"] is not None]
         failed = sum(1 for r in comparison.runs if r["configuration"] in (cid, BASELINE) and not r["ok"])
         planned = len(comparison.instances) * len(comparison.seeds)
         totals = {name: sum(r[name] for r in per_instance) for name in (*_PAIR_COUNTS, "failed_pairs")}
-        summary = paired_summary(differences)
-        summary["verdict"] += _counted_as(totals, largest)
+        summary = _pct_summary(paired_summary(log_gains), direction)
+        summary["verdict"] += _counted_as(totals, largest, direction)
         comparison.per_candidate[cid] = {
             "per_instance": per_instance,
+            "log_gains": log_gains,
             "summary": summary,
-            "finished_only": paired_summary(finished_only),
-            "failure_counted_as_pct": largest,
+            "finished_only": _pct_summary(paired_summary(finished_only), direction),
+            "failure_counted_as_log": largest,
+            "failure_counted_as_pct": pct_from_log(largest, direction) if largest is not None else None,
             "pairs": sum(r["pairs"] for r in per_instance),
             "pairs_planned": planned,
             "failed_runs": failed,
@@ -569,6 +586,21 @@ def _analyse(comparison: Comparison) -> None:
         }
         if comparison.levels:
             comparison.per_candidate[cid]["levels"] = _analyse_levels(comparison, cid)
+
+
+def _pct_summary(summary: dict[str, Any], direction: str) -> dict[str, Any]:
+    """A `paired_summary` of log gains, its `mean`, `ci95` and `worst` in
+    percent of the baseline's value (`pct_from_log`); `chance` is the same on
+    either scale. `log` keeps the mean, sd and interval as they were."""
+    out = dict(summary)
+    out["log"] = {"mean": summary["mean"], "sd": summary["sd"], "ci95": summary["ci95"]}
+
+    def pct(value: float | None) -> float | None:
+        return None if value is None else pct_from_log(value, direction)
+
+    out["mean"], out["worst"] = pct(summary["mean"]), pct(summary["worst"])
+    out["ci95"] = None if summary["ci95"] is None else [pct(v) for v in summary["ci95"]]
+    return out
 
 
 def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
@@ -671,10 +703,11 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
     return {"levels": rows, "deciding": deciding, "verdict": ", ".join(parts), "confirmed": confirmed}
 
 
-def _counted_as(totals: dict[str, int], largest: float | None) -> str:
-    """What the verdict has to say about pairs that did not simply finish."""
+def _counted_as(totals: dict[str, int], largest: float | None, direction: str) -> str:
+    """What the verdict has to say about pairs that did not simply finish.
+    `largest` is the largest log gain measured, shown in percent."""
     notes = []
-    size = f"{largest:.3g} %" if largest is not None else None
+    size = f"{pct_from_log(largest, direction):.3g} %" if largest is not None else None
     for key, side, what in (("candidate_failed_pairs", "the candidate", "a loss"),
                             ("baseline_failed_pairs", "the baseline", "a win")):
         if totals[key] and size is not None:
@@ -684,8 +717,8 @@ def _counted_as(totals: dict[str, int], largest: float | None) -> str:
                          "(no finished pair to size them by)")
     if totals["both_failed_pairs"]:
         notes.append(f"{totals['both_failed_pairs']} pair(s) in which both failed are not in this interval")
-    if totals["zero_baseline_pairs"]:
-        notes.append(f"{totals['zero_baseline_pairs']} pair(s) had a baseline of 0 and are not in this interval")
+    if totals["nonpositive_pairs"]:
+        notes.append(f"{totals['nonpositive_pairs']} pair(s) had a value of 0 or below and are not in this comparison")
     return "".join(f"; {note}" for note in notes)
 
 
@@ -695,8 +728,8 @@ def render_markdown(comparison: Comparison) -> str:
         "",
         f"Stage `{comparison.stage}`, objective `{comparison.objective}` ({comparison.direction}), "
         f"seeds {comparison.seeds}, {len(comparison.instances)} instance(s). Baseline: `{comparison.baseline_id}`. "
-        "Improvement is in percent of the baseline's value on the same instance and seed, averaged over "
-        "the seeds of an instance; positive is better.",
+        "Improvement is the log ratio of the baseline's and the candidate's value on the same instance and "
+        "seed, averaged over the seeds of an instance, and shown in percent of the baseline; positive is better.",
         "",
     ]
     for cid, result in comparison.per_candidate.items():
@@ -711,7 +744,7 @@ def render_markdown(comparison: Comparison) -> str:
             + (f" ({result['failure_counted_as_pct']:.3g} %)" if result.get("failure_counted_as_pct") is not None else "")
             + f": only the candidate failed {result.get('candidate_failed_pairs', 0)}, only the baseline "
             f"{result.get('baseline_failed_pairs', 0)}; left out: both failed {result.get('both_failed_pairs', 0)}, "
-            f"baseline of 0 {result.get('zero_baseline_pairs', 0)}. {result['failed_runs']} run(s) failed."
+            f"a value of 0 or below {result.get('nonpositive_pairs', 0)}. {result['failed_runs']} run(s) failed."
         )
         only = result.get("finished_only") or {}
         if only.get("mean") is not None and result.get("failed_pairs"):
@@ -796,6 +829,6 @@ def _dropped(row: dict[str, Any]) -> str:
                        ("both_failed_pairs", "both failed")):
         if row.get(key):
             parts.append(f"{row[key]} {label}")
-    if row.get("zero_baseline_pairs"):
-        parts.append(f"{row['zero_baseline_pairs']} baseline 0")
+    if row.get("nonpositive_pairs"):
+        parts.append(f"{row['nonpositive_pairs']} not positive")
     return ", ".join(parts) or "–"
