@@ -51,16 +51,12 @@ def fitness_of(row: Mapping[str, Any]) -> float | None:
     return None if value is None else float(value)
 
 
-def competes(row: Mapping[str, Any], reference: float | None = None) -> bool:
+def competes(row: Mapping[str, Any]) -> bool:
     """Whether a row's score is comparable with the others: not rejected, all
     the way through the final stage, and not kept out by the hold-out. A row
     from before the `competes` field existed is given the benefit of the doubt,
-    as it always was. `reference` is the seed's private score
-    (`seed_private(rows)`): with it, a row written before the hold-out veto
-    existed is judged by the veto as well (`replay_veto`)."""
-    if row.get("rejected") or not row.get("competes", True):
-        return False
-    return reference is None or _replayed_veto(row, reference) is None
+    as it always was."""
+    return not row.get("rejected") and bool(row.get("competes", True))
 
 
 def veto_reason(reference: float) -> str:

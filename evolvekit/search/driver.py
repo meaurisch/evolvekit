@@ -3,7 +3,7 @@
 One generation is:
 
     sample P parents from the archive's elites   (sigmoid(z) x 1/(1+children))
-    pick 1-2 inspirations from *other* cells
+    pick 1..N inspirations from *other* cells    (N = search.inspirations)
     mutate                diff / rewrite / crossover / param_lhs / big_step
     novelty filter        AST-normalised hash, before anything is evaluated
     evaluate              the staged cascade
@@ -1029,6 +1029,8 @@ class Driver:
             if not str(c.operator).startswith("big_step"):
                 continue
             tried.add(int(c.generation))
+            # A missing parent counts the row as applied. It cannot occur today: a
+            # big step's parent is always the archive best, which is in the archive.
             parent = by_id.get(c.parent_id) if c.parent_id else None
             failed = (
                 c.rejected
@@ -1474,8 +1476,9 @@ class Driver:
         attempts = 0
         self._embed_context = (candidate_id, generation)
         hint = self._compose_hint(parent)
-        if operator == "big_step" and self._big_step_reason:
-            hint = "\n\n".join(part for part in (self._big_step_reason, hint) if part)
+        reason = self._big_step_reason if operator == "big_step" else None
+        if reason:
+            hint = "\n\n".join(part for part in (reason, hint) if part)
         outcome = self._invoke(operator, parent, inspirations, role, hint, candidate_id)
         attempts += 1
         self._bill(outcome, candidate_id, generation, operator, role)
@@ -1498,7 +1501,9 @@ class Driver:
         # One re-prompt, ever. The first real run showed the small model
         # handing back the same program three times; asking twice is worth the
         # cheap call, asking a third time is how v1 built its token bill.
-        retry = self._invoke(operator, parent, inspirations, role, verdict.retry_hint, candidate_id)
+        # A big step's re-prompt still says why it is due, as its first attempt did.
+        retry_hint = "\n\n".join(part for part in (reason, verdict.retry_hint) if part)
+        retry = self._invoke(operator, parent, inspirations, role, retry_hint, candidate_id)
         attempts += 1
         self._bill(retry, candidate_id, generation, operator, role)
         self._trace(retry, candidate_id, parent, operator, role, attempt=attempts)

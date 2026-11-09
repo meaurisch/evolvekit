@@ -689,14 +689,16 @@ def _combine(outcomes: list[StageOutcome]) -> StageOutcome:
     kpi_cv = {k: _cv([o.kpis[k] for o in outcomes]) for k in sorted(keys)}
 
     vectors: dict[str, list[float]] = {}
-    for name in sorted(set(first.vector_kpis)):
-        expected = len(first.vector_kpis[name])
-        for k, other in enumerate(outcomes[1:], start=1):
+    # Every name any seed reported: one only a later seed reports is ragged too.
+    for name in sorted(set().union(*(o.vector_kpis for o in outcomes))):
+        j = next(k for k, o in enumerate(outcomes) if name in o.vector_kpis)
+        expected = len(outcomes[j].vector_kpis[name])
+        for k, other in enumerate(outcomes):
             got = other.vector_kpis.get(name)
             if got is None:
-                problem = f"seed {k} reported no `{name}`, seed 0 reported {expected}"
+                problem = f"seed {k} reported no `{name}`, seed {j} reported {expected}"
             elif len(got) != expected:
-                problem = f"seed {k} reported {len(got)} values of `{name}`, seed 0 reported {expected}"
+                problem = f"seed {k} reported {len(got)} values of `{name}`, seed {j} reported {expected}"
             else:
                 continue
             # Runs that disagree about how many instances there were cannot be

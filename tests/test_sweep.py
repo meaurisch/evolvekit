@@ -86,6 +86,18 @@ def test_the_scheduled_big_step_prompt_names_its_schedule(tmp_path):
     assert any("This big step is scheduled: one every 1 generation(s)." in p for p in prompts)
 
 
+def test_the_re_prompt_of_a_big_step_still_says_why_it_is_due(tmp_path):
+    seed_block = _driver(tmp_path / "probe")[0].seed_block
+    driver, provider = _driver(tmp_path, big_step_every=1, generations=1, children_per_generation=1,
+                               operators={"rewrite": 1.0}, inspirations=0,
+                               responses=[f"```python\n# Reworded, not changed.\n{seed_block}```"])
+    driver.run()  # the big step hands back its parent reworded: a no-op, re-prompted once
+    prompts = [call["messages"][1]["content"] for call in provider.calls]
+    retries = [p for p in prompts if "structurally identical" in p and "This is a big step" in p]
+    assert retries, "the big step's no-op was re-prompted"
+    assert all("This big step is scheduled: one every 1 generation(s)." in p for p in retries)
+
+
 def test_a_big_step_that_never_applied_is_not_counted_live_or_on_resume(tmp_path):
     driver, _ = _driver(tmp_path, big_step_every=1, generations=2, children_per_generation=1,
                         operators={"rewrite": 1.0}, inspirations=0)

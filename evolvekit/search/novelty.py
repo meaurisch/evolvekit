@@ -343,15 +343,18 @@ def delta_grams(
 ) -> dict[tuple[str, ...], int]:
     """The n-grams a change added (`"+"`) and removed (`"-"`) against its parent.
 
-    With no parent -- the starting point, or a parent that will not parse --
-    the block's full, untagged vector. The tags keep a delta from ever matching
-    a full vector. Empty when the change moved no node types at all, and when
-    the block itself will not parse.
+    With no parent -- the starting point -- the block's full, untagged vector.
+    A parent that will not parse counts as empty: everything the child has, it
+    added, so every gram is tagged `"+"`. The tags keep a delta from ever
+    matching the starting point's full vector. Empty when the change moved no
+    node types at all, and when the block itself will not parse.
     """
     grams = node_ngrams(block, n)
-    parent = node_ngrams(parent_block, n) if parent_block is not None else {}
-    if not parent or not grams:
+    if parent_block is None or not grams:
         return grams
+    parent = node_ngrams(parent_block, n)
+    if not parent:
+        return {("+", *g): k for g, k in grams.items()}
     c, p = Counter(grams), Counter(parent)
     return {("+", *g): k for g, k in (c - p).items()} | {("-", *g): k for g, k in (p - c).items()}
 
@@ -424,7 +427,8 @@ class LocalNearIndex:
             # No node type moved. Constants only: near its parent, so the
             # "change the rule, not the constants" hint is true. Anything else
             # (a `max` -> `min` swap) has an empty change vector: near nothing.
-            if parent_block is not None and _constants_only(block, parent_block):
+            # With no parent id there is no twin to name.
+            if parent_id is not None and parent_block is not None and _constants_only(block, parent_block):
                 return parent_id, 1.0
             return None, 0.0
         best_id, best = None, 0.0
@@ -533,6 +537,8 @@ class NoveltyVerdict:
     kind: str | None = None
     twin_id: str | None = None
     similarity: float | None = None
+    twin_is_parent: bool = False
+    """For `"near"`: the twin is the parent, so the change moved constants only."""
 
     @property
     def novel(self) -> bool:
@@ -563,11 +569,10 @@ class NoveltyVerdict:
     @property
     def retry_hint(self) -> str:
         if self.kind == "near":
-            return (
-                f"Your previous answer was closest to {self.twin_id} at "
-                f"similarity {self.similarity:.2f} -- change the decision "
-                "rule, not the constants."
-            )
+            closest = f"Your previous answer was closest to {self.twin_id} at similarity {self.similarity:.2f} -- "
+            if self.twin_is_parent:
+                return closest + "change the decision rule, not the constants."
+            return closest + f"{self.twin_id} already made this change -- try a different one."
         return (
             f"Your previous answer was structurally identical to {self.twin_id} "
             "(same code once docstrings, comments and variable names are "
@@ -644,5 +649,5 @@ class NoveltyIndex:
             return NoveltyVerdict()
         twin_id, similarity = self.closest(block, parent_block, parent_id)
         if twin_id is not None and similarity >= self.threshold:
-            return NoveltyVerdict("near", twin_id, similarity)
+            return NoveltyVerdict("near", twin_id, similarity, twin_is_parent=twin_id == parent_id)
         return NoveltyVerdict()

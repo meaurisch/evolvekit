@@ -206,6 +206,20 @@ def test_ragged_vectors_fail_the_stage_and_say_which_seed(tmp_path):
     assert outcome.failure == "seed 1 reported 20 values of `per`, seed 0 reported 19"
 
 
+def test_a_vector_a_later_seed_leaves_out_fails_the_stage(tmp_path):
+    body = "payload = {'kpis': {'v': 1.0, **({} if seed == 1 else {'per': [1.0, 2.0]})}}"
+    outcome = _run(tmp_path, body, seeds=2)
+    assert outcome.ok is False
+    assert outcome.failure == "seed 1 reported no `per`, seed 0 reported 2"
+
+
+def test_a_vector_only_a_later_seed_reports_fails_the_stage_rather_than_vanishing(tmp_path):
+    body = "payload = {'kpis': {'v': 1.0, **({'per': [1.0, 2.0, 3.0]} if seed == 1 else {})}}"
+    outcome = _run(tmp_path, body, seeds=2)
+    assert outcome.ok is False
+    assert outcome.failure == "seed 0 reported no `per`, seed 1 reported 3"
+
+
 def test_a_kpi_whose_mean_is_zero_has_no_coefficient_of_variation(tmp_path):
     outcome = _run(tmp_path, "payload = {'kpis': {'v': 1.0, 'centred': float(seed) - 1.0}}", seeds=3)
     assert outcome.kpi_cv["centred"] is None, "no ratio to take; an absolute spread would switch units"

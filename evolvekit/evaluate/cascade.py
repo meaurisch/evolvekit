@@ -872,6 +872,10 @@ class Cascade:
             score_cfg = self.config.evaluate.score
             needed = [level.kpi for level in score_cfg.levels] if score_cfg.levels else list(score_cfg.weights)
             missing = sorted(k for k in needed if k not in outcome.kpis)
+            # With `levels` this cannot fire today: every level's measure is in
+            # `required_kpis`, so a hold-out run without one has already failed
+            # above. Kept for the weights, whose secondary measures are not
+            # required, and in case that list ever changes.
             if missing:
                 failed += 1
                 result.last_failure = (

@@ -478,10 +478,9 @@ def _view_rows() -> list[dict]:
 def test_the_views_apply_the_veto_to_rows_written_before_it():
     rows = _view_rows()
     assert [r["id"] for r in rank(rows)] == ["honest", "seed"]
-    reference = seed_private(rows)
     assert competes(rows[1]) is True, "without the reference, only the stored fields"
-    assert competes(rows[1], reference) is False
     replayed = {r["id"]: r for r in replay_veto(rows)}
+    assert competes(replayed["overfit"]) is False, "the replay applies the veto"
     assert replayed["overfit"]["veto"] == "holdout below the seed's -5"
     assert vetoed_count(rows) == 1 and unfinished_count(rows) == 0
 

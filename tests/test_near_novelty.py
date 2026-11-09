@@ -164,7 +164,19 @@ def test_the_near_retry_hint_asks_for_a_new_rule_not_new_constants():
     hint = verdict.retry_hint
     assert "closest to g001-c0002" in hint
     assert "similarity 1.00" in hint
-    assert "change the decision rule, not the constants" in hint
+    # The twin is another candidate that made the same change, not the parent:
+    # "not the constants" would be false here.
+    assert "g001-c0002 already made this change -- try a different one" in hint
+    assert "not the constants" not in hint
+
+
+def test_the_near_retry_hint_of_a_constants_only_change_asks_for_a_new_rule():
+    index = _index()
+    index.add("g000-c0001", BONUS_20)
+    verdict = index.check(BONUS_18, BONUS_20, "g000-c0001")
+    assert verdict.twin_id == "g000-c0001"
+    assert "change the decision rule, not the constants" in verdict.retry_hint
+    assert "already made this change" not in verdict.retry_hint
 
 
 def test_near_false_skips_the_gate_entirely():
@@ -262,6 +274,12 @@ def test_a_constants_only_change_is_near_its_parent():
     assert verdict.similarity == pytest.approx(1.0)
 
 
+def test_a_constants_only_change_with_no_parent_id_is_near_nothing():
+    index = LocalNearIndex()
+    index.add("g000-c0001", BONUS_20)
+    assert index.closest(BONUS_18, parent_block=BONUS_20) == (None, 0.0)
+
+
 def test_swapping_max_for_min_is_not_near_anything():
     """Same node types, so the delta is empty; but the rule changed, not a constant."""
     assert delta_grams(MIN_NOT_MAX, PARENT_30) == {}
@@ -274,8 +292,14 @@ def test_swapping_max_for_min_is_not_near_anything():
 
 def test_a_parent_that_will_not_parse_does_not_break_the_gate():
     index = _index()
+    index.add("g000-c0001", PARENT_30)
     index.add("g001-c0002", BRANCHED, parent_block="def broken(:::")
-    assert index.check(BRANCHED_AGAIN, "def broken(:::", "g000-c0001").kind in (None, "near")
+    # Everything the child has is what it added: tagged "+", so it can never
+    # match the starting point's untagged full vector (D5 again).
+    delta = delta_grams(BRANCHED_AGAIN, "def broken(:::")
+    assert delta and all(gram[0] == "+" for gram in delta)
+    twin, _ = index.closest(PARENT_30.replace("30.0", "31.0"), "def broken(:::", "g000-c0009")
+    assert twin != "g000-c0001", "a whole block is never compared with the starting point's"
 
 
 def test_a_delta_is_sign_tagged_and_a_seed_keeps_its_full_vector():
@@ -553,7 +577,7 @@ def priority(item, bins):
     return scores
 '''
 
-RETRY_KEY = "change the decision rule, not the constants"
+RETRY_KEY = "Your previous answer was closest to"
 
 
 def _driver(
