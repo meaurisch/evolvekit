@@ -42,11 +42,13 @@ from evolvekit.candidate import (
 from evolvekit.config import TYPED_SPACE_OPERATORS, Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
-from evolvekit.evaluate.cascade import Cascade, finished_final_stage, race_warnings
+from evolvekit.evaluate.cascade import Cascade, finished_final_stage, holdout_veto, race_warnings
+from evolvekit.evaluate.scoring import ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.stages import restore_build
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
+from evolvekit.leaderboard import seed_private
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration
@@ -531,7 +533,10 @@ class Driver:
         that died between the last append and the last snapshot still comes
         back consistent, which is the whole reason the rebuild reads the log.
         """
-        rows = [self._settle_competes(row) for row in self.ledger.runs()]
+        raw = self.ledger.runs()
+        reference = seed_private(raw)
+        rows = [self._rerank(self._settle_competes(row, reference)) for row in raw]
+        self.cascade.seed_private = reference
         if not rows:
             return 0
         self.grid = Archive.from_records(rows, self.config.search.archive, tree=self.repo is not None)
@@ -559,24 +564,50 @@ class Driver:
         self._restore_budget(rows)
         return last_generation
 
-    def _settle_competes(self, row: dict) -> dict:
-        """Judge a row written before `competes` existed by today's rule.
+    def _settle_competes(self, row: dict, seed_private: float | None = None) -> dict:
+        """Judge a row written before `competes` existed by today's rule,
+        hold-out veto included (`seed_private`: the seed's private score).
 
         Without this a resumed older run would put its failed and proxy-only
         candidates straight back into the archive, which is the defect the
-        field exists to end.
+        field exists to end. A row that carries `competes` keeps it, and the
+        veto is applied on top exactly as in a live run: a row written before
+        the veto existed, whose hold-out is below the seed's, stops competing.
         """
         if "competes" in row:
-            return row
-        return {
-            **row,
-            "competes": finished_final_stage(
+            finished = bool(row["competes"])
+        else:
+            finished = finished_final_stage(
                 self.config,
                 rejected=bool(row.get("rejected")),
                 last_failure=row.get("last_failure"),
                 stages_reached=row.get("stages_reached") or [],
                 private_score=row.get("private_score"),
                 gated=row.get("gated"),
+            )
+        veto = holdout_veto(self.config, row.get("private_score"), seed_private) if finished else None
+        if veto is not None:
+            return {**row, "competes": False, "veto": veto}
+        if "competes" in row:
+            return row
+        return {**row, "competes": finished}
+
+    def _rerank(self, row: dict) -> dict:
+        """The ranking score again, with this run's `evaluate.holdout_penalty`.
+
+        A row written before the default became 0 stored a ranking score at
+        λ = 1; kept as it is, it would sit in one archive beside rows ranked by
+        the public score, two scales in one order. Rebuilt as
+        `score − λ·max(0, score − private_score)`, or `score` when the row has
+        no private score.
+        """
+        score = row.get("score")
+        if score is None:
+            return row
+        return {
+            **row,
+            "ranking_score": ranking_score(
+                float(score), float(score), row.get("private_score"), self.config.evaluate.holdout_penalty
             ),
         }
 
@@ -1693,6 +1724,7 @@ class Driver:
             candidate.competes = result.competes
             candidate.raced_out = result.raced_out
             candidate.gated = result.gated
+            candidate.veto = result.veto
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis

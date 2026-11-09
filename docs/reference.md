@@ -203,8 +203,9 @@ seed = the skeleton's EVOLVE-BLOCK
   │      after each command stage: hash the KPIs it reported
   │      = anything seen at that stage → behavioural duplicate, stop here
   │
+  ├─ hold-out below the seed's → does not compete (holdout_veto)
   ├─ insert into the archive: one elite per cell, ranked by
-  │     public − holdout_penalty × max(0, public − private)
+  │     public − holdout_penalty × max(0, public − private)   (penalty 0 by default)
   │
   ├─ economics: cumulative USD, best, USD since the last improvement,
   │             USD per unit of gain over a sliding window
@@ -888,19 +889,45 @@ paid calls bought nothing; that is the number these are here to drive down.
 
 ### The hold-out penalty
 
-`evaluate.holdout_penalty` (default `1.0`) defines the score everything ranks
-by:
+The hold-out acts in two ways. By default only the first is on.
+
+**The veto.** `evaluate.holdout_veto` (default `true`): a candidate whose
+private score is below the **seed's** private score does not compete. It is not
+ranked, archived or bred from, and its row carries `competes: false` and
+`veto: "holdout below the seed's …"` with the seed's value. The leaderboard's
+`!` flag marks the same condition, so what is flagged and what is vetoed are
+one rule. The comparison is with the seed's hold-out score as it is, `private <
+seed's private`, with no allowance for noise: on a hold-out whose score varies
+from run to run, a candidate exactly as good as the seed is vetoed about half
+the time. When the seed's own hold-out run failed there is nothing to compare
+with, and nobody is vetoed. A resumed run reads the seed's private score back
+from `runs.jsonl` (the last seed row that has one).
+
+**The penalty.** `evaluate.holdout_penalty` (default `0.0`) defines the score
+everything ranks by:
 
 ```
 ranking = public − penalty × max(0, public − private)
 ```
 
-The archive, parent sampling, the leaderboard and `summary.best` all use it.
-The raw `public_score`, `private_score` and `generalization_gap` stay in the
-record untouched — the penalty changes what wins, never what is reported.
-Separately, the leaderboard flags with `!` any candidate whose private score is
-below the **seed's**: that is the 2026-08-22 failure, where the winner improved
-the public set and its hold-out went backwards relative to where it started.
+The archive, parent sampling, the leaderboard and `summary.best` all use it. At
+the default 0 the ranking score is the public score, so all of them order by
+the public score. The raw `public_score`, `private_score` and
+`generalization_gap` stay in the record untouched — the penalty changes what
+wins, never what is reported. A resumed run computes the ranking score of every
+row again with the penalty it is run with, so rows written under another value
+do not put two scales in one order.
+
+**Why the veto and not the penalty.** The 2026-08-22 failure was a winner that
+improved the public set while its hold-out went backwards from where it
+started. The veto catches exactly that, and the search learns one bit per
+candidate from the hold-out: in or out. At a penalty of 1 the hold-out was a
+continuous term of the fitness instead. The search selected on it for
+generation after generation, until it was no longer held out, and
+`generalization_gap` stopped meaning what its name says. A non-zero penalty is
+still available — set it when you want the search to prefer candidates whose
+hold-out keeps up with their public score — at that cost: the hold-out then
+trains the search, and its score is no longer an independent check.
 
 ### Adaptive breadth
 
@@ -2418,8 +2445,9 @@ On macOS and Linux there is no installer: `pipx install evolvekit`, then
 4. **Split the work into stages.** Stage 0 is always `builtin-static`. Put a
    subset that runs in seconds at stage 1 with a `promote` rule, and the real
    thing at stage 2 with `private_inputs` for a hold-out. The gap between the
-   public and private score is recorded as `generalization_gap`, charged once
-   through `evaluate.holdout_penalty`, and never otherwise optimised against.
+   public and private score is recorded as `generalization_gap`, and a
+   candidate whose hold-out falls below the seed's does not compete
+   (`evaluate.holdout_veto`); the hold-out is never otherwise optimised against.
    If your problem has one instance and no natural subset, say so in the config
    and lean on step 2 instead — `examples/circlepacking/` runs two stages and
    no hold-out for exactly that reason, and its repair function does the
@@ -2588,8 +2616,8 @@ stochastic, Azure-backed evaluators.
   contract-tested against recorded responses, error shapes included.
 - **Evaluation** (`evolvekit/evaluate/`) — the staged cascade,
   `top_k_per_generation` and `archive_percentile` promotion, linear and `log1p`
-  penalty scales, a private hold-out charged once through
-  `evaluate.holdout_penalty`, hard reject confined to stage 0, optional
+  penalty scales, a private hold-out that vetoes a candidate below the seed's
+  (`evaluate.holdout_veto`), hard reject confined to stage 0, optional
   `text_feedback` prose per stage, multi-seed stages that average their KPIs
   and record a per-KPI coefficient of variation, and a behaviour signature per
   command stage that stops a candidate the moment it reproduces an earlier

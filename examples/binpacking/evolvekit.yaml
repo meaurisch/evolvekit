@@ -122,10 +122,7 @@ evaluate:
       weight: 5.0
       scale: linear
 
-  # Ranking = public - penalty * max(0, public - private). The first real run's
-  # winner improved the public set and lost on the hold-out; at 1.0 that trade
-  # is exactly cancelled out instead of being rewarded.
-  holdout_penalty: 1.0
+  # The default hold-out veto applies (`holdout_veto`, docs/reference.md).
 
   # Behavioural duplicates. After every command stage the candidate's KPIs are
   # rounded to `signature_digits` significant digits and hashed; a candidate

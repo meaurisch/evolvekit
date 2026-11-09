@@ -32,6 +32,7 @@ __all__ = [
     "novelty_counts",
     "unfinished_count",
     "competes",
+    "seed_private",
     "render_economics",
     "economics_svg",
 ]
@@ -105,17 +106,19 @@ def unfinished_count(rows: Sequence[Mapping[str, Any]]) -> int:
     )
 
 
-def _seed_private(rows: Sequence[dict[str, Any]]) -> float | None:
+def seed_private(rows: Sequence[dict[str, Any]]) -> float | None:
+    """The seed's private score: what the `!` flag and `evaluate.holdout_veto`
+    compare every hold-out with. `None` when no seed row has one."""
     for row in reversed(rows):  # the last seed row: an aborted seed is evaluated again
         if row.get("operator") == "human-seed" and row.get("private_score") is not None:
             return float(row["private_score"])
     return None
 
 
-def _flagged(row: Mapping[str, Any], seed_private: float | None) -> bool:
+def _flagged(row: Mapping[str, Any], reference: float | None) -> bool:
     private = row.get("private_score")
     return (
-        seed_private is not None and private is not None and float(private) < seed_private
+        reference is not None and private is not None and float(private) < reference
     )
 
 
@@ -185,7 +188,7 @@ def render_markdown(
     top = rank(rows, limit)
     if not top:
         return "No scored candidates yet."
-    seed_private = _seed_private(rows)
+    reference = seed_private(rows)
     header = (
         "| # | id | gen | rank | score | cell | operator | model | lineage | gap | USD |\n"
         "|--:|---|--:|--:|--:|---|---|---|---|--:|--:|"
@@ -193,7 +196,7 @@ def render_markdown(
     lines = [header]
     any_flag = False
     for i, row in enumerate(top, start=1):
-        flag = _flagged(row, seed_private)
+        flag = _flagged(row, reference)
         any_flag = any_flag or flag
         chain = lineage_of(rows, str(row.get("id", "")))
         lines.append(
@@ -514,7 +517,7 @@ def render_html(
         if (best is not None and worst is not None and best > worst)
         else 1.0
     )
-    seed_private = _seed_private(rows)
+    reference = seed_private(rows)
 
     body_lines = []
     for i, row in enumerate(top, start=1):
@@ -523,7 +526,7 @@ def render_html(
         chain = lineage_of(rows, str(row.get("id", "")))
         flag = (
             f' <span class="flag">{HOLDOUT_FLAG}</span>'
-            if _flagged(row, seed_private)
+            if _flagged(row, reference)
             else ""
         )
         body_lines.append(

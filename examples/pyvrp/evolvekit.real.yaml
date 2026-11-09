@@ -50,10 +50,10 @@ evaluate:
 
     # Stage 2: the real thing. 900 seconds -- the hard cap in the skeleton --
     # on the public instance, and the same again on a private hold-out drawn
-    # from the same generator with a different seed. The gap between the two
-    # is charged once through `holdout_penalty`, which is what catches a
-    # configuration tuned to one instance's geography rather than to the
-    # instance *class*.
+    # from the same generator with a different seed. A candidate whose hold-out
+    # falls below the seed's does not compete (`holdout_veto`), which is what
+    # catches a configuration tuned to one instance's geography rather than to
+    # the instance *class*.
     #
     # A PyVRP solve is wall-clock bounded, so one seed's objective carries a
     # few tenths of a percent of noise; two seeds is the cheapest halving of

@@ -3,14 +3,16 @@
 Two distinct things are being tested, because the first real run showed two
 distinct failure modes and one number does not catch both:
 
-* `evaluate.holdout_penalty` charges a candidate whose private hold-out score
-  is *below its own public score* -- it fitted the instances it could see.
-* The leaderboard flags a candidate whose private score is below the **seed's**
-  private score. That is the 2026-08-22 case exactly: the big-step winner
-  improved the public full set (5.87 % -> 5.77 % excess) while its hold-out
-  went 5.51 % -> 5.70 %. Both of its levels stayed better than its own public
-  score, so no penalty is due; what went wrong is only visible against the
-  seed, and that is where the flag is.
+* `evaluate.holdout_penalty`, when set above its default of 0, charges a
+  candidate whose private hold-out score is *below its own public score* -- it
+  fitted the instances it could see.
+* `evaluate.holdout_veto` (on by default) keeps a candidate whose private score
+  is below the **seed's** private score from competing, and the leaderboard
+  flags the same condition. That is the 2026-08-22 case exactly: the big-step
+  winner improved the public full set (5.87 % -> 5.77 % excess) while its
+  hold-out went 5.51 % -> 5.70 %. Both of its levels stayed better than its own
+  public score, so no penalty is due; what went wrong is only visible against
+  the seed, and that is where the veto is.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import yaml
 
 from evolvekit.candidate import Candidate
 from evolvekit.config import ConfigError, build_config, load_config
-from evolvekit.evaluate.cascade import Cascade
+from evolvekit.evaluate.cascade import Cascade, finished_final_stage
 from evolvekit.evaluate.scoring import ranking_score
 from evolvekit.leaderboard import fitness_of, rank, render_markdown
 from evolvekit.search.archive import Archive
@@ -72,8 +74,17 @@ def test_the_penalty_must_be_non_negative(minimal_raw, tmp_path):
         build_config(raw, base_dir=tmp_path)
 
 
-def test_the_default_penalty_is_one(minimal_raw, tmp_path):
-    assert build_config(minimal_raw, base_dir=tmp_path).evaluate.holdout_penalty == 1.0
+def test_the_default_penalty_is_zero_and_the_veto_is_on(minimal_raw, tmp_path):
+    evaluate = build_config(minimal_raw, base_dir=tmp_path).evaluate
+    assert evaluate.holdout_penalty == 0.0
+    assert evaluate.holdout_veto is True
+
+
+def test_the_veto_switch_must_be_a_flag(minimal_raw, tmp_path):
+    raw = copy.deepcopy(minimal_raw)
+    raw["evaluate"]["holdout_veto"] = "sometimes"
+    with pytest.raises(ConfigError, match="holdout_veto"):
+        build_config(raw, base_dir=tmp_path)
 
 
 # -- the cascade -----------------------------------------------------------
@@ -205,6 +216,12 @@ def test_the_leaderboard_ranks_by_the_discounted_score():
     assert markdown.index("honest") < markdown.index("overfitter")
 
 
+def test_with_no_penalty_the_archive_orders_by_the_public_score():
+    rows = [_row("overfitter", -5.0, -6.0, penalty=0.0), _row("honest", -5.4, -5.4, penalty=0.0)]
+    assert [r["id"] for r in rank(rows)] == ["overfitter", "honest"]
+    assert all(fitness_of(r) == r["public_score"] for r in rows)
+
+
 def test_a_row_from_before_the_ranking_score_falls_back_to_score():
     legacy = {"id": "old", "score": -1.0, "rejected": False}
     assert fitness_of(legacy) == -1.0
@@ -219,6 +236,156 @@ def test_the_leaderboard_flags_a_private_score_below_the_seed(tmp_path):
     assert "worse-privately !" in markdown
     assert "fine !" not in markdown
     assert "private hold-out score is below the seed's" in markdown
+
+
+# -- the veto --------------------------------------------------------------
+
+VALUE_SKELETON = (
+    '__all__ = ["value"]\n\n\n'
+    "# EVOLVE-BLOCK-START\n"
+    "def value():\n"
+    "    return {v}\n"
+    "# EVOLVE-BLOCK-END\n"
+)
+
+
+@pytest.fixture
+def mirror_project(tmp_path: Path) -> Path:
+    """Public score `value()`, hold-out score `-value()`: every public gain is a hold-out loss."""
+    (tmp_path / "skeleton.py").write_text(VALUE_SKELETON.format(v=1), encoding="utf-8", newline="\n")
+    (tmp_path / "evaluate.py").write_text(
+        "import argparse, json, runpy\n"
+        "from pathlib import Path\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--candidate'); p.add_argument('--inputs'); p.add_argument('--out')\n"
+        "a = p.parse_args()\n"
+        "v = float(runpy.run_path(a.candidate)['value']())\n"
+        "score = v if a.inputs == 'public' else -v\n"
+        "out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_text(json.dumps({'kpis': {'value': score}}), encoding='utf-8')\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    config = {
+        "problem": {"skeleton": "skeleton.py", "required_functions": ["value"]},
+        "evaluate": {
+            "stages": [
+                {"id": "static", "kind": "builtin-static"},
+                {"id": "full", "kind": "command", "timeout": 60,
+                 "command": "python evaluate.py --candidate {candidate} --inputs {inputs} --out {out}",
+                 "inputs": ["public"], "private_inputs": ["holdout"]},
+            ],
+            "score": {"objective": "value", "direction": "maximize"},
+        },
+        "models": {
+            "small": {"provider": "fake", "model": "s", "options": {"responses": ["x"]}},
+            "strong": {"provider": "fake", "model": "b", "options": {"responses": ["x"]}},
+        },
+    }
+    (tmp_path / "evolvekit.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="\n")
+    return tmp_path / "evolvekit.yaml"
+
+
+def _value_candidate(cid: str, v: float, operator: str = "rewrite") -> Candidate:
+    return Candidate(id=cid, generation=0 if operator == "human-seed" else 1,
+                     block=f"def value():\n    return {v}\n",
+                     source=VALUE_SKELETON.format(v=v), operator=operator)
+
+
+def test_a_candidate_below_the_seeds_hold_out_does_not_compete(mirror_project, tmp_path):
+    config = load_config(mirror_project)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    seed = cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])["g000-c0001"]
+    assert seed.competes and cascade.seed_private == pytest.approx(-1.0)
+
+    results = cascade.evaluate_generation([_value_candidate("hi", 2), _value_candidate("lo", 0.5)])
+    assert results["hi"].public_score == pytest.approx(2.0), "the best public score..."
+    assert results["hi"].competes is False, "...is vetoed by its hold-out"
+    assert results["hi"].veto == "holdout below the seed's -1"
+    assert results["hi"].ranking_score == pytest.approx(2.0), "lambda = 0: the score itself is untouched"
+    assert results["lo"].competes is True and results["lo"].veto is None
+
+
+def test_the_veto_can_be_switched_off(mirror_project, tmp_path):
+    config = load_config(mirror_project)
+    config = replace(config, evaluate=replace(config.evaluate, holdout_veto=False))
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])
+    hi = cascade.evaluate_generation([_value_candidate("hi", 2)])["hi"]
+    assert hi.competes is True and hi.veto is None
+
+
+def test_no_seed_hold_out_means_no_veto(mirror_project, tmp_path):
+    config = load_config(mirror_project)
+    assert finished_final_stage(config, rejected=False, last_failure=None, stages_reached=["static", "full"],
+                                private_score=-5.0, seed_private=None) is True
+    assert finished_final_stage(config, rejected=False, last_failure=None, stages_reached=["static", "full"],
+                                private_score=-5.0, seed_private=-1.0) is False
+
+
+def test_a_resumed_run_rebuilds_the_seeds_hold_out_from_runs_jsonl(mirror_project, tmp_path):
+    from evolvekit.search.driver import Driver
+
+    config = load_config(mirror_project)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    rows = [
+        {"id": "g000-c0001", "generation": 0, "operator": "human-seed", "block": "def value():\n    return 1\n",
+         "score": 1.0, "public_score": 1.0, "private_score": -1.0, "rejected": False, "competes": True,
+         "stages_reached": ["static", "full"]},
+        # Written before `competes` existed: settled by today's rule, veto included.
+        {"id": "g001-c0002", "generation": 1, "operator": "rewrite", "parent_id": "g000-c0001",
+         "block": "def value():\n    return 2\n", "score": 2.0, "public_score": 2.0, "private_score": -2.0,
+         "rejected": False, "stages_reached": ["static", "full"]},
+        # Written before the veto existed, `competes: true`: the veto applies on replay as it would live.
+        {"id": "g001-c0003", "generation": 1, "operator": "rewrite", "parent_id": "g000-c0001",
+         "block": "def value():\n    return 3\n", "score": 3.0, "public_score": 3.0, "private_score": -3.0,
+         "rejected": False, "competes": True, "stages_reached": ["static", "full"]},
+    ]
+    (run_dir / "runs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    driver = Driver(config, run_dir=run_dir)
+    driver.resume()
+    assert driver.cascade.seed_private == pytest.approx(-1.0)
+    assert driver.by_id["g001-c0002"].competes is False
+    assert driver.by_id["g001-c0003"].competes is False
+    assert driver.by_id["g001-c0003"].veto == "holdout below the seed's -1"
+    assert driver.by_id["g000-c0001"].competes is True
+    assert [c.id for c in driver.top_k(3)] == ["g000-c0001"]
+
+
+def test_a_resumed_run_ranks_old_rows_with_the_current_penalty(mirror_project, tmp_path):
+    """Rows written at lambda = 1 store a discounted ranking score. On resume it is
+    recomputed with the run's lambda (0 by default), so the order is the public one."""
+    from evolvekit.search.driver import Driver
+
+    config = load_config(mirror_project)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    def old(cid: str, generation: int, operator: str, public: float, private: float) -> dict:
+        return {"id": cid, "generation": generation, "operator": operator,
+                "parent_id": None if generation == 0 else "g000-c0001",
+                "block": f"def value():\n    return {public}\n", "score": public, "public_score": public,
+                "private_score": private, "ranking_score": ranking_score(public, public, private, 1.0),
+                "rejected": False, "competes": True, "stages_reached": ["static", "full"]}
+
+    rows = [
+        old("g000-c0001", 0, "human-seed", 1.0, 1.0),
+        old("g001-c0002", 1, "rewrite", 3.0, 1.5),  # stored ranking score 1.5, at lambda = 1
+        old("g001-c0003", 1, "rewrite", 2.0, 2.0),
+    ]
+    (run_dir / "runs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    driver = Driver(config, run_dir=run_dir)
+    driver.resume()
+    assert [c.id for c in driver.top_k(3)] == ["g001-c0002", "g001-c0003", "g000-c0001"]
+    assert driver.by_id["g001-c0002"].fitness == pytest.approx(3.0)
+    assert driver.grid.best is not None and driver.grid.best.id == "g001-c0002"
+
+    penalised = replace(config, evaluate=replace(config.evaluate, holdout_penalty=1.0))
+    again = Driver(penalised, run_dir=run_dir)
+    again.resume()
+    assert again.by_id["g001-c0002"].fitness == pytest.approx(1.5), "lambda = 1 set explicitly: as before"
+    assert [c.id for c in again.top_k(3)] == ["g001-c0003", "g001-c0002", "g000-c0001"]
 
 
 @pytest.mark.slow

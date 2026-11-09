@@ -376,6 +376,16 @@ def _sweep(tmp_path):
     return build_status(tmp_path, now=NOW)
 
 
+def test_a_vetoed_candidate_is_never_the_best(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(1000)
+    run.row("g000-c0001", 0, 200.0)
+    run.row("g001-c0002", 1, 150.0, parent_id="g000-c0001", competes=False,
+            veto="holdout below the seed's -195")
+    run.row("g001-c0003", 1, 190.0, parent_id="g000-c0001")
+    assert build_status(tmp_path, now=NOW)["progress"]["best"]["id"] == "g001-c0003"
+
+
 def test_the_best_candidate_comes_with_its_diff_and_its_parameters(tmp_path):
     best = _sweep(tmp_path)["best"]
     assert best["id"] == "g001-c0006" and best["lineage"] == ["g000-c0001"]

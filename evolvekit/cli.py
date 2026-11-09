@@ -109,9 +109,9 @@ evaluate:
     - kpi: priority_errors
       weight: 2.0
       scale: log1p
-  # Ranking = public - holdout_penalty * max(0, public - private). Raising this
-  # makes the search more suspicious of gains that do not survive the hold-out.
-  holdout_penalty: 1.0
+  # A candidate whose hold-out score is below the starting point's does not
+  # compete. Default shown.
+  holdout_veto: true
   # Behavioural duplicates: after every command stage the candidate's KPIs are
   # rounded and hashed, and a candidate whose fingerprint matches one already
   # seen at that stage is stopped there. Defaults shown.

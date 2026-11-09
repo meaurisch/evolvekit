@@ -111,6 +111,10 @@ class EvalResult:
     gated: str | None = None
     """The gate this candidate broke (`evaluate.gates`), as `"missed = 2 > 0"`.
     It keeps its score, is not promoted and does not compete; nothing failed."""
+    veto: str | None = None
+    """Why a candidate that finished the final stage does not compete, when
+    that is its hold-out: `"holdout below the seed's <value>"`
+    (`evaluate.holdout_veto`). `None` for every other candidate."""
     abandoned: str | None = None
     """Why its evaluation did not finish, when the run was stopped in the
     middle of it (`evolvekit/stopping.py`). The driver records nothing of such

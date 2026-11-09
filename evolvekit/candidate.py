@@ -108,7 +108,9 @@ class Candidate:
     generalization_gap: float | None = None
     ranking_score: float | None = None
     """What the search ranks by: the public score discounted by the hold-out
-    gap (`evaluate.holdout_penalty`). The raw scores above are never touched."""
+    gap (`evaluate.holdout_penalty`). At the default penalty of 0 it equals the
+    public score; the hold-out acts through `veto` instead. The raw scores
+    above are never touched."""
     last_failure: str | None = None
     feedback: dict[str, str] = field(default_factory=dict)
     """What each command stage's evaluator said in prose, keyed by stage id. A
@@ -149,10 +151,14 @@ class Candidate:
     gated: str | None = None
     """The gate it broke (`evaluate.gates`), as `"missed = 2 > 0"`: it is not
     competing, and nothing failed. `None` for every other candidate."""
+    veto: str | None = None
+    """`"holdout below the seed's <value>"` when the candidate finished the
+    final stage but its private score is below the seed's
+    (`evaluate.holdout_veto`): it does not compete. `None` otherwise."""
     competes: bool = True
     """False when the candidate did not finish the final stage -- a failed
     evaluation, a proxy-only candidate, a final stage skipped by the daily cap,
-    a hold-out run that failed. It keeps its finite `score` for the record, but
+    a hold-out run that failed, a hold-out below the seed's (`veto`). It keeps its finite `score` for the record, but
     that score is not comparable with a full-stage one, so the candidate is
     never ranked, archived or bred from. True by default because a row written
     before this field existed says nothing either way; `Driver.resume` settles

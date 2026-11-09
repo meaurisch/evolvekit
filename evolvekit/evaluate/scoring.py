@@ -72,12 +72,14 @@ def ranking_score(
     never reached the hold-out keeps its plain score: absent evidence is not
     evidence of overfitting.
 
-    This is a comparison of levels, and it is deliberately only half the story.
-    The other half -- a candidate whose hold-out *regressed against the seed's*
-    while its public score improved, which is what the 2026-08-22 run promoted
-    to best -- is a comparison of deltas, and lives in the leaderboard's
-    hold-out flag rather than in the score. Folding it in here would mean
-    ranking every candidate against a moving reference.
+    The default `evaluate.holdout_penalty` is 0, so by default this is the
+    public score and the hold-out does not enter what the search ranks by: a
+    hold-out that is a fitness term is selected on until it is no longer held
+    out. What the hold-out does by default is a veto -- a candidate whose
+    hold-out *regressed against the seed's*, which is what the 2026-08-22 run
+    promoted to best, does not compete. That lives in
+    `cascade.finished_final_stage` (`evaluate.holdout_veto`), not here, and the
+    leaderboard's hold-out flag shows the same condition.
     """
     if public is None or private is None:
         return score

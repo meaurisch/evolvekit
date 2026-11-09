@@ -140,9 +140,7 @@ evaluate:
       weight: 500.0
       scale: linear
 
-  # No hold-out at this size: `evolvekit.real.yaml` adds one. Left at the
-  # default so the key means the same thing in both files.
-  holdout_penalty: 1.0
+  # The default hold-out veto applies; `evolvekit.real.yaml` adds a hold-out.
 
   signature_digits: 9
   # A PyVRP solve is wall-clock bounded, so two runs of the *same* config on

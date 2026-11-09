@@ -175,9 +175,7 @@ evaluate:
       weight: 1.0
       scale: linear
 
-  # No hold-out, so this never fires. Left at the default rather than removed
-  # so that the key means the same thing in both examples.
-  holdout_penalty: 1.0
+  # The default hold-out veto applies, and with no hold-out it never fires.
   signature_digits: 9
   signature_digits_stochastic: 3
   signature_ignore: [runtime_s, build_s, complexity, static_problems]
