@@ -193,6 +193,104 @@ def test_a_round_that_would_not_finish_within_the_limit_is_not_started(tmp_path)
     assert summary.generations == 0 and [r["generation"] for r in driver.ledger.runs()] == [0]
 
 
+# -- the first round, projected from the seed (persona p5, J1) ------------------
+
+STAGED_SOLVER = """\
+import argparse, json, pathlib, time
+p = argparse.ArgumentParser(); p.add_argument('--x', type=float); p.add_argument('--case'); p.add_argument('--stage')
+a = p.parse_args()
+control = json.loads(pathlib.Path('control.json').read_text()) if pathlib.Path('control.json').exists() else {}
+time.sleep(control.get('sleep_' + a.stage, 0.0))
+print(json.dumps({'cost': 100 + abs(a.x - 0.3) + len(a.case)}))
+"""
+
+
+def _staged_raw(*, children: int, max_hours: float | None, screen_cases: int, full_cases: int, workers: int,
+                top_k: int = 2, operators: dict | None = None) -> dict:
+    """A screening study as the plan compiles one: every child on a few cases first, the best `top_k` on all."""
+    def stage(name: str, cases: int, **more) -> dict:
+        return {"id": name, "kind": "command", "kpis_from": "stdout", "workers": workers, "timeout": 60,
+                "command": "{python} solver.py {params} --case {instance} --stage " + name,
+                "instances": [f"case-{i}" for i in range(cases)], **more}
+
+    raw = _raw(max_hours=max_hours, children=children, generations=6)
+    raw["evaluate"]["stages"] = [{"id": "static", "kind": "builtin-static"},
+                                 stage("screen", screen_cases, promote={"top_k_per_generation": top_k}),
+                                 stage("full", full_cases)]
+    if operators:
+        raw["search"]["operators"] = operators
+    return raw
+
+
+def test_the_first_round_is_projected_stage_by_stage_from_the_seed(tmp_path):
+    # The intern's run (persona p5, J1): 12 combinations, each screened on 2 cases, the best 2 on all 6, on 3
+    # workers. The seed took 36 s (4.4 s screening, 31.3 s on the 6 cases); 12 times that is 0.12 h, and the
+    # round was refused with 0.11 h left. A round of 12 runs about 8 screening waves and 4 full ones: 101 s,
+    # as the four rounds that ran later each took (96 to 101 s).
+    driver = Driver(build_config(_staged_raw(children=12, max_hours=0.124, screen_cases=2, full_cases=6, workers=3),
+                                 base_dir=tmp_path), run_dir=tmp_path / "run")
+    driver._durations = {0: 35.963}
+    driver._seed_stages = {"screen": 4.365, "full": 31.343}
+    projected = driver._projected_s()
+    assert projected == pytest.approx(8 * 4.365 + 4 * 31.343 / 2 + 12 * (35.963 - 4.365 - 31.343), abs=0.01)
+    assert 95 < projected < 110
+    driver.run_stop.start(used_s=36.0, watch=False)
+    assert driver.run_stop.before_generation(projected) is None, "a round of 101 s fits in the 410 s left"
+
+
+def test_without_the_seeds_stages_the_round_is_projected_as_the_seed_times_the_breadth(tmp_path):
+    driver = Driver(build_config(_staged_raw(children=12, max_hours=0.124, screen_cases=2, full_cases=6, workers=3),
+                                 base_dir=tmp_path), run_dir=tmp_path / "run")
+    driver._durations = {0: 35.963}
+    assert driver._projected_s() == pytest.approx(12 * 35.963), "an upper bound, as before"
+    driver._durations = {0: 35.963, 1: 100.75, 2: 101.0}
+    assert driver._projected_s() == pytest.approx(101.0), "once rounds ran, the longest of the last two"
+
+
+def test_a_search_with_ai_adds_the_time_its_changes_take_to_the_first_round(tmp_path):
+    from evolvekit.stopping import AI_CHANGE_S, ai_seconds
+
+    from dataclasses import replace
+
+    raw = _staged_raw(children=4, max_hours=1.0, screen_cases=2, full_cases=2, workers=2)
+    driver = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")
+    # Only the shares matter here: the projection reads them, as the plan does (`plan.ai_seconds`).
+    driver.config = replace(driver.config, search=replace(driver.config.search,
+                                                          operators={"param_local": 0.5, "diff": 0.5}))
+    driver._durations, driver._seed_stages = {0: 3.0}, {"screen": 1.0, "full": 2.0}
+    assert ai_seconds({"param_local": 0.5, "diff": 0.5})[0] == pytest.approx(AI_CHANGE_S / 2)
+    # 4 children x 2 cases on 2 workers: 4 screening waves; the best 2 x 2 cases: 2 full waves; and the AI.
+    assert driver._projected_s() == pytest.approx(4 * 1.0 + 2 * 2.0 + 4 * AI_CHANGE_S / 2)
+
+
+def test_the_seeds_stages_are_read_back_from_the_events_of_earlier_sessions():
+    from evolvekit.search.driver import _seed_stage_durations
+
+    events = [
+        {"type": "generation_started", "generation": 0},
+        {"type": "stage_finished", "stage": "screen", "private": False, "duration_s": 4.365},
+        {"type": "stage_finished", "stage": "full", "private": False, "duration_s": 31.343},
+        {"type": "generation_finished", "generation": 0, "duration_s": 35.963},
+        {"type": "generation_started", "generation": 1},
+        {"type": "stage_finished", "stage": "screen", "private": False, "duration_s": 35.2},
+        {"type": "stage_finished", "stage": "full", "private": True, "duration_s": 9.0},
+    ]
+    assert _seed_stage_durations(events) == {"screen": 4.365, "full": 31.343}
+
+
+@pytest.mark.slow
+def test_a_screening_run_with_time_for_a_round_searches_it(tmp_path):
+    # The seed takes about 2 s (0.1 s screening, 1.5 s on both cases); six times that (12 s) would not fit in
+    # the 8 s the run has, but a round of six screened on 2 workers and one promoted takes about 3.5 s.
+    (tmp_path / "solver.py").write_text(STAGED_SOLVER, encoding="utf-8")
+    (tmp_path / "control.json").write_text(json.dumps({"sleep_screen": 0.1, "sleep_full": 1.5}), encoding="utf-8")
+    raw = _staged_raw(children=6, max_hours=8 / 3600, screen_cases=2, full_cases=2, workers=2, top_k=1)
+    driver = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")
+    summary = driver.run()
+    assert summary.generations >= 1, summary.stop_reason
+    assert 1 in {r["generation"] for r in driver.ledger.runs()}
+
+
 @pytest.mark.slow
 def test_the_time_limit_stops_a_generation_in_the_middle_and_a_resumed_run_stays_stopped(tmp_path):
     run = tmp_path / "run"
