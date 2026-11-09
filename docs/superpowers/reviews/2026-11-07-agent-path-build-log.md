@@ -412,3 +412,27 @@ the owner's real home was untouched.
 
 ### PR
 
+[meaurisch/evolvekit#76](https://github.com/meaurisch/evolvekit/pull/76), stacked on #75; opened 2026-11-09 from
+`agent/5-installer`.
+
+## The end of the build (2026-11-09)
+
+`python tasks.py check` on the last branch, `agent/5-installer` at 2f70d32, nothing else running: exit 0,
+**2711 passed, 5 skipped** in 28:02; afterwards no worktree was left registered by a test.
+
+| Project | PR | Result | Last gate | Persona gate |
+|---|---|---|---|---|
+| 1 One world | [#72](https://github.com/meaurisch/evolvekit/pull/72) | PASS | 1797 passed, 4 skipped (e8ab740) | 9/10, no blocker |
+| 2 Skills and the agent gate | [#73](https://github.com/meaurisch/evolvekit/pull/73) | PASS | 1864 passed, 4 skipped (a40fc6e) | 8/10 (study skill), 8/10 (harness skill); gate script 6/6 and 2/2 |
+| 3 Code studies | [#74](https://github.com/meaurisch/evolvekit/pull/74) | PASS | 2159 passed, 4 skipped (dd58f55) | 8/10, no blocker (round 4) |
+| 4 Studies over time | [#75](https://github.com/meaurisch/evolvekit/pull/75) | PASS | 2498 passed, 5 skipped (f03ab98) | 8/10, no blocker (round 2) |
+| 5 The installer | [#76](https://github.com/meaurisch/evolvekit/pull/76) | PASS | 2711 passed, 5 skipped (2f70d32) | 8/10, no blocker (round 2) |
+
+All five PRs are open, stacked in order, and green in CI (ubuntu and windows). Fixes made after a PR opened and carried
+up the stack by merge commits: an 8.3 short-path worktree leak seen only on Windows CI (on `agent/3-code`, f7dd038), and
+two tests that depended on this machine (on `agent/4-over-time`, a3d13f6). Nothing is merged into master.
+
+Left for the owner, each named in its PR: whether a real second Windows account, a real SmartScreen prompt and
+`app install-startup` behave as on this machine (none was tried: persistent system changes); the Copilot CLI paths
+(not installed here); the release number (still 0.3.0).
+
