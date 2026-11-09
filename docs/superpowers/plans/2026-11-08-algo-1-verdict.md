@@ -1044,6 +1044,19 @@ re-derive the formula; these are the re-derivations.
     sentence name it as the range's end, and "at worst" is always `worst`. (d) Old comparison
     files keep their pre-A1 words ("about 19 in 20" etc.): the "under 19 in 20" wording applies
     only to summaries that carry the A1 posterior.
+14. **After the statistician's round 2: failures and "worse" are judged as strictly as "use".**
+    (a) A candidate that failed more runs than the starting point failed (pairs only the
+    candidate failed > pairs only the starting point failed) is never "use": the decision is
+    `keep` and the sentence says "it failed N runs the starting point finished". The round-2
+    statistician showed a program crashing on a third of its runs reading "use" at chance
+    0.99996, because a crash costs at most its best finished gain. The S5 floor becomes
+    `own largest < log(1.01)` (not `== 0`). (b) "Worse" is symmetric with "use": chance ≤ 0.05
+    ("under 1 in 20"), not ≤ 0.10. Measured: at 0.10 a change with no effect read "probably
+    worse" in 17.8 % of null studies under the product's looks. A null test asserts and prints
+    the false-"worse" rate (< 10 %) under the same procedure as the false-"use" test, and the
+    docs state it. Holm is not applied to "worse" (it changes nothing that is done: worse keeps
+    today's code, as keep does). Cost if wrong: a real loss needs more evidence to be called
+    worse; the action (keep today's code) is the same.
 
 ## Open questions for the builder check
 
