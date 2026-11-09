@@ -326,7 +326,7 @@ from evolvekit import cli  # noqa: E402
 from evolvekit.confirm import (  # noqa: E402
     BASELINE, Comparison, _analyse, confirm, decision_of, render_markdown, verdict_summary,
 )
-from evolvekit.stats import log_gain  # noqa: E402
+from evolvekit.stats import _t90, log_gain, t_cdf  # noqa: E402
 
 DESCRIBED = [LevelConfig("dph", "maximize", 0.01, True).describe(), LevelConfig("wait", "minimize").describe()]
 
@@ -531,3 +531,105 @@ def test_a_level_with_zeros_in_the_baseline_is_compared_in_its_own_units():
     assert first["unit"] == "percent" and first["state"] == "equal"
     assert second["unit"] == "absolute" and second["mean_difference"] == pytest.approx(1.0)
     assert second["state"] == "better"
+    # The same posterior in the KPI's own units: per-case gains 0, 1, 2 (mean 1, scale 1/sqrt(3), 2 df).
+    assert second["chance"] == pytest.approx(t_cdf(math.sqrt(3), 2))
+    assert second["worst"] == pytest.approx(1 - _t90(2) / math.sqrt(3))
+    levels = comparison.per_candidate["c1"]["levels"]
+    assert second["chance"] < 0.95 and levels["decision"] == "keep" and second["clear"] is False
+    assert levels["verdict"] == "equal on level 1 (dph within 1 %), level 2 (late) is not proven either way"
+
+
+def test_a_last_level_the_rule_does_not_speak_on_is_not_proven_either_way():
+    comparison = Comparison(label="t", objective="dph", direction="maximize", stage="full", seeds=[1],
+                            instances=["a", "b", "c"], baseline_id="g000-c0001", candidates=["c"], levels=DESCRIBED)
+    for instance, wait in (("a", 4.9), ("b", 5.05), ("c", 4.95)):
+        comparison.runs += [
+            {"configuration": BASELINE, "instance": instance, "seed": 1, "ok": True, "kpis": {"dph": 10.0, "wait": 5.0}},
+            {"configuration": "c", "instance": instance, "seed": 1, "ok": True, "kpis": {"dph": 10.0, "wait": wait}},
+        ]
+    _analyse(comparison)
+    levels = comparison.per_candidate["c"]["levels"]
+    second = levels["levels"][1]
+    assert second["state"] == "better" and 0.5 < second["chance"] < 0.95 and second["clear"] is False
+    assert levels["verdict"] == "equal on level 1 (dph within 1 %), level 2 (wait) is not proven either way"
+    assert "not distinguishable" not in levels["verdict"] and levels["decision"] == "keep"
+    assert levels["deciding"] == 2 and levels["read_on"] == 2
+
+
+def _levels_result(decision: str, chance: float) -> dict:
+    """A levels result as `_analyse_levels` writes it: level 1 equal, level 2 deciding `decision`."""
+    return {"summary": {"n": 4, "chance": 0.5, "worst": -1.0, "posterior": {}},
+            "levels": {"decision": decision, "confirmed": decision == "use", "deciding": 2, "read_on": 2,
+                       "levels": [{"level": 1, "state": "equal", "chance": 0.5},
+                                  {"level": 2, "state": "better", "chance": chance}]}}
+
+
+def test_top_n_with_levels_pays_for_choosing_among_its_candidates():
+    """Fix round 1, I4: levels results join the Holm family on the deciding level's chance."""
+    from evolvekit.confirm import apply_holm
+
+    results = {"g1": _levels_result("use", 0.999), "g2": _levels_result("use", 0.96),
+               "g3": _levels_result("keep", 0.6)}
+    apply_holm(results, what="candidates")
+    assert decision_of(results["g1"]) == "use"
+    assert decision_of(results["g2"]) == "keep", "0.96 passes alone; second of three, Holm needs 0.975"
+    assert results["g2"]["holm"] == {"k": 3, "what": "candidates", "own": "use", "passed": False}
+    assert results["g3"]["holm"]["passed"] is False and decision_of(results["g3"]) == "keep"
+    mixed = {"lv": _levels_result("use", 0.96), "plain": {"summary": {"n": 4, "chance": 0.96, "worst": 1.0,
+                                                                      "posterior": {}}}}
+    apply_holm(mixed, what="branches")
+    assert mixed["lv"]["holm"]["k"] == 2 and mixed["plain"]["holm"]["k"] == 2, "levels and plain in one family"
+    alone = {"g2": _levels_result("use", 0.96)}
+    apply_holm(alone, what="candidates")
+    assert "holm" not in alone["g2"] and decision_of(alone["g2"]) == "use", "one is no family"
+    old = {"a": {"summary": {}, "levels": {"confirmed": True, "deciding": 2, "levels": []}},
+           "b": _levels_result("use", 0.96)}
+    apply_holm(old, what="branches")
+    assert not any("holm" in r for r in old.values()), "a levels result written before A1.5 is no member"
+
+
+def test_a_bakeoff_with_levels_holds_back_a_branch_holm_does_not_pass():
+    """Three branches through `_analyse`: two read "use" on level 2 alone, the weaker one is held back."""
+    from evolvekit.confirm import apply_holm
+
+    comparison = Comparison(label="t", objective="dph", direction="maximize", stage="full", seeds=[1],
+                            instances=["a", "b", "c", "d"], baseline_id="g000-c0001", candidates=["s", "w", "n"],
+                            levels=DESCRIBED)
+    waits = {"s": (4.0, 4.1, 3.9, 4.0), "w": (4.6, 4.98, 4.7, 4.85), "n": (5.0, 5.1, 4.9, 5.0)}
+    for i, instance in enumerate(("a", "b", "c", "d")):
+        comparison.runs.append({"configuration": BASELINE, "instance": instance, "seed": 1, "ok": True,
+                                "kpis": {"dph": 10.0, "wait": 5.0}})
+        for cid, wait in waits.items():
+            comparison.runs.append({"configuration": cid, "instance": instance, "seed": 1, "ok": True,
+                                    "kpis": {"dph": 10.0, "wait": wait[i]}})
+    _analyse(comparison)
+    weak = comparison.per_candidate["w"]["levels"]["levels"][1]["chance"]
+    assert 0.95 <= weak < 0.975, f"the fixture: the weaker branch passes alone but not second of three ({weak})"
+    assert [decision_of(comparison.per_candidate[c]) for c in "swn"] == ["use", "use", "keep"]
+    apply_holm(comparison.per_candidate, what="branches")
+    assert [decision_of(comparison.per_candidate[c]) for c in "swn"] == ["use", "keep", "keep"]
+    assert "Chosen among 3 branches (Holm): does not pass" in render_markdown(comparison)
+
+
+def test_whether_runs_can_help_is_read_on_the_level_the_descent_stopped_on():
+    """Fix round 1, item 7: level 1 (the objective) has no run noise at all, so on its numbers more runs
+    could never help; level 2 decides `keep` and its gains are mostly run noise, so they can."""
+    from evolvekit.confirm import runs_can_help, within_share
+
+    rng = _random.Random(31)
+    comparison = Comparison(label="t", objective="dph", direction="maximize", stage="full", seeds=[1, 2, 3],
+                            instances=["a", "b", "c", "d"], baseline_id="g000-c0001", candidates=["c"],
+                            levels=DESCRIBED)
+    for instance, size in (("a", 10.0), ("b", 20.0), ("c", 40.0), ("d", 80.0)):
+        for seed in (1, 2, 3):
+            comparison.runs += [
+                {"configuration": BASELINE, "instance": instance, "seed": seed, "ok": True,
+                 "kpis": {"dph": size, "wait": 5.0}},
+                {"configuration": "c", "instance": instance, "seed": seed, "ok": True,
+                 "kpis": {"dph": size, "wait": 5.0 * math.exp(rng.gauss(0, 0.05))}},
+            ]
+    _analyse(comparison)
+    result = comparison.per_candidate["c"]
+    assert result["levels"]["read_on"] == 2 and decision_of(result) == "keep"
+    assert within_share(result["per_instance"]) == 0.0, "on the objective's gains, runs could not help"
+    assert runs_can_help(result) is True, "on level 2's, they can"

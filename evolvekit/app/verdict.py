@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Any
 
 from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, LIMITED_BY_CASES, RULE_WORDS, USE_CHANCE, decide,
-                               identical_runs, is_posterior, t_cdf)
+                               decision_of, identical_runs, is_posterior, read_on_row, t_cdf)
 
 __all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "why_keep"]
@@ -266,8 +266,28 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                 "advice": f"{keep} for now: nothing in these runs tells the change from today's."}
     if "levels" in result:
         levels = result["levels"]
-        decision = final.get("decision") or levels.get("decision") or ("use" if levels.get("confirmed") else "keep")
+        decision = final.get("decision") or decision_of(result)
         base["decision"] = decision
+        row = read_on_row(levels)
+        if row is not None:
+            # The numbers are those of the level the descent stopped on -- the one the decision is
+            # read on -- never the first level's when another decided; `numbers_from` says which.
+            percent = row.get("unit") == "percent"
+            row_chance = row.get("chance")
+            base.update({
+                "n": int(row.get("n") or 0),
+                "mean": _number(row.get("mean_difference")) if percent else None,
+                "ci95": list(row["ci95"]) if percent and row.get("ci95") else None,
+                "worst_pct": _number(row.get("worst")) if percent else None,
+                "chance": row_chance, "chance_words": _chance_words(row_chance, True),
+                "numbers_from": {"level": row.get("level"), "kpi": row.get("kpi"), "unit": row.get("unit"),
+                                 "deciding": levels.get("deciding") == row.get("level")},
+            })
+        held = result.get("holm") or {}
+        if held.get("passed") is False and held.get("own") == "use":
+            return {**base, "state": "unclear", "levels": levels.get("levels"),
+                    "line": f"Not proven on {cases} with {held['k']} {held['what']} compared: {levels.get('verdict')}.",
+                    "advice": f"{keep} for now: the gain is not proven among {held['k']} {held['what']} compared."}
         if decision == "use":
             return {**base, "state": "confirmed", "levels": levels.get("levels"),
                     "line": f"Probably better on {cases}: {levels.get('verdict')}.", "advice": use_advice}
@@ -477,7 +497,9 @@ def _level_direction(row: dict[str, Any]) -> str:
 
 
 def _levels(study: Any, harness: Any, levels: dict[str, Any]) -> list[dict[str, Any]]:
-    """One entry per goal level, in order of importance, `deciding` on the one that decided."""
+    """One entry per goal level, in order of importance, `deciding` on the one that decided and
+    `read_on` on the one the descent stopped on (the deciding one, else where it could go no
+    further): the page's figures are that level's."""
     deciding = levels.get("deciding")
     entries = []
     for index, row in enumerate(levels.get("levels") or [], start=1):
@@ -486,10 +508,11 @@ def _levels(study: Any, harness: Any, levels: dict[str, Any]) -> list[dict[str, 
         entries.append({
             **_measure_of(study, harness, str(row.get("kpi") or ""), _level_direction(row)),
             "mean_pct": _number(row.get("mean_difference")) if percent else None,
-            "ci95_pct": list(ci) if ci else None, "worst_pct": _number(ci[0]) if ci else None,
-            "chance": None, "chance_words": "",
+            "ci95_pct": list(ci) if ci else None, "worst_pct": _number(row.get("worst")) if percent else None,
+            "chance": row.get("chance"), "chance_words": _chance_words(row.get("chance"), True),
             "state": row.get("state"), "compared_in": row.get("unit"), "difference": _number(row.get("mean_difference")),
             "deciding": deciding == row.get("level", index),
+            "read_on": levels.get("read_on", deciding) == row.get("level", index),
         })
     return entries
 
@@ -543,7 +566,8 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     candidate = final.get("candidate") or next(iter((comparison or {}).get("per_candidate") or {}), None)
     result = ((comparison or {}).get("per_candidate") or {}).get(candidate) or {}
     levels = _levels(study, harness, result["levels"]) if isinstance(result.get("levels"), dict) else []
-    deciding = next((level for level in levels if level["deciding"]), levels[0] if levels else None)
+    deciding = next((level for level in levels if level["deciding"]),
+                    next((level for level in levels if level["read_on"]), levels[0] if levels else None))
     document["measure"] = ({k: deciding[k] for k in ("kpi", "label", "unit", "direction")} if deciding else
                            _measure_of(study, harness, goal["kpi"], goal["direction"]))
     seeds = len((comparison or {}).get("seeds") or []) or final.get("seeds") or None
@@ -553,6 +577,9 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     if decision not in _NO_ANSWER and named and not same:
         document.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"), "worst_pct": words.get("worst_pct"),
                          "chance": words.get("chance"), "chance_words": words.get("chance_words", "")})
+        if words.get("numbers_from"):
+            # With levels the figures are those of the level the descent stopped on: which one, said here.
+            document["numbers_from"] = words["numbers_from"]
     if levels and named and not same:
         document["levels"] = levels
     # A bake-off with no branch shown ahead names no branch: no figure of an unnamed one here either.

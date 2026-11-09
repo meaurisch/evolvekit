@@ -70,6 +70,7 @@ __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
     "t_cdf", "decide", "decision_of", "verdict_summary", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT",
     "WORSE_CHANCE", "RULE_WORDS", "LEGACY_RULE_WORDS", "is_posterior", "apply_holm", "comparison_of",
+    "read_on_row", "runs_can_help",
 ]
 
 BASELINE = "baseline"
@@ -152,8 +153,9 @@ def decision_of(result: dict[str, Any]) -> str:
         return "keep"
     if "levels" in result:
         levels = result["levels"]
-        return levels.get("decision") or ("use" if levels["confirmed"] else "keep")
-    decision = decide(result["summary"])
+        decision = levels.get("decision") or ("use" if levels["confirmed"] else "keep")
+    else:
+        decision = decide(result["summary"])
     if decision == "use" and (result.get("holm") or {}).get("passed") is False:
         return "keep"  # its own chance passes the rule; chosen among its rivals, it does not
     return decision
@@ -168,23 +170,41 @@ def apply_holm(results: Mapping[str, dict[str, Any]], *, what: str) -> None:
     `use` by its own summary keeps it only when Holm's step-down over the
     family passes on p = 1 - P(gain > 0) at `HOLM_ALPHA` (decision 13: one
     leg, the rule's own chance). The family is the results that are not
-    `identical`, have no `levels`, and carry A1's posterior over two
-    instances or more; with fewer than two of them there is no choice and
+    `identical` and carry A1's posterior over two instances or more, or --
+    a study scored by levels -- a levels `decision`: its p is one minus the
+    deciding level's chance when that decision is `use`, else 1 (it has no
+    "use" to keep). With fewer than two members there is no choice and
     nothing changes. Each member gets `result["holm"] = {"k", "what",
-    "own", "passed"}` (`own` is `decide` of its summary); `decision_of`
+    "own", "passed"}` (`own` is its decision before Holm); `decision_of`
     reads it. `what` is "branches", "candidates" or "kinds of case"."""
-    family = {
-        cid: r for cid, r in results.items()
-        if not r.get("identical") and "levels" not in r and (r.get("summary") or {}).get("n", 0) >= 2
-        and is_posterior(r["summary"]) and r["summary"].get("chance") is not None
-    }
+    family: dict[str, tuple[float, str]] = {}
+    for cid, r in results.items():
+        if r.get("identical"):
+            continue
+        levels = r.get("levels")
+        if isinstance(levels, dict):
+            if levels.get("decision") is None:
+                continue  # a levels result written before A1.5
+            row = read_on_row(levels)
+            use = levels["decision"] == "use" and row is not None and row.get("chance") is not None
+            family[cid] = (1.0 - float(row["chance"]) if use else 1.0, str(levels["decision"]))
+        elif ((r.get("summary") or {}).get("n", 0) >= 2 and is_posterior(r["summary"])
+              and r["summary"].get("chance") is not None):
+            family[cid] = (1.0 - float(r["summary"]["chance"]), decide(r["summary"]))
     if len(family) < 2:
         for r in results.values():
             r.pop("holm", None)
         return
-    passed = holm({cid: 1.0 - float(r["summary"]["chance"]) for cid, r in family.items()}, HOLM_ALPHA)
-    for cid, r in family.items():
-        r["holm"] = {"k": len(family), "what": what, "own": decide(r["summary"]), "passed": passed[cid]}
+    passed = holm({cid: p for cid, (p, _own) in family.items()}, HOLM_ALPHA)
+    for cid, (_p, own) in family.items():
+        results[cid]["holm"] = {"k": len(family), "what": what, "own": own, "passed": passed[cid]}
+
+
+def read_on_row(levels: dict[str, Any]) -> dict[str, Any] | None:
+    """The row of the level a levels result's descent stopped on
+    (`_analyse_levels`' `read_on`), or None for a result written before it."""
+    at, rows = levels.get("read_on"), levels.get("levels") or []
+    return rows[at - 1] if isinstance(at, int) and 1 <= at <= len(rows) else None
 
 
 CASES_LIMIT_SHARE = 0.25
@@ -221,8 +241,14 @@ def within_share(per_instance: Sequence[dict[str, Any]]) -> float | None:
 def runs_can_help(result: dict[str, Any]) -> bool:
     """Whether more runs per case could still open the answer: unless the
     cases' own spread is most of it (`within_share` under `CASES_LIMIT_SHARE`),
-    in which case only more held-back cases could."""
-    share = within_share(result.get("per_instance") or [])
+    in which case only more held-back cases could. With levels, the gains
+    are those of the level the descent stopped on, not the objective's."""
+    rows = result.get("per_instance") or []
+    row = read_on_row(result["levels"]) if isinstance(result.get("levels"), dict) else None
+    if row is not None and row.get("per_case") is not None:
+        # Scored by levels: the level the descent stopped on is the one more runs would have to open.
+        rows = [{"log_gain": c["gain"], "pairs": c["pairs"], "seed_var": c["seed_var"]} for c in row["per_case"]]
+    share = within_share(rows)
     return share is None or share >= CASES_LIMIT_SHARE
 
 
@@ -845,8 +871,11 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
     the KPI's own units, and says so (`unit`). A pair only one side finished
     counts against the side that failed, as large as the largest gain
     measured on that level. A relative tolerance is a fraction of the
-    baseline's value; an absolute one is in the KPI's units (in percent of
-    the baseline's mean when the level is compared in percent).
+    baseline's value; an absolute one is in the KPI's units. On a level
+    compared in percent an absolute tolerance is taken as that percent of
+    the baseline's mean (`100 * t / |mean|`) -- an approximation: the
+    interval is per-case log ratios shown in percent, and a case far from
+    the mean has its own percent for the same absolute difference.
 
     Every level but the last has a tolerance `w`, and its 95 % interval
     `[lo, hi]` judges it (two one-sided tests, 1 in 40 per side): *equal*
@@ -858,11 +887,17 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
     is read by the rule that decides without levels (`decide` on its
     posterior), so "use" means the same with and without them: `decision`
     is `use`, `worse` or `keep`, `confirmed` is `decision == "use"`, and a
-    level's `clear` says that the rule spoke on it.
+    level's `clear` says that the rule spoke on it; when the rule does not
+    speak on the last level, the verdict says it "is not proven either way".
+    `read_on` is the level the descent stopped on -- the deciding one, else
+    the one that could not be compared, else the last -- whose numbers
+    (`worst` the 5 % quantile, `chance`) the page shows and whose per-case
+    gains (`per_case`) say whether more runs could help (`runs_can_help`).
     """
     rows: list[dict[str, Any]] = []
     parts: list[str] = []
     deciding: int | None = None
+    stopped: int | None = None  # a level that could not be compared at all
     decision = "keep"
     judging = True  # until a level decides, or cannot be compared at all
     for index, level in enumerate(comparison.levels):
@@ -885,7 +920,8 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
             return sign * (mine[key] - base[key])
 
         largest = max((abs(difference(k)) for k in shared), default=None)
-        per_instance = []
+        per_instance: list[float] = []
+        per_case: list[dict[str, Any]] = []
         for instance in comparison.instances:
             differences = []
             for key in [(instance, seed) for seed in comparison.seeds]:
@@ -897,6 +933,8 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
                     differences.append(largest)
             if differences:
                 per_instance.append(fmean(differences))
+                per_case.append({"instance": instance, "gain": per_instance[-1], "pairs": len(differences),
+                                 "seed_var": statistics.variance(differences) if len(differences) >= 2 else None})
         summary = _level_summary(per_instance, unit, direction)
         tolerance = level.get("tolerance")
         tolerance_abs = within = None
@@ -931,8 +969,9 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
             "level": index + 1, "kpi": kpi, "direction": level.get("direction"), "unit": unit,
             "tolerance": tolerance, "relative": bool(level.get("relative")), "tolerance_abs": tolerance_abs,
             "tolerance_in_unit": within, "baseline_mean": baseline_mean, "mean_difference": mean,
-            "ci95": interval, "chance": summary["chance"], "n": summary["n"], "wins": summary["wins"],
-            "losses": summary["losses"], "state": state, "clear": clear,
+            "ci95": interval, "worst": summary["worst"], "chance": summary["chance"], "n": summary["n"],
+            "wins": summary["wins"], "losses": summary["losses"], "state": state, "clear": clear,
+            "per_case": per_case,
         })
         if not judging:
             continue  # below the deciding level: reported, not judged
@@ -943,20 +982,18 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
         elif state in ("better", "worse"):
             deciding, judging = index + 1, False
             decision = summary["decision"] if spoke else "keep"
-            parts.append(
-                f"{state} on level {index + 1} ({kpi}): "
-                + ("clear" if clear else "not distinguishable from the baseline")
-            )
+            parts.append(f"{state} on level {index + 1} ({kpi}): clear" if clear
+                         else f"level {index + 1} ({kpi}) is not proven either way")
         elif state == "undecided":
             deciding, judging = index + 1, False
             parts.append(f"level {index + 1} ({kpi}) is not yet decided within {within_words}")
         elif state == "equal":
             parts.append(f"equal on level {index + 1} ({kpi})")
         else:
-            judging = False
+            judging, stopped = False, index + 1
             parts.append(f"level {index + 1} ({kpi}): no pair of runs to compare")
-    return {"levels": rows, "deciding": deciding, "verdict": ", ".join(parts), "decision": decision,
-            "confirmed": decision == "use"}
+    return {"levels": rows, "deciding": deciding, "read_on": deciding or stopped or (len(rows) or None),
+            "verdict": ", ".join(parts), "decision": decision, "confirmed": decision == "use"}
 
 
 def _level_summary(gains: Sequence[float], unit: str, direction: str) -> dict[str, Any]:
@@ -966,14 +1003,15 @@ def _level_summary(gains: Sequence[float], unit: str, direction: str) -> dict[st
     (`posterior_mean_t`) on the plain differences."""
     if unit == "percent":
         s = verdict_summary(gains, direction=direction)
-        return {key: s[key] for key in ("n", "mean", "ci95", "chance", "wins", "losses", "decision")}
+        return {key: s[key] for key in ("n", "mean", "ci95", "worst", "chance", "wins", "losses", "decision")}
     n = len(gains)
-    out: dict[str, Any] = {"n": n, "mean": fmean(gains) if gains else None, "ci95": None, "chance": None,
-                           "wins": sum(1 for g in gains if g > 0), "losses": sum(1 for g in gains if g < 0)}
+    out: dict[str, Any] = {"n": n, "mean": fmean(gains) if gains else None, "ci95": None, "worst": None,
+                           "chance": None, "wins": sum(1 for g in gains if g > 0),
+                           "losses": sum(1 for g in gains if g < 0)}
     if n >= 2:
         post = posterior_mean_t(gains)
-        out.update(mean=post.mu, ci95=list(post.interval95()), chance=post.p_above(0.0),
-                   posterior={"mu": post.mu, "scale": post.scale, "df": post.df})
+        out.update(mean=post.mu, ci95=list(post.interval95()), worst=post.quantile_low(0.05),
+                   chance=post.p_above(0.0), posterior={"mu": post.mu, "scale": post.scale, "df": post.df})
     out["decision"] = decide(out)
     out.pop("posterior", None)
     return out

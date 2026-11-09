@@ -224,6 +224,43 @@ def test_verdict_levels_mark_the_deciding_level(use_run):
     assert jobs.results(root, run, document_of)["final"]["line"] == v["line"]
 
 
+def _level_two_decides(root: Path, run: str, decision: str) -> dict:
+    """Level 1 equal, level 2 decides `decision`: the rows as `_analyse_levels` writes them (A1.5)."""
+    path = root / "runs" / run / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    row = {"direction": "minimize", "unit": "percent", "n": 3, "wins": 2, "losses": 1, "tolerance": None}
+    second = ({"mean_difference": 6.0, "ci95": [2.0, 10.0], "worst": 3.1, "chance": 0.99, "state": "better"}
+              if decision == "use" else
+              {"mean_difference": -6.0, "ci95": [-10.0, -2.0], "worst": -9.0, "chance": 0.01, "state": "worse"})
+    comparison["per_candidate"]["c1"]["levels"] = {
+        "levels": [{**row, "level": 1, "kpi": "tour_length", "mean_difference": 0.1, "ci95": [-0.4, 0.6],
+                    "worst": -0.3, "chance": 0.55, "state": "equal", "clear": False, "tolerance": 0.01},
+                   {**row, "level": 2, "kpi": "longest_leg", "clear": True, **second}],
+        "deciding": 2, "read_on": 2, "decision": decision, "confirmed": decision == "use",
+        "verdict": f"equal on level 1 (tour_length within 1 %), {second['state']} on level 2 (longest_leg): clear"}
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+    return comparison["per_candidate"]["c1"]["levels"]["levels"][1]
+
+
+@pytest.mark.parametrize("decision", ["use", "worse"])
+def test_the_numbers_on_the_page_are_the_deciding_levels(run_of, decision):
+    """A1.5 fix round 1, I1/I3: level 1 equal, level 2 decides: the page's chance, range and
+    "at worst" are level 2's, never level 1's, and say which level they are."""
+    root, run = run_of(decision)
+    second = _level_two_decides(root, run, decision)
+    v = build_verdict(root, run)
+    assert v["decision"] == decision and v["measure"]["kpi"] == "longest_leg"
+    assert v["chance"] == second["chance"] and v["ci95_pct"] == second["ci95"] and v["worst_pct"] == second["worst"]
+    assert v["mean_pct"] == second["mean_difference"]
+    assert v["numbers_from"] == {"level": 2, "kpi": "longest_leg", "unit": "percent", "deciding": True}
+    assert v["chance_words"] == _chance_words(second["chance"])
+    assert v["line"].startswith("Probably better" if decision == "use" else "Worse")
+    deciding = [level for level in v["levels"] if level["deciding"]]
+    assert len(deciding) == 1 and deciding[0]["worst_pct"] == second["worst"], "the 5 % quantile, not the range's end"
+    assert deciding[0]["chance"] == second["chance"]
+    assert jobs.results(root, run, document_of)["final"]["line"] == v["line"]
+
+
 def test_verdict_never_contains_nan(use_run):
     root, run = use_run
     path = root / "runs" / run / "confirm" / "final" / "comparison.json"
