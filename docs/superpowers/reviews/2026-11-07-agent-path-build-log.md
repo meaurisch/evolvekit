@@ -355,3 +355,60 @@ Both rounds: the campaign ran only inside the weekend, nothing claimed "better" 
 ### PR
 
 [meaurisch/evolvekit#75](https://github.com/meaurisch/evolvekit/pull/75), stacked on #74; opened 2026-11-08 from `agent/4-over-time` (f03ab98 plus the logs).
+
+## Project 5 — The installer
+
+Branch `agent/5-installer` from `agent/4-over-time`. Plan:
+[2026-11-07-agent-5-installer.md](../plans/2026-11-07-agent-5-installer.md), expanded to step level by a planner
+(900 lines, six tasks), then the builder check; its four questions and the planner's three were ruled and folded in
+(D31–D38, D12 rewritten).
+
+### Decisions
+
+- **No Windows account was created** for the persona gate: a persistent system change the owner has not approved.
+  The gate ran under a simulated fresh profile instead (USERPROFILE, APPDATA, LOCALAPPDATA and TEMP into
+  `C:\gate\p5\Users\Zoë Intern`, no Python on PATH); what only a real second account would show is not covered.
+- **PyInstaller only through the `dist` extra**, pinned to the newest release at least 14 days old (6.22.3, uploaded
+  2026-09-12); nothing system-wide, no signing, no Defender exclusions.
+- **PyVRP is not bundled**: `tasks.py dist` packs `pyvrp-1.0.0.zip` beside the app's zip and the planner installs it
+  from Home; demo-tour and prompt-tune (with `examples/prompt-pipeline`) are the built-ins. The version stays 0.3.0.
+- **The exe is its own Python**: one function, `resources.python_argv()` and its variants, replaces every
+  `sys.executable` use; `evolvekit-cli.exe -m`/`-c`/`--script`/a `.py` run as python would, multiprocessing workers
+  included; a `python` harness keeps the application's own Python.
+- **Nothing in the app's folder**: a CLI command that would write there, or any library home inside it, is refused;
+  a bare `stop` on the app exe is `app stop`; only git-tracked files are bundled.
+- **An engine bug from 2026-09-26 fixed here** (found by the persona gate): the first round was priced as the
+  starting point's time times every child, ignoring screening, so a short study could stop before its first round and
+  say it found nothing better. It is now priced stage by stage; a search that does not run says so everywhere.
+
+The final whole-branch review (most capable model): with fixes, 0 Critical, 2 Important (no
+`multiprocessing.freeze_support` in the frozen entry; updating instructions that failed while a study ran), 7 minors;
+one fix wave took them, and its re-review found nothing open.
+
+### Gate
+
+| Commit | Command | Result |
+|---|---|---|
+| b563b89 | `python tasks.py check`, nothing else running | exit 0: **2678 passed, 5 skipped** in 27:54 |
+| 9b48f98 | the same, after the persona gate's fixes | exit 0: **2711 passed, 5 skipped** in 28:23 |
+
+The build at 9b48f98: `evolvekit-app-0.3.0-win64.zip` 37.9 MB (39,712,404 bytes), `pyvrp-1.0.0.zip` 104 KB;
+`tests/dist_smoke.py` 14 of 14.
+
+### Persona gate
+
+An intern, not a programmer, installs evolvekit from its zip on a "new" Windows profile, adds PyVRP from its zip,
+runs a ten-minute study of PyVRP's settings and stops the app. Log:
+[2026-11-08-installer-gate-log.md](2026-11-08-installer-gate-log.md).
+
+| Round | Code | Score | Blocker | What it found |
+|---|---|---|---|---|
+| 1 | b563b89 | 5/10 | yes | the first Start "finished" in 37 s with nothing searched (the engine bug above); no install confirmation; the report led with the search figure |
+| 2 | 506a9d2 | **8/10** | none | **pass**; one search figure differed between the report and the page (fixed before the gate); a time per case below the harness's own unwarned (fixed) |
+
+Both rounds: the runs were the bundle's `evolvekit-cli.exe` and the solves PyVRP's own Python, the extracted folder
+was byte-for-byte the zip, the home was under the simulated profile, the app stopped, no scheduled task existed, and
+the owner's real home was untouched.
+
+### PR
+
