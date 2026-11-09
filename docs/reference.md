@@ -28,11 +28,13 @@ That runs the bin-packing example for six generations against the `fake`
 provider — no network, no API keys, about ten seconds — and prints a
 leaderboard, an economics table and a spend summary. The seed heuristic (best
 fit) scores −5.871; the run improves twice, to −5.620 and then to −5.370,
-spreads its candidates across five archive cells, and rejects eleven of its
-twenty: one no-op, six duplicates, two behavioural twins, one block that tried
-to `import os` (stage 0, the only hard reject) and one response that came back
-in neither of the two formats it was asked for. One further child is flagged as
-a near-duplicate and evaluated anyway. Along the way the breadth grows from
+spreads its candidates across four archive cells, and rejects ten of its
+twenty: one no-op, four duplicates, two behavioural twins, one block that tried
+to `import os` (stage 0, the only hard reject), one response that came back in
+neither of the two formats it was asked for and one that gave back its parent
+unchanged. One further child is flagged as a near-duplicate and evaluated
+anyway, and two that finished are kept out of the ranking because their
+hold-out score fell below the seed's. Along the way the breadth grows from
 three children to four on the plateau and shrinks back to three once the search
 starts climbing again.
 
