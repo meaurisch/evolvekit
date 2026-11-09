@@ -990,6 +990,28 @@ re-derive the formula; these are the re-derivations.
 9. **"From the data" prior** (open question 2): σ0 = stdev(d) when there are no replicate runs,
    named `prior: "from the data"` in `comparison.json`; the statistician review weighs it.
 10. Open questions 3, 4, 8, 9, 10 and 12 as proposed.
+11. **Re-ruling during A1.2 (supersedes decisions 1 and 9 on the variance): the posterior uses
+    the reference prior.** The implementer measured, under the design's null procedure, 22–23 %
+    false "use" with the "from the data" prior and 13–14.5 % when cases differ more than runs.
+    Re-derived: σ0 = sd(d) adds sd² as a pseudo-observation, so νn·σn² = n·sd², νn = n + 1 and
+    the scale is sd/√(n+1) with n + 1 df instead of sd/√n with n − 1 — the data counted twice;
+    and a σ0 taken from run-to-run noise understates the case-to-case spread of the effects with
+    ν0 = 1 pseudo-observation behind it. The prior that is honest whatever the spread's source
+    is the reference prior p(μ, σ²) ∝ 1/σ² (the NIG limit κ0 → 0, ν0 → −1, σ0 → 0):
+    `μ | d ~ Student-t(n − 1, location dbar, scale s/√n)`, s the sample sd of the per-case
+    effects. `posterior_mean_t` computes that (it keeps its name and a docstring that states the
+    prior); the degenerate s = 0 case stays as decision 1 says (1 / 0 / 0.5); n = 1 is `single`.
+    The run-to-run noise (`kpi_cv`, the seed's pooled sd of log objective) is no longer a prior:
+    it is recorded in `comparison.json` as `run_noise` for engineers and A1.3 still uses the
+    per-case run variances. `prior` in `comparison.json` says `"reference"`. The mean shown is
+    dbar (decision 4 holds: it is the posterior mean). The null simulation asserts < 10 % "use"
+    under the design's procedure in **three** settings — runs noisier than cases, cases noisier
+    than runs, and no replicate runs — with enough seeded studies that the asserted bound is not
+    within two standard errors of the measured rate (use 1000 per setting if the test stays under
+    ~10 s, else mark it `slow`), printing each rate. If a setting fails, stop with the rates.
+    Cost if wrong: the chance is the frequentist one-sided t level read as a posterior under a
+    stated flat prior — exactly what S1 asked to be stated, now stated in `comparison.json` and
+    the docs.
 
 ## Open questions for the builder check
 
