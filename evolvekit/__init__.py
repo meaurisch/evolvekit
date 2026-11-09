@@ -7,7 +7,7 @@ small/strong routing, the structural and behavioural novelty filters, and the
 meta-scratchpad; then the near-duplicate gate, the USD-per-improvement view
 and its two stop rules, adaptive breadth, and the circle-packing example.
 
-See README.md and docs/new-experiment.md.
+See docs/reference.md and docs/new-experiment.md.
 """
 
 __version__ = "0.3.0"
