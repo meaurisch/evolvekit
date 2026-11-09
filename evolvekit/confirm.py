@@ -187,7 +187,9 @@ def decision_of(result: dict[str, Any]) -> str:
     exactly the starting point's result (its change was not exercised, so
     there is nothing to decide on); by the levels when the study scores by
     levels (their `decision`; a result written before it had only
-    `confirmed`); else `decide` on its `verdict_summary`."""
+    `confirmed`); else `decide` on its `verdict_summary`. A "use" is kept
+    when it failed more runs than the starting point (`failed_more`) only by a
+    comparison written before A1 (no posterior), which keeps its answer."""
     if result.get("identical"):
         return "keep"
     if "levels" in result:
@@ -195,7 +197,8 @@ def decision_of(result: dict[str, Any]) -> str:
         decision = levels.get("decision") or ("use" if levels["confirmed"] else "keep")
     else:
         decision = decide(result["summary"])
-    if decision == "use" and failed_more(result) is not None:
+    legacy = "summary" in result and not is_posterior(result["summary"] or {})  # written before A1: its rule
+    if decision == "use" and not legacy and failed_more(result) is not None:
         return "keep"  # it failed more runs than the starting point did (decision 14a)
     if decision == "use" and (result.get("holm") or {}).get("passed") is False:
         return "keep"  # its own chance passes the rule; chosen among its rivals, it does not
@@ -204,6 +207,8 @@ def decision_of(result: dict[str, Any]) -> str:
 
 HOLM_ALPHA = 1.0 - USE_CHANCE
 """Holm's level over the candidates or branches of a family: one minus the chance "use" needs."""
+BEFORE_HOLM = "its own answer, before the choice among several (Holm): the result's decision decides"
+"""A family member's `summary.decision_label`: the result's `decision` is the answer after Holm."""
 
 
 def apply_holm(results: Mapping[str, dict[str, Any]], *, what: str) -> None:
@@ -217,7 +222,10 @@ def apply_holm(results: Mapping[str, dict[str, Any]], *, what: str) -> None:
     "use" to keep). With fewer than two members there is no choice and
     nothing changes. Each member gets `result["holm"] = {"k", "what",
     "own", "passed"}` (`own` is its decision before Holm); `decision_of`
-    reads it. `what` is "branches", "candidates" or "kinds of case"."""
+    reads it, and `result["decision"]` is what it reads after Holm, every
+    result's (R3). In a family, a summary not under levels labels its own
+    `decision` as the answer before Holm (`BEFORE_HOLM`). `what` is
+    "branches", "candidates" or "kinds of case"."""
     family: dict[str, tuple[float, str]] = {}
     for cid, r in results.items():
         if r.get("identical"):
@@ -235,10 +243,19 @@ def apply_holm(results: Mapping[str, dict[str, Any]], *, what: str) -> None:
     if len(family) < 2:
         for r in results.values():
             r.pop("holm", None)
-        return
-    passed = holm({cid: p for cid, (p, _own) in family.items()}, HOLM_ALPHA)
-    for cid, (_p, own) in family.items():
-        results[cid]["holm"] = {"k": len(family), "what": what, "own": own, "passed": passed[cid]}
+    else:
+        passed = holm({cid: p for cid, (p, _own) in family.items()}, HOLM_ALPHA)
+        for cid, (_p, own) in family.items():
+            results[cid]["holm"] = {"k": len(family), "what": what, "own": own, "passed": passed[cid]}
+    for r in results.values():
+        summary = r.get("summary")
+        if isinstance(summary, dict) and "levels" not in r:
+            if "holm" in r:
+                summary["decision_label"] = BEFORE_HOLM
+            elif summary.get("decision_label") == BEFORE_HOLM:
+                summary.pop("decision_label")
+        if isinstance(summary, dict) or isinstance(r.get("levels"), dict):
+            r["decision"] = decision_of(r)  # the answer after Holm; the summary's is before it
 
 
 def read_on_row(levels: dict[str, Any]) -> dict[str, Any] | None:
@@ -817,10 +834,13 @@ def _analyse(comparison: Comparison) -> None:
     candidate's own finished pairs -- a loss when the candidate failed, a win
     when the baseline did -- so a configuration that fails often cannot be
     judged on its lucky runs, and a failure never weighs less than a real
-    result. When every finished pair of the candidate equals the baseline
-    (its own largest is 0), a failure is sized by the largest gain of any
-    candidate's finished pairs in this comparison, and by `log(1.01)` (1 %)
-    when that is 0 too: a crash is never a loss of 0 %. A pair in
+    result. When the candidate's finished pairs barely differ from the
+    baseline (its own largest is below `log(1.01)`), a pair only the candidate
+    failed is sized by the largest gain of any candidate's finished pairs in
+    this comparison, and by at least `log(1.01)` (1 %): a crash is never a
+    loss of 0 %. A pair only the baseline failed keeps the candidate's own
+    largest, so a change that does nothing gains nothing from the baseline's
+    crashes. A pair in
     which both failed, or with a value of 0 or below on either side (a log
     ratio of it is no number), says nothing about either and is left out.
     Every kind is counted, and the summary over finished pairs alone is kept
@@ -842,12 +862,13 @@ def _analyse(comparison: Comparison) -> None:
     anywhere = max((g for g in map(largest_of, comparison.candidates) if g is not None), default=0.0)
     for cid in comparison.candidates:
         mine = table.get(cid, {})
-        largest = largest_of(cid)
+        largest = win = largest_of(cid)  # the size of a loss (the candidate failed) and of a win (the baseline did)
         planned_keys = [(instance, s) for instance in comparison.instances for s in comparison.seeds]
         if (largest is not None and largest < _SMALLEST_FAILURE_LOG
-                and any((k in base) != (k in mine) for k in planned_keys)):
-            # Its finished pairs barely differ from the baseline, and a pair only one side finished:
-            # a failure still counts as a real loss (or win), at least 1 % (decision 14a).
+                and any(k in base and k not in mine for k in planned_keys)):
+            # Its finished pairs barely differ from the baseline, and a pair the baseline finished and it did
+            # not: its crash still counts as a real loss, at least 1 % (decision 14a). The floor is the
+            # loss's only: a crash of the baseline is a win as large as the candidate's own (R1).
             largest = max(largest, anywhere, _SMALLEST_FAILURE_LOG)
         per_instance, finished_only = [], []
         for instance in comparison.instances:
@@ -868,8 +889,8 @@ def _analyse(comparison: Comparison) -> None:
                         gains.append(-largest)
                 elif key in mine:
                     counts["baseline_failed_pairs"] += 1
-                    if largest is not None:
-                        gains.append(largest)
+                    if win is not None:
+                        gains.append(win)
                 else:
                     counts["both_failed_pairs"] += 1
             gains = finished + gains
@@ -895,7 +916,7 @@ def _analyse(comparison: Comparison) -> None:
         totals = {name: sum(r[name] for r in per_instance) for name in (*_PAIR_COUNTS, "failed_pairs")}
         one_sided = {key: totals[key] for key in ("candidate_failed_pairs", "baseline_failed_pairs")}
         summary = verdict_summary(log_gains, direction=direction, failed=one_sided)
-        summary["verdict"] += _counted_as(totals, largest, direction)
+        summary["verdict"] += _counted_as(totals, largest, win, direction)
         if comparison.levels:
             summary["decision_label"] = OBJECTIVE_ALONE  # the levels decide (`_analyse_levels`)
         comparison.per_candidate[cid] = {
@@ -904,7 +925,7 @@ def _analyse(comparison: Comparison) -> None:
             "summary": summary,
             "finished_only": verdict_summary(finished_only, direction=direction),
             "failure_counted_as_log": largest,
-            "failure_counted_as_pct": _failure_sizes(largest, direction),
+            "failure_counted_as_pct": _failure_sizes(largest, win, direction),
             "pairs": sum(r["pairs"] for r in per_instance),
             "pairs_planned": planned,
             "failed_runs": failed,
@@ -921,14 +942,15 @@ def _analyse(comparison: Comparison) -> None:
                     levels["decision"], levels["confirmed"] = "keep", False
 
 
-def _failure_sizes(largest: float | None, direction: str) -> dict[str, float] | None:
+def _failure_sizes(largest: float | None, win: float | None, direction: str) -> dict[str, float] | None:
     """The imputed pairs in percent, as the comparison used them: a pair only
     the candidate failed counts as `-largest`, a loss of `-pct_from_log(-largest)`;
-    one only the baseline failed as `+largest`, a win of `pct_from_log(largest)`.
-    The two differ (twice the cost is 100 % more, half of it 50 % less)."""
-    if largest is None:
+    one only the baseline failed as `+win`, a win of `pct_from_log(win)` (`win`
+    is the candidate's own largest gain, `largest` that floored at 1 %). The two
+    differ (twice the cost is 100 % more, half of it 50 % less)."""
+    if largest is None or win is None:
         return None
-    return {"loss": -pct_from_log(-largest, direction), "win": pct_from_log(largest, direction)}
+    return {"loss": -pct_from_log(-largest, direction), "win": pct_from_log(win, direction)}
 
 
 def _pct_summary(summary: dict[str, Any], direction: str) -> dict[str, Any]:
@@ -961,7 +983,7 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
     the KPI's own units, and says so (`unit`). A pair only one side finished
     counts against the side that failed, as large as the largest gain
     measured on that level. A relative tolerance is a fraction of the
-    baseline's value; an absolute one is in the KPI's units. On a level
+    baseline's value (0 when that is 0); an absolute one is in the KPI's units. On a level
     compared in percent an absolute tolerance is taken as that percent of
     the baseline's mean (`100 * t / |mean|`) -- an approximation: the
     interval is per-case log ratios shown in percent, and a case far from
@@ -1030,7 +1052,8 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
         tolerance_abs = within = None
         if not last and tolerance is not None:
             relative = bool(level.get("relative"))
-            tolerance_abs = float(tolerance) * abs(baseline_mean) if relative and baseline_mean else float(tolerance)
+            # A fraction of a baseline of 0 is 0: only exactly equal is equal (R4).
+            tolerance_abs = float(tolerance) * abs(baseline_mean or 0.0) if relative else float(tolerance)
             if unit == "percent":
                 within = 100.0 * float(tolerance) if relative else 100.0 * float(tolerance) / abs(baseline_mean)
             else:
@@ -1107,12 +1130,12 @@ def _level_summary(gains: Sequence[float], unit: str, direction: str) -> dict[st
     return out
 
 
-def _counted_as(totals: dict[str, int], largest: float | None, direction: str) -> str:
+def _counted_as(totals: dict[str, int], largest: float | None, win: float | None, direction: str) -> str:
     """What the verdict has to say about pairs that did not simply finish.
-    `largest` is the largest log gain measured; each imputed pair is said in
-    the percent it was counted as (`_failure_sizes`)."""
+    `largest` and `win` are the log sizes of a loss and of a win (`_failure_sizes`);
+    each imputed pair is said in the percent it was counted as."""
     notes = []
-    sizes = _failure_sizes(largest, direction)
+    sizes = _failure_sizes(largest, win, direction)
     for key, side, what, size in (("candidate_failed_pairs", "the candidate", "a loss", "loss"),
                                   ("baseline_failed_pairs", "the baseline", "a win", "win")):
         if totals[key] and sizes is not None:
@@ -1161,7 +1184,8 @@ def render_markdown(comparison: Comparison) -> str:
             lines += [f"{together} (Holm): "
                       f"{'passes' if holm_info['passed'] else 'does not pass'} the rule's chance at its stricter level.", ""]
         if result.get("levels"):
-            lines += _levels_markdown(result["levels"], LEGACY_RULE_WORDS if legacy else RULE_WORDS)
+            lines += _levels_markdown(result["levels"], LEGACY_RULE_WORDS if legacy else RULE_WORDS,
+                                      verdict=_levels_verdict(result))
         sizes = result.get("failure_counted_as_pct")
         counted = (
             f"{result['pairs']} of {result['pairs_planned']} (instance, seed) pairs are in the comparison, "
@@ -1215,7 +1239,7 @@ def render_markdown(comparison: Comparison) -> str:
         if isinstance(result.get("levels"), dict):
             # Goals in order of importance decide: their answer is the bold one, the objective's is the engineers'.
             answer = _LEVELS_ANSWER.get(decision_of(result), "Not proven")
-            head = (f"**{answer}: {result['levels']['verdict']}.**\n\n"
+            head = (f"**{answer}: {_levels_verdict(result)}.**\n\n"
                     f"{OBJECTIVE_ALONE[:1].upper() + OBJECTIVE_ALONE[1:]}: "
                     + head.replace("**", "").replace(f" {verdict}.", "").replace("Mean improvement", "mean improvement", 1))
         head_lines = [head, ""]
@@ -1259,9 +1283,23 @@ def _instance_rows(per_instance: Sequence[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _levels_markdown(levels: dict[str, Any], rule: str = RULE_WORDS) -> list[str]:
-    """The lexicographic verdict and one row per level (`_analyse_levels`); `rule` is the rule
-    the comparison was decided by, in words."""
+def _levels_verdict(result: dict[str, Any]) -> str:
+    """A levels result's verdict, and why it is not the levels' answer when `decision_of` says
+    otherwise (R2): every run gave the starting point's result, or Holm held it back."""
+    levels, said = result["levels"], str(result["levels"]["verdict"])
+    if decision_of(result) == levels.get("decision"):
+        return said
+    held = result.get("holm") or {}
+    if result.get("identical"):
+        return f"{said}; every run gave the starting point's result"
+    if held.get("passed") is False:
+        return f"{said}; not proven among {held['k']} {held['what']} (Holm)"
+    return said
+
+
+def _levels_markdown(levels: dict[str, Any], rule: str = RULE_WORDS, *, verdict: str | None = None) -> list[str]:
+    """The lexicographic verdict (`verdict`, else the levels' own) and one row per level
+    (`_analyse_levels`); `rule` is the rule the comparison was decided by, in words."""
 
     def number(value: Any, unit: str, signed: bool = False) -> str:
         if value is None:
@@ -1269,7 +1307,7 @@ def _levels_markdown(levels: dict[str, Any], rule: str = RULE_WORDS) -> list[str
         text = f"{value:+.4g}" if signed else f"{value:.4g}"
         return text + " %" if unit == "percent" else text
 
-    verdict = levels["verdict"]
+    verdict = verdict or levels["verdict"]
     lines = [
         "### Level by level",
         "",

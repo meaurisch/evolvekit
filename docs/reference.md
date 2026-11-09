@@ -1321,11 +1321,13 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
 - **A failure is a result.** When only one side of an (instance, seed) pair
   failed or timed out, that side lost the pair: it counts as a log ratio as
   large as the largest one measured on the candidate's own finished pairs —
-  at least 1 % when those barely differ from the baseline (then the largest of
-  any candidate in the comparison, or 1 %), so a crash is never a loss of 0 %
-  — a loss when the candidate failed, a win when the baseline did, and a
+  a loss when the candidate failed, a win when the baseline did. A loss is at
+  least 1 % when those pairs barely differ from the baseline (then the largest
+  of any candidate in the comparison, or 1 %), so a crash is never a loss of
+  0 %; a win keeps the candidate's own size, so a change that does nothing
+  gains nothing from the baseline's crashes. A
   candidate that failed more runs than the baseline is never *use* (see the
-  rule above) — so a configuration that
+  rule above), so a configuration that
   crashes or hangs often cannot be judged on its lucky runs, and a failure
   never weighs less than a real result. It is said as the loss or win it
   counted as in percent (`failure_counted_as_pct`, `{loss, win}`: twice the

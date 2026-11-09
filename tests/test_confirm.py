@@ -1155,3 +1155,151 @@ def test_the_markdown_of_a_candidate_holm_held_back_does_not_say_better():
     text = render_markdown(comparison)
     assert "Chosen among 3 candidates (Holm): does not pass" in text
     assert "Not proven among 3 candidates (Holm)" in text and "Probably better" not in text
+
+
+def _equal_but_the_starting_point_crashes(crashed_cases: set[int], cases: int, *, gain: float = 0.0):
+    """Statistician round 3 (R1): the candidate equals the starting point on every finished pair
+    (or is about `gain` better), and the starting point crashes on seed 1 of `crashed_cases`."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse
+
+    comparison = Comparison(label="x", objective="cost", direction="minimize", stage="full", seeds=[0, 1, 2],
+                            instances=[f"c{i}" for i in range(cases)], baseline_id="seed", candidates=["c"])
+    rng = random.Random(3)
+    for i in range(cases):
+        for s in range(3):
+            value, ok = 100.0 + i, not (i in crashed_cases and s == 1)
+            comparison.runs.append({"configuration": BASELINE, "instance": f"c{i}", "seed": s, "ok": ok,
+                                    "kpis": {"cost": value} if ok else {}})
+            g = gain + rng.uniform(-gain / 10, gain / 10)
+            comparison.runs.append({"configuration": "c", "instance": f"c{i}", "seed": s, "ok": True,
+                                    "kpis": {"cost": value * math.exp(-g)}})
+    _analyse(comparison)
+    return comparison.per_candidate["c"]
+
+
+@pytest.mark.parametrize("crashed, cases", [({0, 1}, 2), ({0, 1, 2}, 4), ({0, 1, 2, 3}, 4)])
+def test_a_pair_only_the_starting_point_failed_is_no_win_for_a_change_that_does_nothing(crashed, cases):
+    """R1: the 1 % floor sizes the candidate's own failures only. A crash of the starting point
+    beside equal finished pairs counts as the candidate's own largest gain, 0: no use."""
+    result = _equal_but_the_starting_point_crashes(crashed, cases)
+    assert decision_of(result) == "keep" and result["summary"]["decision"] == "keep"
+    assert result["failure_counted_as_pct"]["win"] == pytest.approx(0.0)
+    assert "counted as a win of 0 %" in result["summary"]["verdict"]
+
+
+def test_a_real_gain_beside_starting_point_crashes_still_reads_use():
+    result = _equal_but_the_starting_point_crashes({0, 1, 2, 3}, 4, gain=0.03)
+    assert decision_of(result) == "use"
+    assert result["failure_counted_as_pct"]["win"] > 3.0, "a win as large as its own largest gain"
+
+
+def test_a_candidate_failure_beside_a_starting_point_failure_is_floored_only_as_a_loss():
+    """R1: the floor is the loss's; the win stays the own largest gain."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse
+
+    comparison = Comparison(label="x", objective="cost", direction="minimize", stage="full", seeds=[0, 1],
+                            instances=["a", "b"], baseline_id="seed", candidates=["c"])
+    for instance in ("a", "b"):
+        for s in (0, 1):
+            base_ok, mine_ok = (instance, s) != ("a", 1), (instance, s) != ("b", 1)
+            comparison.runs.append({"configuration": BASELINE, "instance": instance, "seed": s, "ok": base_ok,
+                                    "kpis": {"cost": 100.0} if base_ok else {}})
+            comparison.runs.append({"configuration": "c", "instance": instance, "seed": s, "ok": mine_ok,
+                                    "kpis": {"cost": 100.0} if mine_ok else {}})
+    _analyse(comparison)
+    result = comparison.per_candidate["c"]
+    assert result["failure_counted_as_log"] == pytest.approx(math.log(1.01))
+    assert result["failure_counted_as_pct"]["loss"] == pytest.approx(1.0)
+    assert result["failure_counted_as_pct"]["win"] == pytest.approx(0.0)
+    a, b = result["per_instance"]
+    assert a["log_gain"] == pytest.approx(0.0) and b["log_gain"] == pytest.approx(-math.log(1.01) / 2)
+
+
+def _levels_use():
+    from evolvekit.confirm import BASELINE, Comparison, _analyse
+
+    levels = [{"kpi": "cost", "direction": "minimize", "tolerance": 0.01, "relative": True},
+              {"kpi": "late", "direction": "minimize", "tolerance": None, "relative": False}]
+    comparison = Comparison(label="x", objective="cost", direction="minimize", stage="full", seeds=[0, 1, 2],
+                            instances=[f"i{i}" for i in range(4)], baseline_id="seed", candidates=["c"], levels=levels)
+    for i in range(4):
+        for s in range(3):
+            comparison.runs.append({"configuration": BASELINE, "instance": f"i{i}", "seed": s, "ok": True,
+                                    "kpis": {"cost": 100.0, "late": 10.0}})
+            comparison.runs.append({"configuration": "c", "instance": f"i{i}", "seed": s, "ok": True,
+                                    "kpis": {"cost": 100 * math.exp(-0.05 - 0.001 * i - 0.0005 * s), "late": 10.0}})
+    _analyse(comparison)
+    assert comparison.per_candidate["c"]["levels"]["decision"] == "use"
+    return comparison
+
+
+def test_a_holm_held_levels_result_says_not_proven_beside_its_clear_level():
+    """R2: under levels, a Holm-held result's levels verdict says why it is not use, in both places."""
+    from evolvekit.confirm import render_markdown
+
+    comparison = _levels_use()
+    result = comparison.per_candidate["c"]
+    plain = result["levels"]["verdict"]
+    result["holm"] = {"k": 3, "what": "candidates", "own": "use", "passed": False}
+    text = render_markdown(comparison)
+    said = plain + "; not proven among 3 candidates (Holm)"
+    assert f"**Not proven: {said}.**" in text
+    assert f"**{said[:1].upper() + said[1:]}.**" in text
+    assert "Probably better" not in text
+    del result["holm"]
+    result["identical"] = True
+    text = render_markdown(comparison)
+    assert f"**Not proven: {plain}; every run gave the starting point's result.**" in text
+
+
+def test_comparison_json_names_the_answer_after_holm():
+    """R3: a Holm-held candidate's result carries `decision` after Holm; its summary's decision is
+    labelled as the answer before it."""
+    from evolvekit.confirm import BEFORE_HOLM, apply_holm
+
+    results = {"g1": {"summary": _posterior_summary(0.999)}, "g2": {"summary": _posterior_summary(0.96)},
+               "g3": {"summary": _posterior_summary(0.5)}}
+    for r in results.values():
+        r["summary"]["decision"] = decide(r["summary"])
+    apply_holm(results, what="candidates")
+    assert results["g2"]["decision"] == "keep" and results["g2"]["summary"]["decision"] == "use"
+    assert results["g2"]["summary"]["decision_label"] == BEFORE_HOLM
+    assert results["g1"]["decision"] == "use" and results["g3"]["decision"] == "keep"
+    one, two = _levels_use().per_candidate["c"], _levels_use().per_candidate["c"]
+    apply_holm({"a": one, "b": two}, what="candidates")
+    assert one["decision"] == decision_of(one)
+    assert one["summary"]["decision_label"] != BEFORE_HOLM, "under levels the objective's label stays"
+
+
+def test_a_relative_tolerance_on_a_level_whose_starting_point_is_0_is_0():
+    """R4: a fraction of 0 is 0, never the tolerance in the measure's own units: only equal is equal."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse
+
+    levels = [{"kpi": "late", "direction": "minimize", "tolerance": 0.05, "relative": True},
+              {"kpi": "cost", "direction": "minimize", "tolerance": None, "relative": False}]
+
+    def compare(late: list[float]):
+        comparison = Comparison(label="x", objective="cost", direction="minimize", stage="full", seeds=[0, 1],
+                                instances=[f"i{i}" for i in range(4)], baseline_id="seed", candidates=["c"],
+                                levels=levels)
+        for i in range(4):
+            for s in range(2):
+                comparison.runs.append({"configuration": BASELINE, "instance": f"i{i}", "seed": s, "ok": True,
+                                        "kpis": {"cost": 100.0, "late": 0.0}})
+                comparison.runs.append({"configuration": "c", "instance": f"i{i}", "seed": s, "ok": True,
+                                        "kpis": {"cost": 90.0, "late": late[i]}})
+        _analyse(comparison)
+        return comparison.per_candidate["c"]["levels"]["levels"][0]
+
+    row = compare([0.01, 0.02, 0.03, 0.04])
+    assert row["tolerance_abs"] == 0.0 and row["state"] != "equal"
+    assert compare([0.0] * 4)["state"] == "equal"
+
+
+def test_a_comparison_written_before_a1_keeps_its_use_beside_failures():
+    """R5: the failure rule is A1's; a stored legacy use keeps its answer."""
+    legacy = {"summary": {"n": 3, "chance": 0.96, "worst": -0.5},
+              "candidate_failed_pairs": 2, "baseline_failed_pairs": 0}
+    assert decision_of(legacy) == "use"
+    a1 = {"summary": _posterior_summary(0.99), "candidate_failed_pairs": 2, "baseline_failed_pairs": 0}
+    assert decision_of(a1) == "keep"
