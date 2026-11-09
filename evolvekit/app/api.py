@@ -162,7 +162,9 @@ def _templates(harness: Harness) -> list[dict[str, Any]]:
 
 
 def get_settings(req: Request) -> dict[str, Any]:
-    return {**req.home.settings(), "keys": req.home.keys(), "home": str(req.home.root)}
+    """The settings, which keys are set (never their values), the home, and `frozen`: the app is the
+    installed one (`evolvekit-app.exe`), not a pip install (`evolvekit app`)."""
+    return {**req.home.settings(), "keys": req.home.keys(), "home": str(req.home.root), "frozen": resources.is_frozen()}
 
 
 def check_assistant(req: Request) -> dict[str, Any]:

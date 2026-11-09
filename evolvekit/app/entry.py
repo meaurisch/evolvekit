@@ -6,20 +6,28 @@ script of both:
 - `evolvekit-app.exe`, windowless: a double-click and the logon task. With no
   arguments it starts the app (its home under the user profile, the browser
   opened); when an app already runs for that home, its browser is opened
-  instead of a second app.
+  instead of a second app. Having no console, what it says goes to
+  `<home>/app.log`, as the service's does (`cli.cmd_app`).
 - `evolvekit-cli.exe`, with a console: the command line (every `evolvekit ...`
   command works as `evolvekit-cli.exe ...`), and evolvekit's Python, which
   runs `-m MODULE`, `-c CODE`, `--script FILE` and `FILE.py` as python does.
 
 The rule, on the first argument: `-m` / `-c` / `--script` / a `*.py` file are
-python's forms (python's own `-u`, `-B`, `-X OPT`, `-W OPT` before them are
-accepted and ignored); a command of the CLI, `--version`, `-h`, `--help` are
-the CLI (a bare `stop` on `evolvekit-app.exe` is the app's `stop`); anything
-else, nothing included, is the app (`evolvekit app ...`). Frozen, a CLI command
-that would write into the app's own folder is refused, and so is the app form
-whose library home is inside it: the app's folder unzipped as the default
-home, `<profile>/evolvekit` (`%USERPROFILE%` on Windows), cannot start (the
-README says not to unzip it there).
+python's forms (python's own `-u`, `-B`, `-X OPT`, `-W OPT` and the value-less
+`-I`, `-E`, `-s`, `-S`, `-O`, `-OO`, `-b`, `-q`, `-P` before them are accepted
+and ignored); a command of the CLI, `--version`, `-h`, `--help` are the CLI (a
+bare `stop` on `evolvekit-app.exe` is the app's `stop`); anything else, nothing
+included, is the app (`evolvekit app ...`), and so is `app ...` itself. Frozen,
+a CLI command that would write into the app's own folder is refused, and so is
+the app form whose library home is inside it: the app's folder unzipped as the
+default home, `<profile>/evolvekit` (`%USERPROFILE%` on Windows), cannot start
+(the README says not to unzip it there).
+
+Frozen, `multiprocessing.freeze_support()` comes before any of this: a worker
+that `multiprocessing` (or `ProcessPoolExecutor`) starts on evolvekit's Python
+is `evolvekit-cli.exe --multiprocessing-fork ...`, and runs as a worker; for a
+program run as a file, the worker reruns that file as `__mp_main__`, as under
+python (`_workers_rerun_the_file`).
 
 `evolvekit.cli` is imported for the CLI and the app forms only: python's forms
 (every helper process the app starts) do not pay for it.
@@ -75,7 +83,8 @@ _REFUSED = ("error: this is the app's own folder: run evolvekit-cli.exe from a f
 _HOME_IN_BUNDLE = ("The library home {home} is inside the app's own folder. Move the app's folder somewhere else "
                    "(for example to Downloads or Desktop), or start it with --home <a folder of yours>.")
 _NO_STDIN = "evolvekit-cli.exe cannot read a program from its input; give a file"
-_PYTHON_USAGE = "[-u] [-B] [-X OPT] [-W OPT] (-m MODULE | -c CODE | --script FILE | FILE.py) [args]"
+_PYTHON_USAGE = ("[-u] [-B] [-I] [-E] [-s] [-S] [-O] [-b] [-q] [-P] [-X OPT] [-W OPT] "
+                 "(-m MODULE | -c CODE | --script FILE | FILE.py) [args]")
 _CLI_FLAGS = ("--version", "-h", "--help")
 
 
@@ -163,11 +172,12 @@ def _usage(form: str) -> int:
 
 def _python_flags(argv: list[str]) -> int | None:
     """How many leading arguments are python's own flags (`-u`, `-B`, `-X OPT`,
-    `-W OPT`, and `-uB`, `-Xutf8`, `-Wignore`); None when one lacks its value."""
+    `-W OPT`, the value-less `-I`, `-E`, `-s`, `-S`, `-O`, `-b`, `-q`, `-P`, and
+    `-uB`, `-OO`, `-IsE`, `-Xutf8`, `-Wignore`); None when one lacks its value."""
     index = 0
     while index < len(argv):
         token = argv[index]
-        if re.fullmatch(r"-[uB]+", token) or (token[:2] in ("-X", "-W") and len(token) > 2):
+        if re.fullmatch(r"-[uBIEsSObqP]+", token) or (token[:2] in ("-X", "-W") and len(token) > 2):
             index += 1
         elif token in ("-X", "-W"):
             if index + 1 >= len(argv):
@@ -207,8 +217,23 @@ def _run_python(argv: list[str]) -> int:
         first, rest = rest[0], rest[1:]
     sys.argv = [first, *rest]
     sys.path.insert(0, os.path.dirname(os.path.abspath(first)))  # as `python FILE`: a sibling module imports
+    _workers_rerun_the_file()
     runpy.run_path(first, run_name="__main__")
     return 0
+
+
+def _workers_rerun_the_file() -> None:
+    """Frozen on Windows, `multiprocessing`'s spawn sends a worker no main module (`spawn.WINEXE`;
+    PyInstaller's runtime hook also sets `process.ORIGINAL_DIR` to None), so a worker's `__main__`
+    would be this entry and a pickled `__main__.square` is not found. For a program run as a file,
+    put back python's own rule: the worker reruns the file as `__mp_main__`."""
+    if not (resources.is_frozen() and sys.platform == "win32"):
+        return
+    import multiprocessing.process
+    import multiprocessing.spawn
+
+    multiprocessing.spawn.WINEXE = False
+    multiprocessing.process.ORIGINAL_DIR = os.path.abspath(os.getcwd())  # a relative FILE resolves against it
 
 
 def _with_absolute_home(argv: list[str]) -> tuple[Path, list[str]]:
@@ -279,6 +304,8 @@ def _dispatch(argv: list[str], *, frozen: bool, windowless: bool) -> int:
 
     first = argv[0] if argv else ""
     bare_app_stop = argv == ["stop"] and _is_app_exe()
+    if first == "app" and not any(flag in argv for flag in _CLI_FLAGS[1:]):  # `app ...` is the app form (help enters no home)
+        argv, first = argv[1:], None
     if (first in cli._COMMANDS or first in _CLI_FLAGS) and not bare_app_stop:
         if frozen and writes_into_bundle(argv):
             print(_REFUSED, file=sys.stderr)
@@ -300,6 +327,9 @@ def main(argv: list[str] | None = None) -> int:
     windowless = sys.stdout is None or sys.stderr is None
     opened = _frozen_process()
     try:
+        import multiprocessing
+
+        multiprocessing.freeze_support()  # `--multiprocessing-fork ...`: run the worker, then exit
         return _dispatch(argv, frozen=True, windowless=windowless)
     finally:
         for name, handle in opened:

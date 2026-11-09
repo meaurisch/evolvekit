@@ -49,8 +49,10 @@ Extract it into a folder of your own (Downloads, Desktop, Documents — never
 `C:\Users\<you>\evolvekit`, which is your library) and double-click
 `evolvekit-app.exe`. The exe is unsigned: if SmartScreen says *Windows
 protected your PC*, choose *More info*, then *Run anyway*, for a zip from your
-team only. The browser opens at the app; double-clicking again opens the app
-that is running. If no browser opens, run
+team only; if Windows or an antivirus blocks it with no *Run anyway*, ask your
+IT team. The browser opens at the app; double-clicking again opens the app
+that is running. Having no window, it logs to `<home>/app.log` as the service
+does. If no browser opens, run
 `"<the app's folder>\evolvekit-cli.exe" --no-browser` from a terminal in a
 folder of yours: it prints the address. PyVRP is not inside: install
 `pyvrp-1.0.0.zip`, which comes beside the app's zip, from Home.
@@ -58,8 +60,13 @@ folder of yours: it prints the address. PyVRP is not inside: install
 **Stopping it:** Settings → *Stop the app*, or `evolvekit app stop`
 (`"<the app's folder>\evolvekit-cli.exe" app stop`). Runs that are going carry on. Your library stays
 `C:\Users\<you>\evolvekit` (or `EVOLVEKIT_HOME`), never the app's folder.
-The README's [For planners: the installer](../README.md#for-planners-the-installer)
-has the rest: the command line, updating and removing.
+**Updating:** never extract a new zip over a folder whose files are in use: a
+study that is running holds them. When Home shows no study running, stop the
+app and extract over the old folder; while one runs, extract into a new folder
+and start it from there (make the shortcut and the logon task again from the
+new folder if you use them). The README's
+[For planners: the installer](../README.md#for-planners-the-installer) has the
+rest: the command line, updating and removing.
 
 ### The app as a service
 
@@ -152,7 +159,7 @@ opened again at any time:
   settings.yaml        the AI provider and models, the applications used before
   .env                 API keys: written by the app, never shown again
   app.json             while the app runs: where it is, and the key of this launch
-  app.log              what `app --service` did (no key in it)
+  app.log              what `app --service`, or the installer's double-clicked app, did (no key in it)
   clock.json           only during a rehearsal (`app --clock`), while that app runs
   harnesses/           harnesses you installed
   studies/<name>/      one folder per study: study.yaml, the pinned harness,

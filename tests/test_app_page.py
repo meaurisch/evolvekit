@@ -1050,4 +1050,16 @@ SETTINGS = (STATIC / "js" / "pages" / "settings.js").read_text(encoding="utf-8")
 def test_settings_offers_stop_the_app():
     assert '"Stop the app"' in SETTINGS and "/api/shutdown" in SETTINGS
     assert "Studies that are running carry on." in SETTINGS
-    assert "start evolvekit-app.exe, or run evolvekit app" in SETTINGS
+    assert "stoppedWords(st.saved.frozen)" in SETTINGS
+
+
+def test_the_stop_notice_speaks_of_how_the_app_was_started():
+    """The final review, minor 6 and Important 2: an installer user has no `evolvekit` command, a pip
+    user no evolvekit-app.exe; and extracting over a folder whose files a running study holds fails."""
+    out = _node(_page_function(SETTINGS, "stoppedWords"),
+                "process.stdout.write(JSON.stringify([stoppedWords(true), stoppedWords(false)]));")
+    assert out == ["The app has stopped. Studies that are running carry on. To open it again, double-click "
+                   "evolvekit-app.exe. To update the app, extract the new version over its folder only when no "
+                   "study is running (Home shows them); while one runs, extract it into a new folder and start "
+                   "it from there.",
+                   "The app has stopped. Studies that are running carry on. To open it again, run evolvekit app."]

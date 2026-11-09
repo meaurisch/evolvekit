@@ -188,6 +188,38 @@ def test_bundle_data_files_cover_package_data_and_built_ins():
     assert not any("__pycache__" in f or f.endswith(".pyc") or f.startswith(("tests/", "runs/", "docs/")) for f in files)
 
 
+def _git(root, *args):
+    import subprocess
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, timeout=60)
+
+
+def test_bundle_data_files_are_only_tracked_files(tmp_path):
+    root = tmp_path / "checkout ë"
+    tracked = ["evolvekit/app/static/app.html", "evolvekit/skills/shared/evolvekit.md",
+               "harnesses/demo-tour/harness.yaml", "harnesses/prompt-tune/runner.py",
+               "examples/cli-solver/solver.py", "examples/cli-solver/README.md",
+               "examples/prompt-pipeline/pipeline.py", "examples/prompt-pipeline/prompts/system.md",
+               "examples/prompt-pipeline/items/01-capital.json"]
+    untracked = ["evolvekit/app/static/scratch.html", "evolvekit/skills/shared/.env",
+                 "harnesses/demo-tour/.env", "harnesses/demo-tour/runs/r1/out.json", "harnesses/prompt-tune/notes ë.txt",
+                 "examples/prompt-pipeline/items/02-mine.json", "examples/prompt-pipeline/prompts/.env.local"]
+    shutil.copyfile(tasks.ROOT / "pyproject.toml", (root.mkdir() or root) / "pyproject.toml")
+    for name in tracked + untracked:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("x\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "add", "pyproject.toml", *tracked)
+    files = {Path(dest, Path(src).name).as_posix() for src, dest in bundle_files.data_files(root)}
+    assert files == set(tracked), "nothing untracked on the builder's disk (a .env, a scratch run) is ever bundled"
+
+
+def test_bundle_data_files_need_a_checkout(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))   # never a repository above the temp folder
+    shutil.copyfile(tasks.ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+    with pytest.raises(RuntimeError, match="git checkout"):
+        bundle_files.data_files(tmp_path)
+
+
 def test_bundle_stdlib_modules_leave_out_tests_and_idle():
     names = set(bundle_files.stdlib_modules())
     assert {"sqlite3", "csv", "json.decoder", "email.mime.text", "statistics"} <= names

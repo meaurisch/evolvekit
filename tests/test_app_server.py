@@ -197,6 +197,13 @@ def test_a_folder_is_not_a_harness_id(app):
     assert app.home.slugs() == []
 
 
+def test_settings_say_whether_the_app_is_installed(app, monkeypatch):
+    from evolvekit import resources
+    assert call(app, "GET", "/api/settings")[1]["frozen"] is False
+    monkeypatch.setattr(resources, "is_frozen", lambda: True)
+    assert call(app, "GET", "/api/settings")[1]["frozen"] is True
+
+
 def test_keys_are_accepted_and_never_sent_back(app, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     status, body = call(app, "PUT", "/api/settings", {"keys": {"OPENROUTER_API_KEY": "sk-or-v1-secret"}})

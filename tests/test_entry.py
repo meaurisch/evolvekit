@@ -85,7 +85,7 @@ def test_entry_stop_on_the_cli_exe_is_the_clis_own(tmp_path, monkeypatch, calls)
     ["leaderboard", "--run-dir", "OUTSIDE", "--html", "board.html"],
     ["study", "run", "_internal"], ["study", "compile", "_internal"], ["study", "preview", "_internal"],
     ["study", "list", "--home", "here"], ["study", "export", "depot", "--diff", "--home=."],
-    ["harness", "install", "x.zip", "--home", "lib"], ["doctor", "--home", "."], ["app", "--home", "."],
+    ["harness", "install", "x.zip", "--home", "lib"], ["doctor", "--home", "."],
     ["init", "OUTSIDE/../evolvekit app"],                        # an absolute path into the bundle
 ])
 def test_cli_refuses_to_write_into_the_bundle(tmp_path, monkeypatch, capsys, calls, argv):
@@ -215,7 +215,10 @@ def test_python_forms_without_their_argument_are_usage(tmp_path, monkeypatch, ca
     assert capsys.readouterr().err.startswith("usage: ")
 
 @pytest.mark.parametrize("flags", [["-u"], ["-B"], ["-uB"], ["-X", "utf8"], ["-Xutf8"], ["-W", "ignore"],
-                                   ["-u", "-X", "utf8", "-W", "ignore", "-B"]])
+                                   ["-u", "-X", "utf8", "-W", "ignore", "-B"],
+                                   # the final review: the value-less flags of `subprocess.run([sys.executable, "-I", ...])`
+                                   ["-I"], ["-E"], ["-s"], ["-S"], ["-O"], ["-OO"], ["-b"], ["-q"], ["-P"],
+                                   ["-IsE"], ["-I", "-u", "-X", "utf8"]])
 def test_pythons_own_flags_are_ignored(tmp_path, monkeypatch, flags):
     out = tmp_path / "flags.json"
     code = "import json, sys; open(sys.argv[1], 'w', encoding='utf-8').write(json.dumps(sys.argv))"
@@ -414,3 +417,160 @@ def test_help_names_the_program_it_runs_as(tmp_path, monkeypatch, capsys, frozen
         cli.main(["--help"])
     usage = capsys.readouterr().out.splitlines()[0]
     assert usage.startswith(f"usage: {resources.CLI_EXE} " if frozen else "usage: python -m evolvekit ")
+
+
+# -- the final review's fixes
+
+@pytest.mark.skipif(sys.platform != "win32", reason="multiprocessing's frozen spawn is Windows'")
+def test_a_multiprocessing_child_runs_as_a_worker(tmp_path, monkeypatch, calls):
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    import multiprocessing.spawn
+    workers = []
+    monkeypatch.setattr(multiprocessing.spawn, "spawn_main", lambda **kwds: workers.append(kwds))
+    monkeypatch.setattr(sys, "argv", [str(bundle / resources.CLI_EXE), "--multiprocessing-fork",
+                                      "parent_pid=11", "pipe_handle=22"])
+    with pytest.raises(SystemExit):
+        entry.main()
+    assert workers == [{"parent_pid": 11, "pipe_handle": 22}]
+    assert calls == [] and not (profile / "evolvekit").exists(), "a worker is neither the app nor the CLI"
+
+
+@pytest.mark.parametrize("frozen", [True, False])
+def test_freeze_support_comes_before_any_dispatch_when_frozen(tmp_path, monkeypatch, frozen):
+    import multiprocessing
+    if frozen:
+        fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    order = []
+    monkeypatch.setattr(multiprocessing, "freeze_support", lambda: order.append("freeze_support"))
+    monkeypatch.setattr(cli, "main", lambda argv=None: order.append("cli") or 0)
+    assert entry.main(["study", "list"]) == 0
+    assert entry.main(["-c", "pass"]) == 0
+    assert order == (["freeze_support", "cli", "freeze_support"] if frozen else ["cli"])
+
+
+@pytest.mark.parametrize("argv", [["app", "--no-browser"], ["app"], ["app", "stop"]])
+def test_the_cli_exes_app_takes_the_app_form(tmp_path, monkeypatch, calls, argv):
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    monkeypatch.chdir(bundle)
+    seen = []
+    monkeypatch.setattr(cli, "main", lambda argv=None: seen.append((list(argv), Path.cwd())) or 0)
+    assert entry.main(argv) == 0
+    assert len(seen) == 1 and seen[0][0] == argv
+    assert os.path.samefile(seen[0][1], profile / "evolvekit"), "the app works in its home (D5)"
+
+
+def test_the_cli_exes_app_help_enters_no_home(tmp_path, monkeypatch, calls):
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    monkeypatch.chdir(bundle)
+    assert entry.main(["app", "--help"]) == 0 and calls == [["app", "--help"]]
+    assert not (profile / "evolvekit").exists()
+
+
+@pytest.mark.parametrize("given", [["--home", "."], ["--home", "_internal"]])
+def test_the_cli_exes_app_refuses_a_home_in_the_bundle(tmp_path, monkeypatch, capsys, calls, given):
+    bundle = fake_bundle(monkeypatch, tmp_path / "Zoë Intern" / "evolvekit app", exe=resources.CLI_EXE)
+    monkeypatch.chdir(bundle)
+    before = _snapshot(bundle)
+    assert entry.main(["app", *given]) == 2 and calls == []
+    assert capsys.readouterr().err.strip() == _home_in_bundle((bundle / given[1]).resolve())
+    assert _snapshot(bundle) == before
+
+
+def test_the_cli_exes_app_unzipped_as_the_default_home_is_refused(tmp_path, monkeypatch, capsys, calls):
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    bundle = fake_bundle(monkeypatch, profile / "evolvekit", exe=resources.CLI_EXE)
+    monkeypatch.chdir(tmp_path)
+    before = _snapshot(bundle)
+    assert entry.main(["app", "--no-browser"]) == 2 and calls == []
+    assert capsys.readouterr().err.strip() == _home_in_bundle(default_home())
+    assert _snapshot(bundle) == before
+
+
+def _windowless(monkeypatch):
+    """The streams a double-clicked evolvekit-app.exe has: none, not even the original ones."""
+    for name in ("stdout", "stderr", "__stdout__", "__stderr__"):
+        monkeypatch.setattr(sys, name, None)
+
+
+@pytest.mark.parametrize("streams", [False, True])
+def test_the_windowless_app_logs_to_its_home(tmp_path, monkeypatch, streams):
+    """`streams`: evolvekit-app.exe started with handles (the smoke test's DEVNULL) is still the
+    windowless app, and logs as a double-click does."""
+    import io
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    home = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern") / "evolvekit"
+    if streams:
+        for name in ("stdout", "stderr", "__stdout__", "__stderr__"):
+            monkeypatch.setattr(sys, name, io.StringIO())
+    else:
+        _windowless(monkeypatch)
+    opened, keyed = [], []
+    monkeypatch.setattr("evolvekit.dashboard.open_in_browser", opened.append)
+    def serve(self):
+        keyed.append(self.url_with_token)
+        print("a request failed: ë")                       # what a request error prints lands in the log
+    monkeypatch.setattr(AppServer, "serve_forever", serve)
+    assert entry.main(["--port", "8793"]) == 0
+    log = (home / service.LOG).read_text(encoding="utf-8")
+    assert "evolvekit app : http://127.0.0.1:" in log and "a request failed: ë" in log and log.rstrip().endswith("stopped")
+    assert opened == keyed and len(keyed) == 1, "a double-click still opens the browser"
+    token = keyed[0].split("token=")[1]
+    assert token not in log, "the launch's key is in app.json, never in the log"
+
+
+def test_the_windowless_app_logs_a_second_start_and_opens_the_first(tmp_path, monkeypatch):
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    home = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern") / "evolvekit"
+    write_running(home, pid=os.getpid(), port=8790, url="http://127.0.0.1:8790/?token=k")
+    _windowless(monkeypatch)
+    opened = []
+    monkeypatch.setattr("evolvekit.dashboard.open_in_browser", opened.append)
+    monkeypatch.setattr("evolvekit.app.server.AppServer", _NeverStarts)
+    assert entry.main([]) == 0
+    assert opened == ["http://127.0.0.1:8790/?token=k"]
+    log = (home / service.LOG).read_text(encoding="utf-8")
+    assert "already running at http://127.0.0.1:8790/" in log and "token=k" not in log
+
+
+def test_the_app_with_a_console_writes_no_log(tmp_path, monkeypatch):
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    home = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern") / "evolvekit"
+    monkeypatch.setattr("evolvekit.dashboard.open_in_browser", lambda url: None)
+    monkeypatch.setattr(AppServer, "serve_forever", lambda self: None)
+    assert entry.main(["--port", "8793", "--no-browser"]) == 0
+    assert not (home / service.LOG).exists()
+
+
+@pytest.mark.parametrize("form", [[], ["--script"]])
+def test_a_program_file_is_the_main_module_a_worker_reruns(tmp_path, monkeypatch, form):
+    """Frozen on Windows, spawn sends a worker no main module (`WINEXE`, and PyInstaller's hook sets
+    `ORIGINAL_DIR` to None), so a worker's `__main__` was the entry: `Can't get attribute 'square'`.
+    For a program run as a file the entry sends the file, as python does."""
+    import multiprocessing.process, multiprocessing.spawn
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(multiprocessing.spawn, "WINEXE", True)          # as the frozen interpreter has it
+    monkeypatch.setattr(multiprocessing.process, "ORIGINAL_DIR", None)   # as PyInstaller's runtime hook sets it
+    folder = tmp_path / "my work ë"; folder.mkdir(); monkeypatch.chdir(folder)
+    (folder / "pool.py").write_text(
+        "import json, sys, multiprocessing.spawn\n"
+        "data = multiprocessing.spawn.get_preparation_data('worker')\n"
+        "open(sys.argv[1], 'w', encoding='utf-8').write(json.dumps(data.get('init_main_from_path')))\n", encoding="utf-8")
+    out = tmp_path / "main.json"
+    assert entry.main([*form, "pool.py", str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8")) == str(folder / "pool.py")
+
+
+def test_code_given_with_c_keeps_spawns_frozen_rule(tmp_path, monkeypatch):
+    """`-c` has no file a worker could rerun (as `python -c`), and the entry's own `__main__` must never
+    be sent: spawn's frozen rule stays as it is."""
+    import multiprocessing.process, multiprocessing.spawn
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(multiprocessing.spawn, "WINEXE", True)
+    monkeypatch.setattr(multiprocessing.process, "ORIGINAL_DIR", None)
+    assert entry.main(["-c", "pass"]) == 0
+    assert multiprocessing.spawn.WINEXE is True and multiprocessing.process.ORIGINAL_DIR is None

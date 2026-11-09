@@ -6,14 +6,15 @@ It extracts the app's zip into a fresh folder whose name has a space and a
 non-ASCII letter, simulates a user profile there, strips every Python from
 `PATH` for the exes it starts (and proves it), and then drives the bundle's own
 `evolvekit-cli.exe` and `evolvekit-app.exe` alone: the version, the bundled
-interpreter, `doctor`, the PyVRP harness zip, the app's page, a demo-tour study
-from start to verdict, the stop, and that the bundle folder is unchanged. No
+interpreter, a `ProcessPoolExecutor` script, `doctor`, the PyVRP harness zip,
+the app's page, a demo-tour study from start to verdict, the stop (and the
+windowless app's `app.log`), and that the bundle folder is unchanged. No
 `--home` is passed anywhere: the default home is what is tested (D25).
 
 ZIP defaults to the newest `dist/evolvekit-app-*-win64.zip`; the PyVRP harness
 zip is the `pyvrp-*.zip` beside it. Not collected by pytest (no `test_`
 prefix): it needs a built zip, Windows and a few minutes. Exit 0 with
-`smoke: all 13 checks passed` as its last line; exit 1 at the first failed
+`smoke: all 14 checks passed` as its last line; exit 1 at the first failed
 check, named, with the command's output; exit 2 when it cannot start.
 """
 
@@ -175,6 +176,24 @@ class Smoke:
             raise Failed(f"utf8_mode and stdout encoding are {out!r}, wanted '1 utf-8'")
         return "UTF-8 mode, stdout utf-8"
 
+    def check_multiprocessing(self) -> str:
+        script = self.profile / "pool ë.py"
+        script.write_text(
+            "import concurrent.futures, os\n"
+            "def square(n):\n"
+            "    return n * n, os.getpid()\n"
+            "if __name__ == '__main__':\n"
+            "    with concurrent.futures.ProcessPoolExecutor(max_workers=2) as pool:\n"
+            "        done = list(pool.map(square, range(8)))\n"
+            "    print([n for n, _ in done], len({pid for _, pid in done} - {os.getpid()}) > 0)\n", encoding="utf-8")
+        had_home = self.home.exists()
+        out = self.run(str(script)).stdout.strip()
+        if out != "[0, 1, 4, 9, 16, 25, 36, 49] True":
+            raise Failed(f"a 2-worker ProcessPoolExecutor printed {out!r}, wanted '[0, 1, 4, 9, 16, 25, 36, 49] True'")
+        if self.home.exists() and not had_home:
+            raise Failed(f"a multiprocessing worker made the library home {self.home}: it ran as the app")
+        return "a 2-worker ProcessPoolExecutor script ran on evolvekit-cli.exe, its workers in their own processes"
+
     def check_doctor(self) -> str:
         done = self.run("doctor", "--json", codes=(0, 1))
         try:
@@ -313,7 +332,14 @@ class Smoke:
             self.app.wait(timeout=APP_WAIT_S)
         except subprocess.TimeoutExpired:
             raise Failed(f"evolvekit-app.exe has not ended {APP_WAIT_S} s after app stop") from None
-        return f"app stop: stopped the app, app.json gone, evolvekit-app.exe ended (exit {self.app.returncode})"
+        try:
+            log = (self.home / "app.log").read_text(encoding="utf-8")
+        except OSError:
+            raise Failed(f"the windowless evolvekit-app.exe wrote no {self.home / 'app.log'}") from None
+        if "evolvekit app : http://127.0.0.1:" not in log or not log.rstrip().endswith("stopped") or self.token in log:
+            raise Failed(f"app.log does not say the app's address and 'stopped', without the key\n{log[-2000:]}")
+        return (f"app stop: stopped the app, app.json gone, evolvekit-app.exe ended (exit {self.app.returncode}); "
+                "its app.log says where it ran and that it stopped, with no key")
 
     def check_no_process(self) -> str:
         deadline = time.monotonic() + 10
@@ -403,16 +429,17 @@ def main(argv: list[str] | None = None) -> int:
         (1, "the version", smoke.check_version),
         (2, "the bundled interpreter", smoke.check_executable),
         (3, "UTF-8 mode", smoke.check_utf8),
-        (4, "doctor", smoke.check_doctor),
-        (5, "the PyVRP harness zip", smoke.check_pyvrp_zip),
-        (6, "the app starts", smoke.check_app_starts),
-        (7, "the app's /api/home", smoke.check_api_home),
-        (8, "study list", smoke.check_study_list),
-        (9, "a demo-tour study", smoke.check_study),
-        (10, "the verdict", smoke.check_verdict),
-        (11, "the app stops", smoke.check_app_stops),
-        (12, "no process left", smoke.check_no_process),
-        (13, "the bundle holds no state", smoke.check_bundle_unchanged),
+        (4, "multiprocessing", smoke.check_multiprocessing),
+        (5, "doctor", smoke.check_doctor),
+        (6, "the PyVRP harness zip", smoke.check_pyvrp_zip),
+        (7, "the app starts", smoke.check_app_starts),
+        (8, "the app's /api/home", smoke.check_api_home),
+        (9, "study list", smoke.check_study_list),
+        (10, "a demo-tour study", smoke.check_study),
+        (11, "the verdict", smoke.check_verdict),
+        (12, "the app stops", smoke.check_app_stops),
+        (13, "no process left", smoke.check_no_process),
+        (14, "the bundle holds no state", smoke.check_bundle_unchanged),
     ]
     failed = True
     try:

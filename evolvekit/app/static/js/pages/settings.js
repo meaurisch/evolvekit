@@ -22,6 +22,16 @@
     });
   }
 
+  /* What the notice says once the app has stopped, for how it was started: the installer
+     (`frozen`: evolvekit-app.exe, updated by extracting a new zip) or pip (`evolvekit app`). A study
+     that is running holds the app folder's files, so a new version goes over it only when none is. */
+  function stoppedWords(frozen) {
+    var words = "The app has stopped. Studies that are running carry on. ";
+    if (!frozen) return words + "To open it again, run evolvekit app.";
+    return words + "To open it again, double-click evolvekit-app.exe. To update the app, extract the new version over its folder " +
+      "only when no study is running (Home shows them); while one runs, extract it into a new folder and start it from there.";
+  }
+
   function hasKeys() { return svc(st.provider).keys.every(function (k) { return st.saved.keys[k[0]] && st.keys[k[0]] !== ""; }); }
   function head() {
     var c = st.check, p = st.provider;
@@ -168,7 +178,7 @@
       },
       "stop-app": function () {
         return EK.post("/api/shutdown").then(function () {
-          EK.mount(main, html`<div class="page"><div class="page-inner" style="max-width:784px">${EK.notice("info", "The app has stopped. Studies that are running carry on. To open it again, start evolvekit-app.exe, or run evolvekit app.")}</div></div>`);
+          EK.mount(main, html`<div class="page"><div class="page-inner" style="max-width:784px">${EK.notice("info", stoppedWords(st.saved.frozen))}</div></div>`);
         }).catch(EK.fail);
       },
       library: function () {

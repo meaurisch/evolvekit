@@ -2266,15 +2266,17 @@ evolvekit for your team makes it with `python tasks.py dist` and hands it on.
 
 - **Get it:** `evolvekit-app-<version>-win64.zip`, from whoever builds
   evolvekit for your team. Right-click it → *Extract All*, into a folder of
-  your own: Downloads, Desktop or Documents are fine, and so is a network
-  drive or a read-only folder, since nothing is ever written there. Never
-  extract it into `C:\Users\<you>\evolvekit`: that folder is your library
-  (below), not a place for the app.
+  your own: Downloads, Desktop or Documents are fine. Nothing is ever written
+  into the app's folder; running it from a network drive or a read-only
+  folder is untried. Never extract it into `C:\Users\<you>\evolvekit`: that
+  folder is your library (below), not a place for the app.
 - **Start it:** double-click `evolvekit-app.exe` in the extracted
   `evolvekit-app` folder. The exe is not signed, so Windows SmartScreen may say
   *Windows protected your PC*: choose *More info*, then *Run anyway* — only
   for a zip you got from your team. An antivirus may scan it for a few
-  seconds the first time.
+  seconds the first time. If Windows or your antivirus blocks it with no
+  *Run anyway* (a managed computer's app control, or an antivirus that
+  quarantines the exe), ask your IT team.
 - **Use it:** the browser opens at the app. The app has no window of its own:
   it runs until you stop it with *Stop the app* at the end of Settings, and
   runs that are going carry on when it stops. Double-clicking the exe again
@@ -2282,7 +2284,8 @@ evolvekit for your team makes it with `python tasks.py dist` and hands it on.
   folder of yours (in File Explorer, right-click inside Documents → *Open in
   Terminal*) and run the exe by its full path,
   `"<the app's folder>\evolvekit-cli.exe" --no-browser`: it prints the
-  address to open.
+  address to open. What the app says, errors included, goes to `app.log` in
+  your library (no key in it): send that file when the app misbehaves.
 - **Your library** is `C:\Users\<you>\evolvekit` (or `EVOLVEKIT_HOME`): your
   studies, harnesses and settings, never the app's folder.
 - **PyVRP** comes as its own zip, `pyvrp-1.0.0.zip`, which
@@ -2299,9 +2302,17 @@ evolvekit for your team makes it with `python tasks.py dist` and hands it on.
   command that would write there (`init`, `run`, `skill install`, …) refuses
   and says so. Nothing of yours belongs in it, so an update can replace it
   whole.
-- **Updating:** stop the app (Settings → *Stop the app*), then extract the new
-  zip over the old folder, or into a new one; studies, harnesses and settings
-  stay in your library. **Removing:** delete the folder — first run
+- **Updating:** a study that is running holds the app folder's files, so
+  never extract over a folder whose files are in use. When Home shows no
+  study running, stop the app (Settings → *Stop the app*) and extract the new
+  zip over the old folder. While a study runs, extract the new zip into a new
+  folder and start the app from there; if you made the desktop shortcut or
+  the logon task, make them again with the new folder's exe
+  (`"<the new folder>\evolvekit-cli.exe" app --shortcut`, and
+  `… app install-startup`), since they still name the old one, before you
+  delete the old folder. If Windows says a file is in use, choose *Cancel*, never
+  *Skip*: skipping leaves a mix of two versions. Studies, harnesses and
+  settings stay in your library either way. **Removing:** delete the folder — first run
   `evolvekit-cli.exe app uninstall-startup` if you made it start at logon.
 
 On macOS and Linux there is no installer: `pipx install evolvekit`, then

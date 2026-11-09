@@ -70,6 +70,9 @@ suite tests without PyInstaller (`tests\test_dist_task.py`):
   `_internal\examples\prompt-pipeline\` (`pipeline.py`, `prompts\`, `items\`).
   Each harness's `code.repo: ../../examples/<name>` points at them; there is no
   git repository there, so a code study of a bundled built-in is refused;
+- of all these, only the files git tracks (`git ls-files`): nothing
+  untracked on the builder's disk (a `.env`, a scratch run, a local output)
+  is ever bundled, so the build runs from a git checkout;
 - the whole standard library, because a runner may import any of it, less
   the test packages, IDLE, turtle graphics, `lib2to3`, `ensurepip`, `venv`,
   `antigravity`, `this` and `pydoc_data`; and `tkinter` for the file picker,
@@ -94,7 +97,16 @@ Both run the same entry, `evolvekit\app\entry.py`:
   `-m MODULE`, `-c CODE`, `--script FILE` and `FILE.py`. Runs, runners,
   `{python}` in a harness command and the app's helper processes start on it,
   because their output goes to a log and a windowless process has no streams
-  to give it.
+  to give it. Python's own value-less flags (`-I`, `-E`, `-s`, `-O`, `-u`, …)
+  before a form are accepted and ignored, and `multiprocessing` works: the
+  entry calls `multiprocessing.freeze_support()` first, so a worker started as
+  `evolvekit-cli.exe --multiprocessing-fork …` runs as a worker, and for a
+  program run as a file the worker reruns that file as python's would (a
+  frozen Windows interpreter otherwise sends a worker no main module).
+
+The windowless `evolvekit-app.exe` has no streams either: what the app says
+goes to `<home>/app.log`, as the service's does, and the browser still
+opens.
 
 ## Interpreter options
 
@@ -123,5 +135,5 @@ fresh folder and runs it there under a simulated new profile. Run it alone
 .venv\Scripts\python.exe tests\dist_smoke.py [ZIP] [--pyvrp-python PATH] [--keep]
 ```
 
-Its last line is `smoke: all 13 checks passed` (exit 0); a failed check is
+Its last line is `smoke: all 14 checks passed` (exit 0); a failed check is
 named, with the command's output (exit 1).

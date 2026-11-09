@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import pkgutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -38,12 +39,27 @@ def _ignored(relative: Path) -> bool:
     return any(part in ("__pycache__", ".pytest_cache") for part in relative.parts) or relative.suffix == ".pyc"
 
 
-def _tree(folder: Path, dest: str) -> list[tuple[str, str]]:
-    """Every file under `folder` (the ignore rule applied) as `(source, dest/<its folder>)`."""
+def tracked_files(root: Path) -> set[Path]:
+    """Every file of the checkout at `root` that git tracks (`git ls-files`),
+    as it is on disk: only these are bundled, so nothing untracked on the
+    builder's disk (a `.env`, a scratch run, a local output) ever ships."""
+    try:
+        done = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, timeout=120)
+    except OSError as exc:
+        raise RuntimeError(f"the bundle is built from a git checkout, and git cannot run: {exc}") from None
+    if done.returncode != 0:
+        said = done.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"the bundle is built from a git checkout, and {root} is not one: {said}")
+    names = done.stdout.decode("utf-8").split("\0")
+    return {(root / name).resolve() for name in names if name and (root / name).is_file()}
+
+
+def _tree(folder: Path, dest: str, tracked: set[Path]) -> list[tuple[str, str]]:
+    """Every tracked file under `folder` (the ignore rule applied) as `(source, dest/<its folder>)`."""
     files = []
     for path in sorted(folder.rglob("*")):
         relative = path.relative_to(folder)
-        if path.is_file() and not _ignored(relative):
+        if path.is_file() and path.resolve() in tracked and not _ignored(relative):
             files.append((str(path), Path(dest, relative.parent).as_posix()))
     return files
 
@@ -52,27 +68,29 @@ def data_files(root: Path) -> list[tuple[str, str]]:
     """`(source file, destination folder relative to the bundle's _internal)`:
     evolvekit's package data (the `[tool.setuptools.package-data].evolvekit`
     globs of `root/pyproject.toml`, so the wheel and the bundle ship one list),
-    the built-in harnesses and their applications."""
+    the built-in harnesses and their applications -- of each, only the files
+    git tracks (`tracked_files`)."""
     root = Path(root)
     with open(root / "pyproject.toml", "rb") as handle:
         globs = tomllib.load(handle)["tool"]["setuptools"]["package-data"]["evolvekit"]
+    tracked = tracked_files(root)
     package = root / "evolvekit"
     files: dict[str, str] = {}
     for pattern in globs:
         for path in sorted(package.glob(pattern)):
-            if path.is_file():
+            if path.is_file() and path.resolve() in tracked:
                 files[str(path)] = Path("evolvekit", path.relative_to(package).parent).as_posix()
     for harness in BUILT_INS:
-        files.update(_tree(root / "harnesses" / harness, f"harnesses/{harness}"))
+        files.update(_tree(root / "harnesses" / harness, f"harnesses/{harness}", tracked))
     for name, entries in EXAMPLES.items():
         for entry in entries:
             path = root / "examples" / name / entry
             if path.is_dir():
-                files.update(_tree(path, f"examples/{name}/{entry}"))
-            elif path.is_file():
+                files.update(_tree(path, f"examples/{name}/{entry}", tracked))
+            elif path.is_file() and path.resolve() in tracked:
                 files[str(path)] = f"examples/{name}"
             else:
-                raise FileNotFoundError(f"the bundle needs {path}")
+                raise FileNotFoundError(f"the bundle needs {path}, tracked by git")
     return sorted(files.items())
 
 
