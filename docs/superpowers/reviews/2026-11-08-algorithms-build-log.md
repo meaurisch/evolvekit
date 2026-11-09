@@ -116,4 +116,100 @@ changed what was built.
   carries an archive cell, and a candidate the hold-out keeps out finishes without one. The rule
   is right; the test now checks candidates that compete (commit after 81fa543). The rerun:
   **2785 passed, 5 skipped** in 29:11.
-- PR: PR_A0_PENDING.
+- PR: [meaurisch/evolvekit#78](https://github.com/meaurisch/evolvekit/pull/78), `algo/0-correctness`
+  against `master`. **PASS.**
+
+## Project A1 — the verdict (2026-11-09)
+
+Branch `algo/1-verdict` from `algo/0-correctness` (1386757). Plan:
+[2026-11-08-algo-1-verdict.md](../plans/2026-11-08-algo-1-verdict.md). Six tasks (A1.1–A1.3, A1.4a,
+A1.4b, A1.5), each built by a fresh implementer and reviewed by a fresh reviewer; then the docs, a
+whole-branch review, five statistician rounds, two persona rounds and five fix waves.
+
+| Task | Closes | Review rounds |
+|---|---|---|
+| A1.1 log-ratio effects | S4 | 2 (the imputed loss was said as the wrong number) |
+| A1.2 one decision | S1, S2, S8 | 4 (decisions 11–13 taken during it, after measurement) |
+| A1.3 extend only while runs help | S2 | 2 |
+| A1.4a Holm for bake-off and `top:N` | S3 | 3 |
+| A1.4b merge small kinds of case, Holm over them | S3 | 2 |
+| A1.5 levels judged with intervals | S7 | 2 (levels joined Holm) |
+
+### The design's statistics, re-derived
+
+The design's rule did not survive measurement. Each change below is a numbered decision in the
+plan, with the simulation that forced it; the owner should read decisions 11–15.
+
+- **The prior** (decisions 1, 11). The design's conjugate prior with κ0 = 1 capped the posterior
+  t at √(n(n+1)): two held-back cases could never exceed a chance of 0.954, so Holm over groups was
+  unreachable. A weak κ0 then counted the data twice ("from the data" prior: 22 % false "use") or
+  understated the case spread (a run-noise prior: 13–14.5 %). The posterior is now the reference
+  prior, μ | d ~ t(n − 1, mean, sd/√n): the chance is stated as a posterior under a flat prior.
+- **The threshold** (decision 2). At "9 in 10" the design's own null procedure gave 11.5–13 %
+  false "use" against its "< 10 %". "Use" needs a chance of 19 in 20.
+- **The reads** (decision 12). Adding a run at a time and stopping on "use" took false "use" to
+  16 %: the posterior is not a licence to peek against a point null. The final check reads its
+  answer, adds all its extra runs at once, and reads once more; the app refuses a third read.
+- **The rule said as it works** (decision 13). With both thresholds at 0.95 the 1 % margin leg can
+  never bind; the rule is one sentence: "Use when the chance of a gain is at least 19 in 20."
+- **Failures and "worse"** (decision 14 and statistician rounds 3–4). A candidate that failed
+  more runs than the starting point is never "use" (a program crashing on a third of its runs read
+  "use" at 0.99996); "worse" is symmetric with "use" (≤ 1 in 20; at 1 in 10 a change with no
+  effect read "worse" in 17.8 % of null studies); a failure on either side is sized alike once one
+  is floored at 1 % (an asymmetric floor made equal crashes read "worse" in up to 42 %).
+- **The range a person sees** (decision 15, persona round 1). The page shows the 90 % range, whose
+  low end is "at least"/"at worst" — the number the rule reads; the 95 % interval stays in
+  `comparison.json` for engineers.
+
+Measured false rates with no true gain (seeded, under the product's reads; slow tests assert
+rate + 2 SE < 10 %):
+
+| Setting | False "use" | False "worse" |
+|---|--:|--:|
+| runs noisier than cases (4 cases × 3 runs) | 8.5 % | — |
+| pure run noise, the worst case | 8.9–9.0 % | 4.9 % |
+| cases noisier than runs | 5.0 % | — |
+| no repeated runs | 4.6 % | — |
+| time stops the extension at 4 runs | 7.6 % | — |
+| both programs crash alike, 5–30 % of runs | 0.1–5.1 % | 4.0–6.0 % |
+| 3 kinds of case × 2 cases, with Holm (family-wise) | 8.8 % | — |
+| 3 kinds of case × 4 cases, with Holm | 8.5 % | — |
+| 4 branches of a bake-off, with Holm | 3.7 % (18 % without) | — |
+| a level at its tolerance edge called equal | 2.7 % per side (49 % before) | — |
+
+A 3 % true gain on four held-back cases reads "use" in about 96 % of studies.
+
+### Statistician review
+
+| Round | Findings | What it found |
+|---|---|---|
+| 1 | 6 (1 Important) | per-group Holm ran after two reads; its test simulated one |
+| 2 | 5 (2 Important) | the engineers' file under levels said the objective's answer; a crashing program read "use"; false "worse" 17.8 % |
+| 3 | 5 (1 Important) | a do-nothing change read "use" when the starting point timed out |
+| 4 | 1 (Important) | equal crashes on both sides read "worse" |
+| 5 | **clean** | one docstring |
+
+### Persona round (the Study page)
+
+A planner read three finished studies (use; keep limited by its cases; a bake-off "use" among two
+branches) through the in-app browser, in a fresh home whose path has a space, built with the real
+`run_study`/`run_bakeoff`.
+
+| Round | Score | Blocker | What it found |
+|---|---|---|---|
+| 1 | 6/10 | none | "at least 4.5 %" beside a bar whose low end was 4.0 % (two bounds for one idea); no chance in figures on "use"; two names for the range |
+| 2 | **8/10** | none | **pass**; the bake-off caveat beside "at least" (reworded), a keep without a middle figure (added) |
+
+### Limits logged, not fixed
+
+- The app's groups preview reads the study's un-merged `groups.json`; the run's own copy records
+  `merged_from` (A4.2 reworks grouping).
+- Levels results written on this branch before the 90 % range fall back to a "95 % range" label.
+- A Keep page still shows a "Settings to keep" table with the new settings' column (the page's
+  shape is out of programme A's scope).
+- Campaign rechecks and Continue ask a new question; they are outside the measured rates.
+
+### Gate and PR
+
+- Gate: GATE_A1_PENDING.
+- PR: PR_A1_PENDING.
