@@ -2300,7 +2300,8 @@ evolvekit for your team makes it with `python tasks.py dist` and hands it on.
   `"<the app's folder>\evolvekit-cli.exe" …`. Work from a folder of your own
   and run `evolvekit-cli.exe` by its full path: from the app's own folder, a
   command that would write there (`init`, `run`, `skill install`, …) refuses
-  and says so. Nothing of yours belongs in it, so an update can replace it
+  and says so, and so does every command whose library would be inside the
+  app's folder. Nothing of yours belongs in it, so an update can replace it
   whole.
 - **Updating:** a study that is running holds the app folder's files, so
   never extract over a folder whose files are in use. When Home shows no

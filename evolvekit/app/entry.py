@@ -19,9 +19,11 @@ and ignored); a command of the CLI, `--version`, `-h`, `--help` are the CLI (a
 bare `stop` on `evolvekit-app.exe` is the app's `stop`); anything else, nothing
 included, is the app (`evolvekit app ...`), and so is `app ...` itself. Frozen,
 a CLI command that would write into the app's own folder is refused, and so is
-the app form whose library home is inside it: the app's folder unzipped as the
-default home, `<profile>/evolvekit` (`%USERPROFILE%` on Windows), cannot start
-(the README says not to unzip it there).
+the app form or a CLI command whose library home is inside it (`--home`,
+`EVOLVEKIT_HOME` or the default, with the app form's sentence, before anything
+is made): the app's folder unzipped as the default home, `<profile>/evolvekit`
+(`%USERPROFILE%` on Windows), cannot start (the README says not to unzip it
+there).
 
 Frozen, `multiprocessing.freeze_support()` comes before any of this: a worker
 that `multiprocessing` (or `ProcessPoolExecutor`) starts on evolvekit's Python
@@ -47,7 +49,7 @@ from pathlib import Path
 
 from evolvekit import resources
 
-__all__ = ["WRITE_TARGETS", "main", "writes_into_bundle"]
+__all__ = ["WRITE_TARGETS", "home_in_bundle", "main", "writes_into_bundle"]
 
 WRITE_TARGETS: dict[tuple[str, str | None], tuple[str, ...]] = {
     ("init", None): ("directory",),
@@ -138,6 +140,32 @@ def writes_into_bundle(argv: list[str]) -> bool:
         return False
     except Exception:  # the relaxed parser failed (argparse's insides changed): judge the working folder
         return _inside(Path.cwd(), bundle)
+
+
+def home_in_bundle(argv: list[str]) -> Path | None:
+    """Frozen: the library home this CLI command opens, when it is inside the
+    app's own folder, else None. A command opens a home when its parser has
+    `--home` (`harness install`/`list`, every `study` command, `app`, `doctor`):
+    the `--home` given (against the working folder), else `EVOLVEKIT_HOME`, else
+    `<profile>/evolvekit` -- the app's folder unzipped there is refused before
+    anything is made."""
+    if not resources.is_frozen() or not argv or any(flag in argv for flag in _CLI_FLAGS):
+        return None
+    from evolvekit import cli
+    from evolvekit.harness.library import default_home
+
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            args, _ = _relaxed(cli.build_parser()).parse_known_args(argv)
+    except SystemExit:  # cli.main says what is wrong, once
+        return None
+    except Exception:  # the relaxed parser failed: writes_into_bundle's fail-safe judges the working folder
+        return None
+    if not hasattr(args, "home"):
+        return None
+    given = args.home if isinstance(args.home, str) and args.home else None
+    home = (Path.cwd() / Path(given).expanduser() if given else Path.cwd() / default_home()).resolve()
+    return home if _inside(home, resources.bundle_dir().resolve()) else None  # type: ignore[union-attr]
 
 
 def _is_app_exe() -> bool:
@@ -307,6 +335,9 @@ def _dispatch(argv: list[str], *, frozen: bool, windowless: bool) -> int:
     if first == "app" and not any(flag in argv for flag in _CLI_FLAGS[1:]):  # `app ...` is the app form (help enters no home)
         argv, first = argv[1:], None
     if (first in cli._COMMANDS or first in _CLI_FLAGS) and not bare_app_stop:
+        if frozen and (home := home_in_bundle(argv)) is not None:
+            _say(_HOME_IN_BUNDLE.format(home=home), windowless=windowless)
+            return 2
         if frozen and writes_into_bundle(argv):
             print(_REFUSED, file=sys.stderr)
             return 2

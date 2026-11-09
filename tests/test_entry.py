@@ -84,8 +84,6 @@ def test_entry_stop_on_the_cli_exe_is_the_clis_own(tmp_path, monkeypatch, calls)
     ["harness", "pack", "OUTSIDE", "--out", "."], ["leaderboard"],
     ["leaderboard", "--run-dir", "OUTSIDE", "--html", "board.html"],
     ["study", "run", "_internal"], ["study", "compile", "_internal"], ["study", "preview", "_internal"],
-    ["study", "list", "--home", "here"], ["study", "export", "depot", "--diff", "--home=."],
-    ["harness", "install", "x.zip", "--home", "lib"], ["doctor", "--home", "."],
     ["init", "OUTSIDE/../evolvekit app"],                        # an absolute path into the bundle
 ])
 def test_cli_refuses_to_write_into_the_bundle(tmp_path, monkeypatch, capsys, calls, argv):
@@ -574,3 +572,61 @@ def test_code_given_with_c_keeps_spawns_frozen_rule(tmp_path, monkeypatch):
     monkeypatch.setattr(multiprocessing.process, "ORIGINAL_DIR", None)
     assert entry.main(["-c", "pass"]) == 0
     assert multiprocessing.spawn.WINEXE is True and multiprocessing.process.ORIGINAL_DIR is None
+
+
+# -- the controller's ruling on concern 3: a CLI command whose library home is inside the bundle
+
+@pytest.mark.parametrize("argv", [["study", "list", "--home", "here"], ["study", "export", "depot", "--diff", "--home=."],
+                                  ["harness", "install", "x.zip", "--home", "lib"], ["doctor", "--home", "."]])
+def test_a_cli_home_given_inside_the_bundle_is_refused(tmp_path, monkeypatch, capsys, calls, argv):
+    bundle = fake_bundle(monkeypatch, tmp_path / "Zoë Intern" / "evolvekit app", exe=resources.CLI_EXE)
+    monkeypatch.chdir(bundle)
+    before = _snapshot(bundle)
+    given = next(a.partition("=")[2] or argv[i + 1] for i, a in enumerate(argv) if a.startswith("--home"))
+    assert entry.main(argv) == 2 and calls == []
+    assert capsys.readouterr().err.strip() == _home_in_bundle((bundle / given).resolve())
+    assert _snapshot(bundle) == before
+
+
+@pytest.mark.parametrize("argv", [["harness", "install", "ZIP"], ["study", "new", "Depot", "--harness", "demo-tour"],
+                                  ["harness", "list"], ["study", "list"], ["study", "status", "depot"], ["doctor"]])
+def test_the_default_home_inside_the_bundle_refuses_cli_commands(tmp_path, monkeypatch, capsys, calls, argv):
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    bundle = fake_bundle(monkeypatch, profile / "evolvekit", exe=resources.CLI_EXE)   # unzipped as %USERPROFILE%\evolvekit
+    mine = tmp_path / "my work"; mine.mkdir(); monkeypatch.chdir(mine)                 # from a folder of the user's
+    before = _snapshot(bundle)
+    argv = [str(tmp_path / "pyvrp.zip") if a == "ZIP" else a for a in argv]
+    assert entry.main(argv) == 2 and calls == []
+    assert capsys.readouterr().err.strip() == _home_in_bundle(default_home().resolve())
+    assert _snapshot(bundle) == before and list(mine.iterdir()) == []
+
+
+def test_an_evolvekit_home_inside_the_bundle_refuses_cli_commands(tmp_path, monkeypatch, capsys, calls):
+    fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    bundle = fake_bundle(monkeypatch, tmp_path / "evolvekit app", exe=resources.CLI_EXE)
+    monkeypatch.setenv("EVOLVEKIT_HOME", str(bundle / "library"))
+    assert entry.main(["harness", "list"]) == 2 and calls == []
+    assert capsys.readouterr().err.strip() == _home_in_bundle((bundle / "library").resolve())
+    assert not (bundle / "library").exists()
+
+
+def test_a_cli_home_outside_the_bundle_still_works(tmp_path, monkeypatch, calls):
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    fake_bundle(monkeypatch, profile / "evolvekit", exe=resources.CLI_EXE)       # the default home would be refused
+    mine = tmp_path / "my work"; mine.mkdir(); monkeypatch.chdir(mine)
+    home = str(tmp_path / "my library ë")
+    argv = [["harness", "list", "--home", home], ["study", "new", "Depot", "--harness", "demo-tour", "--home", home],
+            ["doctor", f"--home={home}"], ["skill", "install", "--dir", str(mine)], ["study", "new", "--help"]]
+    for each in argv:
+        assert entry.main(each) == 0
+    assert calls == argv, "an outside --home, a command that opens no home, and help all run"
+
+
+def test_a_windowless_cli_home_refusal_is_a_message_box(tmp_path, monkeypatch, calls):
+    profile = fake_profile(monkeypatch, tmp_path / "Users" / "Zoë Intern")
+    fake_bundle(monkeypatch, profile / "evolvekit")                                # evolvekit-app.exe doctor
+    boxes = []
+    monkeypatch.setattr(entry, "_message_box", boxes.append)
+    monkeypatch.setattr(sys, "stdout", None); monkeypatch.setattr(sys, "stderr", None)
+    assert entry.main(["doctor"]) == 2 and calls == []
+    assert boxes == [_home_in_bundle(default_home().resolve())]
