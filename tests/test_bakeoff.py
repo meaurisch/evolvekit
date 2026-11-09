@@ -91,7 +91,9 @@ def test_bakeoff_two_refs_on_demo_tour(tmp_path):
     chosen = ref_of[job["final"]["candidate"]]
     own = next(c for c in verdict["candidates"] if c["ref"] == chosen)
     if own["decision"] == "use":  # decision 32: the chosen branch's line, said as one of N
-        assert verdict["decision"] == "use" and verdict["line"] == f"Of 2 branches, {chosen}: {own['line'][0].lower()}{own['line'][1:]}"
+        assert verdict["decision"] == "use" and verdict["line"] == (
+            f"Of 2 branches, {chosen}: {own['line'][0].lower()}{own['line'][1:]} "
+            "Chosen among 2 branches: the true gain is likely smaller than shown.")
     else:
         assert verdict["decision"] == "keep"
         assert verdict["line"] == "None of the 2 branches is shown to beat the starting point."
@@ -247,6 +249,11 @@ def test_compare_page_lists_candidates(tmp_path):
     run_dir = root / "runs" / RUN
     finished_run(run_dir, decision="use")
     _as_bakeoff(run_dir)
+    path = run_dir / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    for cid, own in (("c1", "use"), ("c2", "keep")):  # what `confirm(family=True)` writes for two branches
+        comparison["per_candidate"][cid]["holm"] = {"k": 2, "what": "branches", "own": own, "passed": own == "use"}
+    path.write_text(json.dumps(comparison), encoding="utf-8")
     verdict = build_verdict(root, RUN)
     assert [(c["ref"], c["decision"]) for c in verdict["candidates"]] == [("same", "keep"), ("restart", "use")]
     assert all(set(c) >= {"ref", "commit", "decision", "line", "mean_pct", "ci95_pct", "worst_pct", "chance"}
@@ -577,3 +584,41 @@ def test_a_branch_held_back_by_its_rivals_says_why(tmp_path):
     path.write_text(json.dumps(comparison), encoding="utf-8")
     line = next(c["line"] for c in build_verdict(root, RUN)["candidates"] if c["ref"] == "restart")
     assert line.startswith("Not proven on 1 held-back case with 2 branches compared: "), line
+
+
+def test_a_bakeoff_asks_confirm_for_a_family(tmp_path, monkeypatch):
+    """`run_bakeoff` must pay for its choice: it hands `confirm` `family=True`."""
+    from evolvekit.confirm import ConfirmStopped
+    from evolvekit.harness import execute
+
+    top = _solver_repo(tmp_path)
+    folder = _code_study(tmp_path, top)
+    (folder / "runs" / "b1").mkdir(parents=True)
+    (folder / "runs" / "b1" / "bakeoff.json").write_text(json.dumps({"refs": ["same", "restart"]}), encoding="utf-8")
+    seen = {}
+
+    def fake(*args, **kwargs):
+        seen.update(kwargs)
+        raise ConfirmStopped("stopped for the test")
+
+    monkeypatch.setattr(execute, "confirm", fake)
+    run_bakeoff(folder, "b1", log=lambda _m: None)
+    assert seen.get("family") is True
+
+
+def test_confirm_with_family_names_a_choice_among_branches(tmp_path):
+    """The check a bake-off asks for (`family=True`, branches given by id) is written with each branch's Holm."""
+    from test_confirm import _write_config, _write_run
+
+    from evolvekit.config import load_config
+    from evolvekit.confirm import confirm
+
+    config_path = _write_config(tmp_path)
+    run_dir = _write_run(tmp_path, config_path, {"c2": {"params": {"x": -0.02}, "score": -98.0},
+                                                 "c3": {"params": {"x": -0.10}, "score": -90.0}})
+    comparison = confirm(load_config(config_path), run_dir, seeds=[1001], candidates="c2,c3", family=True,
+                         label="final", log=lambda m: None)
+    written = json.loads((run_dir / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
+    assert [written["per_candidate"][c]["holm"]["what"] for c in comparison.candidates] == ["branches", "branches"]
+    plain = confirm(load_config(config_path), run_dir, seeds=[1001], candidates="c2,c3", label="plain", log=lambda m: None)
+    assert not any("holm" in r for r in plain.per_candidate.values())

@@ -993,7 +993,11 @@ def render_markdown(comparison: Comparison) -> str:
             lines += ["**Every run gave exactly the baseline's result**, on every instance and seed: the "
                       "candidate's change may not be exercised by these runs, so the interval below says "
                       "nothing about it.", ""]
-        verdict = s["verdict"][:1].upper() + s["verdict"][1:]
+        held = result.get("holm") or {}
+        said = s["verdict"]
+        if held.get("passed") is False and held.get("own") == "use":
+            said = f"not proven among {held['k']} {held['what']} (Holm)"  # its own chance passes; chosen among rivals it does not
+        verdict = said[:1].upper() + said[1:]
         if s.get("chance") is not None and s.get("ci95"):
             interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]"
             head = (

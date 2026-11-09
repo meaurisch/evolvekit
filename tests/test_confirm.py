@@ -915,7 +915,7 @@ def test_top_n_pays_for_choosing_among_its_candidates():
     assert not any("holm" in r for r in old.values()), "a comparison before A1, and an identical run, are no family"
 
 
-def test_four_null_branches_say_use_in_at_most_five_percent_of_bakeoffs_with_holm():
+def test_four_null_branches_say_use_in_at_most_eight_percent_of_bakeoffs_with_holm():
     """Family-wise false "use" with k = 4 equal branches: Holm bounds it by alpha = 5 %
     (asserted at 8 % over 400 seeded bake-offs, i.e. plus sampling margin)."""
     from evolvekit.confirm import apply_holm
@@ -931,3 +931,34 @@ def test_four_null_branches_say_use_in_at_most_five_percent_of_bakeoffs_with_hol
     print(f"family-wise false use, 4 null branches: {any_use / runs:.3f} with Holm, {any_use_alone / runs:.3f} without")
     assert any_use <= 0.08 * runs, f"{any_use} of {runs} bake-offs of four equal branches named one better"
     assert any_use <= any_use_alone
+
+
+def test_top_two_over_several_cases_is_a_family_and_says_so(tmp_path):
+    config_path = _write_config(tmp_path)
+    run_dir = _write_run(tmp_path, config_path, {
+        "g001-c0002": {"params": {"x": -0.02}, "score": -98.0},
+        "g002-c0005": {"params": {"x": -0.10}, "score": -90.0},
+    })
+    comparison = confirm(load_config(config_path), run_dir, seeds=[1001], candidates="top:2", label="fam",
+                         log=lambda m: None)
+    written = json.loads((run_dir / "confirm" / "fam" / "comparison.json").read_text(encoding="utf-8"))
+    assert len(comparison.instances) >= 2
+    for cid in comparison.candidates:
+        assert written["per_candidate"][cid]["holm"]["k"] == 2 and written["per_candidate"][cid]["holm"]["what"] == "candidates"
+    assert "Chosen among 2 candidates (Holm)" in (run_dir / "confirm" / "fam" / "comparison.md").read_text(encoding="utf-8")
+    alone = confirm(load_config(config_path), run_dir, seeds=[1001], candidates="top:1", label="one", log=lambda m: None)
+    assert "holm" not in alone.per_candidate[alone.candidates[0]]
+
+
+def test_the_markdown_of_a_candidate_holm_held_back_does_not_say_better():
+    look = _a_study(random.Random(5), gains=[0.03, 0.031, 0.029, 0.03], run_sd=0.002)(3)
+    assert decision_of(look) == "use"
+    look["holm"] = {"k": 3, "what": "candidates", "own": "use", "passed": False}
+    comparison = Comparison(label="sim", objective="cost", direction="minimize", stage="full", seeds=[0, 1, 2],
+                            instances=["a", "b", "c", "d"], baseline_id="seed", candidates=["c"])
+    comparison.per_candidate["c"] = look
+    from evolvekit.confirm import render_markdown
+
+    text = render_markdown(comparison)
+    assert "Chosen among 3 candidates (Holm): does not pass" in text
+    assert "Not proven among 3 candidates (Holm)" in text and "Probably better" not in text

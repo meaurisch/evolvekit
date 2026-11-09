@@ -535,7 +535,7 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                   if job.get("bakeoff") else None)
     named = True
     if candidates:
-        decision, named = _bakeoff_headline(document, job, candidates, jobs._what(study))
+        decision, named = _bakeoff_headline(document, job, candidates, jobs._what(study), comparison)
     candidate = final.get("candidate") or next(iter((comparison or {}).get("per_candidate") or {}), None)
     result = ((comparison or {}).get("per_candidate") or {}).get(candidate) or {}
     levels = _levels(study, harness, result["levels"]) if isinstance(result.get("levels"), dict) else []
@@ -790,7 +790,8 @@ def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: di
 
 
 def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
-                      candidates: list[dict[str, Any]], what: str = "code change") -> tuple[str, bool]:
+                      candidates: list[dict[str, Any]], what: str = "code change",
+                      comparison: dict[str, Any] | None = None) -> tuple[str, bool]:
     """Decision 32: a bake-off's own decision and line are those of the branch
     it chose (the largest mean among those whose own decision is `use`), said
     as one of N ("Of 2 branches, <ref>: ..."; "<ref>: ..." for one branch);
@@ -811,8 +812,10 @@ def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
 
     if chosen is not None and chosen["decision"] in ("use", "single"):
         document["decision"], document["line"] = chosen["decision"], named(chosen)
-        if chosen["decision"] == "use" and count >= 2:
-            document["line"] += f" Chosen among {count} branches: the true gain is likely smaller than shown."
+        # The family Holm paid for (identical branches and the starting point are not in it), not the count.
+        paid = (((comparison or {}).get("per_candidate") or {}).get(chosen_id) or {}).get("holm") or {}
+        if chosen["decision"] == "use" and int(paid.get("k") or 0) >= 2:
+            document["line"] += f" Chosen among {paid['k']} branches: the true gain is likely smaller than shown."
         if chosen["decision"] == "use":
             document["advice"] = f"Use the code of {chosen['ref']}: it is probably better on cases no branch was made for."
         return str(document["decision"]), True
