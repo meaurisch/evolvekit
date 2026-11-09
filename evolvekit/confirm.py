@@ -576,7 +576,7 @@ def _analyse(comparison: Comparison) -> None:
             "summary": summary,
             "finished_only": _pct_summary(paired_summary(finished_only), direction),
             "failure_counted_as_log": largest,
-            "failure_counted_as_pct": pct_from_log(largest, direction) if largest is not None else None,
+            "failure_counted_as_pct": _failure_sizes(largest, direction),
             "pairs": sum(r["pairs"] for r in per_instance),
             "pairs_planned": planned,
             "failed_runs": failed,
@@ -586,6 +586,16 @@ def _analyse(comparison: Comparison) -> None:
         }
         if comparison.levels:
             comparison.per_candidate[cid]["levels"] = _analyse_levels(comparison, cid)
+
+
+def _failure_sizes(largest: float | None, direction: str) -> dict[str, float] | None:
+    """The imputed pairs in percent, as the comparison used them: a pair only
+    the candidate failed counts as `-largest`, a loss of `-pct_from_log(-largest)`;
+    one only the baseline failed as `+largest`, a win of `pct_from_log(largest)`.
+    The two differ (twice the cost is 100 % more, half of it 50 % less)."""
+    if largest is None:
+        return None
+    return {"loss": -pct_from_log(-largest, direction), "win": pct_from_log(largest, direction)}
 
 
 def _pct_summary(summary: dict[str, Any], direction: str) -> dict[str, Any]:
@@ -705,13 +715,14 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
 
 def _counted_as(totals: dict[str, int], largest: float | None, direction: str) -> str:
     """What the verdict has to say about pairs that did not simply finish.
-    `largest` is the largest log gain measured, shown in percent."""
+    `largest` is the largest log gain measured; each imputed pair is said in
+    the percent it was counted as (`_failure_sizes`)."""
     notes = []
-    size = f"{pct_from_log(largest, direction):.3g} %" if largest is not None else None
-    for key, side, what in (("candidate_failed_pairs", "the candidate", "a loss"),
-                            ("baseline_failed_pairs", "the baseline", "a win")):
-        if totals[key] and size is not None:
-            notes.append(f"{totals[key]} pair(s) in which only {side} failed counted as {what} of {size}")
+    sizes = _failure_sizes(largest, direction)
+    for key, side, what, size in (("candidate_failed_pairs", "the candidate", "a loss", "loss"),
+                                  ("baseline_failed_pairs", "the baseline", "a win", "win")):
+        if totals[key] and sizes is not None:
+            notes.append(f"{totals[key]} pair(s) in which only {side} failed counted as {what} of {sizes[size]:.3g} %")
         elif totals[key]:
             notes.append(f"{totals[key]} pair(s) in which only {side} failed are not in this interval "
                          "(no finished pair to size them by)")
@@ -737,11 +748,12 @@ def render_markdown(comparison: Comparison) -> str:
         lines += [f"## `{cid}` against the baseline", ""]
         if result.get("levels"):
             lines += _levels_markdown(result["levels"])
+        sizes = result.get("failure_counted_as_pct")
         counted = (
             f"{result['pairs']} of {result['pairs_planned']} (instance, seed) pairs are in the comparison, "
             f"{result.get('finished_pairs', 0)} of them finished by both. A pair only one side finished counts "
             "against the side that failed, as large as the largest difference measured"
-            + (f" ({result['failure_counted_as_pct']:.3g} %)" if result.get("failure_counted_as_pct") is not None else "")
+            + (f" (a loss of {sizes['loss']:.3g} %, a win of {sizes['win']:.3g} %)" if isinstance(sizes, dict) else "")
             + f": only the candidate failed {result.get('candidate_failed_pairs', 0)}, only the baseline "
             f"{result.get('baseline_failed_pairs', 0)}; left out: both failed {result.get('both_failed_pairs', 0)}, "
             f"a value of 0 or below {result.get('nonpositive_pairs', 0)}. {result['failed_runs']} run(s) failed."

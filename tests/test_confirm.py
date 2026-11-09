@@ -225,6 +225,37 @@ def test_a_case_keeps_the_count_and_the_spread_of_the_gains_it_used():
     assert result["pairs"] == 4 and result["nonpositive_pairs"] == 1
 
 
+@pytest.mark.parametrize("direction, loss, win", [("minimize", 100.0, 50.0), ("maximize", 50.0, 100.0)])
+def test_an_imputed_failure_is_said_as_the_loss_or_the_win_the_comparison_used(direction, loss, win):
+    """The largest log gain measured is L = log 2. A pair only the candidate failed is
+    counted as -L, one only the baseline failed as +L; in percent those are not mirror
+    images (twice the cost is 100 % more, half is 50 % less), and the sentence says the
+    number the comparison used."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse, render_markdown
+
+    better = 50.0 if direction == "minimize" else 200.0
+    comparison = Comparison(label="t", objective="cost", direction=direction, stage="full", seeds=[1, 2, 3],
+                            instances=["a", "b"], baseline_id="g000-c0001", candidates=["c1"])
+    runs = {  # (instance, seed): (baseline, candidate); None is a failed run
+        ("a", 1): (100.0, better), ("a", 2): (100.0, 100.0), ("a", 3): (100.0, None),
+        ("b", 1): (100.0, 100.0), ("b", 2): (None, 100.0), ("b", 3): (100.0, 100.0),
+    }
+    for (instance, seed), pair in runs.items():
+        for who, value in zip((BASELINE, "c1"), pair):
+            comparison.runs.append({"configuration": who, "instance": instance, "seed": seed, "ok": value is not None,
+                                    "kpis": {} if value is None else {"cost": value}})
+    _analyse(comparison)
+    result = comparison.per_candidate["c1"]
+    assert result["failure_counted_as_log"] == pytest.approx(math.log(2))
+    assert result["failure_counted_as_pct"] == {"loss": pytest.approx(loss), "win": pytest.approx(win)}
+    a = result["per_instance"][0]
+    assert a["log_gain"] == pytest.approx((math.log(2) + 0.0 - math.log(2)) / 3, abs=1e-12)
+    verdict = result["summary"]["verdict"]
+    assert f"1 pair(s) in which only the candidate failed counted as a loss of {loss:.3g} %" in verdict
+    assert f"1 pair(s) in which only the baseline failed counted as a win of {win:.3g} %" in verdict
+    assert f"(a loss of {loss:.3g} %, a win of {win:.3g} %)" in render_markdown(comparison)
+
+
 def test_a_candidate_whose_every_run_equals_the_baseline_is_marked_identical():
     """Persona round 1, B2: every paired run of a branch gave exactly the starting point's result (its
     change never ran), and the comparison still gave it a chance and a range. `identical` says so; the
@@ -306,9 +337,13 @@ def test_a_pair_only_the_candidate_failed_counts_as_its_largest_loss(tmp_path):
     medium = by_instance["medium"]
     assert (medium["pairs"], medium["finished_pairs"], medium["candidate_failed_pairs"]) == (3, 2, 1)
     assert result["candidate_failed_pairs"] == 1 and result["failed_pairs"] == 1 and result["pairs"] == 9
-    worst = result["failure_counted_as_pct"]
-    assert worst == pytest.approx(5.0, abs=1.0), "the largest difference measured: about 5 %"
-    assert result["failure_counted_as_log"] == pytest.approx(-math.log(0.95), abs=0.01)
+    largest = result["failure_counted_as_log"]
+    assert largest == pytest.approx(-math.log(0.95), abs=0.01), "the largest difference measured"
+    sizes = result["failure_counted_as_pct"]
+    # Minimised: the loss used is -largest, 100 * (exp(largest) - 1) % more (5.26 % at a ratio of
+    # exactly 0.95; the largest pair here has some noise on top); a win is 100 * (1 - exp(-largest)) % less.
+    assert sizes["loss"] == pytest.approx(100 * (math.exp(largest) - 1), rel=1e-12)
+    assert sizes["win"] == pytest.approx(100 * (1 - math.exp(-largest)), rel=1e-12) and sizes["win"] < sizes["loss"]
     # About (5 + 5 - 5) / 3 on `medium`, against about 5 on `small`.
     assert medium["improvement_pct"] < by_instance["small"]["improvement_pct"] - 2.0
     assert result["summary"]["mean"] < result["finished_only"]["mean"]
