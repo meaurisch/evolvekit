@@ -240,9 +240,10 @@ def test_the_archive_spreads_across_cells(demo_run):
     assert summary.cells >= 2, "the whole run collapsed into one cell"
     assert len(driver.grid.axes) == 2
     assert {a.kpi for a in driver.grid.axes} == {"complexity", "mean_openness"}
-    # Every scored candidate carries the coordinate it was placed at.
+    # Every candidate that competes carries the coordinate it was placed at
+    # (one the hold-out keeps out finishes but is never placed).
     for row in driver.ledger.runs():
-        if not row["rejected"]:
+        if not row["rejected"] and row.get("competes", True):
             assert row["cell"] is not None and len(row["cell"]) == 2
     # One elite per occupied cell, and each is the best in its cell.
     for cell in driver.grid.cells.values():
