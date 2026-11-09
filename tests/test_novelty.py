@@ -82,6 +82,69 @@ def test_an_unparseable_block_still_hashes():
     assert digest != novelty_hash(BEST_FIT)
 
 
+def test_a_builtin_keeps_its_name_so_max_and_min_differ():
+    """D1: tightest-first versus emptiest-first is literally max versus min."""
+    tightest = "def priority(item, bins):\n    return max(item, bins)\n"
+    emptiest = "def priority(item, bins):\n    return min(item, bins)\n"
+    assert novelty_hash(tightest) != novelty_hash(emptiest)
+
+
+def test_sorted_and_reversed_differ():
+    a = "def order(items):\n    return list(sorted(items))\n"
+    b = "def order(items):\n    return list(reversed(items))\n"
+    assert novelty_hash(a) != novelty_hash(b)
+
+
+def test_a_local_the_block_binds_is_still_canonicalised():
+    assert novelty_hash("def f(x):\n    v = x\n    return v\n") == novelty_hash(
+        "def f(x):\n    w = x\n    return w\n"
+    )
+
+
+def test_a_skeleton_helper_keeps_its_name():
+    repair = "def priority(item, bins):\n    return repair(item, bins)\n"
+    deadline = "def priority(item, bins):\n    return deadline(item, bins)\n"
+    assert novelty_hash(repair) != novelty_hash(deadline)
+    assert "repair" in normalise_block(repair)
+
+
+def test_a_shadowed_builtin_is_a_local_like_any_other():
+    a = "def f(xs):\n    max = len(xs)\n    return max\n"
+    b = "def f(xs):\n    min = len(xs)\n    return min\n"
+    assert novelty_hash(a) == novelty_hash(b)
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "def f(xs):\n    return [{n} * 2 for {n} in xs]\n",
+        "def f(xs):\n    for {n} in xs:\n        pass\n    return {n}\n",
+        "def f(xs):\n    with open(xs) as {n}:\n        return {n}.read()\n",
+        "def f(xs):\n    try:\n        return xs[0]\n    except IndexError as {n}:\n        return str({n})\n",
+        "def f(xs):\n    if ({n} := len(xs)) > 2:\n        return {n}\n    return 0\n",
+        "def f(xs):\n    {n}: int = 0\n    {n} += len(xs)\n    return {n}\n",
+        "def f(xs):\n    def {n}(y):\n        return y + 1\n    return {n}(xs)\n",
+        "def f(xs):\n    class {n}:\n        pass\n    return {n}()\n",
+        "def f(xs):\n    return (lambda {n}: {n} + 1)(xs)\n",
+        "def f(xs):\n    {n} = 0\n    def g():\n        nonlocal {n}\n        {n} = 1\n    g()\n    return {n}\n",
+        "def f(xs):\n    global {n}\n    {n} = xs\n    return {n}\n",
+    ],
+)
+def test_every_binding_form_is_canonicalised(template):
+    assert novelty_hash(template.format(n="alpha")) == novelty_hash(template.format(n="beta"))
+
+
+def test_match_captures_are_canonicalised():
+    template = (
+        "def f(xs):\n    match xs:\n        case [{n}, *{m}]:\n            return {n}, {m}\n"
+        "        case {{'k': 1, **{m}}}:\n            return {m}\n"
+        "        case _ as {n}:\n            return {n}\n"
+    )
+    assert novelty_hash(template.format(n="alpha", m="rest")) == novelty_hash(
+        template.format(n="beta", m="tail")
+    )
+
+
 # -- the index -------------------------------------------------------------
 
 

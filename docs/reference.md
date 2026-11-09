@@ -784,8 +784,10 @@ then instances), and reaches the behaviour signature as `<kpi>_per_instance`.
 Three of them, because a child can repeat itself in three different ways.
 
 **Structural**, before a child is evaluated. Its block is parsed, stripped of
-docstrings and comments, its local names canonicalised to `v0, v1, …`, and the
-result hashed. A child whose hash matches its parent's is a **no-op**; one that
+docstrings and comments, the names it binds (arguments, assignment and loop
+targets, nested defs) canonicalised to `v0, v1, …`; builtins, the skeleton's
+helpers and imports keep their names, so `max` and `min` are different
+programs; and the result hashed. A child whose hash matches its parent's is a **no-op**; one that
 matches any archived candidate is a **duplicate**. Both are written to
 `runs.jsonl` with `rejected: true`, a `reject_reason` naming the twin and a
 `twin_id`, and neither enters the archive, the parent pool, or the evaluator.

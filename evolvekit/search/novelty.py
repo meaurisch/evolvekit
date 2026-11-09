@@ -8,10 +8,14 @@ identical program, so the filter works on the AST, not on the characters:
 
 1. parse the block;
 2. drop docstrings (comments are already gone -- they never reach the AST);
-3. canonicalise local identifiers, in order of first appearance, to `v0`, `v1`
-   ...  Top-level function and class names are left alone: they are the
-   skeleton's contract, and two blocks that differ only in which function they
-   define are genuinely different candidates;
+3. canonicalise the names the block **binds** (arguments, assignment and loop
+   targets, `with`/`except` names, comprehension and walrus targets, nested
+   defs, `global`/`nonlocal`) to `v0`, `v1` ... in order of first appearance;
+   every free name (builtins, the skeleton's helpers, imports) keeps its text,
+   so `max` and `min` are different programs.  Top-level function and class
+   names are left alone: they are the skeleton's contract, and two blocks that
+   differ only in which function they define are genuinely different
+   candidates;
 4. hash the dumped tree.
 
 A child whose hash equals its parent's is a **no-op**; one that equals any
@@ -87,14 +91,19 @@ comparison is about shape rather than about which node types appear at all."""
 
 
 class _Canonicaliser(ast.NodeTransformer):
-    """Rename locals to `v0`, `v1`, ... and delete docstrings."""
+    """Rename the names the block binds to `v0`, `v1`, ... and delete docstrings.
 
-    def __init__(self, protected: set[str]) -> None:
+    `bound` comes from `_bound_names`; every other name -- a builtin, a helper
+    from the skeleton, an import -- keeps its text.
+    """
+
+    def __init__(self, protected: set[str], bound: set[str]) -> None:
         self.protected = protected
+        self.bound = bound
         self.mapping: dict[str, str] = {}
 
     def _rename(self, name: str) -> str:
-        if name in self.protected or name.startswith("__"):
+        if name not in self.bound or name in self.protected or name.startswith("__"):
             return name
         if name not in self.mapping:
             self.mapping[name] = f"v{len(self.mapping)}"
@@ -120,16 +129,22 @@ class _Canonicaliser(ast.NodeTransformer):
         self._strip_docstring(node)
         return self.generic_visit(node)
 
+    # A nested def's name is bound; a top-level one is protected, so renaming
+    # it through `_rename` is a no-op.
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
         self._strip_docstring(node)
+        node.name = self._rename(node.name)
         return self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
         self._strip_docstring(node)
+        node.name = self._rename(node.name)
         return self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
         self._strip_docstring(node)
+        node.name = self._rename(node.name)
         return self.generic_visit(node)
 
     # -- identifiers -----------------------------------------------------
@@ -142,6 +157,73 @@ class _Canonicaliser(ast.NodeTransformer):
     def visit_Name(self, node: ast.Name) -> ast.AST:
         node.id = self._rename(node.id)
         return node
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.AST:
+        if node.name is not None:
+            node.name = self._rename(node.name)
+        return self.generic_visit(node)
+
+    def visit_Global(self, node: ast.Global) -> ast.AST:
+        node.names = [self._rename(name) for name in node.names]
+        return node
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> ast.AST:
+        node.names = [self._rename(name) for name in node.names]
+        return node
+
+    # `match` capture names are bound too, so they are renamed like the names
+    # that read them.
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> ast.AST:
+        if node.name is not None:
+            node.name = self._rename(node.name)
+        return self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> ast.AST:
+        if node.name is not None:
+            node.name = self._rename(node.name)
+        return self.generic_visit(node)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> ast.AST:
+        if node.rest is not None:
+            node.rest = self._rename(node.rest)
+        return self.generic_visit(node)
+
+
+def _bound_names(tree: ast.Module, protected: set[str]) -> set[str]:
+    """Every name the block binds, minus its interface and the dunders.
+
+    Assignment of every kind (plain, augmented, annotated, `for`, `with ... as`,
+    comprehension and walrus targets, `del`), arguments, `except ... as`,
+    `global`/`nonlocal`, nested `def`/`class` names and `match` captures. A
+    name that is only read -- a builtin, a skeleton helper -- is free.
+    """
+    top_level = {
+        id(node)
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name is not None:
+                names.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if id(node) not in top_level:
+                names.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name is not None:
+                names.add(node.name)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest is not None:
+                names.add(node.rest)
+    return {name for name in names - protected if not name.startswith("__")}
 
 
 def _protected_names(tree: ast.Module) -> set[str]:
@@ -159,14 +241,15 @@ def _protected_names(tree: ast.Module) -> set[str]:
 
 
 def normalise_block(block: str) -> str:
-    """The block's canonical form: no docstrings, no comments, no local names."""
+    """The block's canonical form: no docstrings, no comments, no bound names."""
     try:
         tree = ast.parse(block)
     except (SyntaxError, ValueError):  # ValueError: a null byte, or a lone surrogate (a diff's non-UTF-8 byte)
         return "\n".join(
             line.rstrip() for line in block.strip().splitlines() if line.strip()
         )
-    transformer = _Canonicaliser(_protected_names(tree))
+    protected = _protected_names(tree)
+    transformer = _Canonicaliser(protected, _bound_names(tree, protected))
     canonical = ast.fix_missing_locations(transformer.visit(tree))
     return ast.dump(canonical, annotate_fields=True, include_attributes=False)
 
@@ -197,7 +280,8 @@ def node_type_sequence(block: str) -> list[str]:
         tree = ast.parse(block)
     except (SyntaxError, ValueError):
         return []
-    transformer = _Canonicaliser(_protected_names(tree))
+    protected = _protected_names(tree)
+    transformer = _Canonicaliser(protected, _bound_names(tree, protected))
     canonical = ast.fix_missing_locations(transformer.visit(tree))
     out: list[str] = []
     stack: list[ast.AST] = [canonical]
