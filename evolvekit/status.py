@@ -50,6 +50,7 @@ from evolvekit.leaderboard import competes, fitness_of, rank, replay_veto
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
+from evolvekit.stats import paired_summary, per_instance_means
 
 __all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
 
@@ -145,21 +146,21 @@ def _number(value: Any) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
-def _paired_t(mean: float, sd: float, n: int) -> float:
-    """The paired t statistic. Gains that do not vary at all are as clear as a
-    result gets -- in the direction of their mean: a candidate that loses by
-    exactly 1 on every seed is not "t = inf, within noise"."""
-    if sd > 0:
-        return mean / (sd / math.sqrt(n))
-    return math.copysign(math.inf, mean) if mean else 0.0
-
-
 def _noise_note(clear: bool, worse: bool) -> str:
     if clear:
         return ""
     if worse:
-        return " (at most -2: the best is behind the baseline on these seeds, beyond the noise)"
-    return " (between -2 and 2: not distinguishable from noise)"
+        return " (the interval lies below zero: the best is behind the baseline on these seeds, beyond the noise)"
+    return " (the interval includes zero: not distinguishable from noise)"
+
+
+def _judged(summary: Mapping[str, Any]) -> tuple[str, bool, bool]:
+    """The verdict on a `paired_summary`: clear when its 95 % interval lies
+    above zero, worse when it lies below, within noise otherwise -- the rule
+    `confirm` states, on the same summary."""
+    low, high = summary["ci95"]
+    clear, worse = low > 0, high < 0
+    return ("clear" if clear else "worse" if worse else "within noise"), clear, worse
 
 
 def _spread(values: Sequence[float]) -> dict[str, Any]:
@@ -960,54 +961,62 @@ class _Run:
                 "n": len(shared),
             }
         sign = 1.0 if self._direction == "minimize" else -1.0
-        gains = [sign * (a[s] - b[s]) for s in shared]
-        mean, sd = fmean(gains), stdev(gains)
-        t = _paired_t(mean, sd, len(gains))
-        clear = mean > 0 and t >= 2.0
-        worse = mean < 0 and t <= -2.0
+        summary = paired_summary(per_instance_means({s: sign * (a[s] - b[s]) for s in shared}))
+        if summary["n"] < 2:  # runs that name one instance, on a stage not described per instance
+            return {
+                "verdict": "unknown",
+                "why": "fewer than two instances to compare: one instance run many times is one case",
+                "n": summary["n"],
+            }
+        verdict, clear, worse = _judged(summary)
+        low, high = summary["ci95"]
         return {
-            "verdict": "clear" if clear else "worse" if worse else "within noise",
+            "verdict": verdict,
             "why": (
-                f"paired over {len(shared)} shared seed(s): mean gain {mean:.6g}, "
-                f"t = {t:.2f}" + (_noise_note(clear, worse))
+                f"paired over {summary['n']} shared seed(s): mean gain {summary['mean']:.6g}, "
+                f"95 % interval {low:.6g} to {high:.6g}" + (_noise_note(clear, worse))
                 + ". These are the seeds the search selected on, so even a clear "
                 "result is optimistic until it is confirmed on seeds it never saw"
             ),
-            "n": len(shared),
-            "mean_gain": mean,
-            "sd_gain": sd,
-            "t": t if math.isfinite(t) else None,
+            "n": summary["n"],
+            "mean_gain": summary["mean"],
+            "sd_gain": summary["sd"],
+            "ci95": summary["ci95"],
         }
 
     def _verdict_per_instance(
         self, a: Mapping[Any, float], b: Mapping[Any, float], shared: Sequence[Any]
     ) -> dict[str, Any]:
-        """Paired over `(instance, seed)` runs, each gain in percent of the
+        """Paired over instances: each `(instance, seed)` gain in percent of the
         baseline's value on that same run -- so a large instance and a small
-        one count alike, and what the instance contributes cancels out."""
+        one count alike -- averaged over the seeds within its instance, as
+        `confirm` does. The instance is the case: one instance run on many
+        seeds is one case, not many."""
         sign = 1.0 if self._direction == "minimize" else -1.0
-        gains = [100.0 * sign * (a[run] - b[run]) / abs(a[run]) for run in shared if a[run]]
-        if len(gains) < 2:
-            return {"verdict": "unknown", "why": "fewer than two comparable runs", "n": len(gains)}
-        mean, sd = fmean(gains), stdev(gains)
-        t = _paired_t(mean, sd, len(gains))
-        clear = mean > 0 and t >= 2.0
-        worse = mean < 0 and t <= -2.0
-        instances = len({run[0] for run in shared})
+        gains = {run: 100.0 * sign * (a[run] - b[run]) / abs(a[run]) for run in shared if a[run]}
+        summary = paired_summary(per_instance_means(gains))
+        if summary["n"] < 2:
+            return {
+                "verdict": "unknown",
+                "why": "fewer than two instances to compare: one instance run many times is one case",
+                "n": summary["n"],
+            }
+        verdict, clear, worse = _judged(summary)
+        low, high = summary["ci95"]
         return {
-            "verdict": "clear" if clear else "worse" if worse else "within noise",
+            "verdict": verdict,
             "why": (
-                f"paired over {len(gains)} shared run(s) on {instances} instance(s): mean gain "
-                f"{mean:.3g} % per run, t = {t:.2f}"
+                f"paired over {len(gains)} shared run(s) on {summary['n']} instance(s): mean gain "
+                f"{summary['mean']:.6g} % per instance, 95 % interval {low:.6g} to {high:.6g} %"
                 + (_noise_note(clear, worse))
                 + ". These are the instances and seeds the search selected on, so even a clear "
                 "result is optimistic until it is confirmed on seeds it never saw"
             ),
-            "n": len(gains),
-            "unit": "percent of the baseline, per run",
-            "mean_gain": mean,
-            "sd_gain": sd,
-            "t": t if math.isfinite(t) else None,
+            "n": summary["n"],
+            "unit": "percent of the baseline, per instance",
+            "mean_gain": summary["mean"],
+            "sd_gain": summary["sd"],
+            "ci95": summary["ci95"],
         }
 
     def progress(self) -> dict[str, Any]:

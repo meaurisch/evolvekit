@@ -122,6 +122,22 @@ def test_the_t_distribution_is_right():
     assert t_cdf(1.0, 1) == pytest.approx(0.75, abs=0.001)
 
 
+def test_the_statistics_live_in_one_module_and_confirm_re_exports_them():
+    from evolvekit import confirm as confirm_module, stats
+
+    for name in ("paired_summary", "t_cdf", "wilcoxon_signed_rank", "_t95", "_betainc"):
+        assert getattr(confirm_module, name) is getattr(stats, name), name
+
+
+def test_per_instance_means_average_the_seeds_within_each_instance():
+    from evolvekit.stats import per_instance_means
+
+    gains = {("a", 0): 1.0, ("a", 1): 3.0, ("b", 0): -2.0, ("b", 1): 0.0, ("c", 0): 5.0}
+    assert per_instance_means(gains) == [2.0, -1.0, 5.0]
+    assert per_instance_means({0: 1.5, 1: 2.5}) == [1.5, 2.5], "no instances: each seed is its own case"
+    assert per_instance_means({}) == []
+
+
 def test_a_summary_gives_the_chance_of_a_gain_and_the_worst_case():
     handoff = paired_summary([1.3, 0.6, 1.9])            # the design handoff's own study
     assert handoff["chance"] == pytest.approx(0.96, abs=0.01)
