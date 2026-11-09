@@ -429,6 +429,38 @@ def test_a_resumed_runs_economics_see_the_replayed_order(mirror_project, tmp_pat
     assert points[-1].best == pytest.approx(3.0)
 
 
+def test_the_run_summary_counts_what_the_hold_out_keeps_out_apart(mirror_project, tmp_path, monkeypatch, capsys):
+    from evolvekit.cli import main
+    from evolvekit.search.driver import Driver, RunSummary
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    rows = [
+        {"id": "g000-c0001", "generation": 0, "operator": "human-seed", "block": "def value():\n    return 1\n",
+         "score": 1.0, "public_score": 1.0, "private_score": -1.0, "rejected": False, "competes": True,
+         "stages_reached": ["static", "full"]},
+        # Finished, below the seed's hold-out: kept out, not unfinished.
+        {"id": "g001-c0002", "generation": 1, "operator": "rewrite", "parent_id": "g000-c0001",
+         "block": "def value():\n    return 2\n", "score": 2.0, "public_score": 2.0, "private_score": -2.0,
+         "rejected": False, "competes": True, "stages_reached": ["static", "full"]},
+        # Did not finish.
+        {"id": "g001-c0003", "generation": 1, "operator": "rewrite", "parent_id": "g000-c0001",
+         "block": "def value():\n    return 3\n", "score": -1000.0, "rejected": False, "competes": False,
+         "last_failure": "stage full: exit code 1", "stages_reached": ["static"]},
+    ]
+    (run_dir / "runs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    def replay_only(self, generations=None):  # the summary of the run as it stands, with no search
+        self.resume()
+        return self._finalise(RunSummary())
+
+    monkeypatch.setattr(Driver, "run", replay_only)
+    assert main(["run", "--config", str(mirror_project), "--run-dir", str(run_dir), "--quiet"]) == 0
+    out = capsys.readouterr().out
+    assert "unfinished  : 1 (evaluated, never ranked)" in out
+    assert "kept out    : 1 by the hold-out (finished, never ranked)" in out
+
+
 # -- every view applies the veto as the replay does ---------------------------
 
 

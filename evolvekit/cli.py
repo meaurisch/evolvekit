@@ -656,6 +656,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"rejected    : {summary.rejection_breakdown}")
     print(f"near-dupes  : {summary.near_breakdown}")
     print(f"unfinished  : {summary.unfinished} (evaluated, never ranked)")
+    print(f"kept out    : {summary.vetoed} by the hold-out (finished, never ranked)")
     totals = summary.totals
     print(
         f"spend       : ${totals.get('usd', 0.0):.4f} over "
@@ -924,7 +925,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"unfinished   : {unfinished_count(rows)} did not finish the final stage "
         "(failed, not promoted or skipped; never ranked)"
     )
-    print(f"kept out     : {vetoed_count(rows)} by the hold-out (finished; hold-out score below the starting point's)")
+    print(
+        f"kept out     : {vetoed_count(rows)} by the hold-out "
+        "(finished; hold-out score below the starting point's)"
+    )
     print(f"generations  : {max(int(r.get('generation', 0)) for r in rows)}")
     print(
         f"archive      : {archive.get('occupancy', 'no archive.json snapshot yet')}"

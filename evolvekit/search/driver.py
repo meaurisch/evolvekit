@@ -107,7 +107,11 @@ class RunSummary:
     """Candidates that were evaluated but did not finish the final stage: a
     failed or timed-out evaluation, a proxy-only candidate, a skipped final
     stage, a failed hold-out. Recorded, never ranked -- and a number that is
-    climbing is an evaluator problem, not a search problem."""
+    climbing is an evaluator problem, not a search problem. A candidate kept
+    out by the hold-out veto finished, and is counted in `vetoed` instead."""
+    vetoed: int = 0
+    """Candidates that finished the final stage with a hold-out score below
+    the seed's (`evaluate.holdout_veto`): recorded, never ranked."""
     embedding_calls: int = 0
     children_per_generation: int = 0
     """The breadth the run ended on. Equal to the configured value unless
@@ -942,8 +946,9 @@ class Driver:
         )
         summary.near = sum(1 for c in self.archive if c.novelty == "near")
         summary.unfinished = sum(
-            1 for c in self.archive if not c.rejected and not c.competes
+            1 for c in self.archive if not c.rejected and not c.competes and not c.veto
         )
+        summary.vetoed = sum(1 for c in self.archive if not c.rejected and c.veto)
         summary.embedding_calls = self.ledger.embedding_calls
         summary.cells = len(self.grid.cells)
         summary.occupancy = self.grid.occupancy()

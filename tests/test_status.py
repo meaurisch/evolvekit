@@ -398,6 +398,9 @@ def test_a_row_written_before_the_veto_is_judged_by_it(tmp_path):
     assert document["progress"]["best"]["id"] == "g001-c0003"
     kept = next(c for c in document["candidates"] if c["id"] == "g001-c0002")
     assert kept["competes"] is False and kept["veto"] == "holdout below the seed's -200"
+    # What the dashboard's "Unfinished" and "Kept out by the hold-out" filters split on.
+    others = [c for c in document["candidates"] if c["id"] != "g001-c0002"]
+    assert all(c["veto"] is None for c in others)
 
 
 def test_the_best_candidate_comes_with_its_diff_and_its_parameters(tmp_path):

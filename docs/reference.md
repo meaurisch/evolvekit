@@ -899,7 +899,9 @@ lists these candidates under its table, each with the `!` flag — the flag and
 the veto are one condition — and counts them as "kept out by the hold-out",
 apart from the candidates that did not finish; `status` and the dashboard label
 them the same way. A row written before the veto existed is judged by it when
-it is read back, by the resumed run and by every view alike. The comparison is with the seed's hold-out score as it is, `private <
+it is read back, by the resumed run and by every view alike.
+
+The comparison is with the seed's hold-out score as it is, `private <
 seed's private`, with no allowance for noise: on a hold-out whose score varies
 from run to run, a candidate exactly as good as the seed is vetoed about half
 the time. When the seed's own hold-out run failed there is nothing to compare
