@@ -36,7 +36,7 @@ from evolvekit.app import verdict as verdict_doc
 from evolvekit.app.verdict import (  # noqa: F401 - the words live in verdict.py; callers read them here too
     _better_word, _chance_of, _chance_words, _decision_of, _final_words, _pct,
 )
-from evolvekit.confirm import BASELINE
+from evolvekit.confirm import BASELINE, read_on_row
 from evolvekit.evaluate.process import scrubbed_environment
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_events, read_heartbeat
 from evolvekit.harness import HarnessError
@@ -1099,8 +1099,9 @@ def _status_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], documen
     # starting point alone.
     current = done_rounds + 1 if isinstance(done_rounds, int) else (0 if stage else None)
     if job.get("phase") == "check":
-        # The check adds a run per case at a time while the answer is open
-        # (`execute._extend_check`); `check.seeds` says how many it is on.
+        # While the answer is open after the planned runs, the check adds every run the seeds
+        # and the time allow at once and reads it again (`execute._extend_check`); `check.seeds`
+        # says how many it is on.
         on = int((job.get("check") or {}).get("seeds") or plan.get("check_seeds") or DEFAULT_CHECK_SEEDS)
         if (job.get("check") or {}).get("limited_by") == "cases":
             now_line = (f"The final check: {_runs_word(on)} per case on the held-back cases; more runs would "
@@ -1451,6 +1452,9 @@ PER_GROUP_DOWNLOADS = (
     {"name": "rule", "label": f"Which cases get which settings ({RULE_MD})"},
 )
 """The two files of a finished per-group run, beside its group's own downloads."""
+HELD_FIGURES = ("mean", "ci95", "worst_pct", "chance", "chance_words", "chance_margin", "why_keep", "levels",
+                "read_twice", "next")
+"""What a group's `final` drops while the verdict holds its "use" (`results`): its figures and their words."""
 
 
 def results(root: Path, run: str, document_of: DocumentOf, group: str | None = None) -> dict[str, Any]:
@@ -1470,6 +1474,14 @@ def results(root: Path, run: str, document_of: DocumentOf, group: str | None = N
     data = _results_at(root, run, picked[1], phase(picked[1]), document_of)
     document = verdict_doc.build_verdict(root, run)
     data["phase"] = job.get("phase")
+    own = (document.get("groups") or {}).get(picked[0]) or {}
+    if own.get("decision") == "pending" and data["final"].get("decision") == "use":
+        # Held until every kind of case is read (Holm): the page says the document's words, and no figure.
+        data["final"] = {
+            **{k: v for k, v in data["final"].items() if k not in HELD_FIGURES},
+            "decision": "pending", "state": "missing", "confirmed": False,
+            "line": own.get("line") or "", "advice": own.get("advice") or "",
+        }
     data["final"]["recheck"] = None  # a per-group run is not checked again (D37)
     data["can_continue"] = False
     if job.get("phase") == "done":
@@ -2206,6 +2218,17 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
         facts.update({"decision": decision, "mean": mean if isinstance(mean, (int, float)) else None,
                       "ci95": summary.get("ci95"), "chance": _chance_of(summary) if summary else None,
                       "n": int(summary.get("n") or 0)})
+        row = read_on_row(own["levels"]) if isinstance(own.get("levels"), dict) else None
+        if row is not None:
+            # Goals in order of importance: the figures are the level the answer is read on, as the
+            # verdict document's (`numbers_from`); in a goal's own units there is no percent to draw.
+            percent = row.get("unit") == "percent"
+            mean = row.get("mean_difference") if percent else None
+            facts.update({"mean": mean if isinstance(mean, (int, float)) else None,
+                          "ci95": list(row["ci95"]) if percent and row.get("ci95") else None,
+                          "chance": row.get("chance"), "n": int(row.get("n") or 0)})
+            if row.get("kpi") != goal.get("kpi"):
+                mean = None  # "N % lower <the goal>" would name another measure than the one read
         if same:
             facts.update({"decision": "keep", "mean": None, "ci95": None, "chance": None, "same": True})
             card = {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · no difference in any run",

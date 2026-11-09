@@ -601,30 +601,69 @@ def test_one_group_pays_for_nothing(tmp_path):
     assert build_verdict(root, "r1")["decision"] == "use"
 
 
-def test_three_null_groups_pay_a_family_wise_false_use_rate_of_at_most_6_percent():
-    """Three groups of two held-back cases, no real gain anywhere: each chance is the reference
-    posterior's, T_1(dbar / (s / sqrt 2)). Alone each group says use 5 % of the time (some group
-    about 14 %); with Holm over the three, any group saying use stays near 4.9 % (asserted <= 6 %)."""
+def _group_check(look):
+    """One group's final check as `execute._extend_check` reads it: look 1 on the planned 3 runs
+    per case; while that answer is `keep` and more runs could help (`runs_can_help`), every run
+    the 12 seeds allow at once and look 2 -- whatever it says."""
+    from evolvekit.confirm import decision_of, runs_can_help
+
+    result = look(3)
+    if decision_of(result) == "keep" and runs_can_help(result):
+        result = look(12)
+    return result
+
+
+def _family_wise_null_use(cases: int, studies: int) -> tuple[float, float, float]:
+    """Three kinds of case of `cases` held-back cases each, no real gain anywhere, runs noisier than
+    cases (the pure run-noise worst case: the rule is scale-free): each group's check read as
+    `_group_check` reads it, then Holm over the groups (`apply_group_holm`). Returns the share of
+    `studies` seeded studies in which some kind of case says use without Holm, with it, and the
+    standard error of the second."""
+    import math
     import random
-    import statistics
 
     from evolvekit.confirm import apply_holm, decision_of
-    from evolvekit.stats import t_cdf
+    from test_confirm import _a_study
 
-    rng = random.Random(20261109)
-    runs, alone, paid = 4000, 0, 0
-    for _ in range(runs):
-        results = {}
-        for g in range(3):
-            d = [rng.gauss(0, 1) for _ in range(2)]
-            t = statistics.fmean(d) / (statistics.stdev(d) / 2 ** 0.5)
-            results[g] = {"summary": {"n": 2, "chance": t_cdf(t, 1), "worst": 0.0, "posterior": {"df": 1}}}
+    rng = random.Random(20261109 + cases)
+    alone = paid = 0
+    for _ in range(studies):
+        results = {g: _group_check(_a_study(rng, gains=[0.0] * cases, run_sd=0.02)) for g in range(3)}
         alone += any(decision_of(r) == "use" for r in results.values())
         apply_holm(results, what="kinds of case")
         paid += any(decision_of(r) == "use" for r in results.values())
-    print(f"false use over 3 null groups: unpaid {alone / runs:.3f}, with Holm {paid / runs:.3f}")
-    assert alone / runs > 0.10, "unpaid, three chances to be wrong are far above 5 %"
-    assert paid / runs <= 0.06
+    rate = paid / studies
+    return alone / studies, rate, math.sqrt(rate * (1 - rate) / studies)
+
+
+@pytest.mark.parametrize("cases", [2, 4])
+def test_three_null_kinds_of_case_say_use_family_wise_in_under_one_in_ten_after_each_groups_two_reads(
+        cases, capsys):
+    """After a group's second read, 1 - chance is no longer a single read's p-value, so Holm's 5 %
+    is not kept: some kind of case says use in about 8.7 % (3 kinds x 2 cases) and 8.4 % (3 x 4)
+    of null studies (measured on 40000 each, +- 0.14 %). The fast guard: under 10 % in 2000 seeded studies;
+    the slow test holds the margin."""
+    studies = 2000
+    alone, rate, se = _family_wise_null_use(cases, studies)
+    with capsys.disabled():
+        print(f"\nfalse use over 3 null kinds of case x {cases} held-back cases, two reads each "
+              f"({studies} studies): unpaid {alone:.3f}, family-wise with Holm {rate:.4f} +- {se:.4f}")
+    assert alone > rate, "unpaid, three chances to be wrong say use more often"
+    assert rate < 0.10, f"{rate:.4f} of {studies} null studies: some kind of case said use"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("cases", [2, 4])
+def test_three_null_kinds_of_case_say_use_family_wise_in_under_one_in_ten_two_standard_errors_clear(
+        cases, capsys):
+    """The same on 8000 seeded studies, so that 10 % is more than two standard errors above the
+    measured family-wise rate."""
+    studies = 8000
+    alone, rate, se = _family_wise_null_use(cases, studies)
+    with capsys.disabled():
+        print(f"\nfalse use over 3 null kinds of case x {cases} held-back cases, two reads each "
+              f"({studies} studies): unpaid {alone:.3f}, family-wise with Holm {rate:.4f} +- {se:.4f}")
+    assert rate + 2 * se < 0.10, f"{rate:.4f} family-wise (2 SE = {2 * se:.4f})"
 
 
 def _real_check(folder: Path, cases: list[str], *, chance: float) -> None:
@@ -656,8 +695,36 @@ def test_a_group_held_by_holm_has_its_markdown_rewritten_too(tmp_path):
     assert "Holm" not in before
     execute.apply_group_holm(run_dir)
     after = (run_dir / "groups" / "small" / "confirm" / "final" / "comparison.md").read_text(encoding="utf-8")
-    assert "Chosen among 2 kinds of case (Holm): does not pass" in after
+    assert "Judged with the 2 kinds of case together (Holm): does not pass" in after
+    assert "Chosen among" not in after, "kinds of case are not a choice among rivals"
     assert "Not proven among 2 kinds of case (Holm)" in after
+
+
+LEGACY_SUMMARY = {"n": 2, "mean": 3.0, "ci95": [-1.0, 7.0], "chance": 0.93, "worst": -0.4, "wins": 2, "losses": 0,
+                  "wilcoxon": {"p": 0.5}, "verdict": "probably better: chance 0.93"}
+"""A summary written before A1: a one-sided t chance, a Wilcoxon test, no posterior, no `chance_margin`."""
+
+
+def test_a_group_written_before_the_posterior_keeps_its_page_when_the_others_pay_for_holm(tmp_path):
+    from evolvekit.confirm import LEGACY_RULE_WORDS, RULE_WORDS
+
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2), "old": ("use", 2)})
+    for name, chance in (("small", 0.96), ("large", 0.97)):
+        part = json.loads((run_dir / groups.GROUPS).read_text(encoding="utf-8"))["groups"][name]
+        _real_check(run_dir / "groups" / name, part["test"], chance=chance)
+    old = run_dir / "groups" / "old" / "confirm" / "final"
+    loaded = json.loads((run_dir / "groups" / "small" / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
+    result = loaded["per_candidate"]["c1"]
+    result.update(summary=dict(LEGACY_SUMMARY), failure_counted_as_pct=None)
+    result.pop("finished_only", None)
+    loaded.pop("looks", None), loaded.pop("prior", None)
+    (old / "comparison.json").write_text(json.dumps(loaded), encoding="utf-8")
+    (old / "comparison.md").write_text("old page", encoding="utf-8")
+    execute.apply_group_holm(run_dir)  # renders every group's page again: the old one must not raise
+    text = (old / "comparison.md").read_text(encoding="utf-8")
+    assert LEGACY_RULE_WORDS in text and RULE_WORDS not in text
+    assert "Wilcoxon signed-rank p = 0.5000" in text and "credible" not in text and "losing more than" not in text
+    assert "Holm" not in text, "a summary written before A1 is not in the family"
 
 
 def test_a_failing_holm_step_fails_the_run_instead_of_finishing_it(tmp_path, monkeypatch):
@@ -695,7 +762,8 @@ def test_a_failing_holm_step_fails_the_run_instead_of_finishing_it(tmp_path, mon
     assert job["phase"] == "failed" and "holm broke" in job["error"]
 
 
-def test_while_a_later_group_is_still_checking_no_group_says_better(tmp_path):
+def test_while_a_later_group_is_still_checking_no_group_says_better(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs, "run_alive", lambda *args, **kwargs: True)  # the run's process lives
     root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
     path = run_dir / "job.json"
     job = json.loads(path.read_text(encoding="utf-8"))
@@ -708,3 +776,56 @@ def test_while_a_later_group_is_still_checking_no_group_says_better(tmp_path):
         assert doc["groups"][name]["line"] == "Its answer is read once every kind of case is checked."
         assert "Probably better" not in doc["groups"][name]["line"]
     assert "Probably better" not in json.dumps(doc)
+
+
+def _run_phase(run_dir: Path, phase: str) -> None:
+    path = run_dir / "job.json"
+    job = json.loads(path.read_text(encoding="utf-8"))
+    job["phase"] = phase
+    path.write_text(json.dumps(job), encoding="utf-8")
+
+
+def test_while_every_waiting_kind_of_case_is_held_the_run_says_not_every_one_is_read(tmp_path, monkeypatch):
+    """M1: no group's check is still going -- they wait for each other -- so the run does not name
+    one as unfinished."""
+    monkeypatch.setattr(jobs, "run_alive", lambda *args, **kwargs: True)  # the run's process lives
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    _run_phase(run_dir, "check")
+    doc = build_verdict(root, "r1")
+    assert doc["decision"] == "pending"
+    assert doc["line"] == "Per kind of case: not every kind of case is read yet."
+    assert "has not finished" not in doc["line"]
+    assert doc["groups"]["small"]["line"] == "Its answer is read once every kind of case is checked."
+
+
+@pytest.mark.parametrize("phase", ["stopped", "failed"])
+def test_a_run_that_ended_early_says_a_held_kind_of_case_was_not_read(tmp_path, phase):
+    """M2: a held group of a run that stopped or failed is never read: it says so, not that it waits."""
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    _run_phase(run_dir, phase)
+    doc = build_verdict(root, "r1")
+    for name in ("small", "large"):
+        assert doc["groups"][name]["decision"] == "pending"
+        assert doc["groups"][name]["line"] == ("Its answer was not read: the run ended before every kind of case "
+                                               "was checked.")
+    assert "Probably better" not in json.dumps(doc)
+
+
+def test_the_results_of_a_held_group_say_what_the_verdict_says_not_better(tmp_path, monkeypatch):
+    """I1: the group's own final check says use, the run is not done, so the verdict document holds
+    the group pending; its results page and summary say the document's words, with no figures."""
+    monkeypatch.setattr(jobs, "run_alive", lambda *args, **kwargs: True)  # the run's process lives
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    _run_phase(run_dir, "check")
+    doc = build_verdict(root, "r1")
+    data = jobs.results(root, "r1", document_of, group="small")
+    final = data["final"]
+    assert final["decision"] == "pending" and final["state"] == "missing"
+    assert final["line"] == "Its answer is read once every kind of case is checked."
+    assert final["line"] == doc["groups"]["small"]["line"] and final["advice"] == doc["groups"]["small"]["advice"]
+    for key in ("mean", "ci95", "worst_pct", "chance", "chance_words", "why_keep"):
+        assert key not in final, key
+    assert "Probably better" not in json.dumps(final) and "Probably better" not in data["summary_text"]
+    assert f"Final check (small): {doc['groups']['small']['line']}" in data["summary_text"].splitlines()
+    _run_phase(run_dir, "done")
+    assert jobs.results(root, "r1", document_of, group="small")["final"]["decision"] == "use", "read once all are done"

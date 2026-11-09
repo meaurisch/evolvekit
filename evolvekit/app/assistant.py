@@ -403,7 +403,7 @@ def _run_words(status: dict[str, Any], results: dict[str, Any]) -> dict[str, Any
             "final check": _drop_empty({
                 "line": final.get("line"), "advice": final.get("advice"), "state": final.get("state"),
                 "chance of a gain": final.get("chance_words") or final.get("chance"),
-                "worst case %": final.get("worst_pct"), "mean %": final.get("mean"), "ci95 %": final.get("ci95"),
+                "at worst (5 % bound) %": final.get("worst_pct"), "mean %": final.get("mean"), "ci95 %": final.get("ci95"),
                 "rule": final.get("rule"), "next": final.get("next"),
             }),
             "held-back cases (case: start -> best, change)": rows("held"),

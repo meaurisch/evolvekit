@@ -261,6 +261,19 @@ def test_the_numbers_on_the_page_are_the_deciding_levels(run_of, decision):
     assert jobs.results(root, run, document_of)["final"]["line"] == v["line"]
 
 
+@pytest.mark.parametrize("decision", ["use", "worse"])
+def test_the_home_card_of_goals_in_order_draws_the_deciding_levels_range(run_of, decision):
+    """I3: the card's mean, range and chance (words.js draws the range from them) are the level the
+    answer is read on, as the verdict document's, never the first measure's summary."""
+    root, run = run_of(decision)
+    second = _level_two_decides(root, run, decision)
+    v = build_verdict(root, run)
+    card = jobs.run_line(root, None, root / "runs" / run)
+    assert card["ci95"] == second["ci95"] == v["ci95_pct"]
+    assert card["mean"] == second["mean_difference"] == v["mean_pct"]
+    assert card["chance"] == second["chance"] == v["chance"] and card["n"] == second["n"]
+
+
 def test_verdict_never_contains_nan(use_run):
     root, run = use_run
     path = root / "runs" / run / "confirm" / "final" / "comparison.json"
