@@ -349,26 +349,27 @@ def _null_use_rate(setting: str, studies: int, seed: int = 20261108) -> float:
 
 
 @pytest.mark.parametrize("setting", list(NULL_SETTINGS))
-def test_a_null_study_says_use_in_under_one_in_ten_with_extension_and_a_recheck(setting, capsys):
-    """Decisions 11 and 12, the fast guard: with no true mean gain, 4 held-back cases x 3 runs,
-    the extension's runs added at once when the answer is open (look 2) and one recheck, "use"
-    in under 10 % of 1000 seeded studies, in each setting. The slow test below holds the margin."""
+def test_a_null_study_says_use_in_under_one_in_ten_under_the_products_looks(setting, capsys):
+    """Decisions 11-13, the fast guard: with no true mean gain, 4 held-back cases x 3 runs, the
+    extension's runs added at once when the answer is open (look 2), or else one recheck --
+    at most two reads -- "use" in under 10 % of 1000 seeded studies, in each setting (the
+    time-capped one extends to 4 runs and is then not rechecked). The slow test holds the margin."""
     rate = _null_use_rate(setting, 1000)
     with capsys.disabled():
-        print(f"\nfalse use, {setting}, 4 cases x 3 runs, extension and a recheck (1000 studies): {rate:.3f}")
+        print(f"\nfalse use, {setting}, 4 cases x 3 runs, at most two reads (1000 studies): {rate:.3f}")
     assert rate < 0.10, f"{rate:.3f} of 1000 null studies said use"
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("setting", list(NULL_SETTINGS))
-def test_a_null_study_says_use_in_under_one_in_ten_two_standard_errors_clear(setting, capsys):
+def test_a_null_study_says_use_in_under_one_in_ten_under_the_products_looks_two_standard_errors_clear(setting, capsys):
     """The same, on 6000 seeded studies per setting, so that 10 % is more than two standard
     errors above the measured rate (about 8.7 % when runs are noisier than cases)."""
     studies = 6000
     rate = _null_use_rate(setting, studies)
     se = math.sqrt(rate * (1 - rate) / studies)
     with capsys.disabled():
-        print(f"\nfalse use, {setting}, 4 cases x 3 runs, extension and a recheck ({studies} studies): "
+        print(f"\nfalse use, {setting}, 4 cases x 3 runs, at most two reads ({studies} studies): "
               f"{rate:.4f} +- {se:.4f}")
     assert rate + 2 * se < 0.10, f"{rate:.4f} of {studies} null studies said use (2 SE = {2 * se:.4f})"
 
@@ -379,7 +380,7 @@ def test_a_null_study_with_quiet_runs_reports_its_false_use_rate(capsys):
     rng = random.Random(11)
     uses = sum(_final_answer(_a_study(rng, gains=[0.0] * 4, run_sd=0.002)) == "use" for _ in range(200))
     with capsys.disabled():
-        print(f"\nfalse use with quiet runs (0.2 %), 4 cases x 3 runs, extension and a recheck: {uses / 200:.3f}")
+        print(f"\nfalse use with quiet runs (0.2 %), 4 cases x 3 runs, at most two reads: {uses / 200:.3f}")
 
 
 def test_a_three_percent_gain_on_four_cases_reports_its_power(capsys):
@@ -387,7 +388,7 @@ def test_a_three_percent_gain_on_four_cases_reports_its_power(capsys):
     uses = sum(_final_answer(_a_study(rng, gains=[rng.gauss(0.03, 0.005) for _ in range(4)], run_sd=0.02)) == "use"
                for _ in range(200))
     with capsys.disabled():
-        print(f"\npower of a 3 % gain on 4 held-back cases x 3 runs, with extension and a recheck: {uses / 200:.2f}")
+        print(f"\npower of a 3 % gain on 4 held-back cases x 3 runs, at most two reads: {uses / 200:.2f}")
     assert 0 <= uses <= 200
 
 

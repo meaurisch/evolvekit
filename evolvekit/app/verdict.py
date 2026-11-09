@@ -13,7 +13,9 @@ check's `confirm.verdict_summary`, the one place that decides: `chance` is
 the posterior probability of a gain, P(gain > 0); `mean_pct` the posterior
 mean; `ci95_pct` a 95 % credible interval; and `worst_pct` the 5 % quantile,
 the one-sided bound the rule reads -- so "use" holds exactly when the chance
-is at least 19 in 20 and the worst case shown is within 1 %. In `by_case`,
+of a gain is at least 19 in 20 (and then the worst case shown is no loss). A
+comparison written before A1 keeps the rule, the words and the `rule`
+sentence it was decided by (`posterior: false`). In `by_case`,
 `start` and `best` are a held-back case's means over the final check's runs
 and `change_pct` is the case's measured gain (its log gain over the runs, in
 percent), so the two need not agree with each other. `combinations` counts every combination the
@@ -57,7 +59,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, is_posterior, t_cdf
+from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, RULE_WORDS, USE_CHANCE, decide, identical_runs,
+                               is_posterior, t_cdf)
 
 __all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "why_keep"]
@@ -246,7 +249,8 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     cases = f"{n} held-back case{'s' if n != 1 else ''}"
     posterior = is_posterior(summary)
     base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "decision": decision, "chance": chance,
-            "chance_words": _chance_words(chance, posterior), "worst_pct": worst, "rule": RULE_WORDS,
+            "chance_words": _chance_words(chance, posterior), "worst_pct": worst,
+            "rule": RULE_WORDS if posterior or not summary else LEGACY_RULE_WORDS,
             "posterior": posterior}
     use_advice = f"Use {new}: {they} probably better on cases the search never saw."
     if result.get("identical"):
@@ -539,7 +543,7 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     # A search that did not run learned nothing: no figure, not even "the same" (persona p5, J1).
     document["learned_from"] = {"cases": len(study.training),
                                 "pct": learned_pct if named and not words.get("not_run") else None}
-    document["rule"] = RULE_WORDS
+    document["rule"] = words.get("rule") or RULE_WORDS
     document["by_case"] = _held_rows(result, held)
     # Not with goals in order of importance: the range and the rows are the first measure's, while
     # another level may be what kept it (fix round 1, I1).

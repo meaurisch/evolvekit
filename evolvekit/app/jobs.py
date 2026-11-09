@@ -761,6 +761,10 @@ def resume_final_check(home: Any, root: Path, run: str, seeds: int | None = None
         raise AppError("the run held no cases back, so there is no final check", 409)
     if seeds is not None and not 1 <= int(seeds) <= len(CHECK_SEEDS):
         raise AppError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case", 400)
+    if (job.get("final") or {}).get("decision") and _read_twice(_read(run_dir / "confirm" / "final" / "comparison.json")):
+        # An answer read twice (the check, then its extension or a recheck): a third read is outside
+        # the false-"use" rate the rule was measured at (decision 13b).
+        raise AppError(READ_TWICE, 409)
     with _launch_guard:
         _one_at_a_time(home)
         # A check only runs the application: nothing in it has a use for a key.

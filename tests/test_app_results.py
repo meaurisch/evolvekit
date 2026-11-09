@@ -52,7 +52,7 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     assert use["line"] == ("Probably better: 1.3 % lower real cost on 3 held-back cases, a chance of about 19 in 20; "
                            "at worst 0.3 % worse than your starting point (PyVRP's own defaults).")
     assert use["advice"] == "Use the new settings: they are probably better on cases the search never saw."
-    assert use["rule"].startswith("Use when the chance of a gain")
+    assert use["rule"].startswith("The app says use it when"), "a summary written before A1 states its own rule"
     assert use["chance"] == pytest.approx(0.961, abs=0.001) and use["worst_pct"] == pytest.approx(-0.35, abs=0.01)
     sure = words_for([5.0, 5.2, 4.8])
     assert sure["line"] == ("Probably better: 5.0 % lower real cost on 3 held-back cases, almost certain; "
@@ -121,6 +121,27 @@ def test_an_open_answer_can_be_checked_again_with_twice_the_runs():
     assert "two reads" in jobs.READ_TWICE
 
 
+def test_a_comparison_written_before_a1_keeps_its_rule_sentence():
+    """Fix round 2: the rule the page states is the rule that decided."""
+    from evolvekit.confirm import LEGACY_RULE_WORDS, RULE_WORDS, verdict_summary
+
+    assert words_for([1.0, 1.6, 0.25], decision="use")["rule"] == LEGACY_RULE_WORDS
+    summary = verdict_summary([0.01, 0.016, 0.0025], direction="minimize")
+    fresh = jobs._final_words({"final": {"candidate": "c1"}}, comparison(None, cases=3, summary=summary), GOAL, "settings")
+    assert fresh["rule"] == RULE_WORDS
+
+
+def test_an_answer_read_twice_is_not_checked_a_third_time(tmp_path):
+    """Fix round 2 (decision 13b): the app refuses a recheck of an answer read twice, as a conflict."""
+    from evolvekit.app import AppError
+
+    root, home = study_with_runs(tmp_path)
+    finished_run(root / "runs" / "20260101-000000", decision="keep", looks=2)
+    with pytest.raises(AppError) as refused:
+        jobs.resume_final_check(home, root, "20260101-000000", seeds=6)
+    assert refused.value.status == 409 and str(refused.value) == jobs.READ_TWICE
+
+
 def test_a_comparison_written_before_a1_keeps_its_words():
     """Decision 13d: "under 19 in 20" only for a summary that carries the posterior."""
     legacy = words_for([1.0, 1.6, 0.25], decision="use")
@@ -186,7 +207,7 @@ def test_a_summary_to_paste():
     assert jobs._summary_text(data).splitlines() == [
         "PyVRP: tune solver settings (PyVRP), run 20260927-005503",
         "Answer: Keep today's settings for now: the gain is not proven.",
-        "Use when the chance of a gain is at least 19 in 20.",
+        "The app says use it when the chance of a gain is at least 9 in 10 and the worst plausible case is within 1 % of today.",
         "Set-up: 20 s per case, 30 min in total; the search learned from 2 cases and was checked on 1 held-back case."
         " Compared with PyVRP's own defaults.",
         "Search: " + data["headline"],
@@ -255,10 +276,12 @@ def test_a_data_change_is_shown_in_the_values_it_makes_and_a_rule_compares_them(
 
 
 def finished_run(run_dir: Path, *, check: bool = True, decision: str = "use", mean: float = 4.2,
-                 started: str = "2026-01-01T00:00:00+00:00", held: str = "cases/town-40.json") -> None:
+                 started: str = "2026-01-01T00:00:00+00:00", held: str = "cases/town-40.json",
+                 summary: dict | None = None, looks: int | None = None) -> None:
     """A finished run written by hand: a seed and a best in `runs.jsonl`, and
     -- with `check` -- a final check that found the best `mean` % better on
-    one held-back case (`decision` says what the run made of it)."""
+    one held-back case (`decision` says what the run made of it). The summary is
+    one written before A1 unless `summary` is given; `looks` is written when given."""
     import json
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -281,10 +304,14 @@ def finished_run(run_dir: Path, *, check: bool = True, decision: str = "use", me
     folder = run_dir / "confirm" / "final"
     folder.mkdir(parents=True)
     worst = mean - 1.2
-    (folder / "comparison.json").write_text(json.dumps({
+    written = {
         "seeds": [1001, 1002, 1003], "instances": [held],
-        "per_candidate": {"c1": {"summary": {"n": 1, "mean": mean, "ci95": [worst, mean + 1.2], "chance": 0.97, "worst": worst}}},
-    }), encoding="utf-8")
+        "per_candidate": {"c1": {"summary": summary or {"n": 1, "mean": mean, "ci95": [worst, mean + 1.2],
+                                                          "chance": 0.97, "worst": worst}}},
+    }
+    if looks is not None:
+        written["looks"] = looks
+    (folder / "comparison.json").write_text(json.dumps(written), encoding="utf-8")
     rows = []
     for seed_no in (1001, 1002, 1003):
         rows.append({"configuration": "baseline", "instance": held, "seed": seed_no, "ok": True, "kpis": {"tour_length": 50.0, "longest_leg": 3.0}})

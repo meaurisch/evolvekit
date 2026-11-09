@@ -50,7 +50,8 @@ def _side(home: Any, ref: str, document_of: jobs.DocumentOf) -> dict[str, Any]:
         "goal": {"says": goal["says"], "direction": goal["direction"]},
         "_goal_kpi": goal.get("kpi", ""),
         "headline": data["headline"],
-        "final": {key: final.get(key) for key in ("state", "decision", "line", "advice", "chance", "ci95", "mean", "n", "worst_pct")},
+        "final": {key: final.get(key) for key in ("state", "decision", "line", "advice", "chance", "ci95", "mean", "n", "worst_pct",
+                                                    "posterior")},
         "improvement_pct": data.get("improvement_pct"), "phase": data.get("phase"),
         "held": [{key: row.get(key) for key in ("case", "start", "best", "change_pct")} for row in data["by_case"]["held"]],
         "changes": [{key: change.get(key) for key in ("name", "label", "old_text", "new_text", "changed")}

@@ -69,7 +69,7 @@ if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
 __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
     "t_cdf", "decide", "decision_of", "verdict_summary", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT",
-    "WORSE_CHANCE", "RULE_WORDS", "is_posterior",
+    "WORSE_CHANCE", "RULE_WORDS", "LEGACY_RULE_WORDS", "is_posterior",
 ]
 
 BASELINE = "baseline"
@@ -92,6 +92,12 @@ from a one-sided t chance of 0.9 with the 95 % lower bound within 1 %."""
 
 RULE_WORDS = "Use when the chance of a gain is at least 19 in 20."
 """The rule in one sentence, as the page states it."""
+
+LEGACY_RULE_WORDS = (
+    "The app says use it when the chance of a gain is at least 9 in 10 "
+    "and the worst plausible case is within 1 % of today."
+)
+"""The rule a comparison written before A1 was decided by, as the page stated it then."""
 
 PRIOR = "reference"
 """The posterior's prior, as `comparison.json` names it: p(mu, sigma^2) ~ 1 / sigma^2."""
