@@ -875,3 +875,21 @@ def test_a_check_limited_by_its_cases_says_so_in_place_of_more_runs(run_of):
     assert v["why_keep"] == ("The answer is set by the held-back cases, not by the runs: hold back more cases "
                              "for a firmer answer.")
     assert jobs.results(root, run, document_of)["final"]["line"] == v["line"]
+
+
+def test_the_app_says_why_a_candidate_that_failed_runs_is_not_use():
+    """Decision 14a in the app's line: keep, and the runs it failed that the starting point finished."""
+    from evolvekit.app.verdict import _final_words
+    from test_confirm import _crashing
+
+    comparison = _crashing().to_json()
+    words = _final_words({"final": {"candidate": "c", "comparison": "x"}}, comparison,
+                         {"kpi": "cost", "says": "cost", "direction": "lower"}, "settings")
+    assert words["decision"] == "keep" and words["state"] == "unclear"
+    assert words["line"].startswith("Not proven on 4 held-back cases: it failed 4 runs the starting point finished; ")
+
+
+def test_a_keep_just_above_one_in_20_never_reads_like_worse():
+    """Decision 14b: worse is at 1 in 20, so a keep's chance just above it says which side it is on."""
+    assert _chance_words(0.06) == "over 1 in 20" and _chance_words(0.05) == "about 1 in 20"
+    assert _chance_words(0.04) == "less than 1 in 20" and _chance_words(0.08) == "about 2 in 20"

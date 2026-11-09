@@ -1125,3 +1125,10 @@ def test_the_settings_legend_says_the_goals_direction_and_not_checked():
     assert "The band: values in tries over 1 % better" not in STUDY_PAGE
     assert '"values in tries over 1 % " + (g.direction === "higher" ? "higher" : "lower")' in STUDY_PAGE
     assert '" (not checked)"' in STUDY_PAGE
+
+
+def test_the_pages_chance_words_never_read_like_worse_on_a_keep():
+    """Decision 14b in the page's own words: worse is at 1 in 20, so 0.06 says "over 1 in 20"."""
+    out = _node("""process.stdout.write(JSON.stringify([EK.chanceWords(0.06), EK.chanceWords(0.05),
+        EK.chanceWords(0.04), EK.chanceWords(0.06, false)]));""")
+    assert out == ["chance over 1 in 20", "chance about 1 in 20", "chance less than 1 in 20", "chance about 1 in 20"]

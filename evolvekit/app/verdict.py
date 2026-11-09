@@ -64,8 +64,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, LIMITED_BY_CASES, RULE_WORDS, USE_CHANCE, decide,
-                               decision_of, identical_runs, is_posterior, read_on_row, t_cdf)
+from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, LIMITED_BY_CASES, RULE_WORDS, USE_CHANCE, WORSE_CHANCE,
+                               decide, decision_of, failed_more, failed_words, identical_runs, is_posterior,
+                               read_on_row, t_cdf)
 
 __all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "why_keep"]
@@ -135,6 +136,9 @@ def _chance_words(p: float | None, posterior: bool = True) -> str:
         return "almost certain"
     if p < 0.05:
         return "less than 1 in 20"
+    if posterior and p > WORSE_CHANCE and round(p * 20) <= round(WORSE_CHANCE * 20):
+        # 0.06 would round to "about 1 in 20", which reads like worse's 1 in 20 when the rule said keep.
+        return f"over {round(WORSE_CHANCE * 20)} in 20"
     if not posterior:
         if p < _LEGACY_USE_CHANCE and round(p * 20) >= round(_LEGACY_USE_CHANCE * 20):
             return "under 9 in 10"
@@ -341,6 +345,9 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
         parts = ([of_gain] if of_gain else []) + [f"{edge}; its 95 % range is {_span(low, high)}"]
     else:  # a comparison written before A1, whose worst case was the range's low end: its words as they were
         parts = ([of_gain] if of_gain else []) + [f"at worst {_pct(worst)} worse ({_span(low, high)})"]
+    more = failed_more(result)
+    if more is not None:  # never "use" when it failed more runs than the starting point (decision 14a): say so first
+        parts = [failed_words(more), *parts]
     return {**base, "state": "unclear", "line": f"Not proven on {cases}: {'; '.join(parts)}.",
             "advice": f"{keep} for now: the gain is not proven."}
 

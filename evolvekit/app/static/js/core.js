@@ -183,6 +183,7 @@
     if (posterior === false) { if (p < 0.9 && Math.round(p * 20) >= 18) return "chance under 9 in 10"; }
     else if (p < 0.95 && Math.round(p * 20) >= 19) return "chance under 19 in 20";
     if (p < 0.05) return "chance less than 1 in 20";
+    if (posterior !== false && p > 0.05 && Math.round(p * 20) <= 1) return "chance over 1 in 20"; // never reads like worse's 1 in 20
     if (Math.round(p * 20) >= 20) return "chance better than 19 in 20";
     return "chance about " + Math.round(p * 20) + " in 20";
   };

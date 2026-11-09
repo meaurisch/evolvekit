@@ -376,8 +376,10 @@ def test_a_level_that_does_not_differ_clearly_is_not_confirmed():
     comparison = _comparison(dph_factor=1.0, wait_shift=0.01)
     _analyse(comparison)
     levels = comparison.per_candidate["g003-c0014"]["levels"]
-    assert levels["verdict"].startswith("equal on level 1 (dph within 1 %), worse on level 2 (wait)")
-    assert levels["confirmed"] is False
+    # Worse in sign, but its chance of a gain is above 1 in 20: worse is as strict as use (decision 14b).
+    assert 0.05 < levels["levels"][1]["chance"] <= 0.10
+    assert levels["verdict"] == "equal on level 1 (dph within 1 %), level 2 (wait) is not proven either way"
+    assert levels["confirmed"] is False and levels["decision"] == "keep"
 
 
 def test_a_level_whose_interval_straddles_its_tolerance_is_not_yet_decided():

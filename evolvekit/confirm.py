@@ -84,8 +84,15 @@ kept in `comparison.json` for engineers, and of the rule a comparison written
 before A1 was decided by. It does not decide: with x_m < 0, P(gain > x_m) is at
 least P(gain > 0), so a chance of a gain of 19 in 20 already passes it."""
 
-WORSE_CHANCE = 0.1
-"""`decide` says "worse" up to this chance of a gain: P(gain < 0) >= 0.90."""
+WORSE_CHANCE = 0.05
+"""`decide` says "worse" up to this chance of a gain, "under 1 in 20": P(gain < 0) >= 0.95,
+as strict as "use" (decision 14b)."""
+
+_LEGACY_WORSE_CHANCE = 0.1
+"""The "worse" of a comparison written before A1: a chance of a gain of 0.10 or less."""
+
+OBJECTIVE_ALONE = "the objective alone, for engineers: it does not decide"
+"""With goals in order of importance, the label of the objective's own summary and its decision."""
 
 _LEGACY_USE_CHANCE = 0.9
 """The rule a comparison written before the posterior was decided by: "use"
@@ -123,11 +130,32 @@ def decide(summary: dict[str, Any]) -> str:
     if n == 1:
         return "single"
     chance = float(summary["chance"])
+    if not is_posterior(summary):
+        if chance <= _LEGACY_WORSE_CHANCE:
+            return "worse"
+        return "use" if chance >= _LEGACY_USE_CHANCE and float(summary["worst"]) >= -USE_MARGIN_PCT else "keep"
     if chance <= WORSE_CHANCE:
         return "worse"
-    if not is_posterior(summary):
-        return "use" if chance >= _LEGACY_USE_CHANCE and float(summary["worst"]) >= -USE_MARGIN_PCT else "keep"
-    return "use" if chance >= USE_CHANCE else "keep"
+    if chance >= USE_CHANCE and failed_more(summary.get("failed") or {}) is None:
+        return "use"
+    return "keep"
+
+
+def failed_more(counts: Mapping[str, Any]) -> int | None:
+    """The runs a candidate failed that the starting point finished, when
+    there are more of them than the other way round (pairs only the
+    candidate failed > pairs only the starting point failed), else None.
+    Such a candidate is never "use" (decision 14a): a crash costs at most its
+    best finished gain, so a program that crashes on a third of its runs
+    could otherwise pass. `counts` is a result or a summary's `failed`:
+    `candidate_failed_pairs` and `baseline_failed_pairs`."""
+    mine, theirs = int(counts.get("candidate_failed_pairs") or 0), int(counts.get("baseline_failed_pairs") or 0)
+    return mine if mine > theirs else None
+
+
+def failed_words(runs: int) -> str:
+    """Why a candidate that failed more than the starting point is not "use", in its sentence."""
+    return f"it failed {runs} run{'s' if runs != 1 else ''} the starting point finished"
 
 
 def is_posterior(summary: dict[str, Any]) -> bool:
@@ -139,12 +167,19 @@ def is_posterior(summary: dict[str, Any]) -> bool:
 
 def _chance2(p: float) -> float:
     """A chance to two places, never on the far side of a threshold of the
-    rule: from one half up floored (0.9496 is 0.94, never "use"'s 0.95; 0.996
-    is 0.99), below it rounded up (0.1011 is 0.11, never "worse"'s 0.10; a
-    chance above 0 never prints as 0.00)."""
-    if p >= 0.5:
-        return math.floor(p * 100 + 1e-9) / 100
-    return math.ceil(p * 100 - 1e-9) / 100
+    rule: rounded, then held on its own side of `USE_CHANCE` and
+    `WORSE_CHANCE` (a keep never prints 0.95 nor 0.05), of 1 and of 0 (a
+    chance below 1 never prints 1.00, above 0 never 0.00)."""
+    shown = round(p, 2)
+    if p < USE_CHANCE <= shown:
+        shown = USE_CHANCE - 0.01
+    if p > WORSE_CHANCE >= shown:
+        shown = WORSE_CHANCE + 0.01
+    if p < 1.0 <= shown:
+        shown = 0.99
+    if p > 0.0 >= shown:
+        shown = 0.01
+    return round(shown, 2)
 
 
 def decision_of(result: dict[str, Any]) -> str:
@@ -160,6 +195,8 @@ def decision_of(result: dict[str, Any]) -> str:
         decision = levels.get("decision") or ("use" if levels["confirmed"] else "keep")
     else:
         decision = decide(result["summary"])
+    if decision == "use" and failed_more(result) is not None:
+        return "keep"  # it failed more runs than the starting point did (decision 14a)
     if decision == "use" and (result.get("holm") or {}).get("passed") is False:
         return "keep"  # its own chance passes the rule; chosen among its rivals, it does not
     return decision
@@ -267,7 +304,8 @@ def _run_noise_of(seed_row: dict[str, Any], objective: str) -> float | None:
     return None
 
 
-def verdict_summary(d: Sequence[float], *, direction: str) -> dict[str, Any]:
+def verdict_summary(d: Sequence[float], *, direction: str,
+                    failed: Mapping[str, int] | None = None) -> dict[str, Any]:
     """The one place that decides: per-case log gains `d` to the numbers a
     person is shown and the decision they are read by.
 
@@ -280,7 +318,10 @@ def verdict_summary(d: Sequence[float], *, direction: str) -> dict[str, Any]:
     point's value (`pct_from_log`); `log` and `posterior` keep the log-scale
     numbers. The frequentist interval and Wilcoxon test are under
     `frequentist`, for engineers. `decision` is `decide` of this summary and
-    `verdict` says it in a sentence."""
+    `verdict` says it in a sentence. `failed` (`candidate_failed_pairs`,
+    `baseline_failed_pairs`) is kept as the summary's `failed`: a candidate
+    that failed more runs than the starting point is never "use"
+    (`failed_more`), and the sentence says so."""
     d = [float(x) for x in d]
     n = len(d)
     wins, losses = sum(1 for x in d if x > 0), sum(1 for x in d if x < 0)
@@ -314,8 +355,13 @@ def verdict_summary(d: Sequence[float], *, direction: str) -> dict[str, Any]:
         "posterior": {"mu": post.mu, "scale": post.scale, "df": post.df},
         "frequentist": {**_pct_summary(paired_summary(d), direction), "label": FREQUENTIST_LABEL},
     }
+    if failed:
+        out["failed"] = dict(failed)
     decision = decide(out)
     said = f"a chance of a gain of {_chance2(chance):.2f}"
+    more = failed_more(failed or {})
+    if more is not None:
+        said += f"; {failed_words(more)}"
     verdict = {"use": "probably better", "worse": "probably WORSE"}.get(decision, "not proven") + f": {said}"
     out["decision"], out["verdict"] = decision, verdict + " (reference prior)"
     return out
@@ -798,9 +844,11 @@ def _analyse(comparison: Comparison) -> None:
         mine = table.get(cid, {})
         largest = largest_of(cid)
         planned_keys = [(instance, s) for instance in comparison.instances for s in comparison.seeds]
-        if largest == 0 and any((k in base) != (k in mine) for k in planned_keys):
-            # Every finished pair equals the baseline, and a pair only one side finished: still a loss (or win).
-            largest = max(anywhere, _SMALLEST_FAILURE_LOG)
+        if (largest is not None and largest < _SMALLEST_FAILURE_LOG
+                and any((k in base) != (k in mine) for k in planned_keys)):
+            # Its finished pairs barely differ from the baseline, and a pair only one side finished:
+            # a failure still counts as a real loss (or win), at least 1 % (decision 14a).
+            largest = max(largest, anywhere, _SMALLEST_FAILURE_LOG)
         per_instance, finished_only = [], []
         for instance in comparison.instances:
             counts = dict.fromkeys(_PAIR_COUNTS, 0)
@@ -845,8 +893,11 @@ def _analyse(comparison: Comparison) -> None:
         failed = sum(1 for r in comparison.runs if r["configuration"] in (cid, BASELINE) and not r["ok"])
         planned = len(comparison.instances) * len(comparison.seeds)
         totals = {name: sum(r[name] for r in per_instance) for name in (*_PAIR_COUNTS, "failed_pairs")}
-        summary = verdict_summary(log_gains, direction=direction)
+        one_sided = {key: totals[key] for key in ("candidate_failed_pairs", "baseline_failed_pairs")}
+        summary = verdict_summary(log_gains, direction=direction, failed=one_sided)
         summary["verdict"] += _counted_as(totals, largest, direction)
+        if comparison.levels:
+            summary["decision_label"] = OBJECTIVE_ALONE  # the levels decide (`_analyse_levels`)
         comparison.per_candidate[cid] = {
             "per_instance": per_instance,
             "log_gains": log_gains,
@@ -862,7 +913,12 @@ def _analyse(comparison: Comparison) -> None:
             "identical": identical_runs(comparison.runs, cid, kpis, comparison.instances, comparison.seeds),
         }
         if comparison.levels:
-            comparison.per_candidate[cid]["levels"] = _analyse_levels(comparison, cid)
+            levels = comparison.per_candidate[cid]["levels"] = _analyse_levels(comparison, cid)
+            more = failed_more(one_sided)
+            if more is not None:  # never "use" when it failed more runs than the starting point (decision 14a)
+                levels["verdict"] += f"; {failed_words(more)}"
+                if levels["decision"] == "use":
+                    levels["decision"], levels["confirmed"] = "keep", False
 
 
 def _failure_sizes(largest: float | None, direction: str) -> dict[str, float] | None:
@@ -1156,6 +1212,12 @@ def render_markdown(comparison: Comparison) -> str:
             )
         else:
             head = f"**Mean improvement {s['mean']:+.3f} %** over {s['n']} instance(s). **{verdict}.**"
+        if isinstance(result.get("levels"), dict):
+            # Goals in order of importance decide: their answer is the bold one, the objective's is the engineers'.
+            answer = _LEVELS_ANSWER.get(decision_of(result), "Not proven")
+            head = (f"**{answer}: {result['levels']['verdict']}.**\n\n"
+                    f"{OBJECTIVE_ALONE[:1].upper() + OBJECTIVE_ALONE[1:]}: "
+                    + head.replace("**", "").replace(f" {verdict}.", "").replace("Mean improvement", "mean improvement", 1))
         head_lines = [head, ""]
         f = s.get("frequentist") or (s if "wilcoxon" in s else None)  # a summary written before the posterior
         if f is not None and f.get("mean") is not None:
@@ -1175,6 +1237,10 @@ def render_markdown(comparison: Comparison) -> str:
         ]
         lines += _instance_rows(result["per_instance"])
     return "\n".join(lines)
+
+
+_LEVELS_ANSWER = {"use": "Probably better", "worse": "Probably WORSE", "keep": "Not proven"}
+"""The bold answer of a comparison by goals in order of importance, before its levels' verdict."""
 
 
 def _instance_rows(per_instance: Sequence[dict[str, Any]]) -> list[str]:

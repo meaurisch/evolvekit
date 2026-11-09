@@ -243,14 +243,106 @@ def test_the_sentence_says_the_decision_and_its_numbers():
 
 
 def test_a_chance_never_prints_on_the_far_side_of_a_threshold():
-    """Above one half floored (0.9496 is never 0.95, "use"); below it rounded up (0.1011 is never
-    0.10, "worse"): a printed chance is never on the other side of the rule from the real one."""
-    assert _chance2(0.1011) == 0.11 and _chance2(0.10) == 0.10 and _chance2(0.0001) == 0.01
-    assert _chance2(0.4901) == 0.50 and _chance2(0.5) == 0.5 and _chance2(0.5099) == 0.50 and _chance2(1.0) == 1.0
+    """Rounded to two places, then held on its own side of the rule's 0.95 and 0.05 (decision 14b),
+    and of 1 and 0: a keep never prints 0.95 or 0.05, a chance below 1 never 1.00, above 0 never
+    0.00. No epsilon: 0.94999999999999 is 0.94."""
+    assert _chance2(0.9496) == 0.94 and _chance2(0.94999999999999) == 0.94 and _chance2(0.95) == 0.95
+    assert _chance2(0.0504) == 0.06 and _chance2(0.05000000000001) == 0.06 and _chance2(0.05) == 0.05
+    assert _chance2(0.996) == 0.99 and _chance2(0.0024) == 0.01 and _chance2(1.0) == 1.0 and _chance2(0.0) == 0.0
+    assert _chance2(0.29) == 0.29 and _chance2(0.1011) == 0.10 and _chance2(0.5) == 0.5
     keep = verdict_summary([0.0, -0.002, -0.0005, -0.001, 0.0006], direction="minimize")
     assert keep["decision"] == "keep" and keep["chance"] < 0.5
-    said = keep["verdict"].split("a chance of a gain of ")[1][:4]
-    assert float(said) >= keep["chance"], keep["verdict"]
+    assert "a chance of a gain of 0.13" in keep["verdict"]
+
+
+def test_worse_is_judged_as_strictly_as_use():
+    """Decision 14b: worse at a chance of a gain of 0.05 or less, "under 1 in 20"; a comparison
+    written before A1 keeps its own 0.10."""
+    from evolvekit.confirm import WORSE_CHANCE
+
+    assert WORSE_CHANCE == 0.05
+    post = {"posterior": {"mu": 0.0, "scale": 1.0, "df": 3}}
+    assert decide({"n": 4, "chance": 0.05, **post}) == "worse"
+    assert decide({"n": 4, "chance": 0.07, **post}) == "keep"
+    assert decide({"n": 4, "chance": 0.08, "worst": -3.0}) == "worse", "before A1: its 0.10"
+
+
+def _crashing(seeds: int = 3, *, gain: float = 0.02, crash_seed: int | None = 2, levels: list | None = None):
+    """Statistician round 2 (a): 4 cases, the candidate about `gain` better on every run it
+    finishes, and crashing on seed `crash_seed` of every case, which the starting point finishes."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse
+
+    comparison = Comparison(label="x", objective="cost", direction="minimize", stage="full", seeds=list(range(seeds)),
+                            instances=[f"i{i}" for i in range(4)], baseline_id="seed", candidates=["c"],
+                            levels=levels or [])
+    rng = random.Random(1)
+    for i in range(4):
+        for s in range(seeds):
+            comparison.runs.append({"configuration": BASELINE, "instance": f"i{i}", "seed": s, "ok": True,
+                                    "kpis": {"cost": 100.0, "late": 10.0}})
+            ok = s != crash_seed
+            g = gain + rng.uniform(-gain / 10, gain / 10)
+            comparison.runs.append({"configuration": "c", "instance": f"i{i}", "seed": s, "ok": ok,
+                                    "kpis": {"cost": 100 * math.exp(-g), "late": 10 * math.exp(-g)} if ok else {}})
+    _analyse(comparison)
+    return comparison
+
+
+def test_a_candidate_that_fails_runs_the_starting_point_finished_is_never_use():
+    """Decision 14a: crashing on one run in three of every case read use at 0.99996, because a crash
+    costs at most its best finished gain. It is keep, and every sentence says why."""
+    from evolvekit.confirm import render_markdown
+
+    comparison = _crashing()
+    result = comparison.per_candidate["c"]
+    assert result["summary"]["chance"] > 0.99, "its chance alone would pass"
+    assert result["summary"]["decision"] == "keep" and decision_of(result) == "keep"
+    assert "it failed 4 runs the starting point finished" in result["summary"]["verdict"]
+    assert result["summary"]["verdict"].startswith("not proven")
+    text = render_markdown(comparison)
+    assert "it failed 4 runs the starting point finished" in text and "Probably better" not in text
+    stored = {**result, "summary": {k: v for k, v in result["summary"].items() if k != "decision"}}
+    assert decision_of(stored) == "keep", "decided from what was stored, by the one rule"
+
+
+def test_with_goals_in_order_a_failing_candidate_is_never_use_either():
+    levels = [{"kpi": "cost", "direction": "minimize", "tolerance": None, "relative": False}]
+    result = _crashing(levels=levels).per_candidate["c"]
+    assert result["levels"]["decision"] == "keep" and result["levels"]["confirmed"] is False
+    assert "it failed 4 runs the starting point finished" in result["levels"]["verdict"]
+    assert decision_of(result) == "keep"
+
+
+def test_a_failure_beside_tiny_gains_is_sized_at_least_one_percent():
+    """Decision 14a: the S5 floor is `own largest < log(1.01)`, not `== 0`."""
+    result = _crashing(gain=0.001).per_candidate["c"]
+    assert result["failure_counted_as_log"] == pytest.approx(math.log(1.01))
+
+
+def test_with_goals_in_order_the_page_bolds_the_levels_answer_not_the_objectives():
+    """Statistician round 2 (b): the objective alone would say use, the levels say keep. The page's
+    answer is the levels'; the objective's line is labelled as the engineers' and does not decide."""
+    from evolvekit.confirm import BASELINE, OBJECTIVE_ALONE, Comparison, _analyse, render_markdown
+
+    levels = [{"kpi": "late", "direction": "minimize", "tolerance": 0.01, "relative": True},
+              {"kpi": "cost", "direction": "minimize", "tolerance": None, "relative": False}]
+    comparison = Comparison(label="x", objective="score", direction="minimize", stage="full", seeds=[0, 1, 2],
+                            instances=[f"i{i}" for i in range(4)], baseline_id="seed", candidates=["c"], levels=levels)
+    late = [0.012, 0.006, 0.018, 0.009]  # about 1 % better: straddles the 1 % tolerance
+    for i in range(4):
+        for s in range(3):
+            comparison.runs.append({"configuration": BASELINE, "instance": f"i{i}", "seed": s, "ok": True,
+                                    "kpis": {"score": 100.0, "late": 50.0, "cost": 100.0}})
+            comparison.runs.append({"configuration": "c", "instance": f"i{i}", "seed": s, "ok": True,
+                                    "kpis": {"score": 100 * math.exp(-0.05 - 0.001 * i - 0.0005 * s),
+                                             "late": 50 * math.exp(-late[i] - 0.001 * s), "cost": 90.0}})
+    _analyse(comparison)
+    result = comparison.per_candidate["c"]
+    assert decision_of(result) == "keep" and result["summary"]["chance"] > 0.95
+    assert result["summary"]["decision_label"] == OBJECTIVE_ALONE
+    text = render_markdown(comparison)
+    assert "Probably better" not in text and "**Not proven" in text
+    assert "The objective alone, for engineers: it does not decide" in text
 
 
 def test_a_comparison_written_before_the_posterior_decides_as_it_did():
@@ -386,19 +478,43 @@ def test_a_null_study_says_use_in_under_one_in_ten_under_the_products_looks_two_
     assert rate + 2 * se < 0.10, f"{rate:.4f} of {studies} null studies said use (2 SE = {2 * se:.4f})"
 
 
-def test_a_null_study_of_pure_run_noise_says_use_in_under_one_in_ten(capsys):
-    """The worst case: every case's true gain exactly 0, only the runs vary. The rule is
-    P(gain > 0) >= 0.95 alone (the 1 % margin never binds, decision 13a) and scale-free, so the
-    runs' size does not matter (0.2 % here); with no spread between cases, more runs always help,
-    every open answer is extended and rechecked. Measured 8.9 % (20 000 studies, +- 0.2 %);
-    asserted under 10 % of 1000 seeded studies (9.7 % on this seed)."""
-    rng = random.Random(11)
-    studies = 1000
-    uses = sum(_final_answer(_a_study(rng, gains=[0.0] * 4, run_sd=0.002)) == "use" for _ in range(studies))
+def _pure_noise_rate(answer: str, studies: int, seed: int = 11) -> tuple[float, float]:
+    """The worst case: every case's true gain exactly 0, only the runs vary (0.2 %; the rule is
+    scale-free, so their size does not matter). With no spread between cases more runs always
+    help, so every open answer is extended and, read once, rechecked (`_final_answer`). Returns
+    the share of `studies` seeded null studies that say `answer`, and its standard error."""
+    rng = random.Random(seed)
+    said = sum(_final_answer(_a_study(rng, gains=[0.0] * 4, run_sd=0.002)) == answer for _ in range(studies))
+    rate = said / studies
+    return rate, math.sqrt(rate * (1 - rate) / studies)
+
+
+@pytest.mark.parametrize("answer", ["use", "worse"])
+def test_a_null_study_of_pure_run_noise_says_use_or_worse_in_under_one_in_ten(answer, capsys):
+    """The rule is P(gain > 0) >= 0.95 for use and <= 0.05 for worse (decision 14b: symmetric), the
+    1 % margin never binding (decision 13a), so nothing but the chance stands between the null and
+    either answer. Measured: use 8.6-9.0 % (8.9 % on 20 000 studies), worse 4.9-5.3 % (a worse read
+    once is rechecked, a use is not). The fast guard: under 10 % of 4000 seeded studies (use 8.6 %,
+    worse 5.3 % on this seed); the slow test holds the margin."""
+    studies = 4000
+    rate, se = _pure_noise_rate(answer, studies)
     with capsys.disabled():
-        print(f"\nfalse use, pure run noise, 4 cases x 3 runs, at most two reads ({studies} studies): "
-              f"{uses / studies:.3f}")
-    assert uses / studies < 0.10, f"{uses / studies:.3f} of {studies} null studies said use"
+        print(f"\nfalse {answer}, pure run noise, 4 cases x 3 runs, at most two reads ({studies} studies): "
+              f"{rate:.4f} +- {se:.4f}")
+    assert rate < 0.10, f"{rate:.4f} of {studies} null studies said {answer}"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("answer", ["use", "worse"])
+def test_a_null_study_of_pure_run_noise_says_use_or_worse_in_under_one_in_ten_two_standard_errors_clear(
+        answer, capsys):
+    """The same on 8000 seeded studies, so that 10 % is more than two standard errors above the rate."""
+    studies = 8000
+    rate, se = _pure_noise_rate(answer, studies, seed=12)
+    with capsys.disabled():
+        print(f"\nfalse {answer}, pure run noise, 4 cases x 3 runs, at most two reads ({studies} studies): "
+              f"{rate:.4f} +- {se:.4f}")
+    assert rate + 2 * se < 0.10, f"{rate:.4f} of {studies} null studies said {answer} (2 SE = {2 * se:.4f})"
 
 
 def test_a_three_percent_gain_on_four_cases_reports_its_power(capsys):

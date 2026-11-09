@@ -637,19 +637,21 @@ def _family_wise_null_use(cases: int, studies: int) -> tuple[float, float, float
 
 
 @pytest.mark.parametrize("cases", [2, 4])
-def test_three_null_kinds_of_case_say_use_family_wise_in_under_one_in_ten_after_each_groups_two_reads(
+def test_three_null_kinds_of_case_family_wise_false_use_fast_guard_after_each_groups_two_reads(
         cases, capsys):
     """After a group's second read, 1 - chance is no longer a single read's p-value, so Holm's 5 %
     is not kept: some kind of case says use in about 8.7 % (3 kinds x 2 cases) and 8.4 % (3 x 4)
-    of null studies (measured on 40000 each, +- 0.14 %). The fast guard: under 10 % in 2000 seeded studies;
-    the slow test holds the margin."""
+    of null studies (measured on 40000 each, +- 0.14 %). The fast guard is looser than the claim, on
+    purpose: 2000 seeded studies have a standard error of about 0.65 %, and this seed reads 9.55 % for
+    2 cases, so it asserts under 11 % -- it catches a regression of two points or more. The slow test
+    holds the claim itself (under 10 % with two standard errors to spare)."""
     studies = 2000
     alone, rate, se = _family_wise_null_use(cases, studies)
     with capsys.disabled():
         print(f"\nfalse use over 3 null kinds of case x {cases} held-back cases, two reads each "
               f"({studies} studies): unpaid {alone:.3f}, family-wise with Holm {rate:.4f} +- {se:.4f}")
     assert alone > rate, "unpaid, three chances to be wrong say use more often"
-    assert rate < 0.10, f"{rate:.4f} of {studies} null studies: some kind of case said use"
+    assert rate < 0.11, f"{rate:.4f} of {studies} null studies: some kind of case said use"
 
 
 @pytest.mark.slow
