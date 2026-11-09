@@ -1282,14 +1282,16 @@ def _runs_word(count: int) -> str:
 
 
 def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, Any] | None,
-             used_s: float | None = None) -> dict[str, Any] | None:
+             used_s: float | None = None, *, limited: bool = False) -> dict[str, Any] | None:
     """A final check with twice the runs per case, where that could still
     settle an open answer. The runs done are kept, so it only adds runs; what
     it adds is said against the study's total time. Offered only while the
     answer was read once: after an extension it has had its two reads
     (decision 13b), and a third would say "use" more often than the rule
-    promises (`READ_TWICE` says so on the page)."""
-    if comparison is None or final.get("state") not in ("unclear", "worse") or _read_twice(comparison):
+    promises (`READ_TWICE` says so on the page). Never to a check `limited` by
+    its cases (A1.3): more runs would not change it, and the page says to hold
+    back more cases."""
+    if limited or comparison is None or final.get("state") not in ("unclear", "worse") or _read_twice(comparison):
         return None
     have = len(comparison.get("seeds") or [])
     want = min(2 * have, len(CHECK_SEEDS))
@@ -1528,7 +1530,8 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     facts = verdict_doc._run_facts(run_dir, job)
     started, used_s = facts["started"], facts["used_s"]
     final = _final_words(job, comparison, goal, what, baseline)
-    final["recheck"] = (_recheck(final, plan, comparison, used_s)
+    final["recheck"] = (_recheck(final, plan, comparison, used_s,
+                                limited=(job.get("check") or {}).get("limited_by") == "cases")
                         if job.get("phase") == "done" and not job.get("bakeoff") else None)
     if (job.get("phase") == "done" and not job.get("bakeoff") and final.get("state") in ("unclear", "worse")
             and _read_twice(comparison)):

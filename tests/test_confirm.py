@@ -316,14 +316,15 @@ def _final_answer(look, *, runs: int = 3, most: int = 12) -> str:
     """The product's looks, as `execute._extend_check` and the page take them (decisions 12 and
     13b): look 1 after the planned runs; while it is open, every run up to `most` (the seeds,
     or the time) at once and look 2, whatever it says. The page offers one recheck with twice
-    the runs only to an answer read once."""
-    from evolvekit.confirm import runs_can_help  # A1.3; until then it always says yes
+    the runs only to an answer read once, and never to a check limited by its cases."""
+    from evolvekit.confirm import runs_can_help
 
     result, looks = look(runs), 1
     if decision_of(result) == "keep" and runs < most and runs_can_help(result):
         runs, looks = most, 2
         result = look(runs)
-    if looks == 1 and decision_of(result) != "use" and runs < 12:
+    if (looks == 1 and decision_of(result) != "use" and runs < 12
+            and runs_can_help(result)):  # a check limited by its cases is not checked again
         result = look(min(2 * runs, 12))
     return decision_of(result)
 
@@ -364,7 +365,7 @@ def test_a_null_study_says_use_in_under_one_in_ten_under_the_products_looks(sett
 @pytest.mark.parametrize("setting", list(NULL_SETTINGS))
 def test_a_null_study_says_use_in_under_one_in_ten_under_the_products_looks_two_standard_errors_clear(setting, capsys):
     """The same, on 6000 seeded studies per setting, so that 10 % is more than two standard
-    errors above the measured rate (about 8.7 % when runs are noisier than cases)."""
+    errors above the measured rate (8.8 % in 1000 studies when runs are noisier than cases)."""
     studies = 6000
     rate = _null_use_rate(setting, studies)
     se = math.sqrt(rate * (1 - rate) / studies)
@@ -862,6 +863,12 @@ def test_the_share_of_the_runs_is_within_over_within_plus_between():
     assert within_share(rows[:1]) is None, "one case has no spread between cases"
     assert within_share([{**r, "seed_var": None} for r in rows]) is None, "one run per case: unknown"
     assert within_share([{"log_gain": 0.0, "seed_var": 0.0, "pairs": 3}] * 3) == 0.0
+    # Pooled over the cases that have a variance; a one-run case has none but its mean is as noisy.
+    mixed = [{"log_gain": 0.10, "seed_var": 0.0006, "pairs": 3}, {"log_gain": -0.05, "seed_var": 0.0002, "pairs": 3},
+             {"log_gain": 0.02, "seed_var": None, "pairs": 1}]
+    within_mixed = (0.0006 + 0.0002) / 2 * (1 / 3 + 1 / 3 + 1) / 3
+    between_mixed = max(0.0, statistics.variance([0.10, -0.05, 0.02]) - within_mixed)
+    assert within_share(mixed) == pytest.approx(within_mixed / (within_mixed + between_mixed))
     # Decision 7: the gains actually used (`pairs`), not the case's total, divide the variance.
     fewer = [{**r, "pairs": 2} for r in rows]
     assert within_share(fewer) > within_share(rows)
@@ -874,4 +881,4 @@ def test_runs_dominated_by_their_own_noise_are_called_case_limited_in_under_one_
 
     rng = random.Random(25)
     limited = sum(not runs_can_help(_a_study(rng, gains=[0.0] * 4, run_sd=0.02)(3)) for _ in range(400))
-    assert limited < 40, f"{limited} of 400"
+    assert 5 <= limited < 40, f"{limited} of 400 (about 5 % expected: 21)"

@@ -118,6 +118,7 @@ def test_an_open_answer_can_be_checked_again_with_twice_the_runs():
     read_twice = {**comparison([-1.0, 2.0]), "looks": 2}
     assert jobs._recheck({"state": "unclear"}, PLAN, read_twice) is None, "after an extension: its two reads"
     assert jobs._recheck({"state": "unclear"}, PLAN, {**comparison([-1.0, 2.0]), "looks": 1}) is not None
+    assert jobs._recheck({"state": "unclear"}, PLAN, comparison([-1.0, 2.0]), limited=True) is None,         "limited by its cases: the page says to hold back more cases, not to check again"
     assert "two reads" in jobs.READ_TWICE
 
 

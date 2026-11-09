@@ -164,16 +164,21 @@ def within_share(per_instance: Sequence[dict[str, Any]]) -> float | None:
 
     `E[var(d_i)] = tau^2 + mean(sigma_i^2 / n_i)`: the cases' own spread plus
     the runs' noise left in each case's mean. `within` is that second part
-    (each case's variance of its gains over the gains it used), `between` the
+    (the run-to-run variance pooled over the cases that have one, divided by
+    the gains each case used, averaged over all cases), `between` the
     method-of-moments tau^2, and the share is `within / (within + between)`:
     only `within` falls with more runs. None when it cannot be told (fewer
     than two cases with a gain, or no case with a run-to-run variance);
     0.0 when nothing varies at all (more runs add nothing)."""
-    gains = [r["log_gain"] for r in per_instance if r.get("log_gain") is not None]
-    parts = [r["seed_var"] / max(1, int(r.get("pairs") or 1)) for r in per_instance if r.get("seed_var") is not None]
-    if len(gains) < 2 or not parts:
+    rows = [r for r in per_instance if r.get("log_gain") is not None]
+    gains = [r["log_gain"] for r in rows]
+    spread = [(max(1, int(r.get("pairs") or 1)) - 1, r["seed_var"]) for r in rows if r.get("seed_var") is not None]
+    if len(gains) < 2 or not spread or sum(df for df, _ in spread) <= 0:
         return None
-    within = fmean(parts)
+    # The run-to-run variance pooled over the cases that have one (a case with a single
+    # gain has none, but its mean is as noisy as the rest): each case's mean carries it / n_i.
+    pooled = sum(df * v for df, v in spread) / sum(df for df, _ in spread)
+    within = pooled * fmean(1 / max(1, int(r.get("pairs") or 1)) for r in rows)
     between = max(0.0, statistics.variance(gains) - within)
     if within + between <= 0:
         return 0.0
