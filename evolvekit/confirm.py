@@ -137,10 +137,14 @@ def is_posterior(summary: dict[str, Any]) -> bool:
     return isinstance(summary.get("posterior"), dict)
 
 
-def _floor2(p: float) -> float:
-    """`p` floored to two places, so a chance just under a threshold never
-    prints as the threshold (0.9496 is 0.94, 0.996 is 0.99)."""
-    return math.floor(p * 100 + 1e-9) / 100
+def _chance2(p: float) -> float:
+    """A chance to two places, never on the far side of a threshold of the
+    rule: from one half up floored (0.9496 is 0.94, never "use"'s 0.95; 0.996
+    is 0.99), below it rounded up (0.1011 is 0.11, never "worse"'s 0.10; a
+    chance above 0 never prints as 0.00)."""
+    if p >= 0.5:
+        return math.floor(p * 100 + 1e-9) / 100
+    return math.ceil(p * 100 - 1e-9) / 100
 
 
 def decision_of(result: dict[str, Any]) -> str:
@@ -311,7 +315,7 @@ def verdict_summary(d: Sequence[float], *, direction: str) -> dict[str, Any]:
         "frequentist": {**_pct_summary(paired_summary(d), direction), "label": FREQUENTIST_LABEL},
     }
     decision = decide(out)
-    said = f"a chance of a gain of {_floor2(chance):.2f}"
+    said = f"a chance of a gain of {_chance2(chance):.2f}"
     verdict = {"use": "probably better", "worse": "probably WORSE"}.get(decision, "not proven") + f": {said}"
     out["decision"], out["verdict"] = decision, verdict + " (reference prior)"
     return out
@@ -346,7 +350,10 @@ class Comparison:
     """The posterior's prior, by name."""
     looks: int = 1
     """How many times this comparison's answer has been read (written): a
-    check extended or run again under one label reads it again."""
+    check extended or run again under one label reads it again; one whose
+    runs all came from the cache measured nothing new and is not another read,
+    and another baseline or other candidates under the label start at 1
+    (`_looks_before`)."""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -422,17 +429,23 @@ def _select(rows: list[dict[str, Any]], wanted: str) -> list[dict[str, Any]]:
     return [_find(rows, spec.strip(), "--candidates") for spec in wanted.split(",") if spec.strip()]
 
 
-def _looks_before(out_dir: Path) -> int:
-    """How many times the comparison under this label was read before: its
+def _looks_before(out_dir: Path, *, baseline_id: str, candidates: Sequence[str]) -> int:
+    """How many times this comparison was read before under its label: its
     `comparison.json`'s `looks` (1 for one written before it said so), 0
-    with no file. A stopped comparison writes nothing, so it is no look."""
+    with no file -- and 0 when that file compared other configurations
+    (another `baseline_id` or other `candidates`: a run continued and checked
+    again under `final` compares its new best, whose answer was never read).
+    A stopped comparison writes nothing, so it is no look."""
     path = out_dir / "comparison.json"
     if not path.is_file():
         return 0
     try:
-        looks = json.loads(path.read_text(encoding="utf-8")).get("looks", 1)
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        looks = stored.get("looks", 1)
     except (OSError, ValueError, AttributeError):
         return 1
+    if stored.get("baseline_id") != baseline_id or list(stored.get("candidates") or []) != list(candidates):
+        return 0
     return int(looks) if isinstance(looks, int) and looks >= 1 else 1
 
 
@@ -514,8 +527,10 @@ def confirm(
         stage=stage.id, seeds=list(seeds), instances=list(stage.instance_names()),
         baseline_id=str(seed_row["id"]), candidates=[str(r["id"]) for r in chosen],
         levels=[level.describe() for level in config.evaluate.score.levels],
-        run_noise=_run_noise_of(seed_row, config.evaluate.score.objective), looks=_looks_before(out_dir) + 1,
+        run_noise=_run_noise_of(seed_row, config.evaluate.score.objective),
     )
+    comparison.looks = _looks_before(out_dir, baseline_id=comparison.baseline_id,
+                                     candidates=comparison.candidates) + 1
 
     def observer_for(name: str) -> Callable[..., None]:
         def observe(type: str, **fields: Any) -> None:
@@ -626,6 +641,8 @@ def _compare(
         heartbeat.stop(phase="interrupted" if interrupted else "crashed")
         raise
 
+    if comparison.looks > 1 and comparison.runs and all(r.get("cached") for r in comparison.runs):
+        comparison.looks -= 1  # every run came from the cache: nothing new was measured, so no new read
     _analyse(comparison)
     if family:
         apply_holm(comparison.per_candidate, what=family)
@@ -732,6 +749,10 @@ def identical_runs(runs: Sequence[dict[str, Any]], candidate: str, kpis: Sequenc
     return True
 
 
+_SMALLEST_FAILURE_LOG = math.log(1.01)
+"""What a failure counts as when nothing in the comparison measured any gain: 1 %."""
+
+
 def _analyse(comparison: Comparison) -> None:
     """Per candidate: the per-instance gains and their summary.
 
@@ -746,10 +767,14 @@ def _analyse(comparison: Comparison) -> None:
 
     A failed run is part of the result, not a gap in it. When only one side of
     an (instance, seed) pair failed or timed out, that side lost the pair: it
-    is counted as a log gain as large as the largest one measured anywhere
-    in this comparison -- a loss when the candidate failed, a win when the
-    baseline did -- so a configuration that fails often cannot be judged on its
-    lucky runs, and a failure never weighs less than a real result. A pair in
+    is counted as a log gain as large as the largest one measured on this
+    candidate's own finished pairs -- a loss when the candidate failed, a win
+    when the baseline did -- so a configuration that fails often cannot be
+    judged on its lucky runs, and a failure never weighs less than a real
+    result. When every finished pair of the candidate equals the baseline
+    (its own largest is 0), a failure is sized by the largest gain of any
+    candidate's finished pairs in this comparison, and by `log(1.01)` (1 %)
+    when that is 0 too: a crash is never a loss of 0 %. A pair in
     which both failed, or with a value of 0 or below on either side (a log
     ratio of it is no number), says nothing about either and is left out.
     Every kind is counted, and the summary over finished pairs alone is kept
@@ -763,10 +788,19 @@ def _analyse(comparison: Comparison) -> None:
     base = table.get(BASELINE, {})
     kpis = list(dict.fromkeys([objective, *(str(level["kpi"]) for level in comparison.levels)]))
 
-    for cid in comparison.candidates:
+    def largest_of(cid: str) -> float | None:
         mine = table.get(cid, {})
         measured = [log_gain(base[k], mine[k], direction) for k in base.keys() & mine.keys()]
-        largest = max((abs(g) for g in measured if g is not None), default=None)
+        return max((abs(g) for g in measured if g is not None), default=None)
+
+    anywhere = max((g for g in map(largest_of, comparison.candidates) if g is not None), default=0.0)
+    for cid in comparison.candidates:
+        mine = table.get(cid, {})
+        largest = largest_of(cid)
+        planned_keys = [(instance, s) for instance in comparison.instances for s in comparison.seeds]
+        if largest == 0 and any((k in base) != (k in mine) for k in planned_keys):
+            # Every finished pair equals the baseline, and a pair only one side finished: still a loss (or win).
+            largest = max(anywhere, _SMALLEST_FAILURE_LOG)
         per_instance, finished_only = [], []
         for instance in comparison.instances:
             counts = dict.fromkeys(_PAIR_COUNTS, 0)
@@ -1045,6 +1079,11 @@ def comparison_of(data: dict[str, Any]) -> Comparison:
 
 
 def render_markdown(comparison: Comparison) -> str:
+    """`comparison.md`. A comparison written before A1 (no candidate's summary
+    carries the posterior, `is_posterior`) keeps the page it had: the rule it
+    was decided by (`LEGACY_RULE_WORDS`), its interval and its Wilcoxon test."""
+    summaries = [r.get("summary") or {} for r in comparison.per_candidate.values()]
+    legacy = bool(summaries) and not any(is_posterior(s) for s in summaries)
     lines = [
         f"# Confirmation `{comparison.label}`",
         "",
@@ -1052,7 +1091,7 @@ def render_markdown(comparison: Comparison) -> str:
         f"seeds {comparison.seeds}, {len(comparison.instances)} instance(s). Baseline: `{comparison.baseline_id}`. "
         "Improvement is the log ratio of the baseline's and the candidate's value on the same instance and "
         "seed, averaged over the seeds of an instance, and shown in percent of the baseline; positive is better. "
-        f"The rule: {RULE_WORDS} The answer was read {comparison.looks} time(s).",
+        f"The rule: {LEGACY_RULE_WORDS if legacy else RULE_WORDS} The answer was read {comparison.looks} time(s).",
         "",
     ]
     for cid, result in comparison.per_candidate.items():
@@ -1060,10 +1099,13 @@ def render_markdown(comparison: Comparison) -> str:
         lines += [f"## `{cid}` against the baseline", ""]
         holm_info = result.get("holm")
         if holm_info:
-            lines += [f"Chosen among {holm_info['k']} {holm_info['what']} (Holm): "
+            # Kinds of case are judged together, each its own answer, not chosen among.
+            together = (f"Judged with the {holm_info['k']} {holm_info['what']} together"
+                        if holm_info["what"] == "kinds of case" else f"Chosen among {holm_info['k']} {holm_info['what']}")
+            lines += [f"{together} (Holm): "
                       f"{'passes' if holm_info['passed'] else 'does not pass'} the rule's chance at its stricter level.", ""]
         if result.get("levels"):
-            lines += _levels_markdown(result["levels"])
+            lines += _levels_markdown(result["levels"], LEGACY_RULE_WORDS if legacy else RULE_WORDS)
         sizes = result.get("failure_counted_as_pct")
         counted = (
             f"{result['pairs']} of {result['pairs_planned']} (instance, seed) pairs are in the comparison, "
@@ -1093,12 +1135,22 @@ def render_markdown(comparison: Comparison) -> str:
         if held.get("passed") is False and held.get("own") == "use":
             said = f"not proven among {held['k']} {held['what']} (Holm)"  # its own chance passes; chosen among rivals it does not
         verdict = said[:1].upper() + said[1:]
+        if not is_posterior(s) and s.get("chance") is not None:
+            # A summary written before A1: its head as it was then (a t interval and a Wilcoxon test).
+            interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]" if s.get("ci95") else "n/a"
+            p = (s.get("wilcoxon") or {}).get("p")
+            head = (f"**Mean improvement {s['mean']:+.3f} %**, 95 % CI {interval} over {s['n']} instance(s); "
+                    f"{s['wins']} better, {s['losses']} worse; Wilcoxon signed-rank p = "
+                    + ("n/a" if p is None else f"{p:.4f}") + f". **{verdict}.**")
+            lines += [head, "", counted, "", "| instance | baseline | candidate | improvement | pairs won | dropped |",
+                      "|---|--:|--:|--:|--:|--:|", *_instance_rows(result["per_instance"])]
+            continue
         if s.get("chance") is not None and s.get("ci95"):
             interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]"
             head = (
                 f"**Mean improvement {s['mean']:+.3f} %** (the paired mean, the posterior's), "
                 f"95 % credible interval {interval} over {s['n']} instance(s); "
-                f"{s['wins']} better, {s['losses']} worse; chance of a gain {_floor2(s['chance']):.2f}, "
+                f"{s['wins']} better, {s['losses']} worse; chance of a gain {_chance2(s['chance']):.2f}, "
                 f"of losing more than {USE_MARGIN_PCT:g} % {1 - s['chance_margin']:.2f} (for engineers: it does "
                 f"not decide); prior {s.get('prior', PRIOR)}. **{verdict}.**"
             )
@@ -1121,21 +1173,29 @@ def render_markdown(comparison: Comparison) -> str:
             "| instance | baseline | candidate | improvement | pairs won | dropped |",
             "|---|--:|--:|--:|--:|--:|",
         ]
-        for row in result["per_instance"]:
-            dropped = _dropped(row)
-            if row["improvement_pct"] is None:
-                lines.append(f"| {row['instance']} | – | – | – | 0 of 0 | {dropped} |")
-            else:
-                lines.append(
-                    f"| {row['instance']} | {row['baseline']:.6g} | {row['candidate']:.6g} | "
-                    f"{row['improvement_pct']:+.3f} % | {row['pair_wins']} of {row['pairs']} | {dropped} |"
-                )
-        lines.append("")
+        lines += _instance_rows(result["per_instance"])
     return "\n".join(lines)
 
 
-def _levels_markdown(levels: dict[str, Any]) -> list[str]:
-    """The lexicographic verdict and one row per level (`_analyse_levels`)."""
+def _instance_rows(per_instance: Sequence[dict[str, Any]]) -> list[str]:
+    """The per-instance table's rows, and the blank line after it."""
+    lines = []
+    for row in per_instance:
+        dropped = _dropped(row)
+        if row["improvement_pct"] is None:
+            lines.append(f"| {row['instance']} | – | – | – | 0 of 0 | {dropped} |")
+        else:
+            lines.append(
+                f"| {row['instance']} | {row['baseline']:.6g} | {row['candidate']:.6g} | "
+                f"{row['improvement_pct']:+.3f} % | {row['pair_wins']} of {row['pairs']} | {dropped} |"
+            )
+    lines.append("")
+    return lines
+
+
+def _levels_markdown(levels: dict[str, Any], rule: str = RULE_WORDS) -> list[str]:
+    """The lexicographic verdict and one row per level (`_analyse_levels`); `rule` is the rule
+    the comparison was decided by, in words."""
 
     def number(value: Any, unit: str, signed: bool = False) -> str:
         if value is None:
@@ -1151,7 +1211,7 @@ def _levels_markdown(levels: dict[str, Any]) -> list[str]:
         "its tolerance, better or worse when the interval lies wholly beyond it, and not yet decided "
         "otherwise; the first level that is not equal decides, and an undecided one keeps today's. "
         "The last level has no tolerance: the sign of its mean says better or worse. The level that "
-        f"decides is read by the rule: {RULE_WORDS}",
+        f"decides is read by the rule: {rule}",
         "",
         "Differences are per instance, averaged over the seeds, positive is better: the log ratio "
         "shown in percent of the baseline's value, or a plain difference in the KPI's own units where "

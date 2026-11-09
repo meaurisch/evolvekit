@@ -18,7 +18,7 @@ from evolvekit.confirm import (
     USE_CHANCE,
     Comparison,
     _analyse,
-    _floor2,
+    _chance2,
     _run_noise_of,
     confirm,
     decide,
@@ -236,10 +236,21 @@ def test_the_sentence_says_the_decision_and_its_numbers():
     assert use["chance"] > 0.9995 and use["verdict"] == "probably better: a chance of a gain of 0.99 (reference prior)", \
         "floored: a chance below 1 never prints as 1.00"
     worse = verdict_summary([-0.015, -0.010, -0.012, -0.008], direction="minimize")
-    assert worse["verdict"] == "probably WORSE: a chance of a gain of 0.00 (reference prior)"
+    assert worse["verdict"] == "probably WORSE: a chance of a gain of 0.01 (reference prior)",         "rounded up: a chance above 0 never prints as 0.00"
     keep = verdict_summary([-0.09, 0.115, -0.004], direction="minimize")
     assert keep["verdict"] == "not proven: a chance of a gain of 0.54 (reference prior)"
-    assert _floor2(0.9496) == 0.94 and _floor2(0.996) == 0.99 and _floor2(0.95) == 0.95 and _floor2(0.0) == 0.0
+    assert _chance2(0.9496) == 0.94 and _chance2(0.996) == 0.99 and _chance2(0.95) == 0.95 and _chance2(0.0) == 0.0
+
+
+def test_a_chance_never_prints_on_the_far_side_of_a_threshold():
+    """Above one half floored (0.9496 is never 0.95, "use"); below it rounded up (0.1011 is never
+    0.10, "worse"): a printed chance is never on the other side of the rule from the real one."""
+    assert _chance2(0.1011) == 0.11 and _chance2(0.10) == 0.10 and _chance2(0.0001) == 0.01
+    assert _chance2(0.4901) == 0.50 and _chance2(0.5) == 0.5 and _chance2(0.5099) == 0.50 and _chance2(1.0) == 1.0
+    keep = verdict_summary([0.0, -0.002, -0.0005, -0.001, 0.0006], direction="minimize")
+    assert keep["decision"] == "keep" and keep["chance"] < 0.5
+    said = keep["verdict"].split("a chance of a gain of ")[1][:4]
+    assert float(said) >= keep["chance"], keep["verdict"]
 
 
 def test_a_comparison_written_before_the_posterior_decides_as_it_did():
@@ -375,13 +386,19 @@ def test_a_null_study_says_use_in_under_one_in_ten_under_the_products_looks_two_
     assert rate + 2 * se < 0.10, f"{rate:.4f} of {studies} null studies said use (2 SE = {2 * se:.4f})"
 
 
-def test_a_null_study_with_quiet_runs_reports_its_false_use_rate(capsys):
-    """Not asserted: runs much quieter than 1 %. The rule is P(gain > 0) >= 0.95 alone (the 1 %
-    margin never binds, decision 13a), so nothing but the chance stands between the null and use."""
+def test_a_null_study_of_pure_run_noise_says_use_in_under_one_in_ten(capsys):
+    """The worst case: every case's true gain exactly 0, only the runs vary. The rule is
+    P(gain > 0) >= 0.95 alone (the 1 % margin never binds, decision 13a) and scale-free, so the
+    runs' size does not matter (0.2 % here); with no spread between cases, more runs always help,
+    every open answer is extended and rechecked. Measured 8.9 % (20 000 studies, +- 0.2 %);
+    asserted under 10 % of 1000 seeded studies (9.7 % on this seed)."""
     rng = random.Random(11)
-    uses = sum(_final_answer(_a_study(rng, gains=[0.0] * 4, run_sd=0.002)) == "use" for _ in range(200))
+    studies = 1000
+    uses = sum(_final_answer(_a_study(rng, gains=[0.0] * 4, run_sd=0.002)) == "use" for _ in range(studies))
     with capsys.disabled():
-        print(f"\nfalse use with quiet runs (0.2 %), 4 cases x 3 runs, at most two reads: {uses / 200:.3f}")
+        print(f"\nfalse use, pure run noise, 4 cases x 3 runs, at most two reads ({studies} studies): "
+              f"{uses / studies:.3f}")
+    assert uses / studies < 0.10, f"{uses / studies:.3f} of {studies} null studies said use"
 
 
 def test_a_three_percent_gain_on_four_cases_reports_its_power(capsys):
@@ -490,6 +507,39 @@ def test_an_imputed_failure_is_said_as_the_loss_or_the_win_the_comparison_used(d
     assert f"1 pair(s) in which only the candidate failed counted as a loss of {loss:.3g} %" in verdict
     assert f"1 pair(s) in which only the baseline failed counted as a win of {win:.3g} %" in verdict
     assert f"(a loss of {loss:.3g} %, a win of {win:.3g} %)" in render_markdown(comparison)
+
+
+def test_a_failure_of_a_candidate_that_otherwise_equals_the_starting_point_is_never_a_loss_of_0_percent():
+    """S5: a candidate whose finished pairs all equal the starting point has its own largest gain
+    0; its crash is sized by the largest gain of any candidate's finished pairs in the comparison,
+    and by log 1.01 (a 1 % loss) when that is 0 too. A candidate with a gain of its own keeps its own."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse
+
+    def compare(others: dict[str, float]) -> Comparison:
+        comparison = Comparison(label="t", objective="cost", direction="minimize", stage="full", seeds=[1, 2],
+                                instances=["a", "b"], baseline_id="g000-c0001", candidates=["same", *others])
+        for instance in ("a", "b"):
+            for seed in (1, 2):
+                comparison.runs.append({"configuration": BASELINE, "instance": instance, "seed": seed, "ok": True,
+                                        "kpis": {"cost": 100.0}})
+                crashed = (instance, seed) == ("a", 2)
+                comparison.runs.append({"configuration": "same", "instance": instance, "seed": seed,
+                                        "ok": not crashed, "kpis": {} if crashed else {"cost": 100.0}})
+                for cid, value in others.items():
+                    comparison.runs.append({"configuration": cid, "instance": instance, "seed": seed, "ok": True,
+                                            "kpis": {"cost": value if seed == 1 else 100.0}})
+        _analyse(comparison)
+        return comparison
+
+    comparison = compare({"rival": 80.0})
+    same = comparison.per_candidate["same"]
+    assert same["failure_counted_as_log"] == pytest.approx(math.log(100 / 80)), "the comparison's largest"
+    assert same["per_instance"][0]["log_gain"] == pytest.approx(-math.log(100 / 80) / 2)
+    assert "counted as a loss of 0 %" not in same["summary"]["verdict"]
+    assert comparison.per_candidate["rival"]["failure_counted_as_log"] == pytest.approx(math.log(100 / 80))
+    alone = compare({})
+    assert alone.per_candidate["same"]["failure_counted_as_log"] == pytest.approx(math.log(1.01))
+    assert "counted as a loss of 1 %" in alone.per_candidate["same"]["summary"]["verdict"]
 
 
 def test_a_candidate_whose_every_run_equals_the_baseline_is_marked_identical():
@@ -816,6 +866,33 @@ def test_comparison_json_records_the_prior_and_how_often_the_answer_was_read(tmp
     assert {"chance", "chance_margin", "worst", "ci95", "frequentist", "posterior", "decision"} <= set(summary)
     markdown = (run_dir / "confirm" / "final" / "comparison.md").read_text(encoding="utf-8")
     assert "The answer was read 2 time(s)." in markdown and "Frequentist, for engineers:" in markdown
+
+
+def test_a_new_comparison_under_the_same_label_starts_its_own_count_of_reads(tmp_path):
+    """I2: after Continue the final check under `final` compares another candidate: its answer
+    was never read, so it starts at one read, not at the old comparison's count plus one."""
+    config_path = _write_config(tmp_path)
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0},
+                                                 "g004-c0020": {"params": {"x": -0.04}, "score": -96.0}})
+    config = load_config(config_path)
+    first = confirm(config, run_dir, seeds=[1001], candidates="g003-c0012", label="final", log=lambda m: None)
+    other = confirm(config, run_dir, seeds=[1001], candidates="g004-c0020", label="final", log=lambda m: None)
+    assert first.looks == 1 and other.looks == 1
+    written = json.loads((run_dir / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
+    assert written["looks"] == 1
+
+
+def test_a_read_that_ran_nothing_new_is_not_another_read(tmp_path):
+    """I2 (M): the same comparison read again from its cached runs alone measured nothing new."""
+    config_path = _write_config(tmp_path)
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    config = load_config(config_path)
+    first = confirm(config, run_dir, seeds=[1001, 1003], label="final", log=lambda m: None)
+    same = confirm(config, run_dir, seeds=[1001, 1003], label="final", log=lambda m: None)
+    assert all(run["cached"] for run in same.runs)
+    assert first.looks == 1 and same.looks == 1
+    more = confirm(config, run_dir, seeds=[1001, 1003, 1004], label="final", log=lambda m: None)
+    assert more.looks == 2
 
 
 def test_the_command_line_compares_the_winners_of_two_runs(tmp_path, capsys):
