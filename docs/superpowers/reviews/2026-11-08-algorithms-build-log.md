@@ -211,5 +211,5 @@ branches) through the in-app browser, in a fresh home whose path has a space, bu
 
 ### Gate and PR
 
-- Gate: GATE_A1_PENDING.
+- Gate: `python tasks.py check` on 5f04e66, nothing else running: **2914 passed, 5 skipped** in 35:58.
 - PR: PR_A1_PENDING.
