@@ -15,13 +15,15 @@ application:
 Loading refuses, one sentence per mistake naming its key path: unknown keys,
 a setting whose default is outside its range, a lever on a table or column the
 harness does not declare, KPI and template SQL that does not compile against
-the declared tables, and a study template that does not compile.
+the declared tables, a feature's SQL that does not run on the request tables
+alone, and a study template that does not compile.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +32,7 @@ from typing import Any, Mapping
 import yaml
 
 from evolvekit.harness import HarnessError
+from evolvekit.harness.sdk.evk_harness import _read_only as evk_read_only
 from evolvekit.harness.sql import placeholders, schema_database, sql_problem
 from evolvekit.space import Parameter, SpaceError
 
@@ -41,6 +44,7 @@ __all__ = [
     "Column",
     "Defaults",
     "Export",
+    "Feature",
     "Harness",
     "InputSpec",
     "Kpi",
@@ -344,6 +348,9 @@ class Setting:
     def parse(name: Any, raw: Any) -> "Setting":
         path = f"settings.{name}"
         data = _mapping(raw, path)
+        if "prior" in data:  # a study's compile writes one (`study new --warm`); a harness declares none
+            raise HarnessError(f"{path}: unknown key(s) ['prior']; a harness declares no prior: `study new --warm` "
+                               "gives a study one from what finished studies learned")
         try:
             parameter = Parameter.parse(name, {k: v for k, v in data.items() if k not in SETTING_META}, path)
         except SpaceError as exc:
@@ -612,6 +619,26 @@ class Export:
 
 
 @dataclass(frozen=True)
+class Feature:
+    """One number per case that tells cases apart (`features:`): SQL over the
+    request tables alone, its first value. `describe` is the words a rule
+    says it in ("If <describe> is above ...")."""
+
+    name: str
+    sql: str
+    describe: str = ""
+
+    @staticmethod
+    def parse(name: Any, raw: Any) -> "Feature":
+        path = f"features.{name}"
+        _name(name, path)
+        data = _mapping(raw, path)
+        _known(data, {"sql", "describe"}, path)
+        return Feature(name=name, sql=_text(_required(data, "sql", path), f"{path}.sql"),
+                       describe=_text(data.get("describe"), f"{path}.describe", empty=True))
+
+
+@dataclass(frozen=True)
 class Defaults:
     time_per_case_s: float = 60.0
     retries: int = 1
@@ -666,6 +693,9 @@ class Harness:
     """Study templates, by id (the file's stem): partial `study.yaml` documents."""
     code: Code | None = None
     """The source a code study may change (`code:`), or `None`."""
+    features: dict[str, Feature] = field(default_factory=dict)
+    """What tells one case from another (`features:`); none: every request
+    table's row count and the mean of each numeric request column that is not private."""
 
     @property
     def key(self) -> str:
@@ -712,6 +742,34 @@ def _check_sql(harness: Harness) -> None:
                             f"kpi_templates.{name}.params.{param.name}.from: does not run against the "
                             f"declared tables: {problem}"
                         )
+    finally:
+        db.close()
+    if not harness.features:
+        return
+    # A feature describes the case before anything solves it: the request tables alone.
+    request = {name: columns for name, columns in harness.declared().items() if name in harness.request_tables}
+    private = {(table, column.name) for table in harness.request_tables
+               for column in harness.tables[table].columns.values() if column.private}
+    private |= {(f"orig_{table}", column) for table, column in private}
+    read = getattr(sqlite3, "SQLITE_READ", 20)
+    db = schema_database(request, harness.request_tables)
+    try:
+        for name, feature in harness.features.items():
+            # A feature's value is shown (groups.json, the rule): a private column is never one of its inputs.
+            touched: list[str] = []
+
+            def authorizer(action: int, table: Any, column: Any, *rest: Any) -> int:
+                if action == read and (table, column) in private:
+                    touched.append(f"{str(table).removeprefix('orig_')}.{column}")
+                    return sqlite3.SQLITE_DENY
+                return evk_read_only(action, table, column, *rest)
+
+            db.set_authorizer(authorizer)
+            problem = sql_problem(db, feature.sql)
+            if touched:
+                raise HarnessError(f"features.{name}.sql: reads the private column {touched[0]}")
+            if problem:
+                raise HarnessError(f"features.{name}.sql: {problem}")
     finally:
         db.close()
 
@@ -781,7 +839,8 @@ def _load_harness(root: Path, *, check_templates: bool = True) -> Harness:
     _known(
         data,
         {"harness", "id", "version", "title", "summary", "application", "cases", "inputs", "time_limit",
-         "seeds", "settings", "tables", "levers", "kpis", "kpi_templates", "exports", "defaults", "code"},
+         "seeds", "settings", "tables", "levers", "kpis", "kpi_templates", "exports", "defaults", "code",
+         "features"},
         "<root>",
     )
     if data.get("harness") != FORMAT:
@@ -818,6 +877,7 @@ def _load_harness(root: Path, *, check_templates: bool = True) -> Harness:
         defaults=Defaults.parse(data.get("defaults")),
         templates=_templates(root),
         code=Code.parse(data["code"], application.kind) if data.get("code") is not None else None,
+        features={name: Feature.parse(name, spec) for name, spec in _mapping(data.get("features"), "features").items()},
     )
     for name, kpi in harness.kpis.items():
         if kpi.guard is not None and kpi.guard["kpi"] not in harness.kpis:

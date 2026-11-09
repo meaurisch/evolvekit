@@ -13,13 +13,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from evolvekit.app import AppError, assistant, compare, jobs, tries, work
+from evolvekit.app import AppError, assistant, compare, jobs, scheduler, tries, work
+from evolvekit.app.detach import no_window_flags
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
-from evolvekit.harness import HarnessError
+from evolvekit.harness import HarnessError, memory
 from evolvekit.harness.execute import plan_for, read_preview
 from evolvekit.harness.manifest import Harness
 from evolvekit.harness.plan import plan_notes
+from evolvekit.harness.schedule import PRESETS, when_words
 from evolvekit.harness.study import SettingChoice, save_study
 
 __all__ = ["ROUTES", "describe_harness"]
@@ -113,8 +115,14 @@ def home(req: Request) -> dict[str, Any]:
             studies.append({"slug": slug, "name": slug, "harness": "", "kind": "broken", "line": str(exc)})
             continue
         state = jobs.state_line(root, study, req.server.status_document)
+        if state.get("kind") == "draft":
+            # What a draft still lacks, so its card names it (persona p4, H6): the first problem's
+            # step, key and text (`Home.problems`), None when Set up has nothing missing.
+            problems = req.home.problems(slug)
+            state["missing"] = ({"step": problems[0]["step"], "key": problems[0]["key"], "text": problems[0]["text"]}
+                                if problems else None)
         template = (pinned.templates.get(study.template) or {}).get("title") if study.template else None
-        studies.append({"slug": slug, "name": study.name, "harness": pinned.title + (f" · {template}" if template else ""),
+        studies.append({"slug": slug, "name": study.name, "harness_id": pinned.id, "harness": pinned.title + (f" · {template}" if template else ""),
                         **state, "updated_at": (root / "study.yaml").stat().st_mtime,
                         "archived": req.home.is_archived(slug)})
     studies.sort(key=lambda s: -float(s.get("updated_at") or 0))
@@ -128,8 +136,18 @@ def home(req: Request) -> dict[str, Any]:
                           "built_in": entry.built_in, "templates": _templates(h),
                           "application": {"kind": h.application.kind, "label": h.application.label}})
     settings = req.home.settings()
-    return {"home": str(req.home.root), "studies": studies, "harnesses": harnesses, "keys": req.home.keys(),
-            "provider": settings["provider"], "trash": req.home.trash()}
+    out = {"home": str(req.home.root), "studies": studies, "harnesses": harnesses, "keys": req.home.keys(),
+           "provider": settings["provider"], "trash": req.home.trash()}
+    clock = scheduler.clock_of(req.home)
+    if clock.simulated:  # a rehearsal (`app --clock`): windows follow it, runs keep real time
+        out["clock"] = {"line": clock.words()}
+    return out
+
+
+def shutdown(req: Request) -> dict[str, bool]:
+    """`evolvekit app stop`: the app ends cleanly (its clock and `app.json` removed), after this answer."""
+    req.server.request_shutdown()
+    return {"stopping": True}
 
 
 def _templates(harness: Harness) -> list[dict[str, Any]]:
@@ -174,7 +192,9 @@ def install(req: Request) -> dict[str, Any]:
 
 def harness(req: Request) -> dict[str, Any]:
     entry = req.home.harness_entry(req.params["harness"], req.query.get("version") or None)
-    return describe_harness(entry.harness)  # type: ignore[arg-type]
+    described = describe_harness(entry.harness)  # type: ignore[arg-type]
+    described["learned"] = memory.learned(req.home, described["id"], document_of=req.server.status_document)
+    return described
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +213,30 @@ def _document(req: Request, slug: str) -> dict[str, Any]:
     document["test_run"] = work.test_run_state(root, req.server)
     document["runs"] = jobs.runs(root)
     document["state"] = jobs.state_line(root, study, req.server.status_document)
+    # The campaign's words (None without a schedule) and the windows Set up offers (D19).
+    document["campaign"] = document["state"].get("campaign")
+    document["schedule_presets"] = PRESETS
+    if study.schedule is not None:
+        # The hours one week of its windows gives (real hours, so a rehearsal's are fewer), and the
+        # campaign's search time left on its run (None before its first run): persona p4, H1.
+        clock = scheduler.clock_of(req.home)
+        document["schedule_hours"] = scheduler.schedule_hours(study.schedule, now=clock.now(), speed=clock.speed)
+        run = scheduler.campaign_run(root)
+        document["campaign_left_s"] = (scheduler.campaign_left_s(root / "runs" / run) if run is not None else None)
+        # What the scheduled Continue says on its button ("… in the next window (Sat 00:00)"), even
+        # when the campaign is finished and says no next window; and whether a renewed campaign waits
+        # to start a fresh run after the latest one, when Continue is not offered (persona p4, H5).
+        now = clock.now()
+        found = study.schedule.next_edge(now)
+        document["next_window"] = ({"at": found[0].isoformat(), "edge": found[1], "words": when_words(found[0], now)}
+                                   if found is not None else None)
+        stored = scheduler.read_campaign(root) or {}
+        latest = document["runs"][-1]["id"] if document["runs"] else None
+        document["new_run_waits"] = bool(stored.get("state") == "armed" and latest is not None
+                                         and stored.get("after") == latest)
+    clock = scheduler.clock_of(req.home)
+    if clock.simulated:  # a rehearsal: Set up says a window's hours on its clock and in real time
+        document["clock"] = {"line": clock.words(), "speed": clock.speed}
     document["notes"] = plan_notes(len(study.test))  # too few held-back cases for a firm answer, before any run
     return document
 
@@ -292,7 +336,8 @@ def pick_file(req: Request) -> dict[str, Any]:
     title = str(body.get("title") or ("Choose a folder" if kind == "folder" else "Choose a file"))[:120]
     try:
         done = subprocess.run([sys.executable, "-c", _PICK, title, kind], capture_output=True, text=True,
-                              timeout=PICK_TIMEOUT_S, encoding="utf-8", errors="replace")
+                              timeout=PICK_TIMEOUT_S, encoding="utf-8", errors="replace",
+                              creationflags=no_window_flags())
     except subprocess.TimeoutExpired:
         return {"cancelled": True}
     try:
@@ -324,6 +369,14 @@ def restore_case(req: Request) -> dict[str, Any]:
     if jobs.running(req.home.study_root(slug)):
         raise AppError("the study is running; its cases cannot change now", 409)
     req.home.restore_case(slug, req.params["name"])
+    return _document(req, slug)
+
+
+def put_tag(req: Request) -> dict[str, Any]:
+    """JSON `{tag}`: what kind of case it is (`""` takes the tag away); tags
+    decide the groups of `study groups` as soon as one case has one."""
+    slug = req.params["slug"]
+    req.home.set_tag(slug, req.params["name"], req.json().get("tag", ""))
     return _document(req, slug)
 
 
@@ -397,8 +450,35 @@ def plan(req: Request) -> dict[str, Any]:
         if hours is not None and hours > study.budget.hours:
             fixes.append({"kind": "time", "hours": hours, "label": f"Allow {_hours_words(hours)} in total",
                           "detail": f"About {GOOD * tunables} combinations for all {tunables}."})
-    return {"summary": chosen.summary(), "estimated": estimated, "warning": warning, "fixes": fixes,
-            "tunables": tunables, **chosen.to_json()}
+    window = whole = None
+    if study.schedule is not None and not chosen.blocked:
+        # A scheduled study ends on its windows, not "done around 17:34" from now (persona p4, H1).
+        clock = scheduler.clock_of(req.home)
+        now = clock.now()
+        # A campaign with a finished run goes on with what is left of its search time (m9).
+        hours = scheduler.campaign_plan_hours(root, study, chosen.hours, chosen.final_check_s, now=now)
+        window = scheduler.plan_window(study.schedule, hours, now=now, speed=clock.speed)
+        if hours == chosen.hours:  # the line spreads the study's own hours: the offer's done time is the line's
+            whole = _whole_window(study, pinned, timing, models, now=now, speed=clock.speed)
+    return {"summary": chosen.summary(when=window["line"] if window else None), "estimated": estimated,
+            "warning": warning, "fixes": fixes, "tunables": tunables, **chosen.to_json(),
+            **({"window": window} if window else {}), **({"whole_window": whole} if whole else {})}
+
+
+def _whole_window(study: Any, harness: Any, timing: dict[str, Any], models: dict[str, Any] | None, *,
+                  now: Any, speed: float) -> dict[str, Any] | None:
+    """Set up's "Search through the whole window" (persona p4 round 2, I1): the hours one week of the
+    windows gives less the final check the plan makes for them, so both end inside the windows."""
+    import dataclasses
+
+    def check_s(hours: float) -> float:
+        trial = dataclasses.replace(study, budget=dataclasses.replace(study.budget, hours=hours))
+        return plan_for(trial, harness, timing, models=models).final_check_s
+
+    try:
+        return scheduler.whole_window(study.schedule, study.budget.hours, check_s, now=now, speed=speed)
+    except (HarnessError, ValueError, ZeroDivisionError):
+        return None
 
 
 THIN, GOOD = 6, 10
@@ -562,12 +642,21 @@ def _run(req: Request, root: Path) -> str:
 
 
 def start(req: Request) -> dict[str, Any]:
-    """A new run; with a body `{"resume": "<run>"}`, that run again from where it stopped."""
-    root, _, _ = req.home.load(req.params["slug"])
-    resume = req.json().get("resume")
+    """A new run; with a body `{"resume": "<run>"}`, that run again from where it stopped. A study
+    with a schedule is armed instead (its windows start the sessions, D3), or with `{"now": true}`
+    started at once as a session by hand (`scheduler.start_campaign`)."""
+    root, study, _ = req.home.load(req.params["slug"])
+    body = req.json()
+    resume, now = body.get("resume"), body.get("now", False)
     if resume is not None and not isinstance(resume, str):
         raise AppError("resume: the name of a run")
-    return jobs.start(req.home, root, resume=resume)
+    if not isinstance(now, bool):
+        raise AppError("now: true or false")
+    if resume is not None:
+        return scheduler.by_hand(req.home, root, lambda: jobs.start(req.home, root, resume=resume))
+    if study.schedule is not None:
+        return scheduler.start_campaign(req.home, root, now=scheduler.clock_of(req.home).now(), at_once=now)
+    return jobs.start(req.home, root)
 
 
 def bakeoff(req: Request) -> dict[str, Any]:
@@ -589,30 +678,61 @@ def verdict(req: Request) -> dict[str, Any]:
 
 
 def stop(req: Request) -> dict[str, Any]:
+    """Stop the run; on an armed campaign, a person's stop also pauses it (D4)."""
     root, _, _ = req.home.load(req.params["slug"])
+    if (scheduler.read_campaign(root) or {}).get("state") == "armed":
+        run = req.query.get("run") or jobs.latest_run(root)
+        if run is not None:
+            jobs._run_dir(root, run)  # noqa: SLF001 - a name that is no run is refused before anything is paused
+        return scheduler.stop_by_person(req.home, root, run)
     return jobs.stop(root, _run(req, root))
 
 
 def final_check(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
     seeds = req.json().get("seeds")
-    return jobs.resume_final_check(req.home, root, _run(req, root), int(seeds) if seeds is not None else None)
+    run = _run(req, root)
+    return scheduler.by_hand(req.home, root, lambda: jobs.resume_final_check(
+        req.home, root, run, int(seeds) if seeds is not None else None))
 
 
 def continue_run(req: Request) -> dict[str, Any]:
     """`{"run": RUN, "hours": H}`: a finished run searched on for H hours
-    more (the study's hours when not said), then checked again."""
-    root, _, _ = req.home.load(req.params["slug"])
+    more (the study's hours when not said), then checked again. On a study with a
+    schedule the time goes to its next window instead (`scheduler.continue_campaign`:
+    `{"scheduled": true, "next", "words", ...}`), or with `{"now": true}` at once, as a
+    session by hand."""
+    root, study, _ = req.home.load(req.params["slug"])
     body = req.json()
     run = body.get("run") or _run(req, root)
     if not isinstance(run, str):
         raise AppError("run: the name of a run")
-    return jobs.continue_run(req.home, root, run, body.get("hours"))
+    now = body.get("now", False)
+    if not isinstance(now, bool):
+        raise AppError("now: true or false")
+    if study.schedule is not None and not now:
+        return scheduler.continue_campaign(req.home, root, run, body.get("hours"),
+                                           now=scheduler.clock_of(req.home).now())
+    return scheduler.by_hand(req.home, root, lambda: jobs.continue_run(req.home, root, run, body.get("hours")))
+
+
+def _group(req: Request) -> str | None:
+    """`?group=`: the group of a per-group run to read (its name); None for the run's own choice."""
+    return req.query.get("group") or None
+
+
+def _run_folder(req: Request, root: Path) -> tuple[str, Path]:
+    """`(run, folder)` of `?run=`: the run's folder, or for a per-group run the
+    folder of `?group=` (else the current group while it runs, else the first)."""
+    run = _run(req, root)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the run's folder, judged by name
+    picked = jobs._group_folder(run_dir, jobs.phase(run_dir), _group(req))  # noqa: SLF001
+    return run, picked[1] if picked is not None else run_dir
 
 
 def status(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
-    return jobs.status(root, _run(req, root), req.server.status_document)
+    return jobs.status(root, _run(req, root), req.server.status_document, group=_group(req))
 
 
 RUNS_POLL_LIVE_S, RUNS_POLL_IDLE_S = 5, 10
@@ -623,20 +743,22 @@ def runs_of(req: Request) -> dict[str, Any]:
     """Every run of the study as it is now (`jobs.runs`, no status document read) and the newest:
     what the open Study page asks every few seconds, so it notices a run that started or ended.
     `poll_s` is when to ask again: RUNS_POLL_LIVE_S while a run is queued or live, else RUNS_POLL_IDLE_S.
-    A finished run's line is kept between calls (`jobs.run_line`), so asking costs little."""
-    root, _, _ = req.home.load(req.params["slug"])
+    `campaign` is a scheduled study's `scheduler.campaign_state` (None without a schedule). A finished run's line is kept between calls (`jobs.run_line`), so asking costs little."""
+    root, study, _ = req.home.load(req.params["slug"])
     listed = jobs.runs(root)
     live = any(r.get("phase") in (*jobs.ACTIVE, "queued") for r in listed)
     earlier = jobs.earlier_use(root, listed[-1]) if listed else None  # the header's "An earlier run … says use"
+    # A scheduled study's campaign as it is now (its line, when its runs ran): the open page follows it.
+    campaign = (scheduler.campaign_state(root, study, now=scheduler.clock_of(req.home).now())
+                if study.schedule is not None else None)
     return {"runs": listed, "latest": jobs.latest_run(root), "poll_s": RUNS_POLL_LIVE_S if live else RUNS_POLL_IDLE_S,
-            "earlier": earlier}
+            "earlier": earlier, "campaign": campaign}
 
 
 def tries_of(req: Request) -> dict[str, Any]:
     """Every try of a run, for the Study page's Tries, Cases and Settings views (`tries.digest`)."""
     root, _, _ = req.home.load(req.params["slug"])
-    run = _run(req, root)
-    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the run's folder, judged by name
+    run, run_dir = _run_folder(req, root)  # a per-group run: one group's tries (`?group=`)
     return {"run": run, **tries.digest(run_dir)}
 
 
@@ -647,7 +769,7 @@ def try_of(req: Request) -> dict[str, Any]:
     from evolvekit.status import candidate_detail
 
     root, _, _ = req.home.load(req.params["slug"])
-    run_dir = jobs._run_dir(root, _run(req, root))  # noqa: SLF001 - the run's folder, judged by name
+    _, run_dir = _run_folder(req, root)  # a per-group run: one group's combination (`?group=`)
     detail = candidate_detail(run_dir, req.params["combination"])
     if not detail:
         raise AppError(f"there is no combination {req.params['combination']!r} in this run", 404)
@@ -659,7 +781,7 @@ def try_of(req: Request) -> dict[str, Any]:
 
 def results(req: Request) -> dict[str, Any]:
     root, _, _ = req.home.load(req.params["slug"])
-    return jobs.results(root, _run(req, root), req.server.status_document)
+    return jobs.results(root, _run(req, root), req.server.status_document, group=_group(req))
 
 
 def download(req: Request) -> FileResponse:
@@ -668,7 +790,8 @@ def download(req: Request) -> FileResponse:
     export = req.params["export"]
     if export == "study":  # the study itself, as one zip: no run needed
         return FileResponse(req.home.export_study(slug), "application/zip", f"{slug}.zip")
-    body, content_type, filename = jobs.download(root, _run(req, root), export, req.server.status_document)
+    body, content_type, filename = jobs.download(root, _run(req, root), export, req.server.status_document,
+                                                 group=_group(req))
     # The report opens in the browser with ?view=1; everything else is a file to save.
     inline = export == "report" and req.query.get("view") == "1"
     return FileResponse(body, content_type, None if inline else filename)
@@ -688,6 +811,7 @@ def compare_runs(req: Request) -> dict[str, Any]:
 
 ROUTES = [
     route("GET", "/api/home")(home),
+    route("POST", "/api/shutdown")(shutdown),
     route("GET", "/api/compare")(compare_runs),
     route("GET", "/api/settings")(get_settings),
     route("PUT", "/api/settings")(put_settings),
@@ -708,6 +832,7 @@ ROUTES = [
     route("PUT", "/api/studies/{slug}/cases/{name}")(put_case),
     route("DELETE", "/api/studies/{slug}/cases/{name}")(delete_case),
     route("POST", "/api/studies/{slug}/cases/{name}/restore")(restore_case),
+    route("PUT", "/api/studies/{slug}/cases/{name}/tag")(put_tag),
     route("POST", "/api/studies/{slug}/samples")(use_samples),
     route("POST", "/api/studies/{slug}/import")(import_cases),
     route("POST", "/api/studies/{slug}/inspect")(inspect_cases),

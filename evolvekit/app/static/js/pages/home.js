@@ -10,7 +10,9 @@
 
   function studyMenu(s) {
     var items = [{ text: "Rename", act: "rename", arg: s.slug }, { text: "Duplicate", act: "duplicate", arg: s.slug }];
-    if (HAS_RUN[s.kind]) items.push({ text: "Compare with…", act: "compare-with", arg: s.slug }, { text: "Past runs", act: "runs", arg: s.slug });
+    // A latest run tuned per kind of case is compared group by group on its own page, not here.
+    if (HAS_RUN[s.kind] && !s.per_group) items.push({ text: "Compare with…", act: "compare-with", arg: s.slug });
+    if (HAS_RUN[s.kind]) items.push({ text: "Past runs", act: "runs", arg: s.slug });
     items.push({ text: "Save as zip", act: "zip", arg: s.slug }, null,
       { text: s.archived ? "Restore from archive" : "Archive", act: "archive", arg: s.slug },
       { text: "Delete", act: "delete", arg: s.slug, danger: true });
@@ -34,10 +36,18 @@
     })}</div>`;
   }
 
+  /** What we learned: the harness of the newest finished study; the Applications drawer when there is none. */
+  function learnedLink() {
+    var newest = (data.studies || []).filter(function (s) { return s.kind === "finished" && s.harness_id && !s.archived; })[0];
+    var icon = EK.gl("chev", 18);
+    return newest ? EK.link("What we learned", { href: "#/harness/" + EK.q(newest.harness_id), icon: icon })
+      : EK.link("What we learned", { act: "apps", icon: icon });
+  }
   function links() {
     var apps = (data.harnesses || []).length;
     return html`<div class="home-links">
       ${EK.link("Applications (" + apps + ")", { act: "apps", icon: EK.gl("folder", 18) })}
+      ${learnedLink()}
       ${EK.link("Add a harness or zip", { act: "add", icon: EK.gl("drop", 18) })}
       ${EK.link("Compare two studies", { act: "compare", icon: EK.gl("chev", 18) })}
       ${EK.link("Library folder", { act: "library", icon: EK.gl("folder", 18) })}</div>`;
@@ -66,21 +76,23 @@
     });
   }
   function poll(main, query, gen) {
+    // Chosen again after every answer: 10 s while a study runs or waits in the queue; 30 s while a
+    // campaign is armed between windows, so the next window's words never go stale (D20); else none.
     var d = data;
-    {
-      var live = d.studies.some(function (s) { return s.kind === "running" || s.kind === "queued"; });
-      if (live) EK.every(10000, function () {
-        EK.get("/api/home").then(function (n) {
-          if (!EK.isCurrent(gen)) return;
-          data = remembered = n;
-          var grid = EK.$(".home-cards", main);
-          if (grid && !EK.$(".menu:not([hidden])", main)) {
-            var busy = document.activeElement && document.activeElement !== main && main.contains(document.activeElement);
-            if (!busy && !document.body.classList.contains("drawer-open")) { EK._moveFocus = false; draw(main, query); }
-          }
-        }).catch(function () { /* the next poll tries again */ });
-      });
-    }
+    var live = d.studies.some(function (s) { return s.kind === "running" || s.kind === "queued"; });
+    var armed = d.studies.some(function (s) { return s.kind === "campaign" || (s.campaign && s.campaign.state === "armed"); });
+    if (!live && !armed) return;
+    EK.later(live ? 10000 : 30000, function () {
+      EK.get("/api/home").then(function (n) {
+        if (!EK.isCurrent(gen)) return;
+        data = remembered = n;
+        var grid = EK.$(".home-cards", main);
+        if (grid && !EK.$(".menu:not([hidden])", main)) {
+          var busy = document.activeElement && document.activeElement !== main && main.contains(document.activeElement);
+          if (!busy && !document.body.classList.contains("drawer-open")) { EK._moveFocus = false; draw(main, query); }
+        }
+      }).catch(function () { /* the next poll tries again */ }).then(function () { if (EK.isCurrent(gen)) poll(main, query, gen); });
+    });
   }
 
   function draw(main, query) {
@@ -88,11 +100,14 @@
     var active = data.studies.filter(function (s) { return !s.archived; });
     var archived = data.studies.filter(function (s) { return s.archived; });
     var trash = data.trash || [];
+    // A rehearsal clock (`evolvekit app --clock`): the campaigns' windows follow it, runs keep real time,
+    // and the notice says so (persona p4, H3: "today 17:19" beside a rehearsal dated 16 Nov).
+    var clock = data.clock ? html`<div class="home-clock">${EK.notice("warning", EK.rehearsalWords(data.clock))}</div>` : "";
     companion(active);
     var newBtn = EK.button("New study", { act: "new", icon: EK.gl("plus", 18) });
     var body;
     if (!data.studies.length && !trash.length) {
-      body = html`<div class="hero"><div aria-hidden="true">${EK.pepper("egg", EK.isPhone() ? 200 : 280)}</div>
+      body = html`${clock}<div class="hero"><div aria-hidden="true">${EK.pepper("egg", EK.isPhone() ? 200 : 280)}</div>
         <h1 class="type-display" id="page-title" tabindex="-1">No studies yet</h1>
         <p class="type-body ink-2">Start one in a few steps. Pepper, the butterfly, follows it.</p>
         <div class="actions" style="justify-content:center;margin-top:8px">${newBtn}${EK.button("Open a study zip", { kind: "secondary", act: "pick-zip" })}</div></div>
@@ -106,7 +121,7 @@
         <div class="phone-only">${newBtn}</div>
         <nav class="tabs-row" aria-label="Which studies">${tabs.map(function (t) {
           return html`<a href="#/${t[0] === "active" ? "" : "?show=" + t[0]}"${EK.attrs({ "aria-current": t[0] === show ? "page" : null })}>${t[1]}${t[2] ? " (" + t[2] + ")" : ""}</a>`;
-        })}</nav><div class="home-cards">${list}</div>${links()}`;
+        })}</nav>${clock}<div class="home-cards">${list}</div>${links()}`;
     }
     EK.mount(main, html`<div class="page"><div class="page-inner">${body}</div>
       <input type="file" accept=".zip" class="sr-only" id="zip-file" tabindex="-1" aria-hidden="true" data-change="zip-picked"></div>`, acts(main, query));
@@ -225,6 +240,7 @@
       return html`<li><div class="row-main"><span class="strong">${h.title} <span class="ink-2">${h.version || ""}</span></span>
         <span class="type-small ink-2">${h.summary || ""}</span>
         <span class="type-small ink-2">${(h.templates || []).map(function (t) { return t.title; }).join(" · ")}</span></div>
+        ${EK.link("What we learned", { href: "#/harness/" + EK.q(h.id) })}
         <span class="badge">${h.built_in ? "built in" : "installed"}</span></li>`;
     });
     EK.openDrawer({ title: "Applications you can tune", sub: "Each comes with its harness", wide: true,
@@ -251,7 +267,7 @@
     wireDrop(document.getElementById("drawer"));
   }
   function compareDrawer() {
-    var ran = data.studies.filter(function (s) { return HAS_RUN[s.kind]; });
+    var ran = data.studies.filter(function (s) { return HAS_RUN[s.kind] && !s.per_group; });
     if (ran.length < 2) {
       EK.openDrawer({ title: "Compare two studies", body: html`<p class="type-body">Two studies need a run each first.</p>` });
       return;

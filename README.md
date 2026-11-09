@@ -1523,6 +1523,9 @@ and empty `cases/` and `inputs/`. Without `--template` the study starts
 blank. `--dir PATH` writes a standalone study folder there instead, outside
 the library home.
 
+`--warm` starts the study from what the home's finished studies on this
+harness learned ([Studies over time](#studies-over-time)).
+
 **Say where the application is.** From the terminal a relative path works
 and is recorded as the full path (the app's API still wants the full path).
 The harness asks the
@@ -1626,6 +1629,9 @@ with AI help what its AI spent (`AI: $0.87 of $1.00`, from the run's
 report's *How it ran* says the same. Nothing else; `--json` prints the whole
 verdict document (see [docs/app.md](docs/app.md#for-developers)).
 
+**Run it in windows.** A study may run only at certain hours, in local
+wall-clock time — at night, at weekends: see [Studies over time](#studies-over-time).
+
 The AI spend stays within its cap, give or take one call. Every claude call,
 a reply or a coding agent's run, is told what is left (`--max-budget-usd`, when
 the installed claude lists it in its `--help`); other providers and embedding
@@ -1651,23 +1657,29 @@ Every command:
 | Command | Does |
 |---|---|
 | `doctor [--app PATH] [--json]` | is this computer ready: Python, evolvekit, the library home, the app, the AI provider, the harnesses |
-| `study new NAME --harness ID [--template T] [--app PATH] [--dir DIR] [--json]` | a new study in the library home; prints its short name (`--json`: `{"slug", "root"}`); `--dir` writes a standalone folder instead |
+| `study new NAME --harness ID [--template T] [--app PATH] [--dir DIR] [--warm] [--json]` | a new study in the library home; prints its short name (`--json`: `{"slug", "root"}`); `--dir` writes a standalone folder instead; `--warm`: start from what finished studies on this harness learned: the latest `use` winner's values as the starting point, and a prior around them for the search that halves with every study since |
 | `study application SLUG PATH` / `study application SLUG --detect` (`--json`) | where the study's application is, checked by the harness; or the ones found on this computer |
 | `study code SLUG [--repo PATH] [--from REF] [--brief TEXT] [--json]` | a code study: where the source is (default: the harness's own folder, while it is there), the commit it starts from (`working`: the files as they are), what to improve; exit 1 when the folder or the ref is not found |
 | `study list [--json]` | every study in the library home: its name, harness and the state line its card shows (`draft · step 3 of 7`, `running · round 2 of 6`, …) |
 | `study cases SLUG --add FILE... [--hold-back N] [--json]` | copies cases into the study, refuses the files the harness cannot read, and holds `N` back for the final check |
+| `study groups SLUG [--k N] [--json]` | groups the cases by their features (or by the tags given in the app's Cases list) and writes `groups.json`; a group needs at least two cases to learn from. `--k` (2 to 5) asks for that many groups; without it, 2 or 3, whichever has the best silhouette. The first time, each case is solved once at the starting values to read its tables (one line per case on stderr). Exit 1 when a case cannot be solved (as `study preview`) or a run of the study is going; 2 when `--k` is outside 2 to 5 |
 | `study check SLUG` | what is still missing; exit 2 while anything is |
-| `study start SLUG [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running |
+| `study start SLUG [--now] [--more H] [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running; a study with a `schedule` is scheduled instead (`scheduled: next window Sat 00:00`, `--json` `{"scheduled": true, "next", "edge"}`: `edge` `start`, or `end` while a window is open), and `--now` starts it at once, as a session no window's end stops; after a finished campaign, a new one. `--more H` (a scheduled study): its finished run gets H hours more search time (`budget.hours` grows by H), spent in its next window, never now: `Scheduled 18 min more for the next window (Sat 00:00)`, `--json` `{"scheduled", "run", "hours", "next", "edge", "words"}` |
 | `study bakeoff SLUG --ref REF [--ref REF ...] [--wait [--timeout S]] [--json]` | a code study: each branch against the starting point on the held-back cases, with no search; exit 2 when a branch or the study is refused |
-| `study stop SLUG [--json]` | asks the running run to stop, or takes a queued one out of the line |
+| `study stop SLUG [--json]` | asks the running run to stop, or takes a queued one out of the line; on a scheduled study it also pauses the campaign (`study start` resumes it) |
 | `study status SLUG [--run ID] [--json]` | the state line; `--json` the document the app's Running screen reads |
 | `study watch SLUG [--every S] [--json]` | the status every `S` seconds (default 5) until the run ends; starts a queued run |
-| `study wait SLUG [--timeout S] [--json]` | returns when the run has ended: exit 0 with the verdict when it is done, 1 when it stopped or failed, 4 on timeout; starts a queued run |
+| `study wait SLUG [--timeout S] [--json]` | returns when the run has ended: exit 0 with the verdict when it is done, 1 when it stopped or failed, 4 on timeout; starts a queued run. On a scheduled study, when the campaign has its answer: 0 with the verdict, 1 when it paused or ended without a finished run |
 | `study verdict SLUG [--run ID] [--json]` | the verdict and what to do about it; `--json` the verdict document |
 | `study report SLUG [--run ID] [--markdown \| --json]` | the report: Markdown for people, else the verdict document |
 | `study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`, and its path; exit 2 for a settings study, or when the starting point stayed the best |
 | `study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints what it will do; with `--yes` makes the branch, pushes it and opens the PR. Exit 0 printed or done, 1 failed while doing it, 2 refused |
-| `study open SLUG [--no-browser]` | prints the study's address in the app, starting the app when none runs, and opens it |
+| `study open SLUG [--no-browser]` | prints the study's address in the app, starting the app (`app --service`) when none runs, and opens it |
+| `app [--home DIR] [--port N] [--no-browser]` | the app in the browser ([The app](#the-app)); a second `app` on the same library opens the first |
+| `app --service` | the app with no browser or console: it logs to `<home>/app.log` (rotated at 5 MB, two kept) and keeps campaigns' windows |
+| `app stop [--home DIR]` | stops the app of this library cleanly; exit 1 when it did not stop within 10 s |
+| `app install-startup` / `app uninstall-startup` | start `app --service` at logon, or no longer. Windows: registers (or removes) the logon task "evolvekit app" and prints what it runs; macOS and Linux: prints the launchd agent or systemd unit to install, and the commands. On Windows this is not yet tried on a real logon |
+| `app --clock ISO --clock-speed N` | a rehearsal clock for campaigns, from `ISO` (local when it has no zone) at `N` times real time (1 to 3600): windows follow it, runs keep real time; Home says so |
 | `study preview \| compile \| run FOLDER-OR-SLUG` | one solve at the starting values; the plan into `runs/<id>/`; the whole study in the foreground |
 | `harness discover (--program PATH \| --python PATH --module NAME) [--json]` | what an application exposes, before a harness exists ([Harness commands](#harness-commands)) |
 | `skill list` / `skill install [--dir DIR] [--force]` | the skills that ship with evolvekit ([For coding agents](#for-coding-agents)) |
@@ -1717,6 +1729,8 @@ What `study.yaml` can say:
 | `goal.levels` | one KPI; or up to four in order of importance, each but the last with `equal_within` (`"1 %"` or a number), as in [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels); or one weighted KPI |
 | `guardrails` | `{kpi, max}` or `{kpi, min}`: a candidate that breaks one is out of the running, as a [gate](#gates-conditions-every-candidate-has-to-meet-evaluategates) |
 | `inputs` | the extra files a harness asks for, such as PyVRP's `solver_settings` to start from |
+| `schedule` | `{windows: [{days, from, to}], until, keep_awake}`: the hours the study may run in, local wall-clock time; `budget.hours` is then the whole campaign's search time; `keep_awake: false`: a scheduled session lets the computer sleep ([campaigns](#studies-over-time)) |
+| `warm` | `{from, run, at, ranked}`: written by `study new --warm`: the finished study (and its run, finished `at`) whose winner is the starting point; `ranked`, only when the tuned settings were chosen by importance, the settings in the order they went with the measure |
 
 **The comparability trap.** A data change that alters what the solver *sees*
 — costs, weights, penalties — also alters every KPI computed from what it
@@ -1949,6 +1963,198 @@ and in PowerShell:
 ```
 git for-each-ref --format="%(refname)" refs/evolvekit/ | ForEach-Object { git update-ref -d $_ }
 ```
+
+### Studies over time
+
+A study need not be one afternoon's work. It can run only at some hours, it
+can start from what earlier studies found, and it can learn settings for each
+kind of case. Their commands are in the table of
+[A study from the command line](#a-study-from-the-command-line).
+
+**Campaigns.** A study may run only at certain hours, in the computer's own
+local time — at night, at weekends:
+
+```yaml
+schedule:
+  windows:
+    - {days: [mon, tue, wed, thu, fri], from: "01:00", to: "06:00"}
+    - {days: [sat, sun], from: "00:00", to: "23:59"}
+  until: 2026-12-31     # optional: the last day a window may start
+  keep_awake: true      # the default; false lets the computer sleep
+```
+
+The app's Set up offers the common windows under *When it runs* (nights,
+weekends, both, and an *Until* date); anything else is written in
+`study.yaml`. A window that crosses midnight (`from: "22:00"`, `to: "06:00"`)
+belongs to the day it starts, and a window ending at `23:59` joins one that
+starts at `00:00`. After a daylight-saving change the windows keep their
+clock times. `24:00` is refused: write `23:59`.
+
+`budget.hours` is then the whole campaign's search time, spread over as many
+windows as it takes. At a window's start the study's run starts, carries on
+where the last window stopped it, or, when it finished its plan with search
+time left, gets more time (the smaller of the window and what is left; under
+ten minutes is not started). At the window's end the run stops cleanly,
+unless it is in its final check, which is never cut off: it finishes, and an
+unfinished one is run again in the next window. One study runs at a time in
+the whole library: runs somebody queued by hand go first, then campaigns,
+the oldest first, and nothing is pre-empted. Three sessions in a row that
+fail pause the campaign, and say why. So does a run of which nothing can go
+on (its search aborted on the plan's last round, say): *The campaign is
+paused: its last run cannot go on (provider failing). Start it again to begin
+a new run.*
+
+```
+python -m evolvekit study start depot-a
+scheduled: next window Sat 00:00 (the app, or evolvekit study wait, starts it then)
+```
+
+`study start` arms the campaign and waits for the first window; `--now`
+starts at once, as a session no window's end stops. A run already going when
+you arm the campaign is yours the same way: no window's end stops it. `study
+stop` pauses the
+campaign (a person's stop is respected: `study start` resumes it). A start
+after the campaign has finished begins a new one (`scheduled: a new campaign
+(the last one finished); next window …`): its first window starts a new run,
+and the old run stays a past run. When all the search time is spent and the
+final check is done, Home says *Campaign finished*. More time for a finished
+campaign (the app's *Continue*, or `study start depot-a --more 0.3`) is spent
+in the next window, never now: `Scheduled 18 min more for the next window (Sat
+00:00)`; raising `budget.hours` does the same. In the app that act reads
+*Search 18 min more in the next window (Sat 00:00)*, with *Search now instead*
+beside it as a smaller second act for a person who wants it now; neither is
+offered while the campaign is armed or a new campaign waits to start a fresh
+run. Set up's plan of a scheduled
+study says when it would end on its windows (*starts Sat 00:00; about 18 min
+of search; done around Sat 00:18*), and when the study's hours are less than a
+week of its windows give it offers *Search through the whole window (about
+47 h; done around Sun 22:54)*: it sets `budget.hours` to that week's window
+hours less the time the plan's final check needs, so the search runs as long as
+the windows give and the final check still ends inside them (read inside a
+window, the week is the rest of it, never the same window a week on). The campaign keeps when each session ran,
+on the clock the windows follow (`sessions` in the study's `campaign.json`),
+and says it: *Ran in its windows: Sat 00:04 – Sun 09:27* — on the Study page
+beside the campaign's line and under the verdict, and in *Past runs*. `study status` says the
+campaign's line (`campaign · next window Sat 00:00`) and when it ran, and `study wait`
+waits for the campaign's answer, not for the first window's stop (exit 0
+with the verdict; 1 when the campaign paused or ended without a finished
+run).
+
+The windows are kept only while the app runs:
+
+```
+python -m evolvekit app --service        # no browser, no console; logs to <home>/app.log
+python -m evolvekit app install-startup  # start it at every logon
+python -m evolvekit app stop             # stop it cleanly
+```
+
+`app install-startup` registers the Windows logon task "evolvekit app"
+(`app uninstall-startup` removes it). It is one task per user, so one library
+starts at logon, the last one installed: installing it for another library
+replaces the first one's task, and says so. On macOS and Linux it prints the
+launchd agent or systemd unit and the commands to install it. It has not yet
+been tried on a real logon. A terminal with `study wait depot-a` also keeps
+the windows. If the app was not running at a window's start, the window is
+not lost — a run starts late, in what is left of it — but one that passed
+with nothing to start it is said on Home and in `study status`: `Campaign ·
+the window of Sat 14 Nov was missed: the app was not running · next window
+Sun 00:00`. `app.log` is private to you (as private as your user folder, and mode 0600
+where the system has modes) and carries no key; a second `evolvekit app` on the same library opens the
+first. A scheduled session keeps the computer from sleeping until its window
+ends, and through a final check that runs past it; a session you started by
+hand does not, and `keep_awake: false` turns it off. [docs/app.md](docs/app.md#the-app-as-a-service)
+has the app as a service, and how to [rehearse a
+campaign](docs/app.md#rehearsing-a-campaign) in half an hour instead of a
+weekend.
+
+**What evolvekit learned.** Every finished study on an application adds to
+what evolvekit knows about it. *What we learned* (Home's links row, and
+beside each application in *Applications*) is one page per application: its
+finished studies, each with its own verdict line, and for every tuned setting
+how strongly its values went with the measure in the searches, the values
+that won, and whether winners moved it up, down or both ways. It claims no
+gain of its own: a winning value comes only from a study whose final check
+said *use it*, and a strength rests on at least five fully evaluated
+combinations or says *not enough tries to tell*. The strength runs from 0 (the
+setting did not go with the measure in the searches) to 1 (it went with it
+every time): it says which settings are worth tuning, not which value wins.
+Beside it, *The searches leaned to* gives each setting's median of the
+studies' search-best values (for a choice, the value most of them had; none on
+a tie), marked *(search, not checked)*: something to try, never a winner. Only studies that tune
+settings count; code studies, bake-offs and per-kind studies are listed with
+their verdicts. A setting the application no longer has, or whose type,
+range, scale or choices changed since, is left out of that study's figures
+with a note.
+
+```
+python -m evolvekit study new "Depot autumn" --harness demo-tour --template tune --warm
+warm start from Depot summer (use): neighbours 12, restart_after 13000
+```
+
+`--warm` starts the new study from what its predecessors found: each tuned
+setting starts from the latest `use` study's winning value (when it lies in
+the study's range), and with a `recommended` template and three finished
+settings studies the tuned settings are those that went most with the
+measure. Each run then draws a share of its combinations around each tuned
+setting's winner: a prior of weight one half, which halves again with every
+other study finished since that winner and is dropped below 0.05 or once four
+have. It is only a prior — it never stops the search from trying any value in
+range, and a bool or a choice is drawn as the winner itself. `study new` says
+what it did on stderr, and `study.yaml` records it as `warm: {from, run, at,
+ranked}`. The warm start changes the starting point the final check compares
+with: the result is judged against the winner's values, not the settings in
+use before, so it suits a planner who uses the winner today. With no `use`
+study it is a plain start, and says so; a template that tunes no setting is
+left as it is. `--warm` needs the library home, not `--dir`, and is a
+command-line option for now.
+
+**Settings per kind of case.** When the cases are of different kinds —
+small depots and large ones, say — one setting for all of them may suit
+none. Cases are put in groups by their features (numbers that describe a
+case before anything solves it: by default each request table's number of
+rows and the mean of each numeric column — never a column the harness marks
+`private`), or by tags you give in the app's Cases list (as `cases/<file>.tags`;
+tags that name the same folder, `Big` and `big`, are one group, and cases
+without a tag are `untagged`):
+
+```
+python -m evolvekit study groups depot-a            # 2 or 3 groups, whichever k-means likes best
+python -m evolvekit study groups depot-a --k 3      # or ask for 3 (2 to 5)
+```
+
+A group needs at least two cases to learn from. `study groups` writes
+`groups.json` (the first time it solves each case once to read its tables;
+it refuses while a run of the study is going). Then `per_group: true` in
+`study.yaml` learns settings for each group:
+
+```yaml
+per_group: true
+```
+
+A start groups the cases itself when `groups.json` is missing or no longer
+matches them. The run searches once per group, one group after another, each
+in a complete run folder of its own, `runs/<id>/groups/<name>/`, under the
+study's time and AI cap split by the groups' cases (a group with half of the
+cases, those to learn from and the held-back ones, gets half of the hours and
+half of the cap); each group has its own final check, on its own held-back
+cases. The verdict's rule: *use* only when every group checked on two or
+more held-back cases says use; with no such group, `single`; else `keep`,
+naming the first group that does not (`Per kind of case: not every group is
+shown to beat today's settings (large: keep).`). `study verdict` prints each
+group's own line under it, and the report has a *Per kind of case* section.
+A finished run writes two files into `runs/<id>/downloads/`:
+`settings_by_group.json`, each group's cases, decision and settings — those
+the search found only where the group's own decision is use, today's
+elsewhere — and `rule.md`, which cases get which settings: for groups by
+features a one-split rule (`If the number of rows in stops is above 51, use
+the settings of group 2; otherwise those of group 1.`), for groups by tags
+one line per tag (`For cases tagged large, use today's settings (large: not
+shown to beat today's).`).
+
+A per-group run cannot be continued, resumed or checked again: start the
+study again instead. It is not offered for compare (each group's verdict is
+on its own page), and `per_group` is refused with a code study, a bake-off
+and a `schedule`.
 
 ### Harness commands
 

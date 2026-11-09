@@ -410,14 +410,19 @@
       var cases = st.doc.cases || [], held = cases.filter(function (c) { return c.set === "test"; }).length;
       var rows = cases.map(function (c) {
         var read = c.inspected ? (c.inspected.ok === false ? html`<span class="tone-critical">${c.inspected.error || "cannot be read"}</span>` : c.inspected.summary || "") : html`<span class="ink-3">not read yet</span>`;
-        return html`<tr><td class="mono">${c.name}</td><td>${read}</td><td>${c.set === "test" ? "held back" : "learns from"}</td>
+        // The kind of case: typed in, saved on Enter or on leaving the field; the group of groups.json beside it.
+        var tag = { act: "tag", arg: c.name };
+        var kind = html`<input${EK.attrs({ type: "text", class: "input case-tag", value: c.tag || "", maxlength: 40, autocomplete: "off",
+          placeholder: "e.g. big", "aria-label": "Kind of case " + c.name, "data-change": tag.act, "data-key": tag.act, "data-arg": tag.arg })}>
+          <span class="type-small ink-2" data-group-of="${c.name}">${c.group || ""}</span>`;
+        return html`<tr><td class="mono">${c.name}</td><td>${read}</td><td>${kind}</td><td>${c.set === "test" ? "held back" : "learns from"}</td>
           <td>${EK.button(c.set === "test" ? "Learn from it" : "Hold back", { kind: "quiet", size: "s", act: "flip", arg: c.name })}
           ${EK.button("Remove", { kind: "quiet", size: "s", act: "remove", arg: c.name, label: "Remove " + c.name })}</td></tr>`;
       });
       return html`<p class="type-small ink-2">${st.doc.split_words}</p>
         <form class="range-edit" data-submit="count">${EK.numberUnit({ id: "held-count", label: "Held back", value: held, unit: "of " + cases.length, width: 160 })}
           ${EK.button("Hold these back", { kind: "secondary", type: "submit" })}</form>
-        <div class="cases-wrap"><table class="case-table"><thead><tr><th>Case</th><th>What it is</th><th>Used for</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        <div class="cases-wrap"><table class="case-table"><thead><tr><th>Case</th><th>What it is</th><th>Kind</th><th>Used for</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
     var dacts = {
       count: function () {
@@ -431,6 +436,29 @@
         var training = inTest ? c.training.concat([path]) : c.training.filter(function (p) { return p !== path; });
         var test = inTest ? c.test.filter(function (p) { return p !== path; }) : c.test.concat([path]);
         EK.patch(EK.studyPath(st.slug), { cases: { training: training, test: test } }).then(function (doc) { st.doc = doc; draw(main); EK.refreshDrawer({ body: body() }); }).catch(EK.fail);
+      },
+      tag: function (el, ev) {
+        if (ev.type === "keydown") {  // Enter leaves the field, which saves it
+          if (ev.key === "Enter") { ev.preventDefault(); el.blur(); }
+          return;
+        }
+        var name = el.getAttribute("data-arg"), value = el.value.trim();
+        return EK.put(EK.studyPath(st.slug, "/cases/" + EK.q(name) + "/tag"), { tag: value }).then(function (doc) {
+          st.doc = doc; draw(main);
+          el.value = value;
+          // Only the groups beside the fields change: redrawing the table would take the next field from under the cursor.
+          var rows = {};
+          (doc.cases || []).forEach(function (c) { rows[c.name] = c; });
+          Array.prototype.forEach.call(document.querySelectorAll("#drawer [data-group-of]"), function (g) {
+            var c = rows[g.getAttribute("data-group-of")];
+            g.textContent = c && c.group ? c.group : "";
+          });
+        }).catch(function (err) {
+          // Not saved: the field shows the tag the case still has, and the toast says why.
+          var kept = (st.doc.cases || []).filter(function (c) { return c.name === name; })[0];
+          el.value = kept && kept.tag ? kept.tag : "";
+          EK.fail(err);
+        });
       },
       remove: function (el) {
         var name = el.getAttribute("data-arg");

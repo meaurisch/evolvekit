@@ -209,7 +209,14 @@ def test_a_short_stage_timeout_gets_no_quiet_machine_note(minimal_raw, tmp_path)
 
 def test_candidate_swaps_in_a_real_candidates_source(minimal_raw, tmp_path):
     """The seed is trivial (0 X's, near-instant); a saved candidate can be
-    much heavier. `candidate=` should time the candidate, not the seed."""
+    much heavier. `candidate=` should time the candidate, not the seed.
+
+    The warning needs the candidate to *finish* inside the timeout yet take
+    more than timeout / TIMEOUT_HEADROOM (3.3 s of 5 s): ~3.4 s of sleep plus
+    interpreter start-up (0.1-1.5 s on a loaded machine) lands in that window
+    with over a second to spare each side, and the seed (start-up only) stays
+    far under it. A candidate killed by the timeout would be a failure (exit
+    2), not this warning."""
     config = _config(
         minimal_raw,
         tmp_path,
@@ -219,7 +226,7 @@ def test_candidate_swaps_in_a_real_candidates_source(minimal_raw, tmp_path):
                 "id": "full",
                 "kind": "command",
                 "command": _content_timed_command(tmp_path),
-                "timeout": 0.8,
+                "timeout": 5.0,
             },
         ],
         budget={"max_full_evals_per_day": 200},
@@ -230,12 +237,12 @@ def test_candidate_swaps_in_a_real_candidates_source(minimal_raw, tmp_path):
     assert not seed_report.warnings
 
     heavy = tmp_path / "heavy_candidate.py"
-    heavy.write_text("# " + "X" * 30 + "\ndef f():\n    return 1\n", encoding="utf-8")
+    heavy.write_text("# " + "X" * 170 + "\ndef f():\n    return 1\n", encoding="utf-8")
     candidate_report = preflight(config, candidate=heavy)
     assert candidate_report.exit_code == 1
     assert any("timeout" in w and "full" in w for w in candidate_report.warnings)
     full = next(s for s in candidate_report.stages if s.label == "full")
-    assert full.duration_s > 0.5
+    assert full.duration_s > 3.3
 
 
 def test_format_report_notes_the_candidate_path(minimal_raw, tmp_path):

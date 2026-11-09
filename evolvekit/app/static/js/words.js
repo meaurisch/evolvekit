@@ -66,6 +66,34 @@
     return s.chance != null ? EK.capital(EK.chanceWords(s.chance)) + " · " + range.charAt(0).toLowerCase() + range.slice(1) : range;
   };
 
+  /** What a start of a scheduled study says (POST /start's `scheduled` answer): "Scheduled: next window
+      Sat 00:00", "Scheduled: its window is open now, until Sun 23:59", or after a finished campaign
+      "Scheduled a new campaign: the last one finished · next window Sat 00:00". */
+  EK.scheduledWords = function (res) {
+    var words = (res && res.words) || "";
+    return res && res.renewed ? "Scheduled a new campaign: the last one " + res.renewed + " · " + words : "Scheduled: " + words;
+  };
+
+  /** The rehearsal notice (`evolvekit app --clock`), on Home and on the Study page (persona p4, H3;
+      round 2, I5): "Rehearsal clock: Mon 16 Nov 08:39, 120 × real time. Times of the windows follow
+      this clock; other dates are the real time." `clock` is the API's `{line}`. */
+  EK.rehearsalWords = function (clock) {
+    return EK.capital(clock.line) + ". Times of the windows follow this clock; other dates are the real time.";
+  };
+
+  /** The name of the Set up row a study's first problem belongs to (`missing`: its step and key):
+      "What to tune", "What may change: code", "Data changes", "Goal", "Time", "When it runs"; "Cases"
+      before Set up; "the plan" for anything else. */
+  EK.missingWords = function (m) {
+    var key = String((m && m.key) || ""), step = (m && m.step) || 7;
+    if (/^schedule\b/.test(key) || /\bschedule\b/.test(String((m && m.text) || ""))) return "When it runs";
+    if (step < 4) return "Cases";
+    if (step === 4) return key.indexOf("vary.code") === 0 ? "What may change: code" : key.indexOf("vary.data") === 0 ? "Data changes" : "What to tune";
+    if (step === 5) return "Goal";
+    if (step === 6) return "Time";
+    return "the plan";
+  };
+
   /** A Home card from one study of GET /api/home. */
   EK.cardOf = function (s) {
     var phase = EK.pepperPhase(s), r = s.rounds || {};
@@ -73,7 +101,9 @@
     var round = r.planned ? "round " + Math.min((r.done || 0) + 1, r.planned) + " of " + r.planned : (r.done ? "round " + (r.done + 1) : "");
     if (s.kind === "draft") {
       c.kicker = "Draft";
-      c.head = s.step >= 4 ? "Set up not finished" : "Cases still to add";
+      // What is missing, by its Set up row's name (persona p4, H6): "Set up not finished: Goal";
+      // a draft with nothing missing is ready, only not started.
+      c.head = s.step >= 4 ? (s.missing ? "Set up not finished: " + EK.missingWords(s.missing) : "Ready to start: not started yet") : "Cases still to add";
       c.sub = s.harness || "";
       c.pepper = "egg";
       c.href = (s.step >= 4 ? "#/setup/" : "#/start/") + EK.q(s.slug);
@@ -105,8 +135,23 @@
       var v = s.verdict || { says: String(s.line || "finished").replace(/^finished · /, "").split(":")[0], line: "", advice: "" };
       c.kicker = EK.capital(v.says);
       c.head = v.line || EK.capital(v.says);
+      // Why a keep is still keep when every held-back case improved (persona p4, H2): under the line.
+      if (v.why_keep) c.why = v.why_keep;
       c.sub = v.advice || "";
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
+    } else if (s.kind === "campaign") {
+      // Between windows (D20): the campaign's own words; no claim, the run is not checked yet.
+      var camp = s.campaign || {};
+      c.kicker = camp.line || "Campaign";
+      if (camp.tone === "warn") c.kickerTone = "warning";
+      c.head = s.first ? "Waits for its first window" : "Between windows";
+      c.sub = r.planned ? (r.done || 0) + " of " + r.planned + " rounds done · not checked yet" : "";
+      if (s.first) {
+        c.pepper = "egg";
+        c.href = "#/setup/" + EK.q(s.slug);
+      } else if (r.planned) {
+        c.timeline = { rounds: r.planned, done: r.done || 0, stoppedAt: (r.done || 0) + 1 };
+      }
     } else if (s.kind === "stopped") {
       c.kicker = s.check_stopped ? "Final check stopped" : "Stopped" + (r.done ? " · round " + (r.done + 1) : "");
       c.head = s.check_stopped ? "No answer yet" : s.best_says ? "Best so far: " + s.best_says : "Stopped by you";
@@ -125,6 +170,9 @@
       c.sub = s.line || "";
       c.pepper = null;
     }
+    // A study with a schedule: its campaign's line ends the sub-line ("… · Campaign · next window Sat 00:00"),
+    // beside the card's own words -- a finished run's verdict stays the head (D49).
+    if (s.campaign && s.campaign.line && s.kind !== "campaign") c.sub = (c.sub ? c.sub + " · " : "") + s.campaign.line;
     // A later run must not hide an earlier use: "An earlier run (<id>) says use: <its verdict line>".
     if (s.earlier && s.earlier.says) c.note = s.earlier.says;
     if (s.archived) c.kicker = "Archived · " + c.kicker.charAt(0).toLowerCase() + c.kicker.slice(1);

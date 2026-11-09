@@ -171,6 +171,38 @@ def test_saving_a_step_checks_its_shape_and_keeps_the_harness(home):
         home.save_step(slug, {"limits": {"time_per_case_s": "soon"}})
 
 
+def test_app_edit_keeps_schedule_per_group_and_warm(home):
+    from evolvekit.harness.schedule import PRESETS
+
+    slug = _demo_study(home)
+    weekends = PRESETS["weekends"]["schedule"]
+    home.save_step(slug, {"schedule": weekends})
+    assert load_study(home.study_root(slug)).schedule.to_yaml() == weekends
+    home.save_step(slug, {"limits": {"time_per_case_s": 1.5, "retries": 0, "runs_per_case": 1}})
+    home.save_step(slug, {"cases": {"training": [], "test": []}})
+    assert "schedule:" in (home.study_root(slug) / "study.yaml").read_text(encoding="utf-8")
+    assert load_study(home.study_root(slug)).schedule.to_yaml() == weekends, "another step's save keeps the schedule"
+    home.save_step(slug, {"schedule": {**weekends, "until": "2026-12-31"}})
+    document = home.document(slug)
+    assert document["study"]["schedule"]["until"] == "2026-12-31"
+    json.dumps(document)  # what the page reads is JSON
+    home.save_step(slug, {"schedule": None})
+    assert load_study(home.study_root(slug)).schedule is None
+    assert "schedule:" not in (home.study_root(slug) / "study.yaml").read_text(encoding="utf-8")
+    warm = {"from": "spring", "run": "r1", "at": "2026-10-01T00:12:00+00:00",
+            "ranked": ["accept_worse", "init", "neighbours", "restart_after"]}
+    home.save_step(slug, {"warm": warm})
+    home.save_step(slug, {"limits": {"time_per_case_s": 2.0, "retries": 0, "runs_per_case": 1}, "step": 5})
+    assert load_study(home.study_root(slug)).warm.to_yaml() == warm, "another step's save keeps the warm start"
+    assert home.document(slug)["study"]["warm"]["from"] == "spring"
+    home.save_step(slug, {"per_group": True})
+    home.save_step(slug, {"limits": {"time_per_case_s": 2.5, "retries": 0, "runs_per_case": 1}, "step": 6})
+    assert load_study(home.study_root(slug)).per_group is True, "another step's save keeps per_group"
+    assert home.document(slug)["study"]["per_group"] is True
+    home.save_step(slug, {"per_group": None})
+    assert "per_group" not in (home.study_root(slug) / "study.yaml").read_text(encoding="utf-8")
+
+
 def test_a_settings_input_is_checked_against_the_harness(home):
     slug = home.create_study("pyvrp", "tune", "PyVRP")
     with pytest.raises(AppError, match="not a setting of PyVRP"):

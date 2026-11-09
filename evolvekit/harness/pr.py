@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from evolvekit.harness import HarnessError
+from evolvekit.app.detach import no_window_flags
 
 __all__ = ["NotCodeStudy", "PrFailed", "PrPlan", "create_pr", "describe", "export_diff", "open_pr", "plan_pr", "push_branch"]
 
@@ -294,7 +295,8 @@ def create_pr(toplevel: Path, *, base: str | None, branch: str, title: str, body
     env = {**os.environ, "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
     try:
         done = subprocess.run(argv, cwd=toplevel, capture_output=True, encoding="utf-8", errors="replace", env=env,
-                              stdin=subprocess.DEVNULL, check=False, timeout=GH_TIMEOUT_S)
+                              stdin=subprocess.DEVNULL, check=False, timeout=GH_TIMEOUT_S,
+                              creationflags=no_window_flags())
     except FileNotFoundError:
         raise HarnessError("gh is not installed") from None
     except subprocess.TimeoutExpired:

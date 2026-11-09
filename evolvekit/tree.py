@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from evolvekit.app.detach import no_window_flags
+
 __all__ = [
     "AUTHOR", "FIXED_DATE", "GIT_FLAGS", "GIT_TIMEOUT_S", "REMOVE_TRIES", "REMOVE_WAIT_S", "Repo", "Tree", "TreeError", "applies",
     "apply_in",
@@ -99,7 +101,7 @@ def _git(cwd: Path | None, *args: str, identity: bool = False, env: Mapping[str,
         full.update(env)
     try:
         done = subprocess.run(["git", *flags, *args], cwd=cwd, capture_output=True, env=full, check=False,
-                              stdin=subprocess.DEVNULL, timeout=timeout)
+                              stdin=subprocess.DEVNULL, timeout=timeout, creationflags=no_window_flags())
     except FileNotFoundError:
         raise TreeError(_MISSING) from None
     except subprocess.TimeoutExpired:

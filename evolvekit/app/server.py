@@ -34,6 +34,7 @@ import sys
 import threading
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -48,7 +49,8 @@ __all__ = ["AppServer", "DEFAULT_PORT", "FileResponse", "PAGE", "Request"]
 DEFAULT_PORT = 8780
 PORT_ATTEMPTS = 20
 TICK_S = 5.0
-"""How often the server looks for a queued run to launch (`jobs.launch_queued`)."""
+"""How often the server looks for a queued run to launch (`jobs.launch_queued`)
+and at the campaigns (`scheduler.tick`)."""
 PAGE = Path(__file__).with_name("static") / "app.html"
 CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 TOKEN_HEADER = "X-Evolvekit-Token"
@@ -71,7 +73,8 @@ SKIPPED = 64 * 1024
 """The most of a refused request's body the server swallows to close cleanly;
 a larger body is left unread and the connection is closed instead."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
-_DASHBOARD = re.compile(r"^/studies/(?P<slug>[^/]+)/runs/(?P<run>[^/]+)/dashboard/(?P<rest>.*)$")
+_DASHBOARD = re.compile(r"^/studies/(?P<slug>[^/]+)/runs/(?P<run>[^/]+)(?:/groups/(?P<group>[^/]+))?/dashboard/(?P<rest>.*)$")
+"""A run's dashboard; a per-group run's group folder has its own (`runs/<id>/groups/<slug>/dashboard/`)."""
 STATUS_FILES = ("events.jsonl", "runs.jsonl", "heartbeat.json")
 """The files of a run the status document is built from; a change to any
 of them is a reason to build it again."""
@@ -269,7 +272,8 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
                     return
                 dashboard = _DASHBOARD.match(path)
                 if dashboard and self.command in ("GET", "HEAD"):
-                    self._dashboard(dashboard.group("slug"), dashboard.group("run"), dashboard.group("rest"), query)
+                    self._dashboard(dashboard.group("slug"), dashboard.group("run"), dashboard.group("rest"), query,
+                                    group=dashboard.group("group"))
                     return
                 for method, pattern, handle in api.ROUTES:
                     match = pattern.fullmatch(path)
@@ -299,7 +303,7 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
             else:
                 self._json(result)
 
-        def _dashboard(self, slug: str, run: str, rest: str, query: dict[str, str]) -> None:
+        def _dashboard(self, slug: str, run: str, rest: str, query: dict[str, str], group: str | None = None) -> None:
             from evolvekit.dashboard import PAGE as DASHBOARD_PAGE
             from evolvekit.dashboard import _read_tail, _safe_path
             from evolvekit.status import candidate_detail
@@ -309,6 +313,11 @@ def _handler(app: "AppServer") -> type[BaseHTTPRequestHandler]:
             run_dir = root / "runs" / run
             if not _RUN.match(run) or not run_dir.is_dir():
                 raise AppError(f"there is no run {run!r} in this study", 404)
+            if group is not None:
+                group = unquote(group)
+                if not _RUN.match(group) or not (run_dir / "groups" / group).is_dir():
+                    raise AppError(f"there is no group {group!r} in this run", 404)
+                run_dir = run_dir / "groups" / group
             if rest in ("", "index.html"):
                 self._send(DASHBOARD_PAGE.read_bytes(), "text/html; charset=utf-8")
             elif rest == "api/status":
@@ -398,16 +407,39 @@ class AppServer:
             self._status_cache[key] = (stamp, document)
         return document
 
-    def _tick(self) -> None:
-        """Every `TICK_S`, launch the run that waits longest if nothing is
-        active (one study at a time); a fault in one tick is logged, not fatal."""
-        from evolvekit.app import jobs
+    def tick_once(self) -> None:
+        """One tick: launch the run that waits longest if nothing is active
+        (one study at a time), then the scheduler's look at the campaigns
+        (`scheduler.tick`, on the rehearsal clock while one is on). A fault in
+        either is printed to stderr with its traceback, never raised; every
+        line the scheduler says is printed to stdout -- the service's log --
+        with the time it happened: `<rehearsal> rehearsal · <real> real · <line>`
+        under the rehearsal clock, `<real> · <line>` otherwise."""
+        from evolvekit.app import scheduler
 
-        while not self._stopping.wait(TICK_S):
+        try:
+            scheduler.launch_queued(self.home)  # `jobs.launch_queued`, under the scheduler's lock
+        except Exception:  # noqa: BLE001 - the ticker must outlive a bad run directory
+            traceback.print_exc(file=sys.stderr)
+        try:
+            clock = scheduler.clock_of(self.home)
+            now = clock.now()
+            said = scheduler.tick(self.home, now=now, speed=clock.speed)
+        except Exception:  # noqa: BLE001 - nor a bad study or campaign
+            traceback.print_exc(file=sys.stderr)
+            return
+        real = datetime.now().astimezone().isoformat(timespec="seconds")
+        for line in said:
+            when = f"{now.isoformat(timespec='seconds')} rehearsal · {real} real" if clock.simulated else real
             try:
-                jobs.launch_queued(self.home)
-            except Exception:  # noqa: BLE001 - the ticker must outlive a bad run directory
+                print(f"{when} · {line}", flush=True)
+            except (UnicodeEncodeError, OSError):  # a console that cannot say it: the tick still happened
                 traceback.print_exc(file=sys.stderr)
+
+    def _tick(self) -> None:
+        """Every `TICK_S`, `tick_once`."""
+        while not self._stopping.wait(TICK_S):
+            self.tick_once()
 
     def _start_ticker(self) -> None:
         if self._ticker is None or not self._ticker.is_alive():
@@ -433,6 +465,12 @@ class AppServer:
         if self._ticker is not None:
             self._ticker.join(timeout=TICK_S + 5)
             self._ticker = None
+
+    def request_shutdown(self) -> None:
+        """End `serve_forever` (or the thread `start` serves from), so its caller's `finally` runs:
+        `POST /api/shutdown`. `shutdown` waits for the serving loop to end, so it runs on a thread of
+        its own -- never the handler's, which that loop would be waiting on."""
+        threading.Thread(target=self._server.shutdown, name="evolvekit-app-shutdown", daemon=True).start()
 
     def stop(self) -> None:
         self._stop_ticker()

@@ -31,8 +31,10 @@
   function refresh(main) {
     return EK.get(EK.studyPath(st.slug)).then(function (doc) { st.doc = doc; return loadPlan(); }).then(function () { draw(main); });
   }
+  /** Save a change, then draw the page once, with its new plan: drawn twice (before and after the plan),
+      the page changed under the pointer, and a click on Start between the two could be lost (persona p4, H8). */
   function save(changes, main) {
-    return EK.patch(EK.studyPath(st.slug), changes).then(function (doc) { st.doc = doc; draw(main); return loadPlan(); }).then(function () {
+    return EK.patch(EK.studyPath(st.slug), changes).then(function (doc) { st.doc = doc; return loadPlan(); }).then(function () {
       draw(main);
       if (EK.drawerKind() && redrawDrawer) redrawDrawer();
     }).catch(EK.fail);
@@ -129,9 +131,39 @@
     var lim = study().limits || {}, hours = (study().budget || {}).hours;
     var value = EK.duration(lim.time_per_case_s) + " a case · " + EK.hours(hours) + " in total";
     if (st.plan && st.plan.blocked) return { kicker: "Time", value: value, sub: "Too short for one full look.", state: "open", action: "Change", act: "time" };
+    // A study with a schedule ends on its windows (the plan's `window` line), never "done around 17:34"
+    // from now (persona p4, H1).
+    if (study().schedule) return { kicker: "Time", value: value, sub: st.plan && st.plan.window ? EK.capital(st.plan.window.line) + "." : "", act: "time" };
     var done = hours ? new Date(Date.now() + hours * 3600 * 1000) : null;
     var tomorrow = done && done.toDateString() !== new Date().toDateString();
     return { kicker: "Time", value: value, sub: done ? "Done around " + done.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) + (tomorrow ? " tomorrow." : ".") : "", act: "time" };
+  }
+  // ------------------------------------------------------------------ When it runs (D19)
+  /** The preset whose windows a schedule has ("weekends"), "own" for windows written by hand, null for none. */
+  function presetOf(schedule) {
+    if (!schedule) return null;
+    var presets = st.doc.schedule_presets || {}, windows = JSON.stringify(schedule.windows || []);
+    for (var id in presets) if (JSON.stringify(presets[id].schedule.windows) === windows) return id;
+    return "own";
+  }
+  /** "31 Dec" for "2026-12-31". */
+  function untilWords(until) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(until || ""));
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    return m ? Number(m[3]) + " " + months[Number(m[2]) - 1] : String(until || "");
+  }
+  function whenSummary() {
+    var s = study().schedule, presets = st.doc.schedule_presets || {};
+    if (!s) return { kicker: "When it runs", value: "As soon as you start it", sub: "Or only at night, or at weekends.", action: "Change", act: "when" };
+    var id = presetOf(s), label = presets[id] ? presets[id].label : "In the windows written in study.yaml";
+    return { kicker: "When it runs", value: label + (s.until ? ", until " + untilWords(s.until) : ""), sub: "It runs only inside these hours, and only while the app is running then.", action: "Change", act: "when" };
+  }
+  /** What a saved When it runs is called in its toast (I2): the preset's label ("Weekends, all day",
+      ", until 31 Dec"), "your own windows", or "as soon as you start it". */
+  function whenSaved(s) {
+    if (!s) return "as soon as you start it";
+    var presets = st.doc.schedule_presets || {}, id = presetOf(s);
+    return (presets[id] ? presets[id].label : "your own windows") + (s.until ? ", until " + untilWords(s.until) : "");
   }
   function codeSummary() {
     var h = st.h.code, c = vary().code;
@@ -153,6 +185,8 @@
   }
 
   function planBlock() {
+    // Just saved When it runs: the old plan's times are not shown while the new one is worked out (I2).
+    if (st.planPending) return html`${EK.notice("info", "Working out the plan for these hours…")}`;
     if (!st.plan) return html`${EK.notice("warning", st.planError || "No plan yet.")}`;
     var p = st.plan, tunables = p.tunables || 0;
     if (p.blocked) {
@@ -163,13 +197,16 @@
     var thin = !!p.warning;
     var searchH = (p.search_s || 0) / 3600, checkH = (p.final_check_s || 0) / 3600;
     var done = new Date(Date.now() + (p.hours || 0) * 3600 * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+    // A study with a schedule: the engine's line on the window clock ("starts Sat 00:00; about 18 min of
+    // search; done around Sun 12:00"), never "done around" from now (persona p4, H1).
+    var when = p.window ? EK.capital(p.window.line) : EK.hours(p.hours) + " in total · done around " + done;
     var phone = EK.isPhone();
     var bar = EK.planBar({ state: thin ? "thin" : "fits", rounds: p.rounds || 1, searchH: searchH || 1, checkH: checkH,
-      head: thin ? "Thin plan: " + p.combinations + " combinations for " + EK.plural(tunables, "setting") : EK.hours(p.hours) + " in total · done around " + done,
+      head: thin ? "Thin plan: " + p.combinations + " combinations for " + EK.plural(tunables, "setting") : when,
       barText: thin && tunables ? "about " + Math.max(1, Math.floor(p.combinations / tunables)) + " tries per setting" : "",
       left: phone ? "Search · " + p.rounds + " rounds" : "Search · " + EK.plural(p.rounds || 0, "round") + " · " + p.combinations + " combinations · " + EK.hours(searchH),
       right: checkH ? (phone ? "Final check" : "Final check · " + (p.test_cases || 0) + " held back · " + EK.hours(checkH)) : "No final check",
-      aria: "Plan: " + p.rounds + " rounds of search, " + EK.hours(searchH) + ", then the final check, " + EK.hours(checkH) + "; done around " + done });
+      aria: "Plan: " + p.rounds + " rounds of search, " + EK.hours(searchH) + ", then the final check, " + EK.hours(checkH) + "; " + (p.window ? p.window.line : "done around " + done) });
     var fixes = (p.fixes || []).map(function (f, i) {
       var text = f.kind === "fewer" ? "Tune the top " + f.keep.length : "Allow " + EK.hours(f.hours);
       return EK.button(text, { kind: i === 0 ? "secondary" : "quiet", act: "fix", arg: i, describedby: "fix-" + i });
@@ -179,8 +216,23 @@
     // the start besides the plan: too few held-back cases for a firm answer. Neither stops the start.
     var ai = p.ai_change_s > 0 ? html`<p class="type-small ink-2">The plan counts about ${Math.round(p.ai_change_s)} s for each change the AI writes.</p>` : "";
     var notes = (p.notes || []).map(function (note) { return EK.notice("info", note); });
-    return html`${bar}${fixes.length ? html`<div class="actions">${fixes}</div>${details}` : ""}
+    return html`${bar}${wholeWindow()}${fixes.length ? html`<div class="actions">${fixes}</div>${details}` : ""}
       ${ai}${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}${notes}`;
+  }
+
+  /** On a study with a schedule whose time is less than one week of its windows: the offer to search
+      through them (persona p4, H1) -- the plan's `whole_window`, the week's hours less the plan's final
+      check, so the search and the final check end inside the windows; it says when it would be done
+      (round 2, I1). On a rehearsal clock it says the hours on that clock and in real time. */
+  function wholeWindow() {
+    var offer = st.plan && st.plan.whole_window, speed = (st.doc.clock || {}).speed;
+    if (!study().schedule || !offer || !(offer.hours > ((study().budget || {}).hours || 0) + 1e-4)) return "";
+    var h = offer.hours;
+    var size = speed && speed !== 1 ? "about " + EK.duration(h * speed * 3600) + " on the rehearsal clock, " + EK.duration(h * 3600) + " of real time"
+      : "about " + EK.duration(h * 3600);
+    var label = "Search through the whole window (" + size + "; done around " + offer.done_words + ")";
+    return html`<div class="actions">${EK.button(label, { kind: "secondary", act: "whole-window", describedby: "whole-window-what", cls: "btn-wraps" })}</div>
+      <p class="type-small ink-2" id="whole-window-what">It searches for as long as the windows give in one week, less the time its final check needs, so the final check runs at the end, inside the windows.</p>`;
   }
 
   function testRun() {
@@ -221,8 +273,8 @@
     var head = missing ? EK.plural(missing, "thing") + " missing" : blocked ? "Not ready: the plan cannot work" : failed ? "Not ready: the test run failed"
       : st.plan && st.plan.warning ? "Ready, but the plan is thin" : "Ready to start?";
     var why = missing ? problems[0].text : blocked ? "Fix the plan first." : failed ? "Fix the test run first." : t.state === "running" ? "Start works while the test runs." : "";
-    var can = !missing && !blocked && !failed;
-    var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary()].filter(Boolean);
+    var can = !missing && !blocked && !failed && !st.planPending;  // never a Start on the old plan (I2)
+    var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary(), whenSummary()].filter(Boolean);
     var c = study().cases || {}, rules = (study().constraints || []).length, measures = Object.keys(study().kpis || {}).length;
     var lim = study().limits || {}, ai = ((study().budget || {}).ai || {}).enabled;
     var more = html`<div class="more-row">
@@ -237,12 +289,12 @@
     var preview = d.preview || {};
     var previewLine = preview.state === "running" ? EK.notice("info", "Timing one case to plan the study…")
       : preview.state === "failed" || preview.state === "interrupted" ? EK.notice("warning", "The timing run did not finish: " + (preview.error || "the plan is an estimate."), { text: "Try again", act: "preview" }) : "";
-    EK.mount(main, html`<div class="page"><div class="page-inner narrow" style="max-width:1000px">
+    EK.mount(main, html`<div class="page beside-drawer"><div class="page-inner narrow" style="max-width:1000px">
       ${EK.titleBlock("Set up · " + study().name, head)}${notice}${previewLine}
       <div class="summary-rows">${rows.map(EK.summaryRow)}</div>
       <section aria-label="Plan" class="sub-section">${planBlock()}</section>
       ${testRun()}
-      <div class="actions">${EK.button("Start", { act: "start", disabled: !can })}${EK.button("Save for later", { kind: "secondary", act: "later" })}${neverRunCode() ? EK.button("Compare branches", { kind: "secondary", act: "branches" }) : ""}<span class="type-small ink-2">${why}</span></div>
+      <div class="actions">${EK.button(study().schedule ? "Schedule it" : "Start", { act: "start", disabled: !can })}${EK.button("Save for later", { kind: "secondary", act: "later" })}${neverRunCode() ? EK.button("Compare branches", { kind: "secondary", act: "branches" }) : ""}<span class="type-small ink-2">${why}</span></div>
       ${more}</div></div>`, acts(main));
   }
 
@@ -253,6 +305,7 @@
       code: function () { codeDrawer(main); },
       goal: function () { goalPicker(main); },
       time: function (el) { timeDrawer(main, el && el.getAttribute("data-arg")); },
+      when: function () { whenDrawer(main); },
       rules: function () { rulesDrawer(main); },
       measures: function () { measuresDrawer(main); },
       data: function () { dataDrawer(main); },
@@ -267,6 +320,13 @@
           save({ budget: Object.assign({}, study().budget, { hours: f.hours }) }, main).then(function () { EK.toast("done", "Allowed " + EK.hours(f.hours)); });
         }
       },
+      "whole-window": function () {
+        var offer = st.plan && st.plan.whole_window;
+        if (!offer) return;
+        return save({ budget: Object.assign({}, study().budget, { hours: offer.hours }) }, main).then(function () {
+          if ((study().budget || {}).hours === offer.hours) EK.toast("done", "It searches through the whole window");  // not after a refusal
+        });
+      },
       test: function () {
         EK.post(EK.studyPath(st.slug, "/test-run")).then(function () { return refresh(main); }).catch(EK.fail);
       },
@@ -275,11 +335,24 @@
         EK.openDrawer({ title: "Why the test run failed", wide: true,
           body: html`${(r.failures || []).map(function (f) { return html`<pre class="code">${f}</pre>`; })}${st.doc.test_run.error ? html`<pre class="code">${st.doc.test_run.error}</pre>` : ""}` });
       },
-      start: function () {
-        EK.post(EK.studyPath(st.slug, "/start")).then(function (res) {
+      start: function (el) {
+        // The click shows at once: the button says what it does and stays disabled until the answer
+        // (persona p4, H8: "my first click on Schedule it seemed not to register").
+        var label = el && el.querySelector("span");
+        if (label) label.textContent = study().schedule ? "Scheduling…" : "Starting…";
+        return EK.post(EK.studyPath(st.slug, "/start")).then(function (res) {
+          if (res.scheduled) {
+            // A study with a schedule waits for its first window (D3): "Scheduled: next window Sat 00:00".
+            EK.toast("done", EK.scheduledWords(res));
+            EK.go("#/");
+            return;
+          }
           EK.toast("done", res.queued ? "Queued: it starts by itself" : "Started");
           EK.go(EK.studyHref(st.slug));
-        }).catch(EK.fail);
+        }).catch(function (err) {
+          if (label) label.textContent = study().schedule ? "Schedule it" : "Start";
+          EK.fail(err);
+        });
       },
       later: function () { EK.toast("done", "Saved. It waits on Home."); EK.go("#/"); },
       branches: function () { EK.branchesDrawer(st.slug, ((study().cases || {}).test || []).length); }
@@ -647,6 +720,59 @@
       st.settings = s;
       if (EK.drawerKind() === "time") { EK.refreshDrawer({ body: body() }); if (focus === "ai") { var el = document.getElementById("t-ai"); if (el) el.focus(); } }
     }).catch(function () { /* AI help stays as it is */ });
+  }
+
+  // ------------------------------------------------------------------ When it runs
+  // The schedule to save: the study's own (so a hand-written `keep_awake: false` stays), with the
+  // picked windows and the Until (none: taken out).
+  function scheduleOf(s, windows, until) {
+    var out = Object.assign({}, s || {}, { windows: windows });
+    if (until) out.until = until; else delete out.until;
+    return out;
+  }
+
+  function whenDrawer(main) {
+    var presets = st.doc.schedule_presets || {};
+    function body() {
+      var s = study().schedule, on = s ? presetOf(s) : "now";
+      var options = [{ id: "now", label: "As soon as I start it" }].concat(Object.keys(presets).map(function (id) { return { id: id, label: presets[id].label }; }));
+      if (on === "own") options.push({ id: "own", label: "The windows written in study.yaml" });
+      return html`<form class="sub-section" data-submit="save-when">
+        <fieldset class="field"><legend class="field-label">When it runs</legend>
+          <div class="choice-lines">${options.map(function (o) { return html`<label class="check-line choice-line"><input type="radio" name="when-preset" value="${o.id}"${EK.attrs({ checked: o.id === on })}> <span>${o.label}</span></label>`; })}</div></fieldset>
+        <div class="field"><label class="field-label" for="when-until">Until (optional)</label>
+          <input class="input" type="date" id="when-until" value="${(s && s.until) || ""}" style="width:200px"></div>
+        <p class="type-small ink-2">It runs only inside these hours, and only while the app is running then.</p>
+        <div class="actions">${EK.button("Save", { type: "submit" })}${EK.button("Cancel", { kind: "quiet", act: "drawer-close" })}</div></form>`;
+    }
+    var dacts = {
+      "save-when": function (form) {
+        // One save at a time, and the answer shows at once (persona p4 round 2, I2: the summary kept the
+        // old words for seconds while the plan was worked out, so Save was clicked twice): Save stays
+        // disabled until the answer; then the page is drawn with the new windows, the drawer closes and
+        // a toast names them; the plan follows when it is worked out.
+        if (st.savingWhen) return;
+        var picked = (document.querySelector('input[name="when-preset"]:checked') || {}).value || "now";
+        var until = document.getElementById("when-until").value;
+        var s = study().schedule, windows = picked === "own" ? (s || {}).windows : presets[picked] && presets[picked].schedule.windows;
+        var change = picked === "now" || !windows ? { schedule: null } : { schedule: scheduleOf(s, windows, until) };
+        var button = form && form.querySelector && form.querySelector('button[type="submit"]');
+        var mine = st;
+        st.savingWhen = true;
+        if (button) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
+        return EK.patch(EK.studyPath(st.slug), change).then(function (doc) {
+          st.doc = doc; st.planPending = true;
+          draw(main);
+          EK.closeDrawer();
+          EK.toast("done", "Saved: " + whenSaved(doc.study.schedule));
+          return loadPlan().then(function () { st.planPending = false; draw(main); });
+        }, function (err) {
+          if (button) { button.disabled = false; button.removeAttribute("aria-busy"); }
+          EK.fail(err);
+        }).then(function () { mine.savingWhen = false; });
+      }
+    };
+    EK.openDrawer({ kind: "when", title: "When it runs", sub: "Whenever you start it, or only in some hours", body: body(), acts: dacts, backLabel: "Back to Set up" });
   }
 
   // ------------------------------------------------------------------ Rules

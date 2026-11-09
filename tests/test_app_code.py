@@ -28,7 +28,7 @@ def test_setup_page_shows_code_summary():
     setup = (STATIC / "js" / "pages" / "setup.js").read_text(encoding="utf-8")
     body = setup[setup.index("function codeSummary"):setup.index("function", setup.index("function codeSummary") + 10)]
     assert 'kicker: "What may change: code"' in body and "vary().code" in body and 'act: "code"' in body
-    assert "var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary()]" in setup
+    assert "var rows = [tuneSummary(), dataSummary(), codeSummary(), goalSummary(), timeSummary(), whenSummary()]" in setup
     drawer = setup[setup.index("function codeDrawer"):]
     assert 'EK.studyPath(st.slug, "/code")' in drawer and "code_proposal" in drawer and "brief" in drawer
     assert "code: function () { codeDrawer(main); }" in setup

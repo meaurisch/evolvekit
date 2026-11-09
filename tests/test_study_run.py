@@ -223,6 +223,11 @@ def test_a_finished_study_goes_on_with_more_time(tmp_path):
     assert more["final"] and more["continued_at"] and more["hours_added"] == 0.004
     assert more["started_at"] == job["started_at"], "the same run, with more time: not a second one"
     assert read_job(run_dir) == more
+    # A continuation whose process died: job.json still says `search`, with the plan's search on record.
+    (run_dir / "job.json").write_text(json.dumps({**more, "phase": "search"}), encoding="utf-8")
+    again = continue_study(folder, "r5", hours=0.004, log=lambda _m: None)
+    assert again["phase"] == "done" and again["search"]["generations"] > more["search"]["generations"], again
+    assert again["started_at"] == job["started_at"], "still the same run"
     with pytest.raises(Exception, match="not finished"):
         continue_study(folder, "nowhere", hours=0.004, log=lambda _m: None)
 

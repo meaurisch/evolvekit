@@ -20,6 +20,7 @@ import sys
 import traceback
 from pathlib import Path
 
+from evolvekit.app import awake
 from evolvekit.harness.execute import (
     JOB,
     Job,
@@ -49,21 +50,24 @@ def main(argv: list[str] | None = None) -> int:
     def log(message: str) -> None:
         print(message, flush=True)
 
+    if args.more and args.hours is None:
+        parser.error("--continue needs --hours")
     try:
-        if args.bakeoff:
-            job = run_bakeoff(root, args.run, log=log)
-        elif args.check:
-            job = final_check(root, args.run, seeds=args.seeds, log=log)
-        else:
-            models_path = run_dir / "models.json"
-            models = json.loads(models_path.read_text(encoding="utf-8")) if models_path.is_file() else None
-            if args.more:
-                if args.hours is None:
-                    parser.error("--continue needs --hours")
-                job = continue_study(root, args.run, hours=args.hours, models=models, log=log)
+        # A scheduled session keeps the computer awake through its window (and a final check past
+        # it), from its span file; every kind of session, and the request ends with the run (D46).
+        with awake.keeping_awake(run_dir):
+            if args.bakeoff:
+                job = run_bakeoff(root, args.run, log=log)
+            elif args.check:
+                job = final_check(root, args.run, seeds=args.seeds, log=log)
             else:
-                run = resume_study if args.resume else run_study
-                job = run(root, args.run, models=models, log=log)
+                models_path = run_dir / "models.json"
+                models = json.loads(models_path.read_text(encoding="utf-8")) if models_path.is_file() else None
+                if args.more:
+                    job = continue_study(root, args.run, hours=args.hours, models=models, log=log)
+                else:
+                    run = resume_study if args.resume else run_study
+                    job = run(root, args.run, models=models, log=log)
     except Exception as exc:  # noqa: BLE001 - job.json must say how it ended, whatever ended it
         traceback.print_exc()
         state = read_job(run_dir)

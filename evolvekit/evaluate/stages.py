@@ -32,6 +32,7 @@ from statistics import fmean, stdev
 from typing import TYPE_CHECKING, Any, Callable
 
 from evolvekit.config import ProblemConfig, StageConfig, embedded_params
+from evolvekit.app.detach import no_window_flags
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.hostload import HostLoad
 from evolvekit.evaluate.process import TAIL_BYTES, read_tail, run_bounded
@@ -410,6 +411,7 @@ def _import_check(candidate_path: Path, timeout: float) -> str | None:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            creationflags=no_window_flags(),
         )
     except subprocess.TimeoutExpired:
         return f"import timed out after {timeout:g}s"
@@ -479,6 +481,7 @@ def _resolve_parameters(
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            creationflags=no_window_flags(),
         )
     except subprocess.TimeoutExpired:
         return None, f"configure() timed out after {timeout:g}s"

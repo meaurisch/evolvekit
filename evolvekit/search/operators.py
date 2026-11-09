@@ -27,7 +27,7 @@ from evolvekit.prompts import Inspiration, build_messages
 from evolvekit.providers.base import Completion, Provider, ProviderError
 from evolvekit.search.params import param_variant
 from evolvekit.search.tuning import Observation, propose_tpe
-from evolvekit.space import CONSTRAINT_ATTEMPTS, ParameterSpace
+from evolvekit.space import CONSTRAINT_ATTEMPTS, PRIOR_BAND, Parameter, ParameterSpace
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only when a tree problem is handled
     from evolvekit.tree import Repo
@@ -299,33 +299,79 @@ def param_lhs_typed(
     than frozen, a choice is drawn from its values, and a log-scale parameter is
     covered decade by decade. The child's block is *rendered* from the sampled
     values, so it does not matter what shape the parent's code is in.
+
+    A parameter with a `prior` (what an earlier study's winner suggests) is,
+    in each variant, drawn with the prior's weight as its chance from the band
+    around the value instead (`PRIOR_BAND`; a bool or a choice takes the value
+    itself); `meta["prior"]` names the parameters drawn so. The other draws
+    still cover the whole range: a prior never excludes a value.
     """
     rng = random.Random(seed)
     base = parent.params or space.defaults()
-    variants = [v for v in space.latin_hypercube(max(2, n_variants), rng) if v != base]
+
+    def sweep() -> list[tuple[dict, list[str]]]:
+        drawn = _with_priors(space, space.latin_hypercube(max(2, n_variants), rng), rng)
+        return [(v, names) for v, names in drawn if v != base]
+
+    variants = sweep()
     if space.constraints:
         # Draw the hypercube again until some of it satisfies the constraints;
         # after CONSTRAINT_ATTEMPTS draws the static stage has the last word.
         for _ in range(CONSTRAINT_ATTEMPTS):
-            feasible = [v for v in variants if space.satisfies(v)]
+            feasible = [(v, names) for v, names in variants if space.satisfies(v)]
             if feasible:
                 variants = feasible
                 break
-            variants = [v for v in space.latin_hypercube(max(2, n_variants), rng) if v != base]
+            variants = sweep()
     if not variants:  # a space of one point
         return OperatorResult(
             operator="param_lhs",
             messages=[],
             error="param_lhs found nothing to sweep: every sample equals the parent",
         )
-    values = variants[seed % len(variants)]
+    values, priored = variants[seed % len(variants)]
     return OperatorResult(
         operator="param_lhs",
         messages=[],
         block=space.render_block(values),
         mode="param_lhs",
-        meta={"params": values},
+        meta={"params": values, **({"prior": priored} if priored else {})},
     )
+
+
+def _with_priors(space: ParameterSpace, variants: list[dict], rng: random.Random) -> list[tuple[dict, list[str]]]:
+    """Each variant, with every parameter that has a prior drawn near its value
+    at the prior's weight as its chance, and the names so drawn. Without a
+    prior nothing is drawn from `rng`, so a space without one sweeps as before."""
+    priored = [p for p in space.parameters if p.prior is not None]
+    out = []
+    for values in variants:
+        names = []
+        for parameter in priored:
+            value, weight = parameter.prior  # type: ignore[misc]
+            if rng.random() < weight:
+                values[parameter.name] = _near(parameter, value, rng)
+                names.append(parameter.name)
+        out.append((values, names))
+    return out
+
+
+def _near(parameter: Parameter, value, rng: random.Random):
+    """A value within `PRIOR_BAND` of `value` on the parameter's own scale. A
+    draw past an end of the range is reflected back inside, not clamped onto
+    the end, so a prior at an end does not pile half its draws on one point."""
+    if not parameter.numeric:
+        return value
+    centre = parameter.to_unit(value)
+    unit = centre + rng.uniform(-PRIOR_BAND, PRIOR_BAND)
+    if unit < 0.0:
+        unit = -unit
+    elif unit > 1.0:
+        unit = 2.0 - unit
+    drawn = parameter.from_unit(unit)  # still clamps, for the last rounding
+    if parameter.type == "int" and abs(parameter.to_unit(drawn) - centre) > PRIOR_BAND:
+        drawn += 1 if drawn < value else -1  # rounded out of the band: the whole number next to it, inside
+    return drawn
 
 
 def _rendered(space: ParameterSpace, values: dict, operator: str, **meta) -> OperatorResult:

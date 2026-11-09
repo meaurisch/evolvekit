@@ -50,6 +50,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from evolvekit.app.detach import no_window_flags
+
 __all__ = ["BoundedRun", "SECRET_NAMES", "run_bounded", "read_tail", "can_pin", "scrubbed_environment"]
 
 SECRET_NAMES = re.compile(r"(_API_KEY$|^AZURE_OPENAI_|_SECRET$|_TOKEN$)", re.I)
@@ -369,7 +371,7 @@ class _WindowsTree:  # pragma: no cover - exercised on Windows only
     def spawn(
         cls, argv: list[str], popen_kwargs: dict[str, Any], cpus: tuple[int, ...] = ()
     ) -> "_WindowsTree":
-        proc = subprocess.Popen(argv, creationflags=_CREATE_SUSPENDED, **popen_kwargs)
+        proc = subprocess.Popen(argv, creationflags=_CREATE_SUSPENDED | no_window_flags(), **popen_kwargs)
         job = _open_job(proc)
         # While it is still suspended: a process's mask is inherited by every
         # process it starts, so the whole tree is pinned from its first instruction.
@@ -382,7 +384,7 @@ class _WindowsTree:  # pragma: no cover - exercised on Windows only
             proc.wait()
             if job is not None:
                 _close_handle(job)
-            proc = subprocess.Popen(argv, **popen_kwargs)
+            proc = subprocess.Popen(argv, creationflags=no_window_flags(), **popen_kwargs)
             job = _open_job(proc)
             pinned = _pin(proc, cpus)
         unpinned = None

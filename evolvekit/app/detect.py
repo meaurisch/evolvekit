@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable
 
+from evolvekit.app.detach import no_window_flags
 from evolvekit.harness.library import BUILT_IN
 from evolvekit.harness.manifest import Harness
 from evolvekit.harness.probe import PROBE_TIMEOUT_S, probe_application
@@ -64,7 +65,8 @@ def _py_launcher() -> list[Path]:
     if sys.platform != "win32":
         return []
     try:
-        done = subprocess.run(["py", "-0p"], capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace")
+        done = subprocess.run(["py", "-0p"], capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
+                              creationflags=no_window_flags())
     except (OSError, subprocess.TimeoutExpired):
         return []
     return parse_py_launcher(done.stdout)

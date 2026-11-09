@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from evolvekit.harness.manifest import Harness
+from evolvekit.app.detach import no_window_flags
 
 __all__ = ["Probe", "probe_application", "version_matches", "version_words", "program_command"]
 
@@ -131,7 +132,7 @@ def probe_application(harness: Harness, app: str, *, timeout: float = PROBE_TIME
         try:
             done = subprocess.run(
                 [app, "-c", _SNIPPET, spec.module], capture_output=True, text=True, timeout=timeout,
-                encoding="utf-8", errors="replace",
+                encoding="utf-8", errors="replace", creationflags=no_window_flags(),
             )
         except subprocess.TimeoutExpired:
             return Probe(False, f"{Path(app).name} did not answer within {timeout:g} s")
@@ -157,7 +158,8 @@ def probe_application(harness: Harness, app: str, *, timeout: float = PROBE_TIME
     for token in tokens:
         argv += program_command(app) if token == "{app}" else [token.replace("{app}", app)]
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
+                              creationflags=no_window_flags())
     except subprocess.TimeoutExpired:
         return Probe(False, f"{Path(app).name} did not answer `{spec.probe}` within {timeout:g} s")
     except OSError as exc:

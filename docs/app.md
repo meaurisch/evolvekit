@@ -32,6 +32,88 @@ them again when it is back.
 | `--port N` | the first port to try (default 8780) |
 | `--no-browser` | print the address instead of opening a browser |
 | `--shortcut` | Windows: put `evolvekit.cmd` on the desktop, which starts the app with a double-click |
+| `--service` | no browser or console: the app logs to `<home>/app.log` (rotated at 5 MB, two kept) and keeps campaigns' windows; `study open` starts it this way |
+| `stop` | `evolvekit app stop`: stops the app of this library cleanly (exit 1 when it did not stop within 10 s) |
+| `install-startup` / `uninstall-startup` | start `app --service` at logon, or no longer. Windows: registers (or removes) the logon task "evolvekit app" and prints what it runs; macOS and Linux: prints the launchd agent or systemd unit to install, and the commands. On Windows this is not yet tried on a real logon |
+| `--clock ISO --clock-speed N` | a rehearsal clock for campaigns, from `ISO` (local when it has no zone) at `N` times real time (1 to 3600): windows follow it, runs keep real time; Home says so |
+
+A second `evolvekit app` on the same library opens the first instead of
+starting another.
+
+### The app as a service
+
+A study with a `schedule` (a *campaign*, see the README's
+[Studies over time](../README.md#studies-over-time)) starts, stops and carries
+on at its windows only while the app runs. For that the app can run without a
+browser or a console:
+
+```
+python -m evolvekit app --service
+```
+
+It keeps the windows, and writes what it does to `<home>/app.log` (rotated at
+5 MB, two kept; what the ticker prints goes there too, one line for every
+start, resume, continuation and stop of a campaign). The log is private to
+you (as private as your user folder, and mode 0600 where the system has
+modes) and never holds the key of the launch: it says `the key is in app.json`
+instead. `evolvekit study open NAME` starts the app this way when none runs. A
+second `evolvekit app`, `--service` or not, finds the first and opens it (a
+service says `already running` in the log and ends).
+
+`evolvekit app stop` ends the app of this library cleanly, and exit 1 if it
+did not stop within 10 seconds. To have it at every logon:
+
+```
+python -m evolvekit app install-startup
+python -m evolvekit app uninstall-startup
+```
+
+On Windows the first registers the logon task "evolvekit app" (it starts
+`pythonw.exe`, with no console window; it does not end after 72 hours or stop
+on battery) and prints what it runs; the second removes the task. There is one
+such task per user, so one library starts at logon: the last one installed.
+Installing it for another library replaces the first one's task, and says so
+(*it replaces the task for &lt;the other home&gt;: there is one logon task per
+user, so that library no longer starts at logon*); `uninstall-startup`
+removes the task whichever library it starts. On macOS and
+Linux they print the launchd agent or systemd unit, and the commands to
+install or remove it. The logon task is untried on a real Windows logon.
+
+A scheduled session keeps the computer from sleeping until its window ends,
+and through a final check that runs past it; `schedule: {keep_awake: false}`
+in `study.yaml` turns that off, and a session you start by hand never does it.
+If the app was not running when a window started, Home says so (*the window
+of Sat 14 Nov was missed: the app was not running*) and the run starts late,
+in what is left of the window.
+
+### Rehearsing a campaign
+
+A weekend takes two days. To see a campaign work, start the app with a
+rehearsal clock:
+
+```
+python -m evolvekit app --service --clock 2026-11-13T17:30 --clock-speed 120
+```
+
+The windows follow a clock that starts on Friday 17:30 and runs 120 times
+faster than real time (`--clock-speed` is 1 to 3600), so Monday 08:00 comes
+about half an hour later. The runs keep real time: they spend real search time
+(it is the windows that are speeded up), and the study's hours are real
+hours. Home says the rehearsal is on (*Rehearsal clock: Fri 13 Nov 17:30, 120 ×
+real time. Times of the windows follow this clock; other dates are the real
+time.* — a run's *today 17:19* is real time; the Study page says it too, above
+its notices), and each line in `app.log` for a campaign gives both times
+(`2026-11-14T01:10:00+01:00 rehearsal · 2026-11-13T18:12:03+01:00 real · …`).
+A run is given more search time only when ten real minutes of its window are
+left, so windows shorter than ten real minutes never give a run more time: at
+120 × a 01:00–06:00 night lasts 150 real seconds, and its runs start, stop
+and resume but are never continued (a fresh run may stop before its first
+round). Rehearse at a speed where a window lasts at least ten real minutes,
+or rehearse a weekend (its 24-hour windows last 12 real minutes at 120 ×).
+Open the app as usual (`python -m evolvekit app`) to look at it: it opens the
+service already running. `evolvekit app stop` ends the service, and the
+clock with it. A clock cannot be set on an app that already runs (stop it
+first), and nothing sets it by accident.
 
 The app answers only to this computer: it listens on 127.0.0.1, refuses
 requests that name another host, accepts changes only from its own page, and
@@ -48,6 +130,8 @@ opened again at any time:
   settings.yaml        the AI provider and models, the applications used before
   .env                 API keys: written by the app, never shown again
   app.json             while the app runs: where it is, and the key of this launch
+  app.log              what `app --service` did (no key in it)
+  clock.json           only during a rehearsal (`app --clock`), while that app runs
   harnesses/           harnesses you installed
   studies/<name>/      one folder per study: study.yaml, the pinned harness,
                        cases/, inputs/, preview/, runs/
@@ -93,7 +177,11 @@ written again by the next app.
 answer with the likely range, and Pepper — the app's butterfly — in the
 study's phase: eggs for a draft, a caterpillar early in the search, a cocoon
 late in it and during the final check, and a butterfly when it is done
-(bright when the answer is *use it*, in quiet colours otherwise). Every card
+(bright when the answer is *use it*, in quiet colours otherwise). A draft
+says what Set up still lacks by its row's name (*Set up not finished: Goal*),
+or *Ready to start: not started yet* when nothing is missing; under a *keep*
+whose held-back cases all improved, the card says why it is still keep
+(`why_keep`), right under the verdict's line. Every card
 has a menu (⋯): *Rename*; *Duplicate* — a new study with the setup and the
 cases, not the runs; *Compare with…*; *Past runs*; *Save as zip*; *Archive* —
 kept, but out of the way, under **Archived** until *Restore*; and *Delete*.
@@ -104,6 +192,27 @@ neither renamed, archived nor deleted. One click away under the cards:
 *Applications* (the harnesses you can tune, and installing one), *Add a
 harness or zip* (a study zip dropped there becomes a study), *Compare two
 studies* and the *Library folder*.
+
+**What we learned.** One page per application, at *What we learned* on Home
+(the link under the cards goes to the application of your newest finished
+study) and beside each application in *Applications*. It lists the finished
+studies on that application, each with its own verdict line, and then a table
+with a row for every setting that was tuned: *Tuned in* (how many studies),
+*How strongly it went with the measure (0 to 1, not proof)* (a bar and a figure such as
+`0.42 · from 2 studies`, or *not enough tries to tell*), *The searches leaned
+to* (each setting's median of the studies' search-best values, for a choice
+the value most of them had and none on a tie, as `4 (search, not checked)`),
+*Winning values* (`12 in Depot spring (1 Oct)`, or *none yet*) and *Winners
+moved it* (*up*, *down*, *both ways*). That strength is how strongly a
+setting's values went with the measure in the searches, and a sentence under
+the table says so: *0 means the setting did not go with the measure in the
+searches, 1 that it went with it every time. It comes from the searches, not
+from final checks: it says which settings are worth tuning, not which value
+wins.* It is not proof of anything, and the page claims no gain of its own;
+where the searches leaned is a search figure, never a winner. A winning value comes only from a study whose
+final check said *use it*. What could not be read across (a setting the
+application no longer has, or one whose meaning changed) is listed under
+*Left out*.
 
 ## A study, from start to answer
 
@@ -156,6 +265,24 @@ opens a drawer on the right (full screen on a phone):
   still going at 1.5 × that + 30 s counts as failed), the total time, runs
   per case, retries, and optional AI search help with a cap. Experts can set
   the combinations per round and the rounds here too.
+- **When it runs** — as soon as you start it, or only in some hours: *Nights,
+  Monday to Friday, 01:00 to 06:00*, *Weekends, all day*, or both, with an
+  optional *Until* date. The study then runs only inside those hours, and only
+  while the app is running then (see [The app as a
+  service](#the-app-as-a-service)). *Start* does not start it but says when it
+  will (*next window Sat 00:00*); the total time under **Time** is then the
+  search time of the whole campaign, spread over as many windows as it takes.
+  The plan bar then says when it would end on the windows (*starts Sat 00:00;
+  about 18 min of search; done around Sat 00:18*), and when the total time is
+  less than one week of the windows gives, *Search through the whole window
+  (about 47 h; done around Sun 22:54)* sets the total time to the plan's
+  `whole_window` hours: the week's window hours less the time its final check
+  needs, so the search and the final check end inside the windows, at the time
+  it names; under a rehearsal clock it names both times, *(about 47 h on the
+  rehearsal clock, 23 min of real time; done around Sun 22:54)*, and sets the
+  real one. *Save* says what it saved at once (*Saved: Weekends, all day*, or
+  *Saved: your own windows*) and is disabled until the answer; the plan follows.
+  Other windows are written in `study.yaml`.
 
 A **code study** — one whose template changes the application's source —
 shows **What may change: code** in place of *What to tune*: the source
@@ -225,7 +352,12 @@ its facts.
 - **Keep**: *Not proven on 3 held-back cases: …* (*chance under 9 in 10*,
   or a worst case beyond 1 %), then *Keep today's settings … for now: the
   gain is not proven.*; *Check with more runs* keeps the runs it did and
-  adds others.
+  adds others. When every held-back case improved but the range still allows
+  a loss, the verdict's `why_keep` stands between the line and the advice:
+  *Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases
+  the range is too wide to rule out a loss: hold back more cases for a firmer
+  answer.* A campaign's run says among the strip's facts when it ran, on the
+  window clock (*Ran in its windows: Sat 00:04 – Sun 09:27*).
 - **One case**: *Not proven, one held-back case: 4.8 % lower tour length.*,
   then *Keep today's settings …: one held-back case is too few cases to tell
   (the 11 runs were all on it); a study that holds back three or more can.*;
@@ -272,6 +404,37 @@ from the command line: `study export SLUG --diff` writes it as a patch, and
 `study pr SLUG` makes a branch and a pull request of it (only with `--yes`;
 see the README's [Code studies](../README.md#code-studies)).
 
+A run per kind of case (`per_group: true`, see the README's *Settings per
+kind of case*) has one search and one final check per group. Its strip says
+the run's own verdict line and advice (*Per kind of case: not every group is
+shown to beat today's settings (large: keep).*); under it, **Per kind of
+case** lists each group — its verdict mark, its name, its cases to learn
+from and held back, and its own verdict line, word for word — and then
+*Which cases get which settings*, the sentences of `rule.md`. Over the three
+views, one chip per group picks which group's tries, cases and settings they
+show (`?group=` on the status, tries and results; while the run goes, the
+group it is on, marked *running*, else the first); *Settings to use* or
+*to keep* is then that group's, by its own verdict, and the downloads add
+`settings_by_group.json` and `rule.md`. While the run goes, its card on Home
+and in *Past runs* says which group it is on (*running · group 2 of 3
+(large) · round 1 of 4 · 9 min left*). Such a run offers no *Continue*,
+*Carry on* or *Check with more runs*: it cannot yet go on, and starts again
+instead — stopped, its strip says *A run per kind of case cannot carry on
+yet: start the study again.* with *Start it again*; stopped or failed, the
+views show the group it stopped in. *Open the report* and *Copy a summary*
+lead with the run's own line and advice and each group's own line; what
+follows is the shown group's, and says so (*The final check of small*,
+*Final check (small): …*). A run per kind of case is never one side of a
+compare: the page, *Past runs* and Home offer none, and `/api/compare`
+answers 409 *a run tuned per kind of case is compared group by group on its
+own page*.
+
+The Cases view shows each case's group as a small badge before its name:
+for a run per kind of case, the group the run gave it; for any other run,
+the case's group in `groups.json` (from `study groups` or the tags), when
+there is one. On a phone, where the plot has no width to spare, the badges
+show only when the rows are of more than one group.
+
 Every figure for a combination is written as the report writes it: one
 decimal and the measure's own direction, never *better* — the chosen
 combination's chip reads *Combination 2 · 7.5 % lower on the cases it
@@ -292,7 +455,11 @@ report* (every number on one page, to read or send as `report.html`), the
 harness's files (the settings, as flags, the data changes, the changed
 requests) and the study itself as one zip; **What next** — *Continue for
 another 22 h* (the same run goes on: the rounds done are kept, then the final
-check runs again), *Start a new study from this*, *Compare with…*; and
+check runs again; on a study with a schedule *Search 18 min more in the next
+window (Sat 00:00)*, which waits for that window, and a smaller *Search now
+instead*; neither while the campaign is armed or a new campaign waits to
+start a fresh run, and both are disabled from the first click until the
+app answers), *Start a new study from this*, *Compare with…*; and
 **Details** — the set-up, every held-back case and every case the search
 learned from, every measure, and *What went wrong*: failed runs grouped with
 what to do about them, and the combinations that had them, each with its
@@ -428,7 +595,15 @@ The page uses nothing but a JSON API (`evolvekit/app/api.py`), so a server
 can take the app's place later. Every request to it, and to a run's dashboard,
 carries the key of this launch — the `token` in the address the app printed —
 in an `X-Evolvekit-Token` header or a `?token=` query; without it the answer
-is 403, sent before the body is read. The routes: `/api/home`, `/api/settings`,
+is 403, sent before the body is read. The routes: `/api/home` (with
+`clock: {line}` while a rehearsal clock is on; a draft's card has `missing`,
+the first thing Set up lacks as `{"step", "key", "text"}`, or `null`),
+`/api/harnesses/{id}` (its `learned`: per setting `tuned_in`, `importance`,
+`importance_n`, `winners`, `direction` and `leaned`, the median of the
+settings studies' search-best values — the lower middle for a whole number,
+the most common value of a choice, `null` on a tie or with none), `POST /api/shutdown` (what
+`evolvekit app stop` sends: it answers `{"stopping": true}` and the app ends
+cleanly), `/api/settings`,
 `/api/harnesses`, `POST /api/detect?study=` (looks for installed copies of the
 application: it searches the machine, so it is not a `GET`), `/api/studies/{name}` and its `application`, `cases`,
 `import`, `samples`, `split`, `inputs`, `preview`, `kpis/try`, `choices`,
@@ -449,13 +624,15 @@ runs, the run is queued and the server starts it later), `stop` (on a queued
 run: it is taken out of the line), `final-check` (with `{"seeds": N}`: again,
 with N runs per case), `continue` (`{"run": RUN, "hours": H}`: a finished
 run searches on for H hours more, at most 48, then checks again; 409 while
-anything runs), `status` (its `best` is the best so far as `study status` says it:
+anything runs; on a study with a schedule the time goes to its next window
+instead, see below, and `{"now": true}` continues at once, as a session by
+hand), `status` (its `best` is the best so far as `study status` says it:
 `pct`, `says` in words such as "6.1 % lower tour length", and the combination's
 `id`; `spent` is the AI's spend of its cap, `pace` after the first round the
 rounds the pace so far buys when fewer than planned, `writing` how many of a
 round's changes the AI has written, and `notes` what to hear besides the plan,
 each with its `line` or sentences as the strip shows them), `runs` (every run
-as it is now and the newest, `{runs, latest, poll_s, earlier}`: the open Study page asks
+as it is now and the newest, `{runs, latest, poll_s, earlier, campaign}` (`campaign` the scheduled study's campaign as it is now, else `null`, so the open page follows a campaign that finishes): the open Study page asks
 it again after `poll_s` seconds, 5 while a run is live and 10 when none is, so a
 run started elsewhere, such as a bake-off from the terminal, or a run that
 ended shows without a reload; a run's `branch` is what `study pr` made for it,
@@ -464,7 +641,17 @@ and `earlier` the newest earlier run that said use when the latest does not),
 Study page's three views: `evolvekit/app/tries.py`; in a code study each
 carries `diff_stat`, and `tries/{combination}` its `diff`), `download/{export}`
 (`download/report?view=1` opens the report in the browser; `download/study`
-is the study as a zip) and `next`; and each run's dashboard at
+is the study as a zip) and `next`. On a run per kind of case, `status`,
+`tries`, `tries/{combination}`, `results` and `download/{export}` take
+`?group=<name>` and read that group's folder (without it, the group the run
+is on while it goes, else the first; a 404 for a group the run does not
+have); `status` then has a `group` (`name`, `index`, `count`, `order`,
+`current`, its own `phase`), `results` a `per_group` (the group shown, the
+run's `decision`, `line`, `advice` and `rule`, each group's `name`,
+`decision`, `line` and `cases`, and `case_groups`), and
+`download/settings_by_group` and `download/rule` are the run's two files; a
+group folder's dashboard is at `/studies/{name}/runs/{run}/groups/{folder}/dashboard/`
+(the `dashboard` of `status` on such a run); and each run's dashboard at
 `/studies/{name}/runs/{run}/dashboard/`. Managing studies: `DELETE
 /api/studies/{name}` moves one to the trash (409 while it runs or waits) and
 `POST /api/trash/{entry}/restore` brings it back; `POST
@@ -475,6 +662,53 @@ outside its folder); `POST …/cases/{name}/restore` brings a removed case
 back; `GET /api/compare?a=<name>[/<run>]&b=<name>[/<run>]` is two runs side
 by side. A run is `python -m evolvekit.app.job STUDY RUN`, started so that it
 outlives the app.
+
+**A study with a schedule.** `GET /api/studies/{name}` then also has:
+
+| Key | Holds |
+|---|---|
+| `campaign` | `scheduler.campaign_state`: `state` (`draft`, `armed`, `paused`, `complete`, `ended`), `next` and `edge` (the windows' next edge, `start` or `end`), `line` (*Campaign · next window Sat 00:00*), `tone`, `missed`; `history_line`, when the campaign's own runs ran, on the window clock (*Ran in its windows: Sat 00:04 – Sun 09:27*, one span per session joined by "; ", then *and on Sat 10:00 – … by hand* for a person's session, *…* while one goes on; `null` before any ran); `history_by_run`, `{run: line}` for every run with a session kept, for the Past runs list |
+| `schedule_presets` | the windows *When it runs* offers |
+| `schedule_hours` | the hours of search one week of its windows gives, in real hours: weekends about 48, weeknights 25; under a rehearsal clock that week's hours divided by its speed (a weekend at 120 × is 0.4) |
+| `campaign_left_s` | the campaign's search time left on its run, in seconds (the run's plan less what its sessions used, plus the hours `budget.hours` has grown since the run was planned); `null` before its first run |
+| `next_window` | `{"at", "edge", "words"}`: the windows' next edge from the home's clock even when the campaign is finished (`campaign.next` is then `null`), `words` as the engine says them (*Sat 00:00*): the scheduled *Continue*'s button; `null` when no window is left |
+| `new_run_waits` | `true` while an armed campaign waits to start a fresh run after the latest one (its `after` is that run): no *Continue* is offered then |
+
+Any study's document also has `clock: {"line", "speed"}` while a rehearsal
+clock is on, so Set up can say a week of windows on both clocks (*Search
+through the whole window (about 47 h on the rehearsal clock, 23 min of real
+time; done around Sun 22:54)*) and the Study page shows the rehearsal notice.
+
+`plan` then has `window`: `{"line", "starts", "done"}`, the plan on the
+windows from the home's clock (a rehearsal's too), spreading the plan's hours —
+or, when the campaign's run is finished and its next window would go on with
+it, the campaign's search time left and a final check — *starts Sat 00:00; about
+18 min of search; done around Sat 00:18* (*starts now* inside a window; *…:
+more than its windows give before its Until (30 Nov)* and no `done` when they
+give less; *its schedule has no window left*) — and its `summary` ends with
+that line instead of *done around 17:34*. While that line spreads the study's
+own hours and they are less than the windows give, `plan` also has
+`whole_window`: `{"hours", "done", "done_words"}` — the real hours of the
+windows that end within the week less the final check the plan makes for them
+(never more than the week's hours), and where the plan line would then end
+(*Sun 22:54*); absent when the study's hours are already that much. `start` arms the campaign
+(`{"scheduled": true, "renewed", "words", "campaign"}`), or with
+`{"now": true}` starts a session at once, by hand. `continue` raises the
+campaign's search time by H hours (the study's hours when not said;
+`budget.hours` grows by H in `study.yaml`), arms the campaign again and
+launches nothing: `{"scheduled": true, "run", "hours", "next", "edge",
+"words", "campaign"}`, `words` being *Scheduled 18 min more for the next
+window (Sat 00:00)* (inside a window: *Scheduled 18 min more: its window is
+open now, until Sun 23:59*). The run must be the study's latest and able to
+go on (409 otherwise, or while anything of the study runs); 400 when H leaves
+the campaign under 10 minutes of search. The next window's tick continues the
+run, never sooner. `campaign.json` keeps `sessions`: `[{"run", "session",
+"from", "to", "by_hand"}]` on the window clock — `from` the tick's time when
+it launched the session (a person's: the home's clock at the launch), `to`
+the campaign's last tick before the one that saw it end (its `ticked_at`, so a
+span never runs on to a tick long after while the app was off; `null` until
+then). `campaign_state` says an ended session ended at that last tick before
+any tick writes it, so the history never shows *…* for a run that is over.
 
 **The verdict document.** The verdict is computed in one place:
 `build_verdict(root, run)` in `evolvekit/app/verdict.py`. It reads the study
@@ -501,10 +735,12 @@ names:
 | `by_case` | one row per held-back case: `name`, `start`, `best`, `change_pct`, `outcome` (`better`, `worse`, `same`, `failed`) |
 | `changed` | the settings and data changes of the best combination: `name`, `label`, `from`, `to` |
 | `candidates` | only on a bake-off's run (`study bakeoff`): one entry per branch in the order given, `ref`, `commit`, `decision`, `line`, and with an answer `mean_pct`, `ci95_pct`, `worst_pct`, `chance` — each against the starting point by the same rule; `same: true` and no figures on a branch whose every run gave exactly today's result; `by_case`, the branch's held-back rows in the keys of `by_case` (none on a branch at the starting commit) |
+| `groups` | only on a run per kind of case (`per_group: true`): `{name: document}`, each group's own verdict document built from its folder `runs/<id>/groups/<slug>/` (with `group`; a group whose search has not begun is `pending`). The run's own document then has no figures, `levels`, `learned_from` or `changed` of its own: its `decision` is `pending` or `stopped` while a group has no answer, `use` only when every group checked on two or more held-back cases says use, `single` when no group has two, else `keep`; `held_back` counts every group's cases, `by_case` holds every group's rows, each with its `group`, `rule` adds the top-level rule, `rule_lines` are the sentences of `rule.md`, and `spent` (with AI) is every group's together |
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
 | `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
-| `how_it_ran` | only when the search stopped on time with fewer rounds than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …" — the Study page shows it under Details |
+| `how_it_ran` | whenever fewer rounds ran than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …", with the reason from the stop (*the time ran out*, *the search time was used*, *stopped*, *the search stopped early (…)*, *the AI budget was used up*); when every round ran but some combinations repeated one already tried, "Ran all 17 planned rounds (176 combinations, about 204 planned): 29 of the combinations tried repeated one already tried and were not measured again." (what it knows, not a claim that it is the whole shortfall) — the Study page shows it under Details |
+| `why_keep` | only on a `keep` whose held-back cases all moved the goal's way while its range still allows a loss: one sentence after `line` that says why it is still keep, "Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer answer." (up to three cases' figures, else "Every one of the N held-back cases was lower"); never on `use`, `worse`, a keep with no difference or a goal with levels (the range there is the first measure's, while another level may be what kept it), and never a gain. `results` carries it (and its `final`, and the text to paste after its *Final check* line), a finished card's `verdict`, the report and `study verdict` say it after the line |
 | `spent` | only on a run with AI help: what its AI spent, from the run's `usage.jsonl`: `{"usd", "cap_usd", "line"}` with the line "AI: $0.87 of $1.00", or `{"requests", "line"}` ("AI: 14 requests") for a provider that counts requests; a fact, not a claim |
 
 The page is plain HTML, CSS and JavaScript with no build step, under

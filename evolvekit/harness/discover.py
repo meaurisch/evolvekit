@@ -14,6 +14,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from evolvekit.app.detach import no_window_flags
 from evolvekit.harness.probe import program_command
 
 _SKIPPED = {"help", "version"}
@@ -191,7 +192,8 @@ def _ask(argv: list[str], flag: str, timeout_s: float, name: str) -> tuple[str |
     """The text a program printed for `flag`, or a note saying why there is none."""
     try:
         done = subprocess.run(argv + [flag], capture_output=True, text=True, timeout=timeout_s,
-                              encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+                              encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+                              creationflags=no_window_flags())
     except subprocess.TimeoutExpired:
         return None, f"{name} did not answer {flag} within {timeout_s:g} s"
     except OSError as exc:
@@ -376,7 +378,8 @@ def discover_python(python: str, module: str, *, timeout_s: float = 30.0) -> dic
     executable = str(Path(python).resolve()) if Path(python).exists() else python
     try:
         done = subprocess.run([executable, "-c", _SCRIPT, module], capture_output=True, text=True,
-                              timeout=timeout_s, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+                              timeout=timeout_s, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+                              creationflags=no_window_flags())
         lines = [line for line in done.stdout.splitlines() if line.startswith(_MARK)]
         if lines:
             answer = json.loads(lines[-1][len(_MARK):])

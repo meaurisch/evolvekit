@@ -20,16 +20,18 @@ import shutil
 import subprocess
 import threading
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import yaml
 
 from evolvekit.app import AppError
+from evolvekit.app.detach import no_window_flags
 from evolvekit.env import parse_env
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import runner_command
+from evolvekit.harness.groups import TAGS, read_groups, read_tag, write_tag
 from evolvekit.harness.library import ORIGIN, HarnessEntry, create_study, find_harnesses, install_harness, slugify
 from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
 from evolvekit.harness.probe import probe_application
@@ -76,6 +78,12 @@ ARCHIVED = ".archived"
 """The marker file of an archived study: a fact about the library, not a field of the study."""
 STUDY_PARTS = ("study.yaml", "harness", "cases", "inputs")
 """What a study is made of, as against what it produced: `runs/`, `preview/`, `assistant.jsonl`."""
+STEP_KEYS = ("template", "step", "schedule", "warm", "per_group")
+"""Parts `save_step` accepts though the study's `study.yaml` may not have them yet."""
+RUN_GOING = "a run is going: tag or group the cases after it ends"
+"""`set_tag` and `study groups` while a run of the study is going (or queued)."""
+OPTIONAL_KEYS = ("schedule", "warm", "per_group")
+"""Parts `save_step` takes out when given `None`."""
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 _TRASH_ENTRY = re.compile(r"^(?P<slug>[a-z0-9][a-z0-9-]{0,79})~(?P<stamp>\d{8}-\d{6})(?:-\d+)?$")
@@ -315,20 +323,34 @@ class Home:
             slug, number = f"{base}-{number}", number + 1
         return slug
 
-    def create_study(self, harness_id: str, template: str | None, name: str, *, folder: Path | None = None) -> str:
+    def create_study(self, harness_id: str, template: str | None, name: str, *, folder: Path | None = None,
+                     warm: bool = False, said: list[str] | None = None) -> str:
         """A new study of the harness `harness_id` from the library -- only
         ever an id: the API passes what a request says. The command line,
-        given a harness folder, passes it as `folder`."""
+        given a harness folder, passes it as `folder`. `warm` starts it from
+        what this home's finished studies on the harness learned
+        (`memory.warm_start`); the lines to say about that are added to `said`."""
         name = str(name or "").strip()
         if not name:
             raise AppError("name: give the study a name")
         source = Path(folder) if folder is not None else self.harness_entry(harness_id).path
         slug = self._free_slug(name)
+        root = self.studies_dir / slug
         try:
-            create_study(self.studies_dir / slug, source, name, template or None)
+            create_study(root, source, name, template or None)
+            if warm:
+                from evolvekit.harness import memory  # it reads studies through this module's Home
+
+                study, lines = memory.warm_start(self, load_harness(root / "harness"), load_study(root))
+                save_study(study, root)
+                if said is not None:
+                    said.extend(lines)
         except HarnessError as exc:
-            shutil.rmtree(self.studies_dir / slug, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
             raise AppError(str(exc)) from None
+        except BaseException:  # a warm start that fails leaves no half-made study behind
+            shutil.rmtree(root, ignore_errors=True)
+            raise
         return slug
 
     def load(self, slug: str) -> tuple[Path, Study, Harness]:
@@ -345,15 +367,20 @@ class Home:
     def save_step(self, slug: str, changes: dict[str, Any]) -> None:
         """Merge `changes` -- top-level parts of `study.yaml` -- into the study
         and save it. The shape is checked; what is missing is not (that is
-        what the problems list says, step by step)."""
+        what the problems list says, step by step). A key the study may lack
+        (`STEP_KEYS`) is accepted when it has none yet; `None` for an
+        optional one (`schedule`) takes it out."""
         root, study, _ = self.load(slug)
         document = study.to_yaml()
         protected = {"study", "harness"}
         for key, value in (changes or {}).items():
             if key in protected:
                 raise AppError(f"{key}: a study keeps its harness; start a new study for another one")
-            if key not in document and key not in ("template", "step"):
+            if key not in document and key not in STEP_KEYS:
                 raise AppError(f"{key}: not part of a study")
+            if value is None and key in OPTIONAL_KEYS:
+                document.pop(key, None)  # `{"schedule": null}`: the study runs as soon as it is started
+                continue
             document[key] = value
         try:
             updated = Study.parse(document)
@@ -554,7 +581,29 @@ class Home:
     def case_names(self, slug: str) -> list[str]:
         root = self.study_root(slug)
         folder = root / "cases"
-        return sorted(p.name for p in folder.iterdir() if p.is_file() and not p.name.startswith(".")) if folder.is_dir() else []
+        # A `.tags` file is a case's tag (`groups.write_tag`), not a case.
+        return sorted(p.name for p in folder.iterdir()
+                      if p.is_file() and not p.name.startswith(".") and not p.name.endswith(TAGS)) if folder.is_dir() else []
+
+    def set_tag(self, slug: str, name: str, tag: str) -> dict[str, Any]:
+        """Say what kind of case `name` is (`""` takes the tag away); as soon as
+        one case has a tag, tags decide its groups (`study groups`). The answer
+        is the study document."""
+        from evolvekit.app import jobs  # jobs reads the store: imported when used
+
+        root, _, _ = self.load(slug)
+        if jobs.running(root):
+            raise AppError(RUN_GOING, 409)
+        filename = safe_name(name)
+        if not (root / "cases" / filename).is_file():
+            raise AppError(f"there is no case {filename!r} in this study", 404)
+        if not isinstance(tag, str):
+            raise AppError("tag: the words for what kind of case it is, or empty to take the tag away")
+        try:
+            write_tag(root, f"cases/{filename}", tag)
+        except HarnessError as exc:
+            raise AppError(str(exc)) from None
+        return self.document(slug)
 
     def put_case(self, slug: str, filename: str, data: bytes) -> dict[str, Any]:
         root, study, harness = self.load(slug)
@@ -661,7 +710,11 @@ class Home:
         trash = root / TRASH / "cases"
         trash.mkdir(parents=True, exist_ok=True)
         (trash / name).unlink(missing_ok=True)
+        (trash / (name + TAGS)).unlink(missing_ok=True)
         shutil.move(str(target), str(trash / name))
+        tag = root / "cases" / (name + TAGS)
+        if tag.is_file():  # the tag leaves with its case, and comes back with it
+            shutil.move(str(tag), str(trash / (name + TAGS)))
         relative = f"cases/{name}"
         study.training = [c for c in study.training if c != relative]
         study.test = [c for c in study.test if c != relative]
@@ -679,6 +732,8 @@ class Home:
             raise AppError(f"there is a case {name!r} in the study again already", 409)
         target.parent.mkdir(exist_ok=True)
         shutil.move(str(waiting), str(target))
+        if (waiting.parent / (name + TAGS)).is_file():
+            shutil.move(str(waiting.parent / (name + TAGS)), str(target.parent / (name + TAGS)))
         relative = f"cases/{name}"
         if relative not in study.training and relative not in study.test:
             study.training.append(relative)
@@ -805,7 +860,7 @@ class Home:
         try:
             argv = runner_command(study, harness, str(root / "harness" / "runner.py")) + ["inspect", "--case", str(path)]
             done = subprocess.run(argv, cwd=root, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=INSPECT_TIMEOUT_S)
+                                  errors="replace", timeout=INSPECT_TIMEOUT_S, creationflags=no_window_flags())
         except subprocess.TimeoutExpired:
             result = {"ok": False, "summary": "", "error": f"reading it took longer than {INSPECT_TIMEOUT_S} s"}
         except (OSError, HarnessError) as exc:
@@ -835,6 +890,9 @@ class Home:
         with _lock(str(root)):
             cache = self._inspected(root)
         listed = []
+        grouped = read_groups(root, study) or {}
+        group_of = {case: group for group, sides in (grouped.get("groups") or {}).items()
+                    for side in ("training", "test") for case in sides.get(side) or []}
         for name in self.case_names(slug):
             relative = f"cases/{name}"
             stat = (root / relative).stat()
@@ -844,6 +902,7 @@ class Home:
                 "name": name, "bytes": stat.st_size,
                 "set": "test" if relative in study.test else "training" if relative in study.training else "",
                 "inspected": cached.get("result") if current else None,
+                "tag": read_tag(root, relative), "group": group_of.get(relative, ""),
             })
         return listed
 
@@ -901,7 +960,7 @@ class Home:
         cases = self.cases(slug)
         return {
             "slug": slug,
-            "study": study.to_yaml(),
+            "study": as_json(study.to_yaml()),
             "problems": problems,
             "steps": [
                 {"number": i + 1, "title": title, "problems": sum(1 for p in problems if p["step"] == i + 1)}
@@ -913,6 +972,17 @@ class Home:
             "inputs": dict(study.inputs),
             "code_proposal": code_proposal(root, harness) if study.code is not None else None,
         }
+
+
+def as_json(value: Any) -> Any:
+    """`study.to_yaml()` (or any part of it) as JSON carries it: a date (`schedule.until`) as `"2026-12-31"`."""
+    if isinstance(value, dict):
+        return {k: as_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [as_json(v) for v in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
 
 
 def _remove_trees(root: Path) -> None:

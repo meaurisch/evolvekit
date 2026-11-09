@@ -10,6 +10,7 @@ import shutil
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
@@ -399,9 +400,18 @@ def build_parser() -> argparse.ArgumentParser:
                             help='print {"application", "settings", "notes"} for a script or an AI coding tool')
 
     p_app = sub.add_parser("app", help="the app: set up, run and read studies in the browser")
+    p_app.add_argument("action", nargs="?", choices=["install-startup", "uninstall-startup", "stop"],
+                       help="install-startup: start the app at logon (Windows: the task \"evolvekit app\"; macOS, "
+                            "Linux: prints the unit); uninstall-startup: undo it; stop: stop the app of this library")
     p_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     p_app.add_argument("--port", type=int, default=None, help="first port to try (default 8780)")
     p_app.add_argument("--no-browser", action="store_true", help="print the address; do not open a browser")
+    p_app.add_argument("--service", action="store_true",
+                       help="no browser and no console: log to <home>/app.log and keep the campaigns' windows")
+    p_app.add_argument("--clock", metavar="ISO",
+                       help="a rehearsal clock for campaigns, starting at this time (a time without a zone is local)")
+    p_app.add_argument("--clock-speed", metavar="N", type=float, default=None,
+                       help="with --clock: how many times faster than real time it runs (1 to 3600, default 1)")
     p_app.add_argument("--shortcut", action="store_true",
                        help="write evolvekit.cmd to the Windows desktop, which starts the app with a double-click")
 
@@ -425,6 +435,9 @@ def build_parser() -> argparse.ArgumentParser:
     s_new.add_argument("--template", help="a template id of the harness (default: a blank study)")
     s_new.add_argument("--app", help="where the application is (a path)")
     s_new.add_argument("--dir", help="write a standalone study folder here instead of into the library home")
+    s_new.add_argument("--warm", action="store_true",
+                       help="start from what finished studies on this harness learned: the latest `use` winner's "
+                            "values as the starting point, and a prior around them for the search")
     s_new.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_new.add_argument("--json", action="store_true", help='print {"slug", "root"} and nothing else')
     s_app = study.add_parser("application", help="say where a study's application is, or list the ones found here")
@@ -454,8 +467,15 @@ def build_parser() -> argparse.ArgumentParser:
     s_cases.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     s_cases.add_argument("--json", action="store_true", help='print {"added", "refused", "test"} and nothing else')
     home_help = "the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)"
-    s_start = study.add_parser("start", help="start the study, as the app's Start does (queued while another study runs)")
+    s_start = study.add_parser("start", help="start the study, as the app's Start does (queued while another study runs; "
+                                             "a study with a schedule waits for its first window)")
     s_start.add_argument("slug", help="the study's name in the library home")
+    s_start.add_argument("--now", action="store_true",
+                         help="a study with a schedule: start at once, whatever the window (no window's end stops "
+                              "this session)")
+    s_start.add_argument("--more", type=float, metavar="H",
+                         help="a study with a schedule whose campaign finished its run: H hours more search time, "
+                              "spent in its next window (never now), as the app's Continue does")
     s_start.add_argument("--wait", action="store_true", help="then wait until the run has ended, as study wait does")
     s_start.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
     s_start.add_argument("--home", help=home_help)
@@ -469,7 +489,8 @@ def build_parser() -> argparse.ArgumentParser:
     s_bake.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
     s_bake.add_argument("--home", help=home_help)
     s_bake.add_argument("--json", action="store_true", help='print {"run", "started"|"queued", "refs"} (one JSON document per line)')
-    s_stop = study.add_parser("stop", help="ask the study's running run to stop, or take back a queued one")
+    s_stop = study.add_parser("stop", help="ask the study's running run to stop, or take back a queued one; "
+                                           "pauses a campaign")
     s_stop.add_argument("slug", help="the study's name in the library home")
     s_stop.add_argument("--home", help=home_help)
     s_stop.add_argument("--json", action="store_true", help="print JSON and nothing else")
@@ -483,7 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
     s_watch.add_argument("--every", type=float, default=5.0, help="seconds between looks (default 5)")
     s_watch.add_argument("--home", help=home_help)
     s_watch.add_argument("--json", action="store_true", help="print one status document per line")
-    s_wait = study.add_parser("wait", help="wait until the run has ended (exit 0 done, 1 stopped or failed, 4 timeout)")
+    s_wait = study.add_parser("wait", help="wait until the run has ended -- for a campaign, until it has its answer "
+                                           "(exit 0 done, 1 stopped, failed or paused, 4 timeout)")
     s_wait.add_argument("slug", help="the study's name in the library home")
     s_wait.add_argument("--timeout", type=float, help="give up after this many seconds (exit 4; default: no limit)")
     s_wait.add_argument("--home", help=home_help)
@@ -515,6 +537,13 @@ def build_parser() -> argparse.ArgumentParser:
     s_pr.add_argument("--yes", action="store_true", help="do it: make the branch, push it, open the PR")
     s_pr.add_argument("--home", help=home_help)
     s_pr.add_argument("--json", action="store_true", help="print the plan (and with --yes what was done) as JSON")
+    s_groups = study.add_parser("groups", help="group the cases by their features (or by the tags given in the app's "
+                                               "Cases list) and write groups.json")
+    s_groups.add_argument("slug", help="the study's name in the library home")
+    s_groups.add_argument("--k", type=int, help="this many groups, 2 to 5 (default: 2 or 3, whichever tells the "
+                                                "cases apart best)")
+    s_groups.add_argument("--home", help=home_help)
+    s_groups.add_argument("--json", action="store_true", help="print groups.json")
     s_open = study.add_parser("open", help="print the study's address in the app (starting the app if none runs) and open it")
     s_open.add_argument("slug", help="the study's name in the library home")
     s_open.add_argument("--no-browser", action="store_true", help="only print the address")
@@ -681,14 +710,46 @@ def _desktop() -> Path:
     return home
 
 
+CLOCK_SPEEDS = (1.0, 3600.0)
+"""The rehearsal clock's speed, at least and at most (`app --clock-speed`)."""
+
+
+def _app_clock(args: argparse.Namespace) -> tuple[datetime | None, float] | None:
+    """`--clock` and `--clock-speed`, read: `(start or None, speed)`; None (said on stderr) when wrong."""
+    if args.clock is None:
+        if args.clock_speed is not None:
+            print("error: --clock-speed needs --clock (the rehearsal clock's start)", file=sys.stderr)
+            return None
+        return None, 1.0
+    try:
+        start = datetime.fromisoformat(args.clock.strip())
+    except ValueError:
+        print(f"error: --clock {args.clock!r} is not a time such as 2026-11-13T17:30", file=sys.stderr)
+        return None
+    speed = 1.0 if args.clock_speed is None else float(args.clock_speed)
+    if not CLOCK_SPEEDS[0] <= speed <= CLOCK_SPEEDS[1]:
+        print(f"error: --clock-speed {speed:g}: from {CLOCK_SPEEDS[0]:g} to {CLOCK_SPEEDS[1]:g}", file=sys.stderr)
+        return None
+    return (start if start.tzinfo is not None else start.astimezone()), speed
+
+
 def cmd_app(args: argparse.Namespace) -> int:
-    """Serve the app for a library home until Ctrl+C. Runs started from it
-    carry on when it stops."""
+    """Serve the app for a library home until Ctrl+C (or `app stop`). Runs started from it carry
+    on when it stops. One app per home: a second start opens the first. `--service`: no browser and
+    no console, a log in the home. `install-startup`, `uninstall-startup`, `stop`: `app.service`."""
+    from evolvekit.app import scheduler, service
+    from evolvekit.app.running import read_running
     from evolvekit.app.server import DEFAULT_PORT, AppServer
     from evolvekit.dashboard import open_in_browser
     from evolvekit.harness.library import default_home
 
     home = Path(args.home).expanduser().resolve() if args.home else default_home()
+    if args.action == "stop":
+        return service.stop_app(home)
+    if args.action == "install-startup":
+        return service.install_startup(home)
+    if args.action == "uninstall-startup":
+        return service.uninstall_startup(home)
     if args.shortcut:
         if os.name != "nt":
             print("error: --shortcut writes a Windows .cmd file; elsewhere, start the app with "
@@ -703,19 +764,97 @@ def cmd_app(args: argparse.Namespace) -> int:
         )
         print(f"wrote {target}: double-click it to start the app, and keep its window open while you work")
         return 0
+    clock = _app_clock(args)
+    if clock is None:
+        return 2
+    running = read_running(home)
+    if running is not None:  # one app per home: two tickers never share one
+        unset = ("the rehearsal clock was not set: stop that app first (evolvekit app stop), then start it with --clock"
+                 if clock[0] is not None else None)
+        if args.service:
+            logger = service.start_logging(home)
+            logger.info("already running at %s (the key is in app.json)", service.address(str(running.get("url"))))
+            if unset:
+                logger.info("%s", unset)
+            service.stop_logging(logger)
+            return 0
+        print(f"the app is already running for this library: {running.get('url')}", flush=True)
+        if unset:
+            print(unset, file=sys.stderr, flush=True)
+        if not args.no_browser:
+            open_in_browser(str(running.get("url")))
+        return 0
+    if args.service:
+        return _serve_service(home, args.port or DEFAULT_PORT, clock)
     server = AppServer(home, port=args.port or DEFAULT_PORT)
-    print(f"evolvekit app : {server.url_with_token}  (open it in your browser, as printed: the address carries this launch's key)", flush=True)
-    print(f"library home  : {server.home.root}", flush=True)
-    print("Keep this window open while you work. Runs carry on when it closes; Ctrl+C stops the app.", flush=True)
-    if not args.no_browser:
-        open_in_browser(server.url_with_token)
     try:
+        _set_clock(home, clock)
+        print(f"evolvekit app : {server.url_with_token}  (open it in your browser, as printed: the address carries this launch's key)", flush=True)
+        print(f"library home  : {server.home.root}", flush=True)
+        if clock[0] is not None:
+            print(scheduler.clock_of(home).words(), flush=True)
+        print("Keep this window open while you work. Runs carry on when it closes; Ctrl+C stops the app.", flush=True)
+        if not args.no_browser:
+            open_in_browser(server.url_with_token)
         server.serve_forever()
     except KeyboardInterrupt:
         print()
     finally:
+        scheduler.clear_clock(home)
         server.stop()
     return 0
+
+
+def _set_clock(home: Path, clock: tuple[datetime | None, float]) -> None:
+    """The rehearsal clock of this app, or none: a `clock.json` left by an app that ended without
+    its `finally` is not this one's."""
+    from evolvekit.app import scheduler
+
+    start, speed = clock
+    if start is None:
+        scheduler.clear_clock(home)
+    else:
+        scheduler.write_clock(home, start, speed)
+
+
+def _serve_service(home: Path, port: int, clock: tuple[datetime | None, float]) -> int:
+    """`app --service`: what it says, and the ticker's lines and tracebacks, go to `<home>/app.log`;
+    no browser, no console. It ends on `app stop` (or a service manager's SIGTERM), cleanly."""
+    import signal
+
+    from evolvekit.app import scheduler, service
+    from evolvekit.app.server import AppServer
+
+    logger = service.start_logging(home, redirect=True)
+    try:
+        server = AppServer(home, port=port)
+    except Exception:  # noqa: BLE001 - said in the log: there is no console to say it on
+        logger.exception("the app could not start")
+        service.stop_logging(logger)
+        return 1
+    code = 0
+    try:
+        _set_clock(home, clock)
+        logger.info("evolvekit app : %s  (the key is in app.json)", server.url)
+        logger.info("library home  : %s", server.home.root)
+        if clock[0] is not None:
+            logger.info("%s", scheduler.clock_of(home).words())
+        try:  # systemd's or launchd's stop ends it as `app stop` does
+            signal.signal(signal.SIGTERM, lambda *_: server.request_shutdown())
+        except (ValueError, OSError, AttributeError):
+            pass
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    except Exception:  # noqa: BLE001 - said in the log before the streams are given back
+        logger.exception("the app stopped on an error")
+        code = 1
+    finally:
+        scheduler.clear_clock(home)
+        server.stop()
+        logger.info("stopped")
+        service.stop_logging(logger)
+    return code
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1092,13 +1231,20 @@ def _tick_queue(home) -> None:
     """Launch the run that waits longest when nothing is active, as the app's
     ticker does, so a queued study starts with no app open. A launch that
     fails -- any study's, for any reason -- is said in one line and the wait
-    goes on, as the app's ticker does: the next tick tries again."""
-    from evolvekit.app import jobs
+    goes on, as the app's ticker does: the next tick tries again. Then the
+    scheduler looks at the campaigns, as the app's ticker does, on the
+    rehearsal clock while the app that set one runs."""
+    from evolvekit.app import scheduler
 
     try:
-        jobs.launch_queued(home)
+        scheduler.launch_queued(home)  # `jobs.launch_queued`, under the scheduler's lock
     except Exception as exc:  # noqa: BLE001 - a fault in another study's launch does not end this wait
         print(f"could not start a queued run: {exc}", file=sys.stderr)
+    try:
+        clock = scheduler.clock_of(home)
+        scheduler.tick(home, now=clock.now(), speed=clock.speed)
+    except Exception as exc:  # noqa: BLE001 - nor a fault in a campaign
+        print(f"could not look at the campaigns: {exc}", file=sys.stderr)
 
 
 def _gone(run_dir: Path, state: str | None) -> bool:
@@ -1158,16 +1304,21 @@ def _plan_line(study) -> str:
 
 
 def _say_verdict(document: dict) -> None:
-    """The verdict's sentence, then what to do about it, one per line; for a
-    bake-off each branch's own line by its ref; then how much of the plan
-    ran when the run ran less of it than planned."""
+    """The verdict's sentence (and, on a keep whose held-back cases all
+    improved, why it is still keep), then what to do about it, one per line;
+    for a bake-off each branch's own line by its ref; then how much of the
+    plan ran when the run ran less of it than planned."""
     print(document["line"])
+    if document.get("why_keep"):
+        print(document["why_keep"])  # why a keep whose held-back cases all improved is still keep
     headline = str(document["line"])
     for candidate in document.get("candidates") or []:
         words = str(candidate.get("line", ""))
         if words and (words in headline or words[:1].lower() + words[1:] in headline):
             continue  # the headline already says this branch's line (a bake-off of one branch)
         print(f"  {candidate.get('ref')}: {words}")
+    for name, own in (document.get("groups") or {}).items():  # a run per kind of case: each group's own line
+        print(f"  {name}: {own.get('line', '')}")
     if document.get("advice"):
         print(document["advice"])
     if document.get("how_it_ran"):
@@ -1178,8 +1329,9 @@ def _say_verdict(document: dict) -> None:
 
 OPEN_WAIT_S = 15.0
 """How long `study open` waits for an app it started to say it is running."""
-APP_LOG = "app.log"
-"""Where the output of an app that `study open` started goes, in the home."""
+APP_START_LOG = "app-start.log"
+"""Where the launcher's output of the app that `study open` starts goes, in the home: the service
+writes `app.log` itself, and rotation cannot rename a file another handle holds on Windows."""
 
 
 def _study_open(args: argparse.Namespace) -> int:
@@ -1196,9 +1348,9 @@ def _study_open(args: argparse.Namespace) -> int:
     running = read_running(home.root)
     if running is None:
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
-        argv = [sys.executable, "-m", "evolvekit", "app", "--home", str(home.root), "--no-browser"]
+        argv = [detach.python_for_runs(), "-m", "evolvekit", "app", "--home", str(home.root), "--service"]
         try:
-            detach.spawn_detached(argv, cwd=home.root, env=env, log=home.root / APP_LOG)
+            detach.spawn_detached(argv, cwd=home.root, env=env, log=home.root / APP_START_LOG)
         except (detach.DetachError, subprocess.TimeoutExpired):
             pass  # the wait below says so
         deadline = time.monotonic() + OPEN_WAIT_S
@@ -1289,13 +1441,19 @@ def _change_command(command: str, args: argparse.Namespace) -> int:
 
 def _wait(home, slug: str, timeout: float | None, as_json: bool, args: argparse.Namespace | None = None) -> int:
     """`study wait`: until the latest run has ended -- 0 done (the verdict),
-    1 stopped or failed, 4 when `timeout` seconds pass first. For people (not
+    1 stopped or failed, 4 when `timeout` seconds pass first; on an armed
+    campaign, until the campaign has its answer (`_wait_campaign`). For people (not
     `as_json`), the state line on stderr whenever it changes, as `study watch`
     prints it. With `args`, a run that is done says the next step on stderr."""
     from evolvekit.app import jobs
     from evolvekit.app.verdict import build_verdict
 
     root, study, _ = home.load(slug)
+    if study.schedule is not None:
+        from evolvekit.app import scheduler
+
+        if (scheduler.read_campaign(root) or {}).get("state") == "armed":
+            return _wait_campaign(home, slug, root, study, timeout, as_json, args)
     run = _run_of(root)
     run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the one check of a run's name
     deadline = None if timeout is None else time.monotonic() + timeout
@@ -1379,6 +1537,152 @@ def _watch(home, slug: str, every: float, as_json: bool) -> int:
         return 130
 
 
+SERVICE_NOTE = ("note: windows are kept while the app runs: evolvekit app --service, or evolvekit app "
+                "install-startup to start it at logon")
+"""Said on stderr after `study start` schedules a study and no app runs for the home."""
+
+
+def _start_campaign(home, root: Path, args: argparse.Namespace) -> int:
+    """`study start` on a study with a schedule: the campaign armed, its first window to start it
+    (D3) -- or with `--now` a session at once, by hand, which no window's end stops (D4)."""
+    from evolvekit.app import jobs, scheduler
+    from evolvekit.app.running import read_running
+
+    now = scheduler.clock_of(home).now()
+    slug = root.name
+    if args.more is not None:
+        if args.now:
+            raise AppError("study start: --more or --now, not both (--more waits for the next window)")
+        run = jobs.latest_run(root)
+        if run is None:
+            raise AppError("the study has no run to give more time to: evolvekit study start schedules its first")
+        more = scheduler.continue_campaign(home, root, run, args.more, now=now)
+        if args.json:
+            print(json.dumps({key: more[key] for key in ("scheduled", "run", "hours", "next", "edge", "words")}), flush=True)
+        else:
+            print(more["words"], flush=True)
+        if read_running(home.root) is None:
+            print(SERVICE_NOTE, file=sys.stderr)
+        if args.wait:
+            return _wait(home, slug, args.timeout, args.json, args)
+        _say_next(args, f"study wait {slug}", f"study status {slug}")
+        return 0
+    answer = scheduler.start_campaign(home, root, now=now, at_once=bool(args.now))
+    renewed = answer.get("renewed")
+    anew = f"a new campaign (the last one {renewed}); " if renewed else ""
+    if answer.get("scheduled"):
+        campaign = answer["campaign"] or {}
+        if args.json:
+            print(json.dumps({"scheduled": True, "next": campaign.get("next"), "edge": campaign.get("edge"),
+                              **({"new_campaign": True} if renewed else {})}), flush=True)
+        else:
+            then = "now" if campaign.get("edge") == "end" else "then"
+            print(f"scheduled: {anew}{answer['words']} (the app, or evolvekit study wait, starts it {then})", flush=True)
+        if read_running(home.root) is None:
+            print(SERVICE_NOTE, file=sys.stderr)
+    else:
+        run = answer["run"]
+        if answer.get("queued"):
+            other = jobs._waiting_for(root) or "another study"  # noqa: SLF001 - the name the app's card shows
+            document = {"run": run, "queued": True}
+            line = (f"queued behind {other}; it starts when that study finishes "
+                    "(the app or `evolvekit study wait` starts it)")
+        else:
+            document, line = {"run": run, "started": True}, f"started run {run}"
+        if renewed:
+            document["new_campaign"] = True
+            line += f": {anew.rstrip('; ')}"
+        print(json.dumps(document) if args.json else line, flush=True)
+    if args.wait:
+        return _wait(home, slug, args.timeout, args.json, args)
+    _say_next(args, f"study wait {slug}", f"study status {slug}")
+    return 0
+
+
+def _stop_campaign(home, root: Path, slug: str, args: argparse.Namespace) -> int:
+    """`study stop` on an armed campaign: a person's stop pauses it (D4), and its run is asked to
+    stop, or taken out of the queue."""
+    from evolvekit.app import jobs, scheduler
+
+    run = jobs.latest_run(root)
+    answer = scheduler.stop_by_person(home, root, run)
+    resumes = "evolvekit study start resumes it"
+    if args.json:
+        print(json.dumps(answer))
+    elif answer.get("dequeued"):
+        print(f"paused the campaign and took run {run} out of the queue; {resumes}")
+    elif answer.get("stopping"):
+        print(f"paused the campaign and asked run {run} to stop (evolvekit study wait {slug} returns when it has); "
+              f"{resumes}")
+    else:
+        print(f"paused the campaign (no run was running); {resumes}")
+    return 0
+
+
+def _wait_campaign(home, slug: str, root: Path, study, timeout: float | None, as_json: bool,
+                   args: argparse.Namespace | None) -> int:
+    """`study wait` on an armed campaign (D22): until it has its answer (`scheduler.campaign_done`:
+    complete, ended or paused, no run active) -- a window's stop is not an end, and no run need exist
+    yet. For people, the campaign's line on stderr whenever it changes. 0 when the latest run is
+    done (its verdict), 1 when the campaign paused or ended without one, 4 on timeout."""
+    from evolvekit.app import jobs, scheduler
+    from evolvekit.app.verdict import build_verdict
+    from evolvekit.harness.study import load_study
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    said = None
+    try:
+        while True:
+            _tick_queue(home)
+            try:
+                study = load_study(root)  # the windows may change between sessions (D1)
+            except (HarnessError, OSError, ValueError):
+                pass  # being edited: the last one read
+            now = scheduler.clock_of(home).now()
+            if scheduler.campaign_done(root, study, now=now):
+                break
+            if not as_json:
+                try:
+                    line = (scheduler.campaign_state(root, study, now=now) or {}).get("line") or said
+                except Exception:  # noqa: BLE001 - progress only
+                    line = said
+                if line != said:
+                    print(line, file=sys.stderr, flush=True)
+                    said = line
+            if deadline is not None and time.monotonic() >= deadline:
+                print(f"the campaign of {slug} goes on after {timeout:g} s "
+                      f"(evolvekit study wait {slug} waits again)", file=sys.stderr)
+                return 4
+            pause = WAIT_EVERY_S if deadline is None else min(WAIT_EVERY_S, deadline - time.monotonic())
+            time.sleep(max(0.0, pause))
+    except KeyboardInterrupt:
+        print(f"stopped waiting; the campaign of {slug} goes on", file=sys.stderr)
+        return 130
+    run = scheduler.campaign_run(root)  # the campaign's own: a new campaign's, not the last one's
+    job = jobs.phase(jobs._run_dir(root, run)) if run else {}  # noqa: SLF001 - the one check of a run's name
+    state = job.get("phase")
+    campaign = scheduler.campaign_state(root, study, now=scheduler.clock_of(home).now())
+    if campaign is None:  # the schedule was taken out while it waited: the tick paused the campaign
+        stored = scheduler.read_campaign(root) or {}
+        campaign = {"state": stored.get("state"), "line": f"Campaign · paused: {stored.get('reason') or scheduler.NO_SCHEDULE}"}
+    if state == "done":
+        document = build_verdict(root, run)
+        if as_json:
+            print(json.dumps({**document, "campaign": campaign}))
+        else:
+            _say_verdict(document)
+        if args is not None:
+            _say_next(args, f"study report {slug} --markdown", f"study open {slug}")
+        return 0
+    if as_json:
+        print(json.dumps({"study": slug, "run": run, "phase": state, "error": job.get("error"), "campaign": campaign}))
+    else:
+        print(campaign.get("line") or "the campaign ended without a finished run")
+        if job.get("error"):
+            print(job["error"], file=sys.stderr)
+    return 1
+
+
 def _study_run_command(command: str, args: argparse.Namespace) -> int:
     """`study start | stop | status | watch | wait`: the app's runner
     (`evolvekit.app.jobs`), on disk, whether or not the app is open."""
@@ -1394,6 +1698,10 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
     if command == "bakeoff":
         return _bakeoff(home, root, study, args)
     if command == "start":
+        if study.schedule is not None:
+            return _start_campaign(home, root, args)
+        if args.more is not None:
+            raise AppError("study start --more: only on a study with a schedule (its next window spends the time)")
         answer = jobs.start(home, root)
         run = answer["run"]
         if answer.get("queued"):
@@ -1409,6 +1717,10 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         _say_next(args, f"study wait {slug}", f"study watch {slug}")
         return 0
     if command == "stop":
+        from evolvekit.app import scheduler
+
+        if (scheduler.read_campaign(root) or {}).get("state") == "armed":
+            return _stop_campaign(home, root, slug, args)
         run = _run_of(root)
         answer = jobs.stop(root, run)
         if args.json:
@@ -1418,12 +1730,27 @@ def _study_run_command(command: str, args: argparse.Namespace) -> int:
         else:
             print(f"asked run {run} to stop (evolvekit study wait {slug} returns when it has)")
         return 0
+    from evolvekit.app import scheduler
+
+    campaign = (scheduler.campaign_state(root, study, now=scheduler.clock_of(home).now())
+                if study.schedule is not None else None)
     if args.json:
-        print(json.dumps(jobs.status(root, _run_of(root, args.run), build_status)))
+        run = args.run or jobs.latest_run(root)
+        if run is None and campaign is not None:
+            print(json.dumps({"run": None, "phase": None, "campaign": campaign}))  # armed, before its first window
+            return 0
+        document = jobs.status(root, _run_of(root, run), build_status)
+        if campaign is not None:
+            document["campaign"] = campaign
+        print(json.dumps(document))
     else:
         card = (jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status) if args.run  # noqa: SLF001
                 else jobs.state_line(root, study, build_status))
         print(card["line"])
+        if campaign is not None and card.get("kind") != "campaign":
+            print(campaign["line"])  # the campaign beside the run's own line: its next window, or its end
+        if campaign is not None and campaign.get("history_line"):
+            print(campaign["history_line"])  # when its sessions ran, on the window clock
         if (card.get("pace") or {}).get("line"):
             print(card["pace"]["line"])  # a live search: how many of the planned rounds its pace buys
         if card.get("kind") == "running" and (card.get("spent") or {}).get("line"):
@@ -1474,6 +1801,9 @@ def cmd_study(args: argparse.Namespace) -> int:
 
     command = args.study_command
     if command == "new":
+        if args.dir and args.warm:
+            print("--warm reads the library home's finished studies; leave out --dir", file=sys.stderr)
+            return 2
         if args.dir:
             folder = Path(args.dir)
             study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name, args.template)
@@ -1496,7 +1826,11 @@ def cmd_study(args: argparse.Namespace) -> int:
             return 0
         home = _home(args)
         given = Path(args.harness)  # a harness folder on disk, else an id the home knows
-        slug = home.create_study(args.harness, args.template, args.name, folder=given if given.is_dir() else None)
+        said: list[str] = []
+        slug = home.create_study(args.harness, args.template, args.name, folder=given if given.is_dir() else None,
+                                 warm=args.warm, said=said)
+        for line in said:
+            print(line, file=sys.stderr)
         answer = None
         if args.app:
             answer = home.set_application(slug, _full_path(args.app))
@@ -1524,6 +1858,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _change_command(command, args)
     if command == "open":
         return _study_open(args)
+    if command == "groups":
+        return _study_groups(args)
     folder = _study_root(args.directory, args)
     if command == "preview":
         result = execute.preview(folder)
@@ -1539,6 +1875,13 @@ def cmd_study(args: argparse.Namespace) -> int:
     models = _study_models(args, study, keys=command == "run")
     if command == "compile":
         plan = execute.plan_for(study, harness, execute.measured(folder), models=models)
+        when = None
+        if study.schedule is not None and not plan.blocked:  # it ends on its windows, not "done around 17:34"
+            from evolvekit.app import scheduler
+
+            # A library study's home keeps the rehearsal clock; a folder elsewhere reads the real one.
+            clock = scheduler.clock_of(folder.parent.parent) if folder.parent.name == "studies" else scheduler.Clock()
+            when = scheduler.plan_window(study.schedule, plan.hours, now=clock.now(), speed=clock.speed)["line"]
         if not args.run_id:
             # Nothing was asked to be kept: compile to prove it works, then leave no folder
             # in runs/ -- it holds only runs that were started (persona round 4, F2).
@@ -1553,12 +1896,12 @@ def cmd_study(args: argparse.Namespace) -> int:
                         (folder / "runs").rmdir()
                     except OSError:
                         pass
-            print(f"compiled, nothing written (give --run-id to keep the files): {plan.summary()}")
+            print(f"compiled, nothing written (give --run-id to keep the files): {plan.summary(when=when)}")
             if not Path(args.directory).is_dir():
                 _say_next(args, f"study start {args.directory}")
             return 0
         run_dir = write_run(study, harness, plan, folder, args.run_id, models=models)
-        print(f"compiled into {run_dir}: {plan.summary()}")
+        print(f"compiled into {run_dir}: {plan.summary(when=when)}")
         if not Path(args.directory).is_dir():  # a name in the library home: start it as the skills say
             _say_next(args, f"study start {args.directory}")
             return 0
@@ -1574,6 +1917,54 @@ def cmd_study(args: argparse.Namespace) -> int:
     elif final.get("skipped"):
         print(f"final check: {final['skipped']}")
     return 0 if job["phase"] in ("done", "stopped") else 1
+
+
+def _study_groups(args: argparse.Namespace) -> int:
+    """`study groups SLUG [--k N] [--json]`: the groups of the study's cases, into groups.json.
+    Exit 1 when a case cannot be solved for its features (as `study preview`) or a run is going."""
+    import functools
+
+    from evolvekit.app import jobs
+    from evolvekit.app.store import RUN_GOING
+    from evolvekit.harness import groups
+
+    if args.k is not None and not 2 <= args.k <= 5:
+        print(f"--k: 2 to 5 groups, got {args.k}", file=sys.stderr)
+        return 2
+    root = _home(args).study_root(args.slug)
+    if jobs.running(root):  # the first time solves every case: never beside a timed run
+        print(RUN_GOING, file=sys.stderr)
+        return 1
+
+    def say(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
+    try:
+        doc = groups.compute(root, k=args.k, tables=functools.partial(groups.case_tables, say=say))
+    except groups.SolveFailed as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(doc))
+        return 0
+
+    def plural(n: int, word: str) -> str:
+        return f"{n} {word}" + ("" if n == 1 else "s")
+
+    count = len(doc["groups"])
+    if doc["method"] == "features":
+        print(f"{plural(count, 'group')} by the cases' features (silhouette {doc['silhouette']:.2f}):")
+    elif doc["method"] == "tags":
+        print(f"{plural(count, 'group')} by the cases' tags:")
+    else:
+        print("1 group:")
+    for name, group in doc["groups"].items():
+        training, test = len(group["training"]), len(group["test"])
+        print(f"  {name}: {plural(training + test, 'case')} ({training} to learn from, {test} held back)")
+    print(f"wrote {groups.GROUPS}", flush=True)
+    for note in doc["notes"]:  # why it is one group, a feature that tells nothing apart
+        print(f"note: {note}", file=sys.stderr)
+    return 0
 
 
 def _study_models(args: argparse.Namespace, study, *, keys: bool = False) -> dict | None:

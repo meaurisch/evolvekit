@@ -586,3 +586,17 @@ def test_a_copilot_answer_carries_its_requests(study, monkeypatch, tmp_path):
     history = assistant.history(root)
     assert history["turns"][-1]["requests"] == 1 and history["total_requests"] == 2
     assert "requests" not in assistant.ask(home, root, "Priced", provider=_Priced()), "dollar providers are unchanged"
+
+
+def test_the_context_carries_a_schedule_with_its_last_day(tmp_path):
+    """A study whose schedule has `until` (a date in study.yaml) is sent to the model as JSON text."""
+    from evolvekit.harness.manifest import load_harness
+
+    home = Home(tmp_path / "home")
+    slug = home.create_study("demo-tour", "tune", "Weekends")
+    home.save_step(slug, {"schedule": {"windows": [{"days": ["sat"], "from": "00:00", "to": "06:00"}],
+                                       "until": "2026-12-31"}})
+    root = home.study_root(slug)
+    sent = assistant.context(root, load_study(root), load_harness(root / "harness"))
+    so_far = json.loads(sent.split("## The study so far\n")[1].split("\n\n## ")[0])
+    assert so_far["schedule"]["until"] == "2026-12-31"

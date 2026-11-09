@@ -161,13 +161,16 @@ class Plan:
             round_s=1.0, check_seeds=3, hours=1.0,
         )
 
-    def summary(self, now: datetime | None = None) -> str:
+    def summary(self, now: datetime | None = None, *, when: str | None = None) -> str:
         """The plan in words, for the study's Limits step. A study with AI says
         the time it assumes for each AI change, and a study with too few
-        held-back cases for a firm answer ends with that note (`notes`)."""
+        held-back cases for a firm answer ends with that note (`notes`).
+        `when` replaces "done around 17:34": a study with a schedule says when
+        it starts and ends on its windows (`scheduler.plan_window`)."""
         if self.blocked:
             return self.blocked
         moment = (now or datetime.now()) + timedelta(hours=self.hours)
+        done = when or f"done around {moment:%H:%M}"
         check = (
             f"a final check on {self.test_cases} held-back case{'s' if self.test_cases != 1 else ''} "
             f"with {self.check_seeds} run{'s' if self.check_seeds != 1 else ''} each (≈ {_minutes(self.final_check_s)})"
@@ -176,7 +179,7 @@ class Plan:
         assumes = f" (assumes about {self.ai_change_s:g} s for each AI change)" if self.ai_change_s else ""
         return " ".join([
             f"about {self.rounds} round{'s' if self.rounds != 1 else ''}, about {self.combinations} combinations "
-            f"tried{assumes}, {check}; done around {moment:%H:%M}.", *self.notes])
+            f"tried{assumes}, {check}; {done}.", *self.notes])
 
     def to_json(self) -> dict[str, Any]:
         return {

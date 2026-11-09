@@ -25,6 +25,7 @@
     el.hidden = false;
     document.body.classList.add("drawer-open");
     document.body.classList.toggle("drawer-dims", !!o.dims);
+    document.body.classList.toggle("drawer-wide", !!o.wide);  // Set up makes room for its width
     var title = document.getElementById("drawer-title");
     if (o.focus !== false && title) title.focus();
     return el;
@@ -52,7 +53,7 @@
     var el = document.getElementById("drawer");
     el.hidden = true;
     el.innerHTML = "";
-    document.body.classList.remove("drawer-open", "drawer-dims");
+    document.body.classList.remove("drawer-open", "drawer-dims", "drawer-wide");
     if (was.onClose) was.onClose();
     if (!opts.quiet && was.opener && document.contains(was.opener)) was.opener.focus();
   };

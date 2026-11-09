@@ -463,3 +463,15 @@ def test_app_writes_and_clears_running_file(tmp_path):
     finally:
         server.stop()
     assert read_running(home) is None
+
+
+def test_a_case_takes_a_tag(app):
+    call(app, "POST", "/api/studies", {"harness": "demo-tour", "template": "tune", "name": "Tags"})
+    call(app, "POST", "/api/studies/tags/samples")
+    status, document = call(app, "PUT", "/api/studies/tags/cases/town-40.json/tag", {"tag": " big "})
+    assert status == 200 and {c["name"]: c["tag"] for c in document["cases"]}["town-40.json"] == "big"
+    assert "town-40.json.tags" not in [c["name"] for c in document["cases"]]
+    assert call(app, "PUT", "/api/studies/tags/cases/town-40.json/tag", {"tag": "x" * 41})[0] == 400
+    assert call(app, "PUT", "/api/studies/tags/cases/nowhere.json/tag", {"tag": "big"})[0] == 404
+    status, document = call(app, "PUT", "/api/studies/tags/cases/town-40.json/tag", {"tag": ""})
+    assert status == 200 and {c["name"]: c["tag"] for c in document["cases"]}["town-40.json"] == ""
