@@ -117,4 +117,85 @@ fixes. Final score **9/10, no blocker**.
 
 ### PR
 
-[meaurisch/evolvekit#72](https://github.com/meaurisch/evolvekit/pull/72) — `agent/1-one-world` against `master`, 32 commits, opened 2026-11-07. **PASS** (every task built and reviewed; gate 1797 passed, 4 skipped; persona 9/10, no blocker).
+[meaurisch/evolvekit#72](https://github.com/meaurisch/evolvekit/pull/72) — `agent/1-one-world` against `master`, 32 commits, opened 2026-11-07; CI on Linux green (4 checks, after the one post-gate fix commit b069b8a cherry-picked from project 2). **PASS** (every task built and reviewed; gate 1797 passed, 4 skipped; persona 9/10, no blocker).
+
+## Project 2 — Skills and the agent gate
+
+Branch `agent/2-skills` from `agent/1-one-world` (e2d5d8e). Plan:
+[2026-11-07-agent-2-skills.md](../plans/2026-11-07-agent-2-skills.md),
+expanded to step level on this branch (838 lines, seven tasks), then the
+builder check by a fresh reviewer; the choices are in the plan's
+"Decisions" section.
+
+### Decisions
+
+From the plan's expansion and the builder check (the plan's "Decisions"
+section holds all 21 with their reasons); the ones a reader should know:
+
+- **The per-case time may default to the harness's** when the request does
+  not give one; only the goal and the total time are never chosen by the
+  skill (the design's own gate sentence gives no per-case time).
+- **The report is written to a file, never pasted** into the agent's answer
+  (`study report SLUG --markdown > evolvekit-report.md`); the answer is the
+  verdict's line and advice. Pasting would put other percentages into the
+  answer.
+- **The gate judges percentages, not words,** in the second answer: the
+  verdict's `advice` carries the decision's own words.
+- **The fixture carries the tool's own settings** (`.claude/settings.json`
+  with the allowed tools and the library home as an additional directory)
+  and `--fixture` prints the three lines to set (`EVOLVEKIT_HOME`, a PATH
+  with the venv first, `cd`), so the persona's plain `claude -p` behaves as
+  the gate's run does.
+- **"Thin" is what `study compile` blocks on** (fewer than 3 rounds); a
+  plan with 3+ rounds goes ahead and the hand-over names the app's thin
+  warning when there are fewer than 6 combinations per setting tuned.
+- **Templates come from the harness folder** (`harness/<id>/templates/`, or
+  the study's pinned copy); with none fitting, the skill writes `vary`,
+  `kpis` (`{from: harness}`) and `goal` by hand, never SQL.
+- **The harness skill's smoke test uses the template the skill wrote.**
+- **`copilot` is not installed on this machine:** the gate records "not
+  installed" for it and runs the tool checks with `claude` only.
+- **The shared reference is copied at install only**, as project 1 built
+  it; no build-time copy into each skill's `references/`.
+
+### Gate
+
+`python tasks.py check` on `agent/2-skills`, nothing else running:
+
+| When | Commit | Result |
+|---|---|---|
+| after Tasks 1–7 and the persona rounds' fixes | 8e85214 | 1856 passed, 4 skipped in 16:21 |
+| the PR's tree, after the whole-branch review's fixes and the gate script's last runs | a40fc6e | **1864 passed, 4 skipped** in 16:06 |
+
+### Persona gate
+
+Design §4.4 and §8 for project 2, in
+[2026-11-07-engineer-gate-log.md](2026-11-07-engineer-gate-log.md):
+
+- **The gate script**, `python tests/agent_gate.py --tool claude`, on the
+  shipped tree: the complete sentence 6/6 PASS, the sentence without the
+  total time 2/2 PASS. Earlier runs caught, and the fixes closed: the agent
+  making the study before asking the missing question; its interview
+  summary saying "lower is better" before any verdict; the check itself
+  counting a figure the verdict's own line gives as another claim. One run
+  stopped on this account's usage limit for the tool's default model and is
+  logged as invalid; the later runs set `ANTHROPIC_MODEL=claude-opus-5-5`. Copilot CLI is not installed on this machine;
+  the gate was not run with it.
+- **Round A** (the study skill, an engineer through their coding agent):
+  **8/10, no blocker** at round 1. Found a project-1 regression (a literal
+  `&#39;` in the Study page's verdict, fixed on project 1's branch as well)
+  and one wording fix (show the plan line before `study start`).
+- **Round B** (the harness skill, an application evolvekit does not know):
+  7/10, 7/10, then **8/10, no blocker** at round 3. The fixes between
+  rounds: the two questions only the engineer can answer come first, with
+  nothing written until they are answered; write only what the interview
+  named; `harness check` always with `--app`; the smoke test is the agent's
+  to run and names its values; samples are never the engineer's own files.
+  The gate's no-harness fixture had to become a program evolvekit does not
+  know (the example solver with another name and version, a scrubbed
+  docstring, neutral request names), since the first two rounds tested
+  adapting the demo instead of writing a harness.
+
+### PR
+
+[meaurisch/evolvekit#73](https://github.com/meaurisch/evolvekit/pull/73) — `agent/2-skills` against `master`, stacked on #72, opened 2026-11-07. **PASS** (every task built and reviewed; gate 1864 passed, 4 skipped; gate script 6/6 and 2/2 on the shipped tree; persona A 8/10, B 8/10 at round 3, no blocker).

@@ -1,0 +1,3 @@
+$ claude <<< Use evolvekit to find solver settings that give shorter tours on the requests in cases/; the solver is solver.py in this folder; hold two back; ten minutes in total; today's settings are the starting point.
+
+You've reached your Fable limit. Switch to another model, or manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue.

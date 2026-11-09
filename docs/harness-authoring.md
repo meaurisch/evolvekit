@@ -15,6 +15,21 @@ Two harnesses in this repository are the worked examples:
   Python, with request loading, unit conversion, a lever applied in code, and
   drift detection. The full picture.
 
+## With an AI coding tool
+
+In the application's repository, install the skills:
+
+```
+python -m evolvekit skill install
+```
+
+Then ask your coding tool to put the application behind evolvekit. The
+`evolvekit-harness` skill (in `.agents/skills/`) follows the steps on this
+page and the check loop: it writes the harness into `harness/`, runs
+`evolvekit harness check` until it exits 0, and smoke-tests a study on the
+samples. It does not edit `evk_harness.py`. Read the result as you would any
+harness: the steps below say what each part is for.
+
 ## First: what the application exposes
 
 Before a harness exists, ask the application what it has:

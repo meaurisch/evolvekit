@@ -1,0 +1,5 @@
+$ claude <<< Use evolvekit to find solver settings that give shorter tours on the requests in cases/; the solver is solver.py in this folder; hold two back; today's settings are the starting point.
+
+Everything in the request is answered except one thing, so I'm stopping here before making anything.
+
+How much time in total should the study get? For example ten minutes, half an hour, or an hour. The rest is settled: the application is solver.py in this folder, the four requests in cases/ with two held back, the tour length as the measure with lower being better, the recommended solver settings may change, today's settings as the starting point, and the harness's default of 2 seconds per case.

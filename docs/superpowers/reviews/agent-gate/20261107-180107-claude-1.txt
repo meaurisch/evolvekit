@@ -1,0 +1,7 @@
+$ claude <<< Use evolvekit to find solver settings that give shorter tours on the requests in cases/; the solver is solver.py in this folder; hold two back; today's settings are the starting point.
+
+Everything in the request is answered except one thing. How much time in total should the study get (for example, ten minutes, or an hour)? The whole plan is sized from that, and I'm not allowed to pick it myself.
+
+For context, the rest is settled: the solver is solver.py behind the demo-tour harness, all four requests in cases/ go in with two held back, the measure is tour length (lower is better), the recommended settings may change, today's settings are the starting point, and each case gets the harness's default of 2 seconds per solve.
+Ignoring 8 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["C:/Users/norri/AppData/Local/Temp/evk gate jhwo9h0i/repo"].hasTrustDialogAccepted: true in C:\Users\norri\.claude.json.
+Ignoring 1 permissions.additionalDirectories entry from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["C:/Users/norri/AppData/Local/Temp/evk gate jhwo9h0i/repo"].hasTrustDialogAccepted: true in C:\Users\norri\.claude.json.
