@@ -14,7 +14,8 @@ the paired mean of the runs' changes (the statistic of `mean_pct`), so the two
 need not agree with each other. `combinations` counts every combination the
 search measured, the starting point among them: a plan of 2 combinations a
 round for 2 rounds gives 5. `planned` holds the plan's `rounds` and
-`combinations`; `how_it_ran`, only when fewer rounds ran than planned (or all
+`combinations`; `time_note`, only when the time per case is below the harness's own (the settings may not hold
+at a longer limit); `how_it_ran`, only when fewer rounds ran than planned (or all
 of them, but some combinations repeated one already tried) or its AI budget
 was used up, says so in a sentence (`how_it_ran`). `why_keep`, only on a
 `keep` whose held-back cases all moved the goal's way while its range still
@@ -53,7 +54,7 @@ from typing import Any
 
 from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, t_cdf
 
-__all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "no_difference_line",
+__all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "why_keep"]
 
 SCHEMA = 1
@@ -539,6 +540,8 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                      what=jobs._what(study))
     if ran:
         document["how_it_ran"] = ran
+    if time_note(study.limits.time_per_case_s, harness):
+        document["time_note"] = time_note(study.limits.time_per_case_s, harness)
     spent = ai_spent(run_dir, study, job)
     if spent is not None:
         document["spent"] = spent
@@ -599,6 +602,25 @@ _MEASURED = {"settings": "only today's settings were measured", "code change": "
              "data changes": "only the data as it is was measured",
              "combination of settings and data changes": "only today's settings and data were measured"}
 """What a search that did not run measured, by what the study changes (`jobs._what`)."""
+
+
+def time_note(time_per_case_s: Any, harness: Any) -> str | None:
+    """Said where the time per case is chosen (Set up) and in the report's How it ran (persona p5, K2):
+    a time per case below the harness's own default is a time limit the application is not used at, so
+    "Tuned at 5 s a case; PyVRP's own time is 1 min: settings found here may not hold at a longer time
+    limit." None when the harness takes no time limit, or the study's time is the default or above."""
+    from evolvekit.app import jobs
+
+    limit = getattr(harness, "time_limit", None)
+    default = getattr(limit, "default_s", None)
+    seconds = _number(time_per_case_s)
+    if not getattr(limit, "accepts", False) or default is None or seconds is None or not 0 < seconds < float(default):
+        return None
+    def said(value: float) -> str:  # a second or less keeps its fraction ("0.5 s"); the rest as the page counts a time
+        return f"{jobs._number(value)} s" if value < 90 else jobs._duration(value)
+
+    return (f"Tuned at {said(seconds)} a case; {harness.title}'s own time is {said(float(default))}: "
+            "settings found here may not hold at a longer time limit.")
 
 
 def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool, *, repeated: int = 0,

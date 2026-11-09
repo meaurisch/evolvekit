@@ -17,6 +17,7 @@ from typing import Any
 
 from evolvekit import resources
 from evolvekit.app import AppError, assistant, compare, jobs, scheduler, tries, work
+from evolvekit.app import verdict as verdict_doc
 from evolvekit.app.detach import no_window_flags
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
@@ -509,7 +510,8 @@ def plan(req: Request) -> dict[str, Any]:
         if hours == chosen.hours:  # the line spreads the study's own hours: the offer's done time is the line's
             whole = _whole_window(study, pinned, timing, models, now=now, speed=clock.speed)
     return {"summary": chosen.summary(when=window["line"] if window else None), "estimated": estimated,
-            "warning": warning, "fixes": fixes, "tunables": tunables, **chosen.to_json(),
+            "time_note": verdict_doc.time_note(study.limits.time_per_case_s, pinned), "warning": warning,
+            "fixes": fixes, "tunables": tunables, **chosen.to_json(),
             **({"window": window} if window else {}), **({"whole_window": whole} if whole else {})}
 
 

@@ -1392,6 +1392,8 @@ def _summary_text(data: dict[str, Any]) -> str:
         f"Search{of}: {data['headline']}",
         f"Final check{of}: {final['line']}",
     ]
+    if data.get("time_note"):
+        lines.append(str(data["time_note"]))
     if final.get("why_keep"):  # why a keep whose held-back cases all improved is still keep (persona p4)
         lines.append(str(final["why_keep"]))
     side = []
@@ -1473,8 +1475,11 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     seed, best = _seed_and_best(run_dir, document)
     if best is None and job.get("bakeoff"):  # no search, so no status document: the branch the check chose
         best = verdict_doc._best_of(job, _rows(run_dir))
-    improvement = ((document.get("progress") or {}).get("improvement") or {})
-    pct = improvement.get("pct")
+    # One search figure on every surface: `verdict._learned_pct` (the change of the plain averages on the
+    # cases learned from), which `verdict.best_so_far` gives the Study page -- never the status document's
+    # `improvement.pct`, the mean of the per-case changes (3.8 % where the page said 1.8 %; persona p5, K1).
+    learned_pct = verdict_doc._learned_pct(seed, best, goal)
+    pct = learned_pct
     what = _what(study)
     # Not checked: the verdict is the only claim (persona p5, J5), so the search's figure says so.
     learned = "on the cases the search learned from, not checked"
@@ -1547,9 +1552,6 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
         "took": _duration(used_s) if used_s is not None else None,
         "compared_with": baseline,
     }
-    # The learned-from figure is the verdict's own (the change of the plain averages), as the report
-    # says it; `pct` is the search's figure (the average of the per-case changes), kept for the Tries plot.
-    learned_pct = verdict_doc._learned_pct(seed, best, goal)
     # The headline, the advice, the decision and its numbers are the verdict
     # document's, so the page and `build_verdict` cannot say two things.
     verdict = verdict_doc._document(root, run_dir, study, harness, job, final, comparison, by_case["held"], changed,
@@ -1582,7 +1584,7 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
         "cases": {"training": list(study.training), "test": list(study.test)},
         "can_continue": can_continue(run_dir, job),
     }
-    for key in ("how_it_ran", "planned", "spent", "why_keep"):  # how much of the plan ran, what the AI spent, why keep
+    for key in ("how_it_ran", "time_note", "planned", "spent", "why_keep"):  # how much of the plan ran, what the AI spent, why keep
         if verdict.get(key):
             data[key] = verdict[key]
     if "candidates" in verdict:  # a bake-off: every branch with its own decision and line
@@ -1731,11 +1733,15 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
     if data.get("how_it_ran"):
         # Fewer rounds ran than planned: its sentence says what ran, and replaces the count, as in the Markdown.
         facts.append(("How it ran", str(data["how_it_ran"])))
+        if data.get("time_note"):
+            facts.append(("Time limit", str(data["time_note"])))
     else:
         # The starting point is no combination the search tried: "0, plus today's settings" for a search
         # that did not run, as the Markdown counts it (fix round 1, M5).
         facts.append(("Combinations tried", f"{context['tried'] - 1}, plus today's settings" if isinstance(context["tried"], int)
                       and context["tried"] >= 1 else str(context["tried"])))
+    if data.get("time_note") and not data.get("how_it_ran"):
+        facts.append(("How it ran", str(data["time_note"])))  # a time below the harness's own (persona p5, K2)
     if context.get("took"):
         facts.append(("It took", context["took"]))
     if context.get("started_at"):
@@ -2254,6 +2260,8 @@ def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, car
                "advice": document.get("advice", ""), "says": says}
     if document.get("how_it_ran"):
         verdict["how_it_ran"] = document["how_it_ran"]
+    if document.get("time_note"):
+        verdict["time_note"] = document["time_note"]
     if document.get("why_keep"):
         verdict["why_keep"] = document["why_keep"]
     if document.get("spent"):

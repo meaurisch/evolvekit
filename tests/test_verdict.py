@@ -124,7 +124,30 @@ def test_results_learned_figure_is_the_verdict_learned_from(use_run):
     r = jobs.results(root, run, document_of)
     assert v["learned_from"]["pct"] == pytest.approx(7.5)
     assert r["learned_pct"] == v["learned_from"]["pct"]
-    assert r["improvement_pct"] == pytest.approx(4.2), "the search's own figure stays for the Tries plot"
+    assert r["improvement_pct"] == pytest.approx(7.5), "one search figure: the Tries plot reads the same one"
+
+
+def test_the_search_figure_is_one_on_every_surface(use_run):
+    """persona p5, K1: report.html said 3.8 % where the Study page said 1.8 % -- the status document's mean of
+    per-case changes against the change of the plain averages. The page's status, the results, the HTML report
+    and the Markdown (report and summary) give the verdict's learned-from figure."""
+    from evolvekit.app.report import render_report
+
+    root, run = use_run
+    path = root / "runs" / run / "runs.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows[0]["kpis"].update({"tour_length": 1.0, "tour_length_raw": 100.0})
+    rows[1]["kpis"].update({"tour_length": 0.9257, "tour_length_raw": 92.5})
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    v = build_verdict(root, run)
+    page = jobs.results(root, run, document_of)
+    assert v["learned_from"]["pct"] == pytest.approx(7.5)
+    figure = "7.5 % lower"
+    assert figure in jobs.status(root, run, document_of)["best"]["says"]
+    for name, text in (("html report", jobs.report_html(page)), ("markdown report", render_report(v, page)),
+                       ("summary", page["summary_text"])):
+        assert "4.2 % lower tour length than" not in text, name
+        assert figure in text, name
 
 
 def test_advice_for_use_says_use(use_run):
@@ -766,3 +789,26 @@ def test_the_seed_cut_by_the_time_limit_is_said_in_its_own_words():
         "the time ran out before its first round")
     assert not_run_words("time limit: its first round would not finish within 0.124 h (…)") == (
         "there was not enough time left for its first round")
+
+
+def test_a_time_below_the_harness_own_is_said_in_the_report_and_the_plan(use_run):
+    """persona p5, K2: 5 s a case against the harness's 1 min was never said. Below the harness's own time per
+    case the verdict, the HTML report, the Markdown and the summary say it, once, in the same words."""
+    from evolvekit.app.report import render_report
+    from evolvekit.harness.study import load_study, save_study
+
+    root, run = use_run
+    note = "Tuned at 1 s a case; Demo tour's own time is 2 s: settings found here may not hold at a longer time limit."
+    assert "time_note" not in build_verdict(root, run), "the study's time is the harness's own"
+    study = load_study(root)
+    study.limits.time_per_case_s = 1
+    save_study(study, root)
+    v = build_verdict(root, run)
+    page = jobs.results(root, run, document_of)
+    assert v["time_note"] == note and page["time_note"] == note
+    html = jobs.report_html(page)
+    assert html.count("Tuned at 1 s a case") == 1 and "Demo tour&#x27;s own time is 2 s" in html
+    assert note.rstrip(".") in render_report(v, page) and note in page["summary_text"]
+    study.limits.time_per_case_s = 5
+    save_study(study, root)
+    assert "time_note" not in build_verdict(root, run), "above the harness's own time: nothing to say"

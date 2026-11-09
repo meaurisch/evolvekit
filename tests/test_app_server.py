@@ -269,6 +269,10 @@ def test_a_study_through_its_steps(app):
 
     status, plan = call(app, "GET", "/api/studies/tours/plan")
     assert status == 200 and plan["estimated"] is True and plan["summary"]
+    assert plan["time_note"].startswith("Tuned at 0.5 s a case; ") and "may not hold at a longer time limit" in plan["time_note"]
+    call(app, "PATCH", "/api/studies/tours", {"limits": {"time_per_case_s": 2, "retries": 1, "runs_per_case": 1}})
+    assert call(app, "GET", "/api/studies/tours/plan")[1]["time_note"] is None, "the harness's own time: nothing to say"
+    call(app, "PATCH", "/api/studies/tours", {"limits": {"time_per_case_s": 0.5, "retries": 1, "runs_per_case": 1}})
     status, body = call(app, "DELETE", "/api/studies/tours/cases/town-40.json")
     assert status == 200 and "cases/town-40.json" not in body["study"]["cases"]["training"]
     status, home = call(app, "GET", "/api/home")

@@ -134,6 +134,8 @@
     // A study with a schedule ends on its windows (the plan's `window` line), never "done around 17:34"
     // from now (persona p4, H1).
     if (study().schedule) return { kicker: "Time", value: value, sub: st.plan && st.plan.window ? EK.capital(st.plan.window.line) + "." : "", act: "time" };
+    // Below the harness's own time per case: said where it is chosen (persona p5, K2).
+    if (st.plan && st.plan.time_note) return { kicker: "Time", value: value, sub: st.plan.time_note, act: "time" };
     var done = hours ? new Date(Date.now() + hours * 3600 * 1000) : null;
     var tomorrow = done && done.toDateString() !== new Date().toDateString();
     return { kicker: "Time", value: value, sub: done ? "Done around " + done.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) + (tomorrow ? " tomorrow." : ".") : "", act: "time" };
@@ -223,7 +225,7 @@
     // The time the plan counts for each change the AI writes (0 without AI), and what to hear before
     // the start besides the plan: too few held-back cases for a firm answer. Neither stops the start.
     var ai = p.ai_change_s > 0 ? html`<p class="type-small ink-2">The plan counts about ${Math.round(p.ai_change_s)} s for each change the AI writes.</p>` : "";
-    var notes = (p.notes || []).map(function (note) { return EK.notice("info", note); });
+    var notes = (p.time_note ? [p.time_note] : []).concat(p.notes || []).map(function (note) { return EK.notice("info", note); });
     return html`${bar}${wholeWindow()}${fixes.length ? html`<div class="actions">${fixes}</div>${details}` : ""}
       ${ai}${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}${notes}`;
   }
