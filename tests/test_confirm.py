@@ -1193,8 +1193,9 @@ def test_a_real_gain_beside_starting_point_crashes_still_reads_use():
     assert result["failure_counted_as_pct"]["win"] > 3.0, "a win as large as its own largest gain"
 
 
-def test_a_candidate_failure_beside_a_starting_point_failure_is_floored_only_as_a_loss():
-    """R1: the floor is the loss's; the win stays the own largest gain."""
+def test_a_candidate_failure_beside_a_starting_point_failure_is_floored_alike_on_either_side():
+    """Round 4: once a candidate-only failure is floored at 1 %, a starting-point-only failure is
+    a win of the same size, so failures that strike both programs alike cancel out."""
     from evolvekit.confirm import BASELINE, Comparison, _analyse
 
     comparison = Comparison(label="x", objective="cost", direction="minimize", stage="full", seeds=[0, 1],
@@ -1210,9 +1211,10 @@ def test_a_candidate_failure_beside_a_starting_point_failure_is_floored_only_as_
     result = comparison.per_candidate["c"]
     assert result["failure_counted_as_log"] == pytest.approx(math.log(1.01))
     assert result["failure_counted_as_pct"]["loss"] == pytest.approx(1.0)
-    assert result["failure_counted_as_pct"]["win"] == pytest.approx(0.0)
+    assert result["failure_counted_as_pct"]["win"] == pytest.approx(100 * (1 - 1 / 1.01))
     a, b = result["per_instance"]
-    assert a["log_gain"] == pytest.approx(0.0) and b["log_gain"] == pytest.approx(-math.log(1.01) / 2)
+    assert a["log_gain"] == pytest.approx(math.log(1.01) / 2) and b["log_gain"] == pytest.approx(-math.log(1.01) / 2)
+    assert decision_of(result) == "keep"
 
 
 def _levels_use():
@@ -1303,3 +1305,84 @@ def test_a_comparison_written_before_a1_keeps_its_use_beside_failures():
     assert decision_of(legacy) == "use"
     a1 = {"summary": _posterior_summary(0.99), "candidate_failed_pairs": 2, "baseline_failed_pairs": 0}
     assert decision_of(a1) == "keep"
+
+
+def _flaky_on_both_sides(rng: random.Random, *, failure_rate: float, cases: int, runs: int, run_sd: float) -> str:
+    """Statistician round 4: the same program on both sides, each run failing independently at
+    `failure_rate` (timeouts, a flaky machine) and finished runs varying by `run_sd` on the log
+    scale (0: deterministic). Returns the answer of one comparison."""
+    comparison = Comparison(label="x", objective="cost", direction="minimize", stage="full", seeds=list(range(runs)),
+                            instances=[f"c{i}" for i in range(cases)], baseline_id="seed", candidates=["c"])
+    for i in range(cases):
+        for s in range(runs):
+            for who in (BASELINE, "c"):
+                ok = rng.random() >= failure_rate
+                value = (100.0 + i) * math.exp(rng.gauss(0.0, run_sd)) if run_sd else 100.0 + i
+                comparison.runs.append({"configuration": who, "instance": f"c{i}", "seed": s, "ok": ok,
+                                        "kpis": {"cost": value} if ok else {}})
+    _analyse(comparison)
+    return decision_of(comparison.per_candidate["c"])
+
+
+FLAKY_SETTINGS = {  # name: (failure rate, cases, runs, run sd on the log scale)
+    "deterministic, 10 cases x 3 runs, 10 % of runs fail": (0.10, 10, 3, 0.0),
+    "deterministic, 10 cases x 1 run, 20 % of runs fail": (0.20, 10, 1, 0.0),
+    "run noise 0.2 %, 10 cases x 3 runs, 10 % of runs fail": (0.10, 10, 3, 0.002),
+}
+
+
+def _flaky_rates(setting: str, studies: int, seed: int = 4) -> dict[str, tuple[float, float]]:
+    """The share of `studies` seeded comparisons of `setting` that say use and worse, each with its SE."""
+    failure_rate, cases, runs, run_sd = FLAKY_SETTINGS[setting]
+    rng = random.Random(seed)
+    answers = [_flaky_on_both_sides(rng, failure_rate=failure_rate, cases=cases, runs=runs, run_sd=run_sd)
+               for _ in range(studies)]
+    rates = {}
+    for answer in ("use", "worse"):
+        rate = answers.count(answer) / studies
+        rates[answer] = (rate, math.sqrt(rate * (1 - rate) / studies))
+    return rates
+
+
+def test_a_do_nothing_change_beside_failures_on_both_sides_reads_keep():
+    """Round 4: 10 cases x 1 run, every finished pair equal; the candidate fails cases 0-2 and the
+    starting point cases 3-5. Its three losses and three wins are sized alike, so the chance is
+    0.5, not "probably worse" (it was 0.04)."""
+    comparison = Comparison(label="x", objective="cost", direction="minimize", stage="full", seeds=[0],
+                            instances=[f"i{k}" for k in range(10)], baseline_id="seed", candidates=["c"])
+    for k in range(10):
+        for who, ok in ((BASELINE, k not in (3, 4, 5)), ("c", k not in (0, 1, 2))):
+            comparison.runs.append({"configuration": who, "instance": f"i{k}", "seed": 0, "ok": ok,
+                                    "kpis": {"cost": 100.0} if ok else {}})
+    _analyse(comparison)
+    result = comparison.per_candidate["c"]
+    assert decision_of(result) == "keep"
+    assert result["summary"]["chance"] == pytest.approx(0.5)
+    assert result["failure_counted_as_pct"]["win"] == pytest.approx(100 * (1 - 1 / 1.01))
+
+
+@pytest.mark.parametrize("setting", list(FLAKY_SETTINGS))
+def test_failures_that_strike_both_sides_alike_say_use_or_worse_in_under_one_in_ten(setting, capsys):
+    """Round 4, the fast guard: the same program on both sides, failing at the same rate, says
+    neither use nor worse in 10 % or more of 1000 seeded comparisons. Before the fix a do-nothing
+    change read worse in 39 % of them (10 cases x 3 runs, deterministic, 10 % failing)."""
+    rates = _flaky_rates(setting, 1000)
+    with capsys.disabled():
+        print(f"\n{setting} (1000 comparisons): " + ", ".join(f"false {a} {r:.3f}" for a, (r, _) in rates.items()))
+    for answer, (rate, _) in rates.items():
+        assert rate < 0.10, f"{rate:.3f} of 1000 null comparisons said {answer}"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("setting", list(FLAKY_SETTINGS))
+def test_failures_that_strike_both_sides_alike_say_use_or_worse_in_under_one_in_ten_two_standard_errors_clear(
+        setting, capsys):
+    """The same on 6000 seeded comparisons per setting, so that 10 % is more than two standard
+    errors above each rate."""
+    studies = 6000
+    rates = _flaky_rates(setting, studies, seed=5)
+    with capsys.disabled():
+        print(f"\n{setting} ({studies} comparisons): "
+              + ", ".join(f"false {a} {r:.4f} +- {se:.4f}" for a, (r, se) in rates.items()))
+    for answer, (rate, se) in rates.items():
+        assert rate + 2 * se < 0.10, f"{rate:.4f} of {studies} null comparisons said {answer} (2 SE = {2 * se:.4f})"

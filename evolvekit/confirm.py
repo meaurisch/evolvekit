@@ -835,12 +835,15 @@ def _analyse(comparison: Comparison) -> None:
     when the baseline did -- so a configuration that fails often cannot be
     judged on its lucky runs, and a failure never weighs less than a real
     result. When the candidate's finished pairs barely differ from the
-    baseline (its own largest is below `log(1.01)`), a pair only the candidate
-    failed is sized by the largest gain of any candidate's finished pairs in
-    this comparison, and by at least `log(1.01)` (1 %): a crash is never a
-    loss of 0 %. A pair only the baseline failed keeps the candidate's own
-    largest, so a change that does nothing gains nothing from the baseline's
-    crashes. A pair in
+    baseline (its own largest is below `log(1.01)`) and it failed a pair the
+    baseline finished, a one-sided pair is sized by the largest gain of any
+    candidate's finished pairs in this comparison, and by at least `log(1.01)`
+    (1 %): a crash is never a loss of 0 %. A pair only the baseline failed is
+    then a win of the same size, so failures that strike both programs alike
+    (timeouts, a flaky machine) cancel out. When the candidate failed no pair
+    the baseline finished nothing is floored: a pair only the baseline failed
+    keeps the candidate's own largest, so a change that does nothing gains
+    nothing from the baseline's crashes alone. A pair in
     which both failed, or with a value of 0 or below on either side (a log
     ratio of it is no number), says nothing about either and is left out.
     Every kind is counted, and the summary over finished pairs alone is kept
@@ -867,9 +870,10 @@ def _analyse(comparison: Comparison) -> None:
         if (largest is not None and largest < _SMALLEST_FAILURE_LOG
                 and any(k in base and k not in mine for k in planned_keys)):
             # Its finished pairs barely differ from the baseline, and a pair the baseline finished and it did
-            # not: its crash still counts as a real loss, at least 1 % (decision 14a). The floor is the
-            # loss's only: a crash of the baseline is a win as large as the candidate's own (R1).
-            largest = max(largest, anywhere, _SMALLEST_FAILURE_LOG)
+            # not: its crash still counts as a real loss, at least 1 % (decision 14a). A crash of the baseline
+            # is then a win of the same size, so failures that strike both alike cancel out (round 4). With no
+            # crash of its own nothing is floored, and the baseline's crashes win only its own largest (R1).
+            largest = win = max(largest, anywhere, _SMALLEST_FAILURE_LOG)
         per_instance, finished_only = [], []
         for instance in comparison.instances:
             counts = dict.fromkeys(_PAIR_COUNTS, 0)
@@ -945,9 +949,11 @@ def _analyse(comparison: Comparison) -> None:
 def _failure_sizes(largest: float | None, win: float | None, direction: str) -> dict[str, float] | None:
     """The imputed pairs in percent, as the comparison used them: a pair only
     the candidate failed counts as `-largest`, a loss of `-pct_from_log(-largest)`;
-    one only the baseline failed as `+win`, a win of `pct_from_log(win)` (`win`
-    is the candidate's own largest gain, `largest` that floored at 1 %). The two
-    differ (twice the cost is 100 % more, half of it 50 % less)."""
+    one only the baseline failed as `+win`, a win of `pct_from_log(win)`. Both
+    are the candidate's own largest gain, or, when it failed a pair beside
+    finished pairs that barely differ, that floored at 1 % (`win == largest`);
+    `win` stays the own largest only when nothing was floored. In percent the
+    two differ (twice the cost is 100 % more, half of it 50 % less)."""
     if largest is None or win is None:
         return None
     return {"loss": -pct_from_log(-largest, direction), "win": pct_from_log(win, direction)}
