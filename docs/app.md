@@ -361,7 +361,14 @@ sentence under it are the verdict's own `line` and `advice`, word for word,
 as `evolvekit study verdict` prints them: the page never composes its own.
 While the final check runs there is no verdict yet, so the strip says *No
 answer yet*. The app decides by one fixed rule, stated under the answer:
-*Use when the chance of a gain is at least 19 in 20.* The chance shown is
+*Use when the chance of a gain is at least 19 in 20.* It says *worse* when
+the chance of a gain is under 1 in 20 (0.05 or less: as strict as use), and
+never *use* for a change that failed more runs than today's settings did: that
+is keep, and its line says so first (*Not proven on 3 held-back cases: it
+failed 4 runs the starting point finished; …*). A keep's chance just above 1
+in 20 reads *over 1 in 20*, never like worse's. With no true gain, the worst
+case (pure run noise) reads *use* in about 8.9 % of studies and *worse* in
+about 5 %. The chance shown is
 the chance the rule reads, so a *use* never shows a loss as its worst case.
 Every estimate shows its likely range (95 %) as a band through *today*, with
 both ends marked, the *low end* and the *high end*. A study whose final check

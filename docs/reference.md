@@ -1246,7 +1246,14 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   true mean gain is Student's t with n − 1 degrees of freedom around the mean
   of the instances' gains, with scale s/√n. The `chance` is P(gain > 0). The
   rule: **use when the chance is at least 0.95** ("19 in 20"), **worse** when it
-  is 0.10 or less, **keep** between. `worst` is the posterior's 5 % quantile,
+  is 0.05 or less ("under 1 in 20", as strict as use), **keep** between. A
+  candidate that failed more runs than the baseline failed (pairs only the
+  candidate failed outnumber pairs only the baseline failed) is never *use*:
+  it is keep, and its sentence says *it failed N runs the starting point
+  finished*. A crash costs at most a lost pair the size of the best finished
+  gain, so without this a program that crashes on a third of its runs could
+  read *use* at a chance of 0.99996. The chance is printed to two places and
+  never on the far side of a threshold: a keep never prints 0.95 or 0.05. `worst` is the posterior's 5 % quantile,
   so a *use* never shows a loss as its worst case; `ci95` is its 95 % interval
   and `mean` the mean of the instances' gains, all in percent of the baseline.
   The sentence (`verdict`) is built from the same numbers, so it and the
@@ -1274,7 +1281,12 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   was measured in a seeded simulation (6000 studies per setting, 4 held-back
   cases of 3 runs): 8.5 % when runs are noisier than cases, 5.0 % when cases
   are noisier than runs, 4.6 % with no repeated runs, 7.6 % when time stops the
-  extension at 4 runs. A 3 % true gain on 4 held-back cases reads *use* in about
+  extension at 4 runs. The worst case is pure run noise (every case's true gain
+  exactly 0, only the runs vary; the rule is scale-free): **about 8.9 %** read
+  *use* (20 000 studies), the bound to quote. The same null read *worse* in
+  about 5 % of studies (4.9 % on 8000, 5.3 % on 4000: a worse read once is
+  rechecked, a use is not); at the old 0.10 it was about 11 % with the recheck
+  and 17.8 % without. A 3 % true gain on 4 held-back cases reads *use* in about
   96 % of studies. A campaign's recheck and a continued study ask a new
   question (later data, another candidate) and are outside that rate. The app
   offers a second read (*Check with more runs*, twice the runs per case) only after a single read,
@@ -1308,8 +1320,12 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   directories share a name (`ID@a/run`, `ID@b/run`).
 - **A failure is a result.** When only one side of an (instance, seed) pair
   failed or timed out, that side lost the pair: it counts as a log ratio as
-  large as the largest one measured anywhere in the comparison — a loss when
-  the candidate failed, a win when the baseline did — so a configuration that
+  large as the largest one measured on the candidate's own finished pairs —
+  at least 1 % when those barely differ from the baseline (then the largest of
+  any candidate in the comparison, or 1 %), so a crash is never a loss of 0 %
+  — a loss when the candidate failed, a win when the baseline did, and a
+  candidate that failed more runs than the baseline is never *use* (see the
+  rule above) — so a configuration that
   crashes or hangs often cannot be judged on its lucky runs, and a failure
   never weighs less than a real result. It is said as the loss or win it
   counted as in percent (`failure_counted_as_pct`, `{loss, win}`: twice the
@@ -2292,7 +2308,7 @@ check is read once and, while its answer is open, extended and read again before
 Holm runs, so a chance of a gain after the second read is no longer a single
 read's: in a seeded simulation of the real procedure, 3 kinds of case with no
 true gain and runs noisier than cases (the worst case) said use for some kind
-of case in 8.7 % of studies with 2 held-back cases each and 8.4 % with 4
+of case in 8.8 % of studies with 2 held-back cases each and 8.5 % with 4
 (40 000 studies each; about 25 % without Holm) — under 10 %, not Holm's 5 %.
 A kind that fails Holm becomes keep, with *Not proven on N held-back cases with
 k kinds of case compared*, and its `comparison.md` says *Judged with the k kinds

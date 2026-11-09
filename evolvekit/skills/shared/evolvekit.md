@@ -115,8 +115,8 @@ The `decision` values:
 | Value | Means |
 |---|---|
 | `use` | the new settings (or the change to the code) pass the rule: use them |
-| `keep` | the final check did not show a gain: keep today's settings (or code); with no figures and a `line` that starts "No difference in any run" when every run gave exactly today's result, so the study may not exercise the change |
-| `worse` | the best combination is worse than the starting point |
+| `keep` | the final check did not show a gain: keep today's settings (or code); also when the change failed more runs than today's did (its `line` says "it failed N runs the starting point finished"); with no figures and a `line` that starts "No difference in any run" when every run gave exactly today's result, so the study may not exercise the change |
+| `worse` | the best combination is worse than the starting point: a chance of a gain under 1 in 20 (0.05 or less) |
 | `none` | nothing beat the starting point, so it stayed the best |
 | `single` | only one held-back case, too few to decide |
 | `pending` | no final check yet |

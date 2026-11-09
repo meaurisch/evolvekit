@@ -640,7 +640,7 @@ def _family_wise_null_use(cases: int, studies: int) -> tuple[float, float, float
 def test_three_null_kinds_of_case_family_wise_false_use_fast_guard_after_each_groups_two_reads(
         cases, capsys):
     """After a group's second read, 1 - chance is no longer a single read's p-value, so Holm's 5 %
-    is not kept: some kind of case says use in about 8.7 % (3 kinds x 2 cases) and 8.4 % (3 x 4)
+    is not kept: some kind of case says use in about 8.8 % (3 kinds x 2 cases) and 8.5 % (3 x 4)
     of null studies (measured on 40000 each, +- 0.14 %). The fast guard is looser than the claim, on
     purpose: 2000 seeded studies have a standard error of about 0.65 %, and this seed reads 9.55 % for
     2 cases, so it asserts under 11 % -- it catches a regression of two points or more. The slow test
