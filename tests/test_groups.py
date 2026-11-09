@@ -519,3 +519,14 @@ def test_a_tie_for_the_most_held_back_cases_goes_to_the_first_and_merged_names_a
     assert list(merged["groups"]) == ["a", "b"] and merged["groups"]["a"]["merged_from"] == ["d", "c"]
     assert merged["groups"]["a"]["test"] == ["a3", "a4", "c3"]
     assert groups.merge_small_groups(_doc({"only": {"training": ["a", "b"], "test": ["c"]}}))["k"] == 1
+
+
+def test_a_merged_tag_still_gets_a_rule_and_so_does_the_all_merged_case():
+    merged = groups.merge_small_groups(_doc({"north": {"training": ["a", "b"], "test": ["c"]},
+                                             "south": {"training": ["d", "e"], "test": ["f", "g"]}}))
+    doc = {**merged, "method": "tags"}
+    assert groups.rule_lines(doc, {"south": "use"}) == ["For cases tagged south or north, use the settings of south."]
+    every = groups.merge_small_groups(_doc({"x": {"training": ["a", "b"], "test": ["c"]},
+                                            "untagged": {"training": ["d", "e"], "test": []}}))
+    assert groups.rule_lines(every, {"x": "keep"}) == [
+        "For cases tagged x or with no tag, use today's settings (x: not shown to beat today's)."]

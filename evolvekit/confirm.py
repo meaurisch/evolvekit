@@ -46,7 +46,7 @@ import math
 import re
 import statistics
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from statistics import fmean
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
@@ -69,7 +69,7 @@ if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
 __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
     "t_cdf", "decide", "decision_of", "verdict_summary", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT",
-    "WORSE_CHANCE", "RULE_WORDS", "LEGACY_RULE_WORDS", "is_posterior", "apply_holm",
+    "WORSE_CHANCE", "RULE_WORDS", "LEGACY_RULE_WORDS", "is_posterior", "apply_holm", "comparison_of",
 ]
 
 BASELINE = "baseline"
@@ -947,6 +947,13 @@ def _counted_as(totals: dict[str, int], largest: float | None, direction: str) -
     if totals["nonpositive_pairs"]:
         notes.append(f"{totals['nonpositive_pairs']} pair(s) had a value of 0 or below and are not in this comparison")
     return "".join(f"; {note}" for note in notes)
+
+
+def comparison_of(data: dict[str, Any]) -> Comparison:
+    """A `Comparison` from its `to_json` (a `comparison.json` read back), so its
+    `comparison.md` can be written again after `apply_holm` changed a result."""
+    names = {f.name for f in fields(Comparison)}
+    return Comparison(**{key: value for key, value in data.items() if key in names})
 
 
 def render_markdown(comparison: Comparison) -> str:

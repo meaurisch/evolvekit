@@ -937,6 +937,7 @@ def _verdict_at(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[s
 PER_GROUP_RULE = (RULE_WORDS + " Per kind of case, each group's settings are used only when its own answer says use; with several "
                   "groups, each needs the stricter chances that comparing several asks for.")
 """The top-level rule of a per-group run (design §6.4), after each group's own."""
+GROUP_USE_WAITS = "Its answer is read once every kind of case is checked."
 PER_GROUP_WORDS = {
     "use": ("Per kind of case: each group checked on two or more held-back cases is probably better.",
             "Use each group's settings: settings_by_group.json has them, rule.md says which cases get which."),
@@ -963,7 +964,8 @@ def _group_held(doc: dict[str, Any]) -> int:
     return int((doc.get("held_back") or {}).get("cases") or 0)
 
 
-def per_group_decision(order: list[str], docs: dict[str, dict[str, Any]], phase: Any = None) -> tuple[str, str, str]:
+def per_group_decision(order: list[str], docs: dict[str, dict[str, Any]], phase: Any = None,
+                       held: Any = ()) -> tuple[str, str, str]:
     """`(decision, line, advice)` of a per-group run from its groups' own
     documents (`docs`, in the run's `order`): a group with no answer yet
     (`pending`, `stopped`) says the run has none; else `use` only when every
@@ -974,7 +976,8 @@ def per_group_decision(order: list[str], docs: dict[str, dict[str, Any]], phase:
     if not order:  # no group began: the run has no answer, whatever groups.json says
         decision = "stopped" if phase in ("stopped", "failed") else "pending"
         return (decision, *PER_GROUP_NONE_BEGUN[decision])
-    waiting = next((name for name in order if docs[name].get("decision") in ("pending", "stopped")), None)
+    waits = [name for name in order if docs[name].get("decision") in ("pending", "stopped")]
+    waiting = next((name for name in waits if name not in held), waits[0] if waits else None)  # `held`: read later
     if waiting is not None:
         decision = "stopped" if phase == "stopped" else str(docs[waiting]["decision"])
         name, said = waiting, decision
@@ -1030,7 +1033,15 @@ def _per_group_verdict(root: Path, run_dir: Path, study: Any, harness: Any, job:
             own["line"] = "Its final check is going." if state.get("phase") == "check" else "Its search is going."
             own["advice"] = ""
         docs[name] = own
-    decision, line, advice = per_group_decision(order, docs, job.get("phase"))
+    held = set()
+    if job.get("phase") != "done" and len(order) > 1:
+        # With several kinds of case every "use" is read together, once all are checked (Holm): until then no
+        # group says better, the verdict is the only claim.
+        for name, d in docs.items():
+            if d.get("decision") == "use":
+                held.add(name)
+                d["decision"], d["line"], d["advice"] = "pending", GROUP_USE_WAITS, ""
+    decision, line, advice = per_group_decision(order, docs, job.get("phase"), held)
     runs_per_case = {(d.get("held_back") or {}).get("runs_per_case") for d in docs.values()} - {None}
     document: dict[str, Any] = {
         "schema": SCHEMA, "study": root.name, "run": run, "phase": job.get("phase"), "decision": decision,

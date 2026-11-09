@@ -60,8 +60,9 @@ GROUPS = "groups.json"
 TAGS = ".tags"
 """The tag of `cases/a.json` is the first line of `cases/a.json.tags`."""
 MIN_TRAINING = 2
-MIN_HELD_BACK = 2
 """Cases to learn from that every group needs."""
+MIN_HELD_BACK = 2
+"""Held-back cases a group needs to be checked on its own; a group with fewer joins another (`merge_small_groups`)."""
 KS = (2, 3)
 """The numbers of groups tried when none is given."""
 RESTARTS = 20
@@ -663,8 +664,13 @@ def rule_lines(doc: dict[str, Any], decisions: dict[str, str]) -> list[str]:
     method = doc.get("method")
     if method == "tags":
         untagged = slug_of("untagged")
-        return [f"For cases {'with no tag' if slug_of(name) == untagged else 'tagged ' + name}, {use(name)}."
-                for name in named]
+        lines = []
+        for name, part in named.items():  # a group that others joined (`merge_small_groups`) answers for their tags too
+            names = [name, *(part.get("merged_from") or [])]
+            tags = [n for n in names if slug_of(n) != untagged]
+            said = ([f"tagged {' or '.join(tags)}"] if tags else []) + (["with no tag"] if len(tags) < len(names) else [])
+            lines.append(f"For cases {' or '.join(said)}, {use(name)}.")
+        return lines
     if method == "one" or len(named) == 1:
         return [f"For every case, {use(name)}." for name in named]
     labels = {case: name for name, part in named.items() for case in part.get("training") or []}

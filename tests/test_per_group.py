@@ -625,3 +625,86 @@ def test_three_null_groups_pay_a_family_wise_false_use_rate_of_at_most_6_percent
     print(f"false use over 3 null groups: unpaid {alone / runs:.3f}, with Holm {paid / runs:.3f}")
     assert alone / runs > 0.10, "unpaid, three chances to be wrong are far above 5 %"
     assert paid / runs <= 0.06
+
+
+def _real_check(folder: Path, cases: list[str], *, chance: float) -> None:
+    """A real comparison (`confirm._analyse`, its json and its markdown) for candidate c1, given a chance of `chance`."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse, render_markdown
+
+    comparison = Comparison(label="final", objective="tour_length", direction="minimize", stage="full",
+                            seeds=[1, 2, 3], instances=cases, baseline_id=BASELINE, candidates=["c1"])
+    for number, case in enumerate(cases):
+        for seed in (1, 2, 3):
+            value = 50.0 + number * 7 + seed / 10
+            comparison.runs.append({"configuration": BASELINE, "instance": case, "seed": seed, "ok": True,
+                                    "kpis": {"tour_length": value}})
+            comparison.runs.append({"configuration": "c1", "instance": case, "seed": seed, "ok": True,
+                                    "kpis": {"tour_length": value * (0.9 + 0.01 * number)}})
+    _analyse(comparison)
+    comparison.per_candidate["c1"]["summary"]["chance"] = chance
+    out = folder / "confirm" / "final"
+    (out / "comparison.json").write_text(json.dumps(comparison.to_json()), encoding="utf-8")
+    (out / "comparison.md").write_text(render_markdown(comparison), encoding="utf-8")
+
+
+def test_a_group_held_by_holm_has_its_markdown_rewritten_too(tmp_path):
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    for name, chance in (("small", 0.96), ("large", 0.97)):
+        part = json.loads((run_dir / groups.GROUPS).read_text(encoding="utf-8"))["groups"][name]
+        _real_check(run_dir / "groups" / name, part["test"], chance=chance)
+    before = (run_dir / "groups" / "small" / "confirm" / "final" / "comparison.md").read_text(encoding="utf-8")
+    assert "Holm" not in before
+    execute.apply_group_holm(run_dir)
+    after = (run_dir / "groups" / "small" / "confirm" / "final" / "comparison.md").read_text(encoding="utf-8")
+    assert "Chosen among 2 kinds of case (Holm): does not pass" in after
+    assert "Not proven among 2 kinds of case (Holm)" in after
+
+
+def test_a_failing_holm_step_fails_the_run_instead_of_finishing_it(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    root = per_group_study(tmp_path, sizes=[20] * 4 + [80] * 4 + [20, 20, 80, 80], held=4, tags={"small": 6, "large": 6})
+    monkeypatch.setattr(execute, "require_valid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execute, "measured", lambda _root: None)
+    monkeypatch.setattr(execute, "plan_for", lambda *args, **kwargs: Plan.fixed())
+
+    def make_folder(study, harness, plan, root_, run_id, **kwargs):
+        folder = root_ / "runs" / run_id / "groups" / kwargs["group"]
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    class FakeDriver:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self):
+            return SimpleNamespace(stop_reason="done", generations=1, best=None, aborted=False)
+
+    monkeypatch.setattr(execute, "write_run", make_folder)
+    monkeypatch.setattr(execute, "load_config", lambda path: None)
+    monkeypatch.setattr("evolvekit.search.driver.Driver", FakeDriver)
+    monkeypatch.setattr(execute, "_final_check", lambda study, plan, config, folder, job, log, **kw: job.finish("done"))
+
+    def broken(_run_dir):
+        raise RuntimeError("holm broke")
+
+    monkeypatch.setattr(execute, "apply_group_holm", broken)
+    with pytest.raises(RuntimeError, match="holm broke"):
+        execute.run_per_group(root, "r1", log=lambda line: None)
+    job = json.loads((root / "runs" / "r1" / "job.json").read_text(encoding="utf-8"))
+    assert job["phase"] == "failed" and "holm broke" in job["error"]
+
+
+def test_while_a_later_group_is_still_checking_no_group_says_better(tmp_path):
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    path = run_dir / "job.json"
+    job = json.loads(path.read_text(encoding="utf-8"))
+    job["phase"] = "search"
+    path.write_text(json.dumps(job), encoding="utf-8")
+    doc = build_verdict(root, "r1")
+    assert doc["decision"] == "pending"
+    for name in ("small", "large"):
+        assert doc["groups"][name]["decision"] == "pending"
+        assert doc["groups"][name]["line"] == "Its answer is read once every kind of case is checked."
+        assert "Probably better" not in doc["groups"][name]["line"]
+    assert "Probably better" not in json.dumps(doc)

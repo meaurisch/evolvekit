@@ -584,9 +584,13 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
         job.finish("failed", error=f"{type(exc).__name__}: {exc}")
         raise
     try:
+        apply_group_holm(run_dir)  # the answers are final only after this: if it fails, the run did not finish
+    except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
+        job.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    try:
         from evolvekit.app.verdict import build_verdict
 
-        apply_group_holm(run_dir)
         kinds.cache_stump(run_dir / kinds.GROUPS)  # the rule's split, once: every verdict reads it from here
         write_group_exports(root, run_dir, build_verdict(root, run_id))
     except Exception as exc:  # noqa: BLE001 - the files are a convenience, the verdict is the result
@@ -603,7 +607,7 @@ def apply_group_holm(run_dir: str | Path) -> None:
     `holm`, and its `job.json` `final.decision` / `final.confirmed` follow
     `decision_of`. A group with no final comparison is not in the family; a
     run with a group not yet done is left as it is."""
-    from evolvekit.confirm import apply_holm
+    from evolvekit.confirm import apply_holm, comparison_of, render_markdown
 
     folders = group_dirs(run_dir)
     jobs = {name: read_job(folder) or {} for name, folder in folders.items()}
@@ -627,6 +631,9 @@ def apply_group_holm(run_dir: str | Path) -> None:
     for name, loaded in comparisons.items():
         folder = folders[name]
         _atomic_write(folder / "confirm" / "final" / "comparison.json", json.dumps(loaded, indent=2) + "\n")
+        markdown = folder / "confirm" / "final" / "comparison.md"
+        if markdown.is_file():  # the engineers' page says what the Holm step did, as the json does
+            _atomic_write(markdown, render_markdown(comparison_of(loaded)))
         decision = decision_of(results[name])
         final = {**jobs[name]["final"], "decision": decision, "confirmed": decision == "use"}
         _atomic_write(folder / JOB, json.dumps({**jobs[name], "final": final}, indent=2) + "\n")
