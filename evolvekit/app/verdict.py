@@ -260,7 +260,10 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "decision": decision, "chance": chance,
             "chance_words": _chance_words(chance, posterior), "worst_pct": worst,
             "rule": RULE_WORDS if posterior or not summary else LEGACY_RULE_WORDS,
-            "posterior": posterior}
+            "posterior": posterior,
+            # The runs it failed that the starting point finished, when more than the other way round
+            # (decision 14a, A1's rule only): the page's caption says its chance does not decide (R6).
+            "failed_more": failed_more(result) if posterior else None}
     use_advice = f"Use {new}: {they} probably better on cases the search never saw."
     if result.get("identical"):
         # Every paired run gave exactly today's result: no range or chance can say anything about a

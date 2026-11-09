@@ -887,6 +887,7 @@ def test_the_app_says_why_a_candidate_that_failed_runs_is_not_use():
                          {"kpi": "cost", "says": "cost", "direction": "lower"}, "settings")
     assert words["decision"] == "keep" and words["state"] == "unclear"
     assert words["line"].startswith("Not proven on 4 held-back cases: it failed 4 runs the starting point finished; ")
+    assert words["failed_more"] == 4, "the page's caption reads it (R6)"
 
 
 def test_a_keep_just_above_one_in_20_never_reads_like_worse():

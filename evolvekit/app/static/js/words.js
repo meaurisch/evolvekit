@@ -59,11 +59,13 @@
   };
 
   /** The caption under a range: the chance and the range's ends, or why there is no range. A comparison
-      written before A1 (`posterior: false`) keeps its own words for the chance. */
+      written before A1 (`posterior: false`) keeps its own words for the chance. A keep that failed more
+      runs than the starting point (`failed_more`, decision 14a) says its chance does not decide. */
   EK.rangeCaption = function (s) {
     var ci = s.ci95;
     if (!ci) return "One case: a number, no range";
     var range = EK.rangeWords(ci[0], ci[1]), legacy = s.posterior === false, rule = legacy ? 0.9 : 0.95;
+    if (s.decision === "keep" && s.failed_more) return "The chance does not decide: it failed " + s.failed_more + " run" + (s.failed_more === 1 ? "" : "s") + " the starting point finished · " + range;
     if (s.decision === "keep" && s.chance != null && s.chance < rule) return (legacy ? "Chance under 9 in 10 · " : "Chance under 19 in 20 · ") + range;
     return s.chance != null ? EK.capital(EK.chanceWords(s.chance, s.posterior)) + " · " + range : range;
   };

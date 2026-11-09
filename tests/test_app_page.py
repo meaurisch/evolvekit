@@ -1132,3 +1132,17 @@ def test_the_pages_chance_words_never_read_like_worse_on_a_keep():
     out = _node("""process.stdout.write(JSON.stringify([EK.chanceWords(0.06), EK.chanceWords(0.05),
         EK.chanceWords(0.04), EK.chanceWords(0.06, false)]));""")
     assert out == ["chance over 1 in 20", "chance about 1 in 20", "chance less than 1 in 20", "chance about 1 in 20"]
+
+
+def test_a_keep_that_failed_more_runs_never_captions_its_chance_as_almost_certain():
+    """R6: a keep demoted for failing more runs than the starting point, with a chance of 0.95 or
+    more, says the chance does not decide because it failed runs, not "Almost certain"."""
+    out = _node("""process.stdout.write(JSON.stringify([
+        EK.rangeCaption({ decision: "keep", chance: 0.99, ci95: [1, 3], posterior: true, failed_more: 4 }),
+        EK.rangeCaption({ decision: "keep", chance: 0.99, ci95: [1, 3], posterior: true, failed_more: 1 }),
+        EK.rangeCaption({ decision: "keep", chance: 0.5, ci95: [-1, 3], posterior: true })]));""")
+    assert out[0].startswith("The chance does not decide: it failed 4 runs the starting point finished · ")
+    assert out[1].startswith("The chance does not decide: it failed 1 run the starting point finished · ")
+    assert "Almost certain" not in out[0] + out[1]
+    assert out[2].startswith("Chance under 19 in 20 · ")
+    assert "failed_more: f.failed_more" in STUDY_PAGE

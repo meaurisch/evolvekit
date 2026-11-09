@@ -253,7 +253,7 @@
       Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Keep · final check on " + EK.plural(f.n || heldCount(), "held-back case"), head: verdictHead(f),
         sub: verdictSub(f), right: "range",
         range: !same && f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null,
-        caption: same ? "" : isBakeoff() && !f.ci95 ? "Each branch’s answer is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95, posterior: f.posterior }), rule: true,
+        caption: same ? "" : isBakeoff() && !f.ci95 ? "Each branch’s answer is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95, posterior: f.posterior, failed_more: f.failed_more }), rule: true,
         acts: [f.recheck ? { text: "Check with more runs", kind: "secondary", act: "recheck" } : null].filter(Boolean) });
     } else if (d === "worse") {
       Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Worse · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
