@@ -477,3 +477,45 @@ def test_cli_groups_json(tmp_path, capsys):
     before = {p.name: p.stat().st_mtime_ns for p in kept}
     assert main(["study", "groups", slug, "--json", "--home", str(home)]) == 0
     assert {p.name: p.stat().st_mtime_ns for p in kept} == before, "a second call solves nothing"
+
+
+def _doc(groups_, features=None):
+    return {"format": 1, "method": "features" if features else "tags", "k": len(groups_), "groups": groups_,
+            "features": features or {}, "notes": []}
+
+
+def test_a_group_with_one_held_back_case_joins_the_nearest_by_its_features():
+    features = {c: {"rows": v} for c, v in {"s1": 20, "s2": 21, "s3": 22, "m1": 40, "m2": 41, "m3": 42, "m4": 43,
+                                             "l1": 90, "l2": 91, "l3": 92, "l4": 93}.items()}
+    doc = _doc({"small": {"training": ["s1", "s2"], "test": ["s3"]},
+                "mid": {"training": ["m1", "m2"], "test": ["m3", "m4"]},
+                "large": {"training": ["l1", "l2"], "test": ["l3", "l4"]}}, features)
+    merged = groups.merge_small_groups(doc)
+    assert list(merged["groups"]) == ["mid", "large"] and merged["k"] == 2
+    assert merged["groups"]["mid"] == {"training": ["m1", "m2", "s1", "s2"], "test": ["m3", "m4", "s3"],
+                                       "merged_from": ["small"]}
+    assert "small has 1 held-back case, so it joins mid, the nearest by its features" in merged["notes"]
+    assert doc["k"] == 3 and "merged_from" not in doc["groups"]["mid"], "the argument is not changed"
+    assert groups.merge_small_groups(merged) == merged
+
+
+def test_without_features_a_small_group_joins_the_one_with_most_held_back_cases():
+    """Review Focus 5: tags only, so no distances."""
+    doc = _doc({"north": {"training": ["a", "b"], "test": ["c"]}, "south": {"training": ["d", "e"], "test": ["f", "g"]},
+                "east": {"training": ["h", "i"], "test": ["j", "k", "l"]}})
+    merged = groups.merge_small_groups(doc)
+    assert list(merged["groups"]) == ["south", "east"] and merged["groups"]["east"]["merged_from"] == ["north"]
+    assert "north has 1 held-back case, so it joins east, the one with the most held-back cases" in merged["notes"]
+    tiny = groups.merge_small_groups(_doc({"x": {"training": ["a", "b"], "test": ["c"]},
+                                           "y": {"training": ["d", "e"], "test": []}}))
+    assert list(tiny["groups"]) == ["x"] and tiny["k"] == 1, "every group too small: one group"
+
+
+def test_a_tie_for_the_most_held_back_cases_goes_to_the_first_and_merged_names_are_kept():
+    doc = _doc({"a": {"training": ["a1", "a2"], "test": ["a3", "a4"]}, "b": {"training": ["b1", "b2"], "test": ["b3", "b4"]},
+                "c": {"training": ["c1", "c2"], "test": ["c3"]}, "d": {"training": ["d1", "d2"], "test": []}})
+    merged = groups.merge_small_groups(doc)
+    # d (fewest) joins a (tie with b, the first wins); then c joins a too (a has the most).
+    assert list(merged["groups"]) == ["a", "b"] and merged["groups"]["a"]["merged_from"] == ["d", "c"]
+    assert merged["groups"]["a"]["test"] == ["a3", "a4", "c3"]
+    assert groups.merge_small_groups(_doc({"only": {"training": ["a", "b"], "test": ["c"]}}))["k"] == 1

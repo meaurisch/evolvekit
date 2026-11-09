@@ -934,8 +934,8 @@ def _verdict_at(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[s
 # a run per kind of case
 # ---------------------------------------------------------------------------
 
-PER_GROUP_RULE = (RULE_WORDS + " Per kind of case, each group's settings are used only when every group checked on "
-                  "two or more held-back cases says use.")
+PER_GROUP_RULE = (RULE_WORDS + " Per kind of case, each group's settings are used only when its own answer says use; with several "
+                  "groups, each needs the stricter chances that comparing several asks for.")
 """The top-level rule of a per-group run (design §6.4), after each group's own."""
 PER_GROUP_WORDS = {
     "use": ("Per kind of case: each group checked on two or more held-back cases is probably better.",

@@ -16,6 +16,10 @@ kind of case (design §6.4).
   restarts; the best silhouette among k = 2 and 3 whose groups each keep two
   cases to learn from (D36). A grouping that leaves any group with fewer is
   no grouping: all cases are one group.
+- **Small groups merge** (`merge_small_groups`): a group with fewer than
+  `MIN_HELD_BACK` held-back cases cannot be checked, so a per-group run joins it
+  to its nearest group first -- by its features, or, with tags only, the group
+  with the most held-back cases -- and records the merge (`merged_from`).
 
 `compute` writes `<study>/groups.json`; `read_groups` reads it back while it
 still describes the study's cases.
@@ -44,10 +48,10 @@ from evolvekit.harness.study import Study, load_study
 from evolvekit.ledger import _atomic_write
 
 __all__ = [
-    "SolveFailed", "GROUPS", "KS", "MIN_TRAINING", "RESTARTS", "TAGS", "TAG_MAX",
+    "SolveFailed", "GROUPS", "KS", "MIN_HELD_BACK", "MIN_TRAINING", "RESTARTS", "TAGS", "TAG_MAX",
     "case_tables", "compute", "features_of", "kmeans", "read_groups", "read_tag", "rule_lines", "rule_stump", "silhouette",
     "cache_stump", "stump_of",
-    "slug_of",
+    "merge_small_groups", "slug_of",
     "standardise", "write_tag",
 ]
 
@@ -56,6 +60,7 @@ GROUPS = "groups.json"
 TAGS = ".tags"
 """The tag of `cases/a.json` is the first line of `cases/a.json.tags`."""
 MIN_TRAINING = 2
+MIN_HELD_BACK = 2
 """Cases to learn from that every group needs."""
 KS = (2, 3)
 """The numbers of groups tried when none is given."""
@@ -347,6 +352,65 @@ def _stamps(root: Path, cases: list[str]) -> dict[str, list[int] | None]:
             out[case] = [stat.st_size, stat.st_mtime_ns]
         except OSError:
             out[case] = None
+    return out
+
+
+def _centroids(doc: dict[str, Any]) -> dict[str, list[float]] | None:
+    """Each group's centroid in standardised features over every case of
+    `doc["features"]`; `None` without features (tags only), or when no feature
+    tells the cases apart. A group none of whose cases has features has none."""
+    features = doc.get("features") or {}
+    cases = [c for c, row in features.items() if isinstance(row, dict) and row]
+    if not cases:
+        return None
+    names = list(features[cases[0]])
+    cases = [c for c in cases if all(n in features[c] for n in names)]
+    points = standardise([[features[c][n] for n in names] for c in cases])
+    if not points or not points[0]:
+        return None
+    where = dict(zip(cases, points))
+    out: dict[str, list[float]] = {}
+    for name, part in doc["groups"].items():
+        own = [where[c] for c in list(part.get("training") or []) + list(part.get("test") or []) if c in where]
+        if own:
+            out[name] = [sum(column) / len(own) for column in zip(*own)]
+    return out
+
+
+def merge_small_groups(doc: dict[str, Any]) -> dict[str, Any]:
+    """A new doc in which no group has fewer than `MIN_HELD_BACK` held-back
+    cases (the argument is not changed). While more than one group exists and
+    one is too small, the one with the fewest held-back cases (ties: the last
+    in order) joins its nearest other group: by the distance between centroids
+    in standardised features, or, without features (tags only), the group
+    with the most held-back cases (ties: the first in order). The target keeps
+    its name and place; its cases are its own followed by the merged group's;
+    `merged_from` lists the names merged into it; `notes` says each merge."""
+    out = json.loads(json.dumps(doc))
+    named = out["groups"]
+    centres = _centroids(out)
+    while len(named) > 1:
+        sizes = {name: len(part.get("test") or []) for name, part in named.items()}
+        small = min(reversed(list(named)), key=lambda name: sizes[name])
+        if sizes[small] >= MIN_HELD_BACK:
+            break
+        others = [name for name in named if name != small]
+        if centres is not None and small in centres and all(name in centres for name in others):
+            target = min(others, key=lambda name: _d2(centres[small], centres[name]))
+            how = "the nearest by its features"
+        else:
+            target = max(others, key=lambda name: (sizes[name], -others.index(name)))
+            how = "the one with the most held-back cases"
+        n = sizes[small]
+        out.setdefault("notes", []).append(
+            f"{small} has {n} held-back case{'s' if n != 1 else ''}, so it joins {target}, {how}")
+        part, into = named.pop(small), named[target]
+        into["training"] = list(into.get("training") or []) + list(part.get("training") or [])
+        into["test"] = list(into.get("test") or []) + list(part.get("test") or [])
+        into["merged_from"] = list(into.get("merged_from") or []) + [small] + list(part.get("merged_from") or [])
+        if centres is not None:
+            centres = _centroids(out)
+    out["k"] = len(named)
     return out
 
 

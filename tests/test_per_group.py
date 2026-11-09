@@ -540,3 +540,88 @@ def test_per_group_end_to_end(tmp_path, capsys):
     assert json.loads((run_dir / "job.json").read_text(encoding="utf-8"))["phase"] == "done"
     assert main(["study", "report", slug, "--markdown", "--home", str(home)]) == 0
     assert "## Per kind of case" in capsys.readouterr().out
+
+
+def test_a_run_merges_a_group_without_two_held_back_cases_before_it_searches(tmp_path, monkeypatch):
+    root = per_group_study(tmp_path, sizes=[20] * 5 + [80] * 5, held=3, tags={"small": 5, "large": 5})
+
+    def stop_here(_root):
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(execute, "require_valid", lambda *args, **kwargs: None)  # no application is installed here
+    monkeypatch.setattr(execute, "measured", stop_here)  # called right after the run's groups.json is written
+    with pytest.raises(RuntimeError, match="stop here"):
+        execute.run_per_group(root, "r1", log=lambda line: None)
+    written = json.loads((root / "runs" / "r1" / groups.GROUPS).read_text(encoding="utf-8"))
+    assert list(written["groups"]) == ["large"] and written["groups"]["large"]["merged_from"] == ["small"]
+    own = json.loads((root / groups.GROUPS).read_text(encoding="utf-8"))
+    assert set(own["groups"]) == {"small", "large"}, "the study's own groups.json is left as computed"
+
+
+def _posterior(folder: Path, *, chance: float) -> None:
+    """The group's final comparison as A1 writes it: a posterior summary on its two held-back cases."""
+    path = folder / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    comparison["per_candidate"]["c1"]["summary"].update(
+        {"chance": chance, "n": 2, "decision": "use", "posterior": {"df": 1}})
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+
+
+def test_each_groups_use_pays_for_the_number_of_groups(tmp_path):
+    from evolvekit.app.verdict import PER_GROUP_RULE
+
+    # Two groups, one leg (the chance of a gain), Holm at 0.05 on p = 1 - chance. 0.96 and 0.97 are
+    # p = 0.04 and 0.03; the smaller must be <= 0.05 / 2 = 0.025, so neither passes.
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    _posterior(run_dir / "groups" / "small", chance=0.96)
+    _posterior(run_dir / "groups" / "large", chance=0.97)
+    execute.apply_group_holm(run_dir)
+    doc = build_verdict(root, "r1")
+    assert doc["groups"]["small"]["decision"] == "keep" and doc["groups"]["large"]["decision"] == "keep"
+    assert doc["groups"]["small"]["line"].startswith("Not proven on 2 held-back cases with 2 kinds of case compared: ")
+    assert "1 kinds" not in json.dumps(doc)
+    assert doc["decision"] == "keep" and doc["rule"] == PER_GROUP_RULE
+    for name in ("small", "large"):
+        job = json.loads((run_dir / "groups" / name / "job.json").read_text(encoding="utf-8"))
+        assert job["final"]["decision"] == "keep" and job["final"]["confirmed"] is False
+    # p = 0.01 <= 0.025 and then 0.04 <= 0.05: both pass.
+    root, run_dir = per_group_run(tmp_path / "b", {"small": ("use", 2), "large": ("use", 2)})
+    _posterior(run_dir / "groups" / "small", chance=0.99)
+    _posterior(run_dir / "groups" / "large", chance=0.96)
+    execute.apply_group_holm(run_dir)
+    assert build_verdict(root, "r1")["decision"] == "use"
+
+
+def test_one_group_pays_for_nothing(tmp_path):
+    root, run_dir = per_group_run(tmp_path, {"only": ("use", 2)})
+    _posterior(run_dir / "groups" / "only", chance=0.951)
+    execute.apply_group_holm(run_dir)
+    path = run_dir / "groups" / "only" / "confirm" / "final" / "comparison.json"
+    assert "holm" not in json.loads(path.read_text(encoding="utf-8"))["per_candidate"]["c1"]
+    assert build_verdict(root, "r1")["decision"] == "use"
+
+
+def test_three_null_groups_pay_a_family_wise_false_use_rate_of_at_most_6_percent():
+    """Three groups of two held-back cases, no real gain anywhere: each chance is the reference
+    posterior's, T_1(dbar / (s / sqrt 2)). Alone each group says use 5 % of the time (some group
+    about 14 %); with Holm over the three, any group saying use stays near 4.9 % (asserted <= 6 %)."""
+    import random
+    import statistics
+
+    from evolvekit.confirm import apply_holm, decision_of
+    from evolvekit.stats import t_cdf
+
+    rng = random.Random(20261109)
+    runs, alone, paid = 4000, 0, 0
+    for _ in range(runs):
+        results = {}
+        for g in range(3):
+            d = [rng.gauss(0, 1) for _ in range(2)]
+            t = statistics.fmean(d) / (statistics.stdev(d) / 2 ** 0.5)
+            results[g] = {"summary": {"n": 2, "chance": t_cdf(t, 1), "worst": 0.0, "posterior": {"df": 1}}}
+        alone += any(decision_of(r) == "use" for r in results.values())
+        apply_holm(results, what="kinds of case")
+        paid += any(decision_of(r) == "use" for r in results.values())
+    print(f"false use over 3 null groups: unpaid {alone / runs:.3f}, with Holm {paid / runs:.3f}")
+    assert alone / runs > 0.10, "unpaid, three chances to be wrong are far above 5 %"
+    assert paid / runs <= 0.06

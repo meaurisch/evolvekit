@@ -516,6 +516,7 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
             log(f"per kind of case: groups.json is missing or out of date, so the cases are grouped now: "
                 f"solving {len(cases)} case(s) for their features")
         doc = kinds.compute(root, features=not tagged)
+    doc = kinds.merge_small_groups(doc)  # a group needs two held-back cases to be checked; the study's own file stays as computed
     order = list(doc["groups"])
     log(f"per kind of case: {len(order)} group{'s' if len(order) != 1 else ''} by {doc.get('method')}: "
         + ", ".join(order))
@@ -585,12 +586,50 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
     try:
         from evolvekit.app.verdict import build_verdict
 
+        apply_group_holm(run_dir)
         kinds.cache_stump(run_dir / kinds.GROUPS)  # the rule's split, once: every verdict reads it from here
         write_group_exports(root, run_dir, build_verdict(root, run_id))
     except Exception as exc:  # noqa: BLE001 - the files are a convenience, the verdict is the result
         log(f"per kind of case: settings_by_group.json and rule.md could not be written: {exc}")
     job.finish("done")
     return job.state
+
+
+def apply_group_holm(run_dir: str | Path) -> None:
+    """The groups of a per-group run are a choice among several kinds of case:
+    once every group is `done`, each group's final comparison pays for the
+    others (`confirm.apply_holm`, "kinds of case"; one group changes nothing).
+    Each group's `confirm/final/comparison.json` is written back with its
+    `holm`, and its `job.json` `final.decision` / `final.confirmed` follow
+    `decision_of`. A group with no final comparison is not in the family; a
+    run with a group not yet done is left as it is."""
+    from evolvekit.confirm import apply_holm
+
+    folders = group_dirs(run_dir)
+    jobs = {name: read_job(folder) or {} for name, folder in folders.items()}
+    if not folders or any(job.get("phase") != "done" for job in jobs.values()):
+        return
+    comparisons: dict[str, dict[str, Any]] = {}
+    results: dict[str, dict[str, Any]] = {}
+    for name, folder in folders.items():
+        final = jobs[name].get("final") or {}
+        cid = final.get("candidate")
+        if not cid or not final.get("comparison"):
+            continue
+        try:
+            loaded = json.loads((folder / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        result = ((loaded.get("per_candidate") or {}).get(cid)) if isinstance(loaded, dict) else None
+        if isinstance(result, dict):
+            comparisons[name], results[name] = loaded, result
+    apply_holm(results, what="kinds of case")
+    for name, loaded in comparisons.items():
+        folder = folders[name]
+        _atomic_write(folder / "confirm" / "final" / "comparison.json", json.dumps(loaded, indent=2) + "\n")
+        decision = decision_of(results[name])
+        final = {**jobs[name]["final"], "decision": decision, "confirmed": decision == "use"}
+        _atomic_write(folder / JOB, json.dumps({**jobs[name], "final": final}, indent=2) + "\n")
 
 
 SETTINGS_BY_GROUP = "settings_by_group.json"
