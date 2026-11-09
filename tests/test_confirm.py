@@ -316,6 +316,20 @@ def test_top_n_and_instances_the_search_never_saw(tmp_path):
     assert comparison.per_candidate["g002-c0005"]["summary"]["mean"] == pytest.approx(10.0, abs=1.0)
 
 
+def test_top_n_skips_a_candidate_the_hold_out_keeps_out():
+    """A row written before the hold-out veto, `competes: true`, whose hold-out is
+    below the seed's: the resumed search keeps it out, and so does `top:N`."""
+    from evolvekit.confirm import _select
+
+    def row(cid: str, operator: str, score: float, private: float) -> dict:
+        return {"id": cid, "operator": operator, "score": score, "private_score": private,
+                "rejected": False, "competes": True}
+
+    rows = [row("g000-c0001", "human-seed", -100.0, -100.0), row("g001-c0002", "param_local", -90.0, -120.0),
+            row("g001-c0003", "param_local", -95.0, -99.0)]
+    assert [r["id"] for r in _select(rows, "top:1")] == ["g001-c0003"]
+
+
 def test_an_interrupted_confirmation_does_not_pay_twice(tmp_path):
     config_path = _write_config(tmp_path)
     run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})

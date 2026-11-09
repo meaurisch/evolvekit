@@ -894,14 +894,17 @@ The hold-out acts in two ways. By default only the first is on.
 **The veto.** `evaluate.holdout_veto` (default `true`): a candidate whose
 private score is below the **seed's** private score does not compete. It is not
 ranked, archived or bred from, and its row carries `competes: false` and
-`veto: "holdout below the seed's …"` with the seed's value. The leaderboard's
-`!` flag marks the same condition, so what is flagged and what is vetoed are
-one rule. The comparison is with the seed's hold-out score as it is, `private <
+`veto: "holdout below the seed's …"` with the seed's value. The leaderboard
+lists these candidates under its table, each with the `!` flag — the flag and
+the veto are one condition — and counts them as "kept out by the hold-out",
+apart from the candidates that did not finish; `status` and the dashboard label
+them the same way. A row written before the veto existed is judged by it when
+it is read back, by the resumed run and by every view alike. The comparison is with the seed's hold-out score as it is, `private <
 seed's private`, with no allowance for noise: on a hold-out whose score varies
 from run to run, a candidate exactly as good as the seed is vetoed about half
 the time. When the seed's own hold-out run failed there is nothing to compare
 with, and nobody is vetoed. A resumed run reads the seed's private score back
-from `runs.jsonl` (the last seed row that has one).
+from `runs.jsonl`: the last seed row's, and none when that row has none.
 
 **The penalty.** `evaluate.holdout_penalty` (default `0.0`) defines the score
 everything ranks by:

@@ -494,7 +494,7 @@ function renderHeader(doc) {
   document.title = (STATE_WORD[health.state] || "run") + " · " + (pct((doc.progress || {}).improvement?.pct) || "") + " · evolvekit";
 }
 function renderNav(doc) {
-  const failures = (doc.failures || []).length, unfinished = (doc.candidates || []).filter((c) => !c.rejected && !c.competes).length;
+  const failures = (doc.failures || []).length, unfinished = (doc.candidates || []).filter((c) => !c.rejected && !c.competes && !c.veto).length;
   const link = (id, label, count, bad) => h("a", { href: "#" + id }, label, count != null ? h("span", { class: "count" + (bad && count ? " bad" : "") }, count) : null);
   $("nav").replaceChildren(link("health", "Health"), link("progress", "Progress"), link("best", "Best configuration"), link("parameters", "Parameters"),
     link("instances", "Per instance"), link("failures", "What went wrong", failures, true), link("candidates", "Candidates", (doc.candidates || []).length), link("archive", "Archive"), link("log", "Console"));
@@ -597,7 +597,7 @@ function drawProgress(doc, width) {
   const minimize = dir === "minimize";
   const pts = cands.filter((c) => c.competes && isNum(c.objective));
   if (!pts.length) return h("div", { class: "empty" }, "No fully evaluated candidate yet. The first point appears when the seed has been through the final stage.");
-  const out = cands.filter((c) => !c.rejected && !c.competes);           // failed, not promoted, skipped
+  const out = cands.filter((c) => !c.rejected && !c.competes);           // failed, not promoted, skipped, kept out by the hold-out
   const base = pr.baseline?.objective, series = (pr.series || []).filter((p) => isNum(p.best_objective));
   const W = Math.max(300, width), narrow = W < 560, H = Math.round(Math.min(380, Math.max(250, W * 0.42)));
   const m = { l: narrow ? 50 : 62, r: narrow ? 14 : 96, t: 22, b: out.length ? 62 : 38 };
@@ -935,7 +935,7 @@ function renderFailures(doc) {
 function status(c) {
   if (c.is_best) return ["star", "best"]; if (c.is_seed) return ["ok", "baseline"];
   if (c.rejected) return ["dim", c.novelty ? c.novelty.replace("_", "-") : "rejected"];
-  if (!c.competes) return isFailure(c) ? ["bad", "failed"] : c.gated ? ["dim", "broke a gate"] : c.raced_out ? ["dim", "raced out"] : ["dim", "not promoted"];
+  if (!c.competes) return c.veto ? ["dim", "kept out by the hold-out"] : isFailure(c) ? ["bad", "failed"] : c.gated ? ["dim", "broke a gate"] : c.raced_out ? ["dim", "raced out"] : ["dim", "not promoted"];
   return ["ok", "ranked"];
 }
 function renderCandidates(doc) {
@@ -1034,7 +1034,7 @@ async function openCandidate(id) {
   $("drawer-body").replaceChildren(
     h("dl", { class: "kv" }, h("dt", null, "generation"), h("dd", null, d.generation + " · " + d.operator + (d.model && d.model !== "none" ? " · " + d.model : "")),
       h("dt", null, "parent"), h("dd", null, d.parent_id ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); openCandidate(d.parent_id); } }, d.parent_id) : "– (the seed)"),
-      h("dt", null, ob.name || "objective"), h("dd", null, num((d.kpis || {})[ob.name]), d.competes ? "  ·  " + pct(improvement(base, (d.kpis || {})[ob.name], ob.direction)) + " vs baseline" : h("span", { class: "note" }, "  · not ranked: " + (d.reject_reason || (d.last_failure || "").split("\n")[0] || (d.gated ? "broke a gate: " + d.gated : "") || "did not reach the final stage"))),
+      h("dt", null, ob.name || "objective"), h("dd", null, num((d.kpis || {})[ob.name]), d.competes ? "  ·  " + pct(improvement(base, (d.kpis || {})[ob.name], ob.direction)) + " vs baseline" : h("span", { class: "note" }, "  · not ranked: " + (d.reject_reason || (d.last_failure || "").split("\n")[0] || (d.veto ? "kept out by the hold-out: " + d.veto : "") || (d.gated ? "broke a gate: " + d.gated : "") || "did not reach the final stage"))),
       h("dt", null, "stages"), h("dd", null, (d.stages_reached || []).join(" → ") || "none"),
       isNum(d.private_score) ? [h("dt", null, "hold-out"), h("dd", null, `public ${num(d.public_score)} · private ${num(d.private_score)}`)] : null),
     d.parameters?.length ? h("div", null, h("h3", null, "Parameters against the default"), paramTable(d.parameters, "this candidate")) : null,

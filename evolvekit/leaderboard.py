@@ -33,6 +33,9 @@ __all__ = [
     "unfinished_count",
     "competes",
     "seed_private",
+    "replay_veto",
+    "veto_reason",
+    "vetoed_count",
     "render_economics",
     "economics_svg",
 ]
@@ -48,16 +51,61 @@ def fitness_of(row: Mapping[str, Any]) -> float | None:
     return None if value is None else float(value)
 
 
-def competes(row: Mapping[str, Any]) -> bool:
-    """Whether a row's score is comparable with the others: not rejected, and
-    all the way through the final stage. A row from before the `competes` field
-    existed is given the benefit of the doubt, as it always was."""
-    return not row.get("rejected") and bool(row.get("competes", True))
+def competes(row: Mapping[str, Any], reference: float | None = None) -> bool:
+    """Whether a row's score is comparable with the others: not rejected, all
+    the way through the final stage, and not kept out by the hold-out. A row
+    from before the `competes` field existed is given the benefit of the doubt,
+    as it always was. `reference` is the seed's private score
+    (`seed_private(rows)`): with it, a row written before the hold-out veto
+    existed is judged by the veto as well (`replay_veto`)."""
+    if row.get("rejected") or not row.get("competes", True):
+        return False
+    return reference is None or _replayed_veto(row, reference) is None
+
+
+def veto_reason(reference: float) -> str:
+    """The sentence a vetoed row carries: `evaluate.holdout_veto`'s reason."""
+    return f"holdout below the seed's {reference:.6g}"
+
+
+def _replayed_veto(row: Mapping[str, Any], reference: float | None) -> str | None:
+    """The veto a row written before the veto existed would have had.
+
+    A row that carries a `veto` key was judged by a run that knew the rule,
+    `holdout_veto: false` included, and keeps that judgement. Without a
+    reference (no seed hold-out), nobody is vetoed."""
+    if "veto" in row or reference is None:
+        return None
+    if row.get("rejected") or not row.get("competes", True):
+        return None
+    private = row.get("private_score")
+    if private is None or float(private) >= reference:
+        return None
+    return veto_reason(reference)
+
+
+def replay_veto(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`rows` with the hold-out veto applied as a resumed run applies it: a row
+    written before the veto existed whose private score is below the seed's
+    gets `competes: false` and its `veto`. Every view that ranks or counts goes
+    through this, so no view names a candidate the search keeps out."""
+    reference = seed_private(rows)
+    result = []
+    for row in rows:
+        veto = _replayed_veto(row, reference)
+        result.append(row if veto is None else {**row, "competes": False, "veto": veto})
+    return result
+
+
+def vetoed_count(rows: Sequence[dict[str, Any]]) -> int:
+    """Finished the final stage, and kept out by the hold-out."""
+    return sum(1 for row in replay_veto(rows) if row.get("veto") and not row.get("rejected"))
 
 
 def rank(rows: Sequence[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
-    """Best first by ranking score. Only candidates that compete are ranked."""
-    alive = [r for r in rows if competes(r) and fitness_of(r) is not None]
+    """Best first by ranking score. Only candidates that compete are ranked,
+    and a row the hold-out veto keeps out does not (`replay_veto`)."""
+    alive = [r for r in replay_veto(rows) if competes(r) and fitness_of(r) is not None]
     alive.sort(key=lambda r: (-(fitness_of(r) or 0.0), str(r.get("id", ""))))
     return alive[:limit]
 
@@ -97,22 +145,48 @@ def novelty_counts(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def unfinished_count(rows: Sequence[Mapping[str, Any]]) -> int:
-    """Evaluated, not rejected, and still not ranked: the evaluation failed or
-    timed out, the candidate was not promoted to the final stage, the final
-    stage was skipped by the daily cap, or the hold-out run failed."""
+def unfinished_count(rows: Sequence[dict[str, Any]]) -> int:
+    """Evaluated, not rejected, and still not ranked because it did not finish:
+    the evaluation failed or timed out, the candidate was not promoted to the
+    final stage, the final stage was skipped by the daily cap, or the hold-out
+    run failed. A candidate kept out by the hold-out veto finished, and is
+    counted apart (`vetoed_count`)."""
     return sum(
-        1 for row in rows if not row.get("rejected") and not row.get("competes", True)
+        1
+        for row in replay_veto(rows)
+        if not row.get("rejected") and not row.get("competes", True) and not row.get("veto")
     )
 
 
 def seed_private(rows: Sequence[dict[str, Any]]) -> float | None:
     """The seed's private score: what the `!` flag and `evaluate.holdout_veto`
-    compare every hold-out with. `None` when no seed row has one."""
-    for row in reversed(rows):  # the last seed row: an aborted seed is evaluated again
-        if row.get("operator") == "human-seed" and row.get("private_score") is not None:
-            return float(row["private_score"])
+    compare every hold-out with. It is the **last** seed row's (an aborted seed
+    is evaluated again, and the attempt that worked is the reference); `None`
+    when that row has no private score, or there is no seed row."""
+    for row in reversed(rows):
+        if row.get("operator") == "human-seed":
+            private = row.get("private_score")
+            return None if private is None else float(private)
     return None
+
+
+def _kept_out_lines(rows: Sequence[dict[str, Any]]) -> list[str]:
+    """The candidates the hold-out veto keeps out, each with the `!` flag:
+    finished, not ranked, and named, because they are the flag's condition."""
+    kept = [r for r in rows if r.get("veto") and not r.get("rejected")]
+    if not kept:
+        return []
+    lines = [
+        f"{len(kept)} kept out by the hold-out and not ranked: their hold-out score is "
+        "below the starting point's."
+    ]
+    lines.extend(
+        f"- {r.get('id', '?')} {HOLDOUT_FLAG} score {_cell(r.get('score'), 6)}: {r['veto']}"
+        for r in kept[:10]
+    )
+    if len(kept) > 10:
+        lines.append(f"- and {len(kept) - 10} more")
+    return lines
 
 
 def _flagged(row: Mapping[str, Any], reference: float | None) -> bool:
@@ -185,9 +259,11 @@ def render_markdown(
     `usage` is optional: pass `ledger.usage()` to get the economics table as
     well. Without it the board is exactly the Phase B one.
     """
+    rows = replay_veto(rows)
     top = rank(rows, limit)
+    kept_out = _kept_out_lines(rows)
     if not top:
-        return "No scored candidates yet."
+        return "\n".join(["No scored candidates yet.", *kept_out])
     reference = seed_private(rows)
     header = (
         "| # | id | gen | rank | score | cell | operator | model | lineage | gap | USD |\n"
@@ -231,7 +307,8 @@ def render_markdown(
             "promoted, or skipped) and are not ranked: their scores are not "
             "comparable with a full evaluation's."
         )
-    if any_flag:
+    lines.extend(kept_out)
+    if any_flag or kept_out:
         lines.append(
             f"{HOLDOUT_FLAG} private hold-out score is below the seed's: the gain "
             "may not generalise."
@@ -293,6 +370,7 @@ _HTML_TEMPLATE = """<!doctype html>
   <div class="stat"><b>{n_dup}</b><span>duplicates</span></div>
   <div class="stat"><b>{n_behav}</b><span>behavioural twins</span></div>
   <div class="stat"><b>{n_near}</b><span>near-duplicates</span></div>
+  <div class="stat"><b>{n_vetoed}</b><span>kept out by the hold-out</span></div>
   <div class="stat"><b>{best}</b><span>best rank score</span></div>
   <div class="stat"><b>{cells}</b><span>archive cells</span></div>
   <div class="stat"><b>{generations}</b><span>generations</span></div>
@@ -309,11 +387,13 @@ _HTML_TEMPLATE = """<!doctype html>
 </tbody>
 </table>
 </div>
+{kept_out}
 {grid}
 {economics}
-<footer>Rank is the hold-out-aware score (public minus the hold-out penalty);
+<footer>Rank is the public score, less the hold-out penalty when one is set;
 score is the raw public one. <span class="flag">{flag}</span> marks a candidate
-whose private hold-out score is below the seed's. Generated from runs.jsonl and
+whose private hold-out score is below the seed's: the hold-out veto keeps it out
+of the ranking, and it is listed under the table. Generated from runs.jsonl and
 archive.json.</footer>
 <script id="rows" type="application/json">{rows_json}</script>
 """
@@ -508,6 +588,7 @@ def render_html(
     window: int = DEFAULT_WINDOW,
 ) -> str:
     """Self-contained dashboard: no CDN, no fetch, works from file://."""
+    rows = replay_veto(rows)
     top = rank(rows, limit)
     scores = [fitness_of(r) or 0.0 for r in top]
     best = max(scores) if scores else None
@@ -557,6 +638,10 @@ def render_html(
         n_dup=counts["duplicate"],
         n_behav=counts["behavioural"],
         n_near=counts["near"],
+        n_vetoed=vetoed_count(rows),
+        kept_out="".join(
+            f'<p class="kept">{html.escape(line)}</p>' for line in _kept_out_lines(rows)
+        ),
         best="-" if best is None else f"{best:.6g}",
         cells=len((archive or {}).get("cells") or []),
         generations=generations,

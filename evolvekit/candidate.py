@@ -158,11 +158,12 @@ class Candidate:
     competes: bool = True
     """False when the candidate did not finish the final stage -- a failed
     evaluation, a proxy-only candidate, a final stage skipped by the daily cap,
-    a hold-out run that failed, a hold-out below the seed's (`veto`). It keeps its finite `score` for the record, but
-    that score is not comparable with a full-stage one, so the candidate is
-    never ranked, archived or bred from. True by default because a row written
-    before this field existed says nothing either way; `Driver.resume` settles
-    those with `cascade.finished_final_stage`."""
+    a hold-out run that failed -- or finished it with a hold-out below the
+    seed's (`veto`, `evaluate.holdout_veto`). It keeps its finite `score` for
+    the record, but the candidate is never ranked, archived or bred from. True
+    by default because a row written before this field existed says nothing
+    either way; `Driver.resume` settles those with
+    `cascade.finished_final_stage`, and applies the veto to every row."""
     commit: str | None = None
     """For a tree problem (`problem.tree`): the commit the candidate's diff made
     on the base -- the base itself for the empty diff. `None` for a skeleton,

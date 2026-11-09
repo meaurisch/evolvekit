@@ -46,7 +46,7 @@ from typing import Any, Callable, Mapping, Sequence
 from evolvekit.economics import DEFAULT_WINDOW, series
 from evolvekit.evaluate.levels import K as LEVEL_STEPS
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
-from evolvekit.leaderboard import competes, fitness_of, rank
+from evolvekit.leaderboard import competes, fitness_of, rank, replay_veto
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
@@ -97,7 +97,9 @@ def build_status(
         }
         return document
 
-    rows = list(read_jsonl(directory / "runs.jsonl"))
+    # The hold-out veto as a resumed run applies it: no view names a candidate
+    # the search keeps out.
+    rows = replay_veto(list(read_jsonl(directory / "runs.jsonl")))
     usage = list(read_jsonl(directory / "usage.jsonl"))
     events = read_events(directory)
     run = _Run(directory, rows, usage, events, moment)
@@ -1734,6 +1736,8 @@ class _Run:
                     # Not in `reason`: a view reads a reason as "failed", and a
                     # candidate that broke a gate did not fail -- it is not competing.
                     "gated": row.get("gated"),
+                    # Apart too: kept out by the hold-out (`evaluate.holdout_veto`), not failed.
+                    "veto": row.get("veto"),
                     "deepest_stage": stages[-1] if stages else None,
                     "evaluation_s": durations.get(cid),
                     "usd": _number(row.get("usd")),
@@ -1807,7 +1811,7 @@ def candidate_details(
     a time re-read `runs.jsonl` and the event log per candidate, which grew
     quadratically -- about 35 minutes for a run of 2,900 candidates."""
     directory = Path(run_dir)
-    rows = {str(r.get("id")): r for r in read_jsonl(directory / "runs.jsonl")}
+    rows = {str(r.get("id")): r for r in replay_veto(list(read_jsonl(directory / "runs.jsonl")))}
     seed = next((r for r in reversed(list(rows.values())) if r.get("operator") == SEED_OPERATOR), None)
     events = read_events(directory)
     finished: dict[str, list[dict[str, Any]]] = {}
@@ -1863,6 +1867,7 @@ def _candidate_detail(
         "reject_reason": row.get("reject_reason"),
         "last_failure": row.get("last_failure"),
         "gated": row.get("gated"),
+        "veto": row.get("veto"),
         "stages_reached": row.get("stages_reached") or [],
         "stage_scores": row.get("stage_scores") or {},
         "kpis": row.get("kpis") or {},

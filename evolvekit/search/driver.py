@@ -512,10 +512,11 @@ class Driver:
 
         Rebuilt from the two logs rather than accumulated, for the same reason
         the archive is: the logs are the record, and a series that drifts from
-        them would be worse than no series.
+        them would be worse than no series. Read as the replay reads them
+        (`_replayed_rows`), so the stop rules see the order the archive has.
         """
         return series(
-            self.ledger.runs(),
+            self._replayed_rows(self.ledger.runs()),
             self.ledger.usage(),
             window=self.config.stop.economics_window,
             epsilon=self.config.stop.epsilon,
@@ -526,6 +527,13 @@ class Driver:
 
     # -- resume ----------------------------------------------------------
 
+    def _replayed_rows(self, raw: list[dict]) -> list[dict]:
+        """`runs.jsonl` rows judged by today's rules: `competes` settled, the
+        hold-out veto applied against the seed's private score, and the ranking
+        score recomputed with this run's λ."""
+        reference = seed_private(raw)
+        return [self._rerank(self._settle_competes(row, reference)) for row in raw]
+
     def resume(self) -> int:
         """Rebuild the archive from `runs.jsonl`. Returns the last generation.
 
@@ -534,9 +542,8 @@ class Driver:
         back consistent, which is the whole reason the rebuild reads the log.
         """
         raw = self.ledger.runs()
-        reference = seed_private(raw)
-        rows = [self._rerank(self._settle_competes(row, reference)) for row in raw]
-        self.cascade.seed_private = reference
+        rows = self._replayed_rows(raw)
+        self.cascade.seed_private = seed_private(raw)
         if not rows:
             return 0
         self.grid = Archive.from_records(rows, self.config.search.archive, tree=self.repo is not None)

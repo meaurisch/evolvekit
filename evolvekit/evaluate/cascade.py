@@ -38,6 +38,7 @@ from evolvekit.evaluate.stages import (
     run_tree_static_stage,
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
+from evolvekit.leaderboard import veto_reason
 from evolvekit.ledger import _atomic_write
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
@@ -64,7 +65,7 @@ def holdout_veto(config: Config, private_score: float | None, seed_private: floa
     if not config.evaluate.holdout_veto or private_score is None or seed_private is None:
         return None
     if private_score < seed_private:
-        return f"holdout below the seed's {seed_private:.6g}"
+        return veto_reason(seed_private)
     return None
 
 
@@ -227,9 +228,10 @@ class Cascade:
         seed's values (`evaluate/levels.py`). On disk for the same reason."""
         self.seed_private: float | None = None
         """The seed's private score: what `evaluate.holdout_veto` compares every
-        hold-out with. Set when a seed's hold-out run finishes (the last one
-        wins: an aborted seed is evaluated again); a resumed run rebuilds it
-        from `runs.jsonl` (`leaderboard.seed_private`)."""
+        hold-out with. Set whenever a seed is evaluated (the last one wins: an
+        aborted seed is evaluated again), `None` when its hold-out did not
+        score; a resumed run rebuilds it from `runs.jsonl`
+        (`leaderboard.seed_private`)."""
         self._trees: dict[str, Tree] = {}
         """Per candidate, its worktree (`problem.tree`): made by `_materialise`."""
         self._tree_errors: dict[str, str] = {}
@@ -322,7 +324,9 @@ class Cascade:
             alive = select_promoted(scored, stage.promote, prior)
 
         for cid, candidate in by_id.items():
-            if candidate.operator == SEED_OPERATOR and results[cid].private_score is not None:
+            # The last seed evaluated is the reference, as `leaderboard.seed_private`
+            # reads it back on a resume: one whose hold-out failed leaves none.
+            if candidate.operator == SEED_OPERATOR and not results[cid].abandoned:
                 self.seed_private = results[cid].private_score
 
         for result in results.values():

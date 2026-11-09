@@ -29,7 +29,17 @@ from evolvekit.candidate import Candidate
 from evolvekit.config import ConfigError, build_config, load_config
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage
 from evolvekit.evaluate.scoring import ranking_score
-from evolvekit.leaderboard import fitness_of, rank, render_markdown
+from evolvekit.leaderboard import (
+    competes,
+    fitness_of,
+    rank,
+    render_html,
+    render_markdown,
+    replay_veto,
+    seed_private,
+    unfinished_count,
+    vetoed_count,
+)
 from evolvekit.search.archive import Archive
 from tests.conftest import EXAMPLE_CONFIG
 
@@ -236,6 +246,9 @@ def test_the_leaderboard_flags_a_private_score_below_the_seed(tmp_path):
     assert "worse-privately !" in markdown
     assert "fine !" not in markdown
     assert "private hold-out score is below the seed's" in markdown
+    # Written before the veto: it is kept out, and named under the table with the flag.
+    assert [r["id"] for r in rank(rows)] == ["fine", "seed"]
+    assert "1 kept out by the hold-out" in markdown
 
 
 # -- the veto --------------------------------------------------------------
@@ -386,6 +399,96 @@ def test_a_resumed_run_ranks_old_rows_with_the_current_penalty(mirror_project, t
     again.resume()
     assert again.by_id["g001-c0002"].fitness == pytest.approx(1.5), "lambda = 1 set explicitly: as before"
     assert [c.id for c in again.top_k(3)] == ["g001-c0003", "g001-c0002", "g000-c0001"]
+
+
+def test_a_resumed_runs_economics_see_the_replayed_order(mirror_project, tmp_path):
+    """The stop rules read the economics series: after a resume it must rank as the
+    archive does -- old lambda = 1 rows at the public score, a vetoed row not at all."""
+    from evolvekit.search.driver import Driver
+
+    config = load_config(mirror_project)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    def old(cid: str, generation: int, operator: str, public: float, private: float) -> dict:
+        return {"id": cid, "generation": generation, "operator": operator,
+                "parent_id": None if generation == 0 else "g000-c0001",
+                "block": f"def value():\n    return {public}\n", "score": public, "public_score": public,
+                "private_score": private, "ranking_score": ranking_score(public, public, private, 1.0),
+                "rejected": False, "competes": True, "stages_reached": ["static", "full"]}
+
+    rows = [
+        old("g000-c0001", 0, "human-seed", 1.0, 1.0),
+        old("g001-c0002", 1, "rewrite", 3.0, 1.5),   # ranking 1.5 at lambda = 1, 3.0 now
+        old("g001-c0003", 1, "rewrite", 10.0, 0.5),  # below the seed's hold-out: vetoed on replay
+    ]
+    (run_dir / "runs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    driver = Driver(config, run_dir=run_dir)
+    driver.resume()
+    points = driver._economics()
+    assert points[-1].best == pytest.approx(3.0)
+
+
+# -- every view applies the veto as the replay does ---------------------------
+
+
+def _view_rows() -> list[dict]:
+    seed = _row("seed", -5.0, -5.0)
+    seed["operator"] = "human-seed"
+    seed["generation"] = 0
+    seed["competes"] = True
+    # Written before the veto existed: `competes: true`, no `veto` key.
+    overfit = {**_row("overfit", -4.0, -6.0, penalty=0.0), "competes": True}
+    honest = {**_row("honest", -4.5, -4.8, penalty=0.0), "competes": True}
+    return [seed, overfit, honest]
+
+
+def test_the_views_apply_the_veto_to_rows_written_before_it():
+    rows = _view_rows()
+    assert [r["id"] for r in rank(rows)] == ["honest", "seed"]
+    reference = seed_private(rows)
+    assert competes(rows[1]) is True, "without the reference, only the stored fields"
+    assert competes(rows[1], reference) is False
+    replayed = {r["id"]: r for r in replay_veto(rows)}
+    assert replayed["overfit"]["veto"] == "holdout below the seed's -5"
+    assert vetoed_count(rows) == 1 and unfinished_count(rows) == 0
+
+
+def test_a_row_judged_with_the_veto_off_keeps_its_judgement():
+    rows = _view_rows()
+    rows[1]["veto"] = None  # written by a run with `holdout_veto: false`
+    assert [r["id"] for r in rank(rows)] == ["overfit", "honest", "seed"]
+
+
+def test_the_leaderboard_names_what_the_veto_keeps_out():
+    rows = _view_rows()
+    markdown = render_markdown(rows)
+    assert "1 kept out by the hold-out" in markdown
+    assert "- overfit ! score -4: holdout below the seed's -5" in markdown
+    assert "did not finish the final stage" not in markdown
+    page = render_html(rows)
+    assert "overfit ! score -4: holdout below the seed&#x27;s -5" in page
+    assert "<b>1</b><span>kept out by the hold-out</span>" in page
+
+
+def test_the_seed_reference_is_the_last_seed_row_only():
+    first = {"id": "a", "operator": "human-seed", "private_score": -1.0}
+    again = {"id": "b", "operator": "human-seed", "private_score": None}
+    assert seed_private([first]) == -1.0
+    assert seed_private([first, again]) is None, "the last seed's hold-out failed: no reference"
+    assert seed_private([again, first]) == -1.0
+    assert seed_private([{"id": "c", "operator": "rewrite", "private_score": 3.0}]) is None
+
+
+def test_a_seed_whose_hold_out_fails_clears_the_live_reference(mirror_project, tmp_path):
+    config = load_config(mirror_project)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])
+    assert cascade.seed_private == pytest.approx(-1.0)
+    broken = Candidate(id="g000-c0002", generation=0, block="def value():\n    return 'x'\n",
+                       source=VALUE_SKELETON.format(v="'x'"), operator="human-seed")
+    cascade.evaluate_generation([broken])
+    assert cascade.seed_private is None
 
 
 @pytest.mark.slow
