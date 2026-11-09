@@ -865,13 +865,25 @@ class Cascade:
                     result.feedback.get(stage.id, ""),
                     f"hold-out set: {outcome.text_feedback}",
                 )
-            merged = dict(result.kpis)
-            merged.update(outcome.kpis)
-            if self.config.evaluate.score.levels:
-                private_score = self._level_score(f"{stage.id}/private", merged)
+            # The hold-out's own measures only: a number the hold-out run did not
+            # report is not filled in from the public run, it would be a score
+            # about two different sets of cases. A penalty it did not report
+            # counts as 0, as on the public run.
+            score_cfg = self.config.evaluate.score
+            needed = [level.kpi for level in score_cfg.levels] if score_cfg.levels else list(score_cfg.weights)
+            missing = sorted(k for k in needed if k not in outcome.kpis)
+            if missing:
+                failed += 1
+                result.last_failure = (
+                    f"stage {stage.id}: the hold-out run did not report {', '.join(missing)}; "
+                    "a hold-out score is computed from the hold-out run's own KPIs"
+                )
+                continue
+            if score_cfg.levels:
+                private_score = self._level_score(f"{stage.id}/private", outcome.kpis)
             else:
                 private_score, _, _ = compute_score(
-                    merged, self.config.evaluate.score, self.config.evaluate.penalties
+                    outcome.kpis, score_cfg, self.config.evaluate.penalties
                 )
             result.private_score = private_score
             if result.public_score is not None:

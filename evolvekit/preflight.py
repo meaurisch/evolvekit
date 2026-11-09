@@ -113,7 +113,7 @@ class StageReport:
     runs: int = 1
     private: bool = False
     kpis: dict[str, float] = field(default_factory=dict)
-    kpi_cv: dict[str, float] = field(default_factory=dict)
+    kpi_cv: dict[str, float | None] = field(default_factory=dict)
     feedback: str = ""
     failure: str | None = None
     workers: int = 1
@@ -535,7 +535,7 @@ def _check_budget(config: Config, report: PreflightReport) -> None:
 
     noisy = [s for s in report.stages if s.kpi_cv]
     for stage in noisy:
-        worst = max(stage.kpi_cv.values(), default=0.0)
+        worst = max((v for v in stage.kpi_cv.values() if v is not None), default=0.0)
         seeds = stage.runs // stage.instances if stage.instances else stage.runs
         report.notes.append(
             f"stage {stage.label} ran {seeds} seed(s)"
@@ -762,7 +762,10 @@ def _kpi_line(stage: StageReport, limit: int = 6, first: str = "") -> str:
     parts = []
     for name, value in items:
         cv = stage.kpi_cv.get(name)
-        suffix = f" (cv {cv * 100:.2f}%)" if cv else ""
+        if cv is None and name in stage.kpi_cv:
+            suffix = " (cv n/a)"
+        else:
+            suffix = f" (cv {cv * 100:.2f}%)" if cv else ""
         parts.append(f"{name}={value:.6g}{suffix}")
     if len(stage.kpis) > limit:
         parts.append(f"... {len(stage.kpis) - limit} more")

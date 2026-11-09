@@ -662,12 +662,12 @@ def _combine_failure(outcomes: list[StageOutcome]) -> StageOutcome:
     return failed
 
 
-def _cv(values: list[float]) -> float:
+def _cv(values: list[float]) -> float | None:
     """Coefficient of variation: spread relative to the mean.
 
-    Zero when every run agreed. When the mean is zero there is no ratio to
-    take, so the absolute spread is reported instead -- a number that is still
-    zero for a deterministic KPI, which is the property this is read for.
+    Zero when every run agreed. When the mean is zero and the runs did not
+    agree there is no ratio to take, so the answer is `None`: an absolute spread
+    would silently switch units next to the ratios of the other KPIs.
     """
     if len(values) < 2:
         return 0.0
@@ -675,11 +675,12 @@ def _cv(values: list[float]) -> float:
     if spread == 0.0:
         return 0.0
     mean_value = fmean(values)
-    return spread / abs(mean_value) if mean_value != 0.0 else spread
+    return spread / abs(mean_value) if mean_value != 0.0 else None
 
 
 def _combine(outcomes: list[StageOutcome]) -> StageOutcome:
-    """Average N successful runs of one stage into a single outcome."""
+    """Average N successful runs of one stage into a single outcome, or fail
+    when they disagree about the length of a vector KPI."""
     first = outcomes[0]
     keys = set(first.kpis)
     for outcome in outcomes[1:]:
@@ -689,14 +690,29 @@ def _combine(outcomes: list[StageOutcome]) -> StageOutcome:
 
     vectors: dict[str, list[float]] = {}
     for name in sorted(set(first.vector_kpis)):
-        series = [o.vector_kpis.get(name) for o in outcomes]
-        if any(v is None for v in series) or len({len(v) for v in series}) != 1:  # type: ignore[arg-type]
+        expected = len(first.vector_kpis[name])
+        for k, other in enumerate(outcomes[1:], start=1):
+            got = other.vector_kpis.get(name)
+            if got is None:
+                problem = f"seed {k} reported no `{name}`, seed 0 reported {expected}"
+            elif len(got) != expected:
+                problem = f"seed {k} reported {len(got)} values of `{name}`, seed 0 reported {expected}"
+            else:
+                continue
             # Runs that disagree about how many instances there were cannot be
-            # averaged element by element. The first run's vector is a truthful
-            # sample; a ragged mean would not be.
-            vectors[name] = list(first.vector_kpis[name])
-            continue
-        vectors[name] = [fmean(column) for column in zip(*series)]  # type: ignore[arg-type]
+            # averaged element by element, and the first run's vector alone
+            # would pass off one run as the mean of all.
+            return StageOutcome(
+                stage_id=first.stage_id,
+                ok=False,
+                failure=problem,
+                stderr=first.stderr,
+                stdout=first.stdout,
+                duration_s=sum(o.duration_s for o in outcomes),
+                runs=len(outcomes),
+                private=first.private,
+            )
+        vectors[name] = [fmean(column) for column in zip(*(o.vector_kpis[name] for o in outcomes))]
 
     return StageOutcome(
         stage_id=first.stage_id,

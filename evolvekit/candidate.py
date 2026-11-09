@@ -97,7 +97,7 @@ class Candidate:
     rejected: bool = False
     reject_reason: str | None = None
     kpis: dict[str, float] = field(default_factory=dict)
-    kpi_cv: dict[str, float] = field(default_factory=dict)
+    kpi_cv: dict[str, float | None] = field(default_factory=dict)
     """How much each KPI moved between the runs of a `seeds: N` stage. Empty
     when every stage ran once, which is the deterministic-evaluator case."""
     penalty_total: float = 0.0

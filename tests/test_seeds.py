@@ -198,11 +198,28 @@ def test_vector_kpis_are_averaged_element_by_element(tmp_path):
     assert outcome.vector_kpis["per"] == pytest.approx([1.0, 2.0])
 
 
-def test_ragged_vectors_fall_back_to_the_first_run(tmp_path):
-    """A mean over vectors of different lengths would be a fabrication."""
-    body = "payload = {'kpis': {'v': 1.0, 'per': [1.0] * (seed + 1)}}"
-    outcome = _run(tmp_path, body, seeds=3)
-    assert outcome.vector_kpis["per"] == [1.0]
+def test_ragged_vectors_fail_the_stage_and_say_which_seed(tmp_path):
+    """A mean over vectors of different lengths would be a fabrication, and so is the first run's alone."""
+    body = "payload = {'kpis': {'v': 1.0, 'per': [1.0] * (20 if seed == 1 else 19)}}"
+    outcome = _run(tmp_path, body, seeds=2)
+    assert outcome.ok is False
+    assert outcome.failure == "seed 1 reported 20 values of `per`, seed 0 reported 19"
+
+
+def test_a_kpi_whose_mean_is_zero_has_no_coefficient_of_variation(tmp_path):
+    outcome = _run(tmp_path, "payload = {'kpis': {'v': 1.0, 'centred': float(seed) - 1.0}}", seeds=3)
+    assert outcome.kpi_cv["centred"] is None, "no ratio to take; an absolute spread would switch units"
+    assert outcome.kpi_cv["v"] == 0.0
+
+
+def test_a_missing_coefficient_is_shown_as_n_a():
+    from evolvekit.evaluate.types import EvalResult
+    from evolvekit.preflight import StageReport, _kpi_line
+
+    assert EvalResult(score=0.0, kpi_cv={"a": None, "b": 0.1}).max_kpi_cv == 0.1
+    stage = StageReport(stage_id="full", kind="command", ok=True, duration_s=1.0, timeout=60.0,
+                        kpis={"centred": 0.0}, kpi_cv={"centred": None})
+    assert _kpi_line(stage) == "centred=0 (cv n/a)"
 
 
 def test_one_failing_run_fails_the_whole_stage_and_names_the_seed(tmp_path):

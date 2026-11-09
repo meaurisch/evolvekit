@@ -185,7 +185,7 @@ seed = the skeleton's EVOLVE-BLOCK
   ├─ generation g       C children; C adapts on stagnation (optional)
   │    sample P parents from the archive's elites
   │                  weight = sigmoid(z(fitness)) × 1/(1 + children)
-  │    draw 1–2 inspirations from *other* cells
+  │    draw 1 to `search.inspirations` (default 2) inspirations from *other* cells
   │
   │    operators   diff (SEARCH/REPLACE) · rewrite · crossover → small model
   │                big_step, every K gens or on plateau        → strong model
@@ -280,7 +280,7 @@ candidates being lost.
 
 | Operator | Model | What it sees |
 |---|---|---|
-| `diff` | small | the parent block, its score breakdown, delta summaries of 1–2 inspirations |
+| `diff` | small | the parent block, its score breakdown, delta summaries of 1 to `search.inspirations` (default 2) inspirations |
 | `rewrite` | small | the same, and asks for the whole block back |
 | `crossover` | small | the parent **and** one inspiration's block, both with score breakdowns |
 | `big_step` | strong | scheduled every `big_step_every` generations, or on plateau |
@@ -294,6 +294,10 @@ than the parent's and are shown as one-line delta summaries — a unified-diff
 stat against their own parent plus the first line of their docstring, both
 computed locally. Crossover is the one operator that also sees an inspiration's
 code, because it cannot combine two candidates otherwise.
+
+Each inspiration adds a summary and a score line to the prompt, and on a tree
+problem its whole diff, so raising `search.inspirations` raises the cost of every
+prompt. Crossover is always shown exactly one.
 
 `param_lhs` costs no tokens. It needs a declaration inside the evolve block:
 

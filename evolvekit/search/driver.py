@@ -1263,8 +1263,8 @@ class Driver:
         )
 
     def _inspirations(self, parent: Candidate, operator: str) -> list[Inspiration]:
-        """1-2 elites from other cells; only crossover is shown their code."""
-        budget = min(self.config.search.inspirations, 2)
+        """1 to `search.inspirations` elites from other cells; only crossover is shown their code."""
+        budget = self.config.search.inspirations
         if budget <= 0:
             return []
         wanted = 1 if operator == "crossover" else self.rng.randint(1, budget)

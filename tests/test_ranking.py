@@ -543,3 +543,49 @@ def test_the_archive_and_the_summary_agree_on_the_winner(tmp_path):
     assert payload["top_k"][0]["id"] == summary.best.id
     rebuilt = Archive.from_records(driver.ledger.runs(), config.search.archive)
     assert rebuilt.best is not None and rebuilt.best.id == summary.best.id
+
+
+def test_the_hold_out_score_uses_the_hold_out_runs_own_kpis(mirror_project, tmp_path):
+    """D6: a weighted KPI the private run did not report used to be taken from the public run."""
+    config = load_config(mirror_project)
+    score = replace(config.evaluate.score, weights={"value": 1.0, "bonus": 1.0})
+    config = replace(config, evaluate=replace(config.evaluate, score=score))
+    script = mirror_project.parent / "evaluate.py"
+    script.write_text(
+        script.read_text(encoding="utf-8").replace(
+            "{'value': score}", "({'value': score, 'bonus': 5.0} if a.inputs == 'public' else {'value': score})"
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    result = Cascade(config, work_dir=tmp_path / "work").evaluate_generation(
+        [_value_candidate("g000-c0001", 1, "human-seed")]
+    )["g000-c0001"]
+    assert result.private_score is None and result.competes is False
+    assert "the hold-out run did not report bonus" in (result.last_failure or "")
+
+
+def test_the_hold_out_with_levels_must_report_every_level(mirror_project, tmp_path):
+    from evolvekit.config import LevelConfig
+
+    config = load_config(mirror_project)
+    score = replace(
+        config.evaluate.score,
+        levels=(LevelConfig("value", "maximize", tolerance=0.1), LevelConfig("bonus", "maximize")),
+    )
+    config = replace(config, evaluate=replace(config.evaluate, score=score))
+    script = mirror_project.parent / "evaluate.py"
+    script.write_text(
+        script.read_text(encoding="utf-8").replace(
+            "{'value': score}", "({'value': score, 'bonus': 5.0} if a.inputs == 'public' else {'value': score})"
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    result = Cascade(config, work_dir=tmp_path / "work").evaluate_generation(
+        [_value_candidate("g000-c0001", 1, "human-seed")]
+    )["g000-c0001"]
+    assert result.private_score is None
+    # The evaluator's own required-measure check may speak first; either way a
+    # hold-out without a level fails with a sentence and is never scored from the public run.
+    assert "bonus" in (result.last_failure or "")

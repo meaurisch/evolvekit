@@ -1693,7 +1693,6 @@ class SearchConfig:
     children_per_generation: int = 4
     generations: int = 10
     big_step_every: int = 5
-    parent_top_k: int = 5
     seed: int = 0
     operators: dict[str, float] = field(
         default_factory=lambda: {"diff": 0.6, "rewrite": 0.4}
@@ -1740,7 +1739,6 @@ class SearchConfig:
             "children_per_generation",
             "generations",
             "big_step_every",
-            "parent_top_k",
             "seed",
             "operators",
             "archive",
@@ -1751,6 +1749,11 @@ class SearchConfig:
             "novelty",
             "adaptive_children",
         }
+        if "parent_top_k" in data:
+            raise ConfigError(
+                "search.parent_top_k: removed -- it never did anything; "
+                "the elites a parent is drawn from are search.archive.top_k"
+            )
         _reject_unknown(data, known, "search")
         ops_raw = _as_mapping(data.get("operators"), "search.operators")
         operators = {
@@ -1782,9 +1785,6 @@ class SearchConfig:
             ),
             big_step_every=_as_int(
                 data.get("big_step_every", 5), "search.big_step_every", minimum=0
-            ),
-            parent_top_k=_as_int(
-                data.get("parent_top_k", 5), "search.parent_top_k", minimum=1
             ),
             seed=_as_int(data.get("seed", 0), "search.seed"),
             operators=operators,

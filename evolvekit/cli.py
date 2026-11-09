@@ -159,7 +159,6 @@ search:
   children_per_generation: 3
   generations: 6
   big_step_every: 3
-  parent_top_k: 5
   seed: 0
   operators:
     diff: 0.5
