@@ -9,6 +9,7 @@ patience, the estimator -- keeps working unchanged.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,22 @@ def test_an_anchor_round_trips_through_json():
     assert Anchor.from_json(json.loads(json.dumps(anchor.to_json()))) == anchor
 
 
+def test_the_last_level_is_scaled_by_the_seeds_own_range_over_instances():
+    anchor = make_anchor(TWO, {"dph": 10.0, "wait": 100.0}, per_instance={"wait": [50.0, 100.0, 150.0]})
+    assert anchor.scale == pytest.approx(100.0)
+    forty, thirty = (level_score(TWO, anchor, {"dph": 10.0, "wait": 100.0 * (1 - g)}) for g in (0.4, 0.3))
+    assert forty - thirty > 0.04, "a 40 % and a 30 % gain are different numbers (0.002 apart at a tenth)"
+    narrow = make_anchor(TWO, {"dph": 10.0, "wait": 100.0}, per_instance={"wait": [99.0, 101.0]})
+    assert narrow.scale == pytest.approx(10.0), "never below a tenth of the seed's value"
+    assert make_anchor(TWO, {"dph": 10.0, "wait": 5.0}).scale == pytest.approx(0.5), "without instances, as before"
+    assert make_anchor(TWO, {"dph": 10.0, "wait": 5.0}, per_instance={"wait": [5.0]}).scale == pytest.approx(0.5), (
+        "one instance has no range"
+    )
+    assert make_anchor(TWO, {"dph": 10.0, "wait": 0.0}, per_instance={"wait": [0.0, 0.0]}).scale == 1.0, (
+        "no value and no range: scaled by 1"
+    )
+
+
 # -- a run -------------------------------------------------------------------
 
 # Level 1 (deliveries per hour) barely moves -- every configuration is within
@@ -213,6 +230,25 @@ def test_a_run_directory_remembers_its_levels(tmp_path):
     raw["search"] = {"operators": {"param_lhs": 1.0}, "generations": 2}
     with pytest.raises(ValueError, match="the levels changed"):
         Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run").run()
+
+
+FANOUT_SOLVER = (
+    "import argparse, json, sys\n"
+    "p = argparse.ArgumentParser(); p.add_argument('instance'); p.add_argument('--x', type=float)\n"
+    "a = p.parse_args()\n"
+    "size = {'a': 50.0, 'b': 100.0, 'c': 150.0}[a.instance]\n"
+    "print(json.dumps({'dph': 10 + 0.01 * a.x, 'wait': size * (1 + a.x)}))\n"
+)
+
+
+@pytest.mark.slow
+def test_a_run_anchors_its_last_level_on_the_seeds_spread_over_instances(tmp_path):
+    (tmp_path / "solver.py").write_text(FANOUT_SOLVER, encoding="utf-8")
+    raw = _raw(stages=[{"id": "static", "kind": "builtin-static"}, FANOUT])
+    raw["search"] = {"operators": {"param_lhs": 1.0}, "children_per_generation": 2, "generations": 1, "seed": 5}
+    Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run").run()
+    anchors = json.loads((tmp_path / "run" / "work" / "levels.json").read_text(encoding="utf-8"))
+    assert anchors["full"]["scale"] == pytest.approx(150.0), "the seed (x = 0.5): 75, 150, 225"
 
 
 # -- status and the dashboard -------------------------------------------------
@@ -287,7 +323,10 @@ def test_the_dashboard_draws_a_row_per_level():
 import random as _random  # noqa: E402
 
 from evolvekit import cli  # noqa: E402
-from evolvekit.confirm import BASELINE, Comparison, _analyse, confirm, render_markdown  # noqa: E402
+from evolvekit.confirm import (  # noqa: E402
+    BASELINE, Comparison, _analyse, confirm, decision_of, render_markdown, verdict_summary,
+)
+from evolvekit.stats import log_gain  # noqa: E402
 
 DESCRIBED = [LevelConfig("dph", "maximize", 0.01, True).describe(), LevelConfig("wait", "minimize").describe()]
 
@@ -330,6 +369,7 @@ def test_confirm_says_worse_when_level_1_falls_beyond_its_tolerance():
     levels = comparison.per_candidate["g003-c0014"]["levels"]
     assert levels["verdict"] == "worse on level 1 (dph): clear"
     assert levels["deciding"] == 1 and levels["confirmed"] is False
+    assert levels["decision"] == "worse" and decision_of(comparison.per_candidate["g003-c0014"]) == "worse"
 
 
 def test_a_level_that_does_not_differ_clearly_is_not_confirmed():
@@ -338,6 +378,107 @@ def test_a_level_that_does_not_differ_clearly_is_not_confirmed():
     levels = comparison.per_candidate["g003-c0014"]["levels"]
     assert levels["verdict"].startswith("equal on level 1 (dph within 1 %), worse on level 2 (wait)")
     assert levels["confirmed"] is False
+
+
+def test_a_level_whose_interval_straddles_its_tolerance_is_not_yet_decided():
+    """About 1 % more deliveries per hour, give or take: the interval crosses the 1 % edge.
+    (`_comparison` gives the candidate's dph no noise of its own, so it cannot straddle.)"""
+    rng = _random.Random(8)
+    comparison = Comparison(label="t", objective="dph", direction="maximize", stage="full", seeds=[1, 2],
+                            instances=["a", "b", "c"], baseline_id="g000-c0001", candidates=["c"], levels=DESCRIBED)
+    for instance, size in (("a", 10.0), ("b", 20.0), ("c", 40.0)):
+        for seed in (1, 2):
+            comparison.runs += [
+                {"configuration": BASELINE, "instance": instance, "seed": seed, "ok": True,
+                 "kpis": {"dph": size, "wait": 5.0}},
+                {"configuration": "c", "instance": instance, "seed": seed, "ok": True,
+                 "kpis": {"dph": size * (1.01 + rng.uniform(-0.004, 0.004)), "wait": 4.0}},
+            ]
+    _analyse(comparison)
+    levels = comparison.per_candidate["c"]["levels"]
+    assert levels["levels"][0]["ci95"][0] < 1.0 < levels["levels"][0]["ci95"][1], "the fixture straddles the edge"
+    assert levels["levels"][0]["state"] == "undecided"
+    assert levels["verdict"] == "level 1 (dph) is not yet decided within 1 %"
+    assert levels["deciding"] == 1 and levels["confirmed"] is False and levels["decision"] == "keep"
+    assert decision_of(comparison.per_candidate["c"]) == "keep", "level 2 is better, and does not speak"
+    assert levels["levels"][1]["state"] == "better", "below the deciding level: reported, not judged"
+    assert "not yet decided" in render_markdown(comparison)
+
+
+def test_a_level_with_one_case_is_not_yet_decided():
+    comparison = _comparison(dph_factor=1.0, wait_shift=-1.0)
+    comparison.instances = ["a"]
+    comparison.runs = [r for r in comparison.runs if r["instance"] == "a"]
+    _analyse(comparison)
+    levels = comparison.per_candidate["g003-c0014"]["levels"]
+    assert levels["levels"][0]["ci95"] is None and levels["levels"][0]["state"] == "undecided"
+    assert levels["deciding"] == 1 and levels["decision"] == "keep"
+
+
+def _edge(rng: _random.Random, factor: float) -> Comparison:
+    """Four cases, two runs each, log-normal noise; the candidate's true dph is `factor` times the
+    starting point's on every case."""
+    comparison = Comparison(label="t", objective="dph", direction="maximize", stage="full", seeds=[1, 2],
+                            instances=["a", "b", "c", "d"], baseline_id="g000-c0001", candidates=["c"],
+                            levels=DESCRIBED)
+    for instance, size in (("a", 10.0), ("b", 20.0), ("c", 40.0), ("d", 80.0)):
+        for seed in (1, 2):
+            dph = size * math.exp(rng.gauss(0, 0.004))
+            comparison.runs += [
+                {"configuration": BASELINE, "instance": instance, "seed": seed, "ok": True,
+                 "kpis": {"dph": dph, "wait": 5.0}},
+                {"configuration": "c", "instance": instance, "seed": seed, "ok": True,
+                 "kpis": {"dph": dph * factor * math.exp(rng.gauss(0, 0.004)), "wait": 5.0}},
+            ]
+    return comparison
+
+
+def test_a_level_at_its_tolerance_edge_is_called_equal_at_most_one_in_forty_per_side():
+    """Two one-sided tests on the 95 % interval: a true difference exactly at the 1 % tolerance, on
+    either side, is called equal about 1 in 40 of the time (2.5 %). 4000 seeded comparisons per side
+    (a standard error of 0.25 %); the bound 3.5 % is four of them above the nominal rate."""
+    rng = _random.Random(15)
+    studies = 4000
+    for factor in (1.01, 0.99):
+        equal = 0
+        for _ in range(studies):
+            comparison = _edge(rng, factor)
+            _analyse(comparison)
+            equal += comparison.per_candidate["c"]["levels"]["levels"][0]["state"] == "equal"
+        rate = equal / studies
+        print(f"true difference at the {'upper' if factor > 1 else 'lower'} edge: called equal {rate:.2%}")
+        assert rate < 0.035, f"{equal} of {studies} at {factor}"
+
+
+def test_a_level_that_decides_is_read_by_the_rule_that_decides_without_levels():
+    """Level 1 equal, level 2 decides: its decision is the posterior rule's on its own log gains,
+    the same `use` with and without levels (decision 6)."""
+    rng = _random.Random(23)
+    seen = set()
+    for shift in (-0.6, -0.3, -0.15, 0.0, 0.15, 0.3):
+        for _ in range(20):
+            comparison = Comparison(label="t", objective="dph", direction="maximize", stage="full", seeds=[1],
+                                    instances=["a", "b", "c"], baseline_id="g000-c0001", candidates=["c"],
+                                    levels=DESCRIBED)
+            gains = []
+            for instance in ("a", "b", "c"):
+                wait, mine = 5.0, 5.0 + shift + rng.gauss(0, 0.2)
+                gains.append(log_gain(wait, mine, "minimize"))
+                comparison.runs += [
+                    {"configuration": BASELINE, "instance": instance, "seed": 1, "ok": True,
+                     "kpis": {"dph": 10.0, "wait": wait}},
+                    {"configuration": "c", "instance": instance, "seed": 1, "ok": True,
+                     "kpis": {"dph": 10.0, "wait": mine}},
+                ]
+            _analyse(comparison)
+            result = comparison.per_candidate["c"]
+            expected = verdict_summary(gains, direction="minimize")["decision"]
+            assert result["levels"]["deciding"] == 2
+            assert result["levels"]["decision"] == expected and decision_of(result) == expected
+            assert result["levels"]["confirmed"] is (expected == "use")
+            assert result["levels"]["levels"][1]["clear"] is (expected in ("use", "worse")), "the words follow it"
+            seen.add(expected)
+    assert seen == {"use", "keep", "worse"}, "the fixture reaches every answer"
 
 
 PER_INSTANCE_SOLVER = (

@@ -146,11 +146,13 @@ def decision_of(result: dict[str, Any]) -> str:
     """What one candidate's comparison says: `keep` when every run gave
     exactly the starting point's result (its change was not exercised, so
     there is nothing to decide on); by the levels when the study scores by
-    levels; else `decide` on its `verdict_summary`."""
+    levels (their `decision`; a result written before it had only
+    `confirmed`); else `decide` on its `verdict_summary`."""
     if result.get("identical"):
         return "keep"
     if "levels" in result:
-        return "use" if result["levels"]["confirmed"] else "keep"
+        levels = result["levels"]
+        return levels.get("decision") or ("use" if levels["confirmed"] else "keep")
     decision = decide(result["summary"])
     if decision == "use" and (result.get("holm") or {}).get("passed") is False:
         return "keep"  # its own chance passes the rule; chosen among its rivals, it does not
@@ -832,28 +834,36 @@ def _pct_summary(summary: dict[str, Any], direction: str) -> dict[str, Any]:
 def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
     """`evaluate.score.levels`, compared level by level, and a lexicographic verdict.
 
-    Per level, the paired difference per (instance, seed), signed so that
-    positive is better, averaged over the seeds of an instance; over
-    instances a mean with a 95 % interval. The difference is in percent of the
-    baseline's value on the same instance and seed, as for the objective --
-    instances of different size then count alike -- unless some baseline
-    value is 0: a level is often a count (late tasks, missed tasks) and a
-    percentage of 0 is no number, so such a level is compared in the KPI's own
-    units, and says so (`unit`). A pair only one side finished counts against
-    the side that failed, as large as the largest difference measured on that
-    level. A relative tolerance is a fraction of the baseline's value; an
-    absolute one is in the KPI's units (in percent of the baseline's mean when
-    the level is compared in percent).
+    Per level, the paired gain per (instance, seed), positive when better,
+    averaged over the seeds of an instance; over instances the posterior of
+    its mean (`verdict_summary`: a mean, a 95 % interval and the chance of a
+    gain). The gain is the log ratio of the baseline's and the candidate's
+    value, as for the objective -- instances of different size then count
+    alike -- shown in percent of the baseline's value, unless some value is 0
+    or below: a level is often a count (late tasks, missed tasks) and a ratio
+    of 0 is no number, so such a level is compared as a plain difference in
+    the KPI's own units, and says so (`unit`). A pair only one side finished
+    counts against the side that failed, as large as the largest gain
+    measured on that level. A relative tolerance is a fraction of the
+    baseline's value; an absolute one is in the KPI's units (in percent of
+    the baseline's mean when the level is compared in percent).
 
-    A level is *equal* when its mean difference is within its tolerance; the
-    first level that is not equal decides, and the result is `confirmed` only
-    when that level is better and its interval lies above zero. The last
-    level has no tolerance: whatever the levels above leave equal, it decides.
+    Every level but the last has a tolerance `w`, and its 95 % interval
+    `[lo, hi]` judges it (two one-sided tests, 1 in 40 per side): *equal*
+    when `-w <= lo` and `hi <= w`, *better* when `lo > w`, *worse* when
+    `hi < -w`, and *undecided* otherwise -- with fewer than two instances
+    too, which have no interval. The first level that is not equal decides;
+    an undecided one decides `keep`. The last level has no tolerance: its
+    state is the sign of its mean. A level that decides `better` or `worse`
+    is read by the rule that decides without levels (`decide` on its
+    posterior), so "use" means the same with and without them: `decision`
+    is `use`, `worse` or `keep`, `confirmed` is `decision == "use"`, and a
+    level's `clear` says that the rule spoke on it.
     """
     rows: list[dict[str, Any]] = []
     parts: list[str] = []
     deciding: int | None = None
-    confirmed = False
+    decision = "keep"
     judging = True  # until a level decides, or cannot be compared at all
     for index, level in enumerate(comparison.levels):
         kpi, last = str(level["kpi"]), index == len(comparison.levels) - 1
@@ -865,11 +875,14 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
         base, mine = table.get(BASELINE, {}), table.get(cid, {})
         shared = base.keys() & mine.keys()
         baseline_mean = fmean(base.values()) if base else None
-        unit = "percent" if shared and baseline_mean and all(base[k] != 0 for k in shared) else "absolute"
+        unit = ("percent" if shared and baseline_mean and all(base[k] > 0 and mine[k] > 0 for k in shared)
+                else "absolute")
+        direction = "maximize" if sign > 0 else "minimize"
 
         def difference(key: tuple[str, int]) -> float:
-            gain = sign * (mine[key] - base[key])
-            return 100.0 * gain / abs(base[key]) if unit == "percent" else gain
+            if unit == "percent":
+                return log_gain(base[key], mine[key], direction)  # type: ignore[return-value]  # both > 0
+            return sign * (mine[key] - base[key])
 
         largest = max((abs(difference(k)) for k in shared), default=None)
         per_instance = []
@@ -884,7 +897,7 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
                     differences.append(largest)
             if differences:
                 per_instance.append(fmean(differences))
-        summary = paired_summary(per_instance)
+        summary = _level_summary(per_instance, unit, direction)
         tolerance = level.get("tolerance")
         tolerance_abs = within = None
         if not last and tolerance is not None:
@@ -894,39 +907,76 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
                 within = 100.0 * float(tolerance) if relative else 100.0 * float(tolerance) / abs(baseline_mean)
             else:
                 within = tolerance_abs
-        mean, interval = summary["mean"], summary.get("ci95")
+        mean, interval = summary["mean"], summary["ci95"]
         if mean is None:
             state = "unknown"
-        elif within is not None and abs(mean) <= within:
-            state = "equal"
+        elif within is not None:
+            # Two one-sided tests on the 95 % interval, 2.5 % each side.
+            if interval is None:
+                state = "undecided"
+            elif interval[0] >= -within and interval[1] <= within:
+                state = "equal"
+            elif interval[0] > within:
+                state = "better"
+            elif interval[1] < -within:
+                state = "worse"
+            else:
+                state = "undecided"
         else:
             state = "better" if mean > 0 else "worse" if mean < 0 else "equal"
-        clear = bool(interval) and ((state == "better" and interval[0] > 0) or (state == "worse" and interval[1] < 0))
+        # The rule that decides without levels, on this level's posterior: "use" or "worse" when it speaks.
+        spoke = {"better": "use", "worse": "worse"}.get(state) == summary["decision"]
+        clear = spoke if last else state in ("better", "worse")
         rows.append({
             "level": index + 1, "kpi": kpi, "direction": level.get("direction"), "unit": unit,
             "tolerance": tolerance, "relative": bool(level.get("relative")), "tolerance_abs": tolerance_abs,
             "tolerance_in_unit": within, "baseline_mean": baseline_mean, "mean_difference": mean,
-            "ci95": interval, "n": summary["n"], "wins": summary["wins"], "losses": summary["losses"],
-            "state": state, "clear": clear,
+            "ci95": interval, "chance": summary["chance"], "n": summary["n"], "wins": summary["wins"],
+            "losses": summary["losses"], "state": state, "clear": clear,
         })
         if not judging:
             continue  # below the deciding level: reported, not judged
+        within_words = (f"{100 * float(tolerance):g} %" if level.get("relative") else f"{float(tolerance):g}"
+                        ) if tolerance is not None else ""
         if state == "equal" and not last:
-            within = f"{100 * float(tolerance):g} %" if level.get("relative") else f"{float(tolerance):g}"
-            parts.append(f"equal on level {index + 1} ({kpi} within {within})")
+            parts.append(f"equal on level {index + 1} ({kpi} within {within_words})")
         elif state in ("better", "worse"):
             deciding, judging = index + 1, False
-            confirmed = state == "better" and clear
+            decision = summary["decision"] if spoke else "keep"
             parts.append(
                 f"{state} on level {index + 1} ({kpi}): "
                 + ("clear" if clear else "not distinguishable from the baseline")
             )
+        elif state == "undecided":
+            deciding, judging = index + 1, False
+            parts.append(f"level {index + 1} ({kpi}) is not yet decided within {within_words}")
         elif state == "equal":
             parts.append(f"equal on level {index + 1} ({kpi})")
         else:
             judging = False
             parts.append(f"level {index + 1} ({kpi}): no pair of runs to compare")
-    return {"levels": rows, "deciding": deciding, "verdict": ", ".join(parts), "confirmed": confirmed}
+    return {"levels": rows, "deciding": deciding, "verdict": ", ".join(parts), "decision": decision,
+            "confirmed": decision == "use"}
+
+
+def _level_summary(gains: Sequence[float], unit: str, direction: str) -> dict[str, Any]:
+    """One level's per-instance gains to its mean, 95 % interval, chance of
+    a gain and `decide`'s decision. In percent: `verdict_summary` of the log
+    gains, as for the objective. In the KPI's own units: the same posterior
+    (`posterior_mean_t`) on the plain differences."""
+    if unit == "percent":
+        s = verdict_summary(gains, direction=direction)
+        return {key: s[key] for key in ("n", "mean", "ci95", "chance", "wins", "losses", "decision")}
+    n = len(gains)
+    out: dict[str, Any] = {"n": n, "mean": fmean(gains) if gains else None, "ci95": None, "chance": None,
+                           "wins": sum(1 for g in gains if g > 0), "losses": sum(1 for g in gains if g < 0)}
+    if n >= 2:
+        post = posterior_mean_t(gains)
+        out.update(mean=post.mu, ci95=list(post.interval95()), chance=post.p_above(0.0),
+                   posterior={"mu": post.mu, "scale": post.scale, "df": post.df})
+    out["decision"] = decide(out)
+    out.pop("posterior", None)
+    return out
 
 
 def _counted_as(totals: dict[str, int], largest: float | None, direction: str) -> str:
@@ -1059,12 +1109,15 @@ def _levels_markdown(levels: dict[str, Any]) -> list[str]:
     lines = [
         "### Level by level",
         "",
-        f"**{verdict[:1].upper() + verdict[1:]}.** The first level that is not equal within its "
-        "tolerance decides; it is confirmed only when that level is better and its 95 % interval "
-        "lies above zero.",
+        f"**{verdict[:1].upper() + verdict[1:]}.** A level is equal when its 95 % interval lies within "
+        "its tolerance, better or worse when the interval lies wholly beyond it, and not yet decided "
+        "otherwise; the first level that is not equal decides, and an undecided one keeps today's. "
+        "The last level has no tolerance: the sign of its mean says better or worse. The level that "
+        f"decides is read by the rule: {RULE_WORDS}",
         "",
-        "Differences are per instance, averaged over the seeds, positive is better: in percent of "
-        "the baseline's value, or in the KPI's own units where some baseline value is 0.",
+        "Differences are per instance, averaged over the seeds, positive is better: the log ratio "
+        "shown in percent of the baseline's value, or a plain difference in the KPI's own units where "
+        "some value is 0 or below.",
         "",
         "| level | goal | baseline mean | equal within | mean difference | 95 % CI | verdict |",
         "|--:|---|--:|--:|--:|---|---|",

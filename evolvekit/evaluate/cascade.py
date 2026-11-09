@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 from statistics import fmean, quantiles
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
@@ -349,15 +349,21 @@ class Cascade:
 
     # -- levels ----------------------------------------------------------
 
-    def _level_score(self, key: str, values: dict[str, float]) -> float:
+    def _level_score(
+        self, key: str, values: dict[str, float], vectors: Mapping[str, Sequence[float]] | None = None
+    ) -> float:
         """`evaluate.score.levels` as one score, measured from the anchor of
         stage `key`. The first candidate through a stage anchors it -- in a
         run that is the seed, which therefore scores exactly 0 -- and the
-        anchor is kept on disk so that a resumed run measures from it too."""
+        anchor is kept on disk so that a resumed run measures from it too.
+        `vectors` is the stage's `vector_kpis`: on a stage that runs per
+        instance, the last level is scaled by the seed's range over them."""
         levels = self.config.evaluate.score.levels
         anchor = self.anchors.get(key)
         if anchor is None:
-            anchor = self.anchors[key] = make_anchor(levels, values)
+            last = levels[-1].kpi
+            spread = (vectors or {}).get(per_instance_key(last))
+            anchor = self.anchors[key] = make_anchor(levels, values, {last: spread} if spread else None)
             # Atomically: half a file reads back as "no anchor", and a resumed
             # run would quietly anchor at its first child instead of the seed.
             _atomic_write(
@@ -789,7 +795,7 @@ class Cascade:
             # No objective KPI here; a static pass or a build carries no score of its own.
             return
         if self.config.evaluate.score.levels:
-            score, penalty_total, terms = self._level_score(stage.id, result.kpis), 0.0, {}
+            score, penalty_total, terms = self._level_score(stage.id, result.kpis, outcome.vector_kpis), 0.0, {}
         else:
             score, penalty_total, terms = compute_score(
                 result.kpis, self.config.evaluate.score, self.config.evaluate.penalties
@@ -884,7 +890,7 @@ class Cascade:
                 )
                 continue
             if score_cfg.levels:
-                private_score = self._level_score(f"{stage.id}/private", outcome.kpis)
+                private_score = self._level_score(f"{stage.id}/private", outcome.kpis, outcome.vector_kpis)
             else:
                 private_score, _, _ = compute_score(
                     outcome.kpis, score_cfg, self.config.evaluate.penalties

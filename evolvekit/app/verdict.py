@@ -266,11 +266,15 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                 "advice": f"{keep} for now: nothing in these runs tells the change from today's."}
     if "levels" in result:
         levels = result["levels"]
-        decision = final.get("decision") or ("use" if levels.get("confirmed") else "keep")
+        decision = final.get("decision") or levels.get("decision") or ("use" if levels.get("confirmed") else "keep")
         base["decision"] = decision
         if decision == "use":
             return {**base, "state": "confirmed", "levels": levels.get("levels"),
                     "line": f"Probably better on {cases}: {levels.get('verdict')}.", "advice": use_advice}
+        if decision == "worse":
+            return {**base, "state": "worse", "levels": levels.get("levels"),
+                    "line": f"Worse on {cases}: {levels.get('verdict')}.",
+                    "advice": f"{keep}: {new} did worse on cases the search never saw."}
         return {**base, "state": "unclear", "levels": levels.get("levels"),
                 "line": f"Not proven on {cases}: {levels.get('verdict')}.",
                 "advice": f"{keep} for now: the gain is not proven."}

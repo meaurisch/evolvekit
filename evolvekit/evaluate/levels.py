@@ -13,8 +13,16 @@ at the seed's values `b_i`:
     score = sum_i q_i * B ** (L - 1 - i)  +  x_L                 (i from 1)
 
 with `s_i` = +1 to maximise and -1 to minimise, `t_i` the level's absolute
-tolerance, `scale_L` a tenth of the seed's last value (1 when that is 0) and
-the base B = 2K + 2. One step on a level outweighs every possible difference
+tolerance, and the base B = 2K + 2. The last level's scale is the seed's own
+spread of that measure over its instances, never below a tenth of its value:
+
+    scale_L = max(0.1 * |b_L|, max_j v_Lj - min_j v_Lj)
+
+over the seed's per-instance values `v_Lj` when the stage runs on two or
+more instances (a tenth of `|b_L|` alone otherwise; 1 when both are 0). A
+tenth of the seed's value alone saturates near +-30 %, where a 40 % and a
+30 % gain are almost the same number; on the seed's own spread they are
+not. One step on a level outweighs every possible difference
 below it: the levels below span at most 2K steps each and the last level
 less than one. The base is 2K + 2 and not 2K + 1 because `tanh` of a large
 difference is exactly 1.0 in floating point -- with 2K + 1, a candidate one
@@ -76,8 +84,15 @@ class Anchor:
         )
 
 
-def make_anchor(levels: Sequence[LevelConfig], values: Mapping[str, float]) -> Anchor:
-    """The anchor for `values` -- in a run, the seed's aggregated KPIs."""
+def make_anchor(
+    levels: Sequence[LevelConfig],
+    values: Mapping[str, float],
+    per_instance: Mapping[str, Sequence[float]] | None = None,
+) -> Anchor:
+    """The anchor for `values` -- in a run, the seed's aggregated KPIs --
+    with `per_instance` the seed's values per instance, when the stage runs
+    on instances: the last level is then scaled by their range (the module
+    docstring's `scale_L`)."""
     tolerances: dict[str, float] = {}
     for level in levels[:-1]:
         assert level.tolerance is not None  # the config requires one on every level but the last
@@ -86,10 +101,12 @@ def make_anchor(levels: Sequence[LevelConfig], values: Mapping[str, float]) -> A
             level.tolerance * abs(base) if level.relative and base != 0 else level.tolerance
         )
     last = float(values[levels[-1].kpi])
+    spread = [float(v) for v in (per_instance or {}).get(levels[-1].kpi) or ()]
+    scale = max(0.1 * abs(last), max(spread) - min(spread) if len(spread) >= 2 else 0.0)
     return Anchor(
         values={level.kpi: float(values[level.kpi]) for level in levels},
         tolerances=tolerances,
-        scale=0.1 * abs(last) if last != 0 else 1.0,
+        scale=scale if scale > 0 else 1.0,
     )
 
 
