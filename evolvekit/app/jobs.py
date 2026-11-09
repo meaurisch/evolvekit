@@ -20,7 +20,6 @@ import re
 import shutil
 import socket
 import sqlite3
-import subprocess
 import sys
 import threading
 import zipfile
@@ -29,19 +28,23 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Callable
 
-from evolvekit.app import AppError
+from evolvekit.app import AppError, detach
 from evolvekit.app.prices import price_of
 from evolvekit.app.store import safe_relative
-from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, t_cdf
+from evolvekit.app import verdict as verdict_doc
+from evolvekit.app.verdict import (  # noqa: F401 - the words live in verdict.py; callers read them here too
+    _better_word, _chance_of, _chance_words, _decision_of, _final_words, _pct,
+)
+from evolvekit.confirm import BASELINE
 from evolvekit.evaluate.process import scrubbed_environment
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_heartbeat
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import CONFIG, STUDY_RUN
-from evolvekit.harness.execute import read_job, run_study_of, runner_command
+from evolvekit.harness.execute import JOB, ExportFailed, export_path, read_job, run_study_of, write_exports
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS
 from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.study import Study, load_study, resolve_kpi, save_study, study_problems
-from evolvekit.ledger import read_jsonl
+from evolvekit.ledger import _atomic_write, read_jsonl
 from evolvekit.lock import pid_alive, pid_started_at
 from evolvekit.stopping import STOP_REQUEST
 
@@ -64,7 +67,6 @@ it dead."""
 LAUNCH_SLACK_S = 120.0
 """A process that started this long after its launch was written is not the
 one launched: the pid was recycled, by a reboot or by chance."""
-EXPORT_TIMEOUT_S = 300
 MAX_CONTINUE_HOURS = 48.0
 """The most a finished run is given at a time when it goes on."""
 REPORTS_COST = ("openrouter", "claude-cli", "copilot-cli")
@@ -72,8 +74,6 @@ REPORTS_COST = ("openrouter", "claude-cli", "copilot-cli")
 help holds without a price in the table. `copilot-cli` counts Copilot
 requests, not dollars, and reports 0.0: the cap holds trivially."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
-_DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
-_BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
 DocumentOf = Callable[[Path], Any]
 _launch_guard = threading.Lock()
 """Held from the question "is anything active?" to the launch that answers
@@ -138,12 +138,15 @@ def _run_dirs(root: Path) -> list[Path]:
     folder = root / "runs"
     if not folder.is_dir():
         return []
-    found = [p for p in folder.iterdir() if p.is_dir() and _RUN.match(p.name)]
+    # A folder that was never submitted -- no job, no launch, no place in the
+    # queue, such as the files `study compile` writes -- is not a run.
+    found = [p for p in folder.iterdir() if p.is_dir() and _RUN.match(p.name)
+             and any((p / name).is_file() for name in (JOB, LAUNCH, QUEUED))]
 
     def started(path: Path) -> str:
         launch, job = _read(path / LAUNCH) or {}, read_job(path) or {}
         queued = (_read(path / QUEUED) or {}) if not launch else {}
-        return str(launch.get("started_at") or job.get("started_at") or queued.get("queued_at") or "")
+        return str(launch.get("started_at") or job.get("started_at") or launch.get("at") or queued.get("queued_at") or "")
 
     return sorted(found, key=lambda p: (started(p), p.name))
 
@@ -158,9 +161,25 @@ def phase(run_dir: Path) -> dict[str, Any]:
     """`job.json`, with the phase corrected for a process that is gone."""
     job = read_job(run_dir)
     launch = _read(run_dir / LAUNCH) or {}
-    if not launch and (run_dir / QUEUED).is_file():
-        # Waiting its turn: a launch, once there is one, is the newer word.
+    if not launch and job is None and (run_dir / QUEUED).is_file():
+        # Waiting its turn: a launch or a job, once there is one, is the newer
+        # word -- a run that started is never queued again.
         return {"phase": "queued", "queued_at": (_read(run_dir / QUEUED) or {}).get("queued_at")}
+    if launch.get("pending"):
+        # A launch under way (`_mark_pending`), in this process or another:
+        # starting while it is young; a launcher that never wrote the real
+        # launch within LAUNCH_SLACK_S did not start the run.
+        at = _moment(launch.get("at"))
+        young = at is not None and (_now() - _utc(at)).total_seconds() < LAUNCH_SLACK_S
+        if job is None:
+            if young:
+                return {"phase": "starting", "started_at": launch.get("at")}
+            return {"phase": "failed", "started_at": launch.get("at"),
+                    "error": f"the run did not start: {_log_tail(run_dir)}"}
+        if young and job.get("phase") in ("done", "stopped", "failed"):
+            # Resumed, continued or checked again: the old job is still the last word.
+            return {"phase": "starting", "started_at": job.get("started_at"), "plan": job.get("plan")}
+        launch = {}  # the job, written after the marker, is the newer word
     if job is None:
         if launch and run_alive(run_dir, launch.get("pid"), launch.get("started_at"), launch.get("host")):
             return {"phase": "starting", "started_at": launch.get("started_at")}
@@ -284,46 +303,74 @@ def _cap_holds(home: Any, study: Study) -> None:
                    "so the cap cannot hold: add its price under Settings › Models, or turn AI help off", 409)
 
 
-_LAUNCHER = r"""
-import json, os, subprocess, sys
-argv, cwd, log = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
-with open(log, "ab") as out:
-    options = dict(cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True)
-    if os.name == "nt":
-        try:
-            process = subprocess.Popen(argv, creationflags=%d, **options)
-        except OSError:
-            process = subprocess.Popen(argv, creationflags=%d, **options)
-    else:
-        process = subprocess.Popen(argv, start_new_session=True, **options)
-print(process.pid)
-""" % (_DETACHED | _BREAKAWAY, _DETACHED)
-
-
-def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys: bool) -> int:
-    """Start the run so that nothing that ends the app ends the run: through a
-    launcher that exits at once, so the run is nobody's child -- a host that
-    kills the app's process tree (a terminal, an IDE) does not reach it --
-    detached from any console, in a process group (or session) of its own,
-    and outside the app's job object where Windows allows that.
+def _launch(home: Any, root: Path, run_dir: Path, extra: list[str], *, with_keys: bool, claimed: bool = False) -> int:
+    """Start the run so that nothing that ends the app ends the run, through
+    `detach.spawn_detached`: nobody's child, detached from any console, in a
+    process group (or session) of its own, outside the app's job object where
+    Windows allows that.
 
     The run's environment is the app's without its secrets (the app carries
     the API keys for its assistant), plus the keys the app keeps when
-    `with_keys`: only a run with AI search help on has a use for them."""
+    `with_keys`: only a run with AI search help on has a use for them.
+
+    `claimed`: the caller already wrote the pending marker (the claim on a
+    queued run), so it is not written again -- each truncation of
+    `launch.json` is a moment a reader sees nothing."""
     env = {**scrubbed_environment(), "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     if with_keys:
         env.update(home.job_environment())
     argv = [sys.executable, "-m", "evolvekit.app.job", str(root), run_dir.name, *extra]
-    done = subprocess.run([sys.executable, "-c", _LAUNCHER, json.dumps(argv), str(root), str(run_dir / LOG)],
-                          env=env, capture_output=True, text=True, timeout=60)
     try:
-        pid = int(done.stdout.strip().splitlines()[-1])
-    except (IndexError, ValueError):
-        said = (done.stderr.strip().splitlines() or ["no message"])[-1]
-        raise AppError(f"the run could not be started: {said}", 500) from None
-    (run_dir / LAUNCH).write_text(json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
-                                              "host": socket.gethostname(), "argv": argv[1:]}, indent=2), encoding="utf-8")
+        previous: str | None = (run_dir / LAUNCH).read_text(encoding="utf-8")
+    except OSError:
+        previous = None
+    # The pending marker: between here and the real launch below, any process
+    # that asks (the app's ticker, `study wait`) sees the run as starting.
+    if not claimed:
+        _mark_pending(run_dir)
+    try:
+        pid = _spawn(env, argv, root, run_dir)
+    except AppError:
+        # The launcher printed no pid: nothing was launched, and the run
+        # reads as it did before. Any other failure (a launcher that timed
+        # out) may have started the run: the marker stays, and the run's
+        # own job.json, or the marker's age, says what became of it.
+        if previous is None:
+            (run_dir / LAUNCH).unlink(missing_ok=True)
+        else:
+            (run_dir / LAUNCH).write_text(previous, encoding="utf-8")
+        raise
+    _record_launch(run_dir, pid, argv)
     return pid
+
+
+def _mark_pending(run_dir: Path, *, exclusive: bool = False) -> bool:
+    """Write `launch.json` as `{"pending": true, "at": iso}`: a launch is
+    under way. With `exclusive`, only when there is no `launch.json` yet --
+    the claim on a queued run, which one process wins; False when another
+    process holds it."""
+    text = json.dumps({"pending": True, "at": _now().isoformat(timespec="seconds")}, indent=2)
+    try:
+        with open(run_dir / LAUNCH, "x" if exclusive else "w", encoding="utf-8") as out:
+            out.write(text)
+    except FileExistsError:
+        return False
+    return True
+
+
+def _spawn(env: dict[str, str], argv: list[str], root: Path, run_dir: Path) -> int:
+    """The launcher, run to its end: the pid of the detached run it started."""
+    try:
+        return detach.spawn_detached(argv, cwd=root, env=env, log=run_dir / LOG)
+    except detach.DetachError as exc:
+        raise AppError(f"the run could not be started: {exc}", 500) from None
+
+
+def _record_launch(run_dir: Path, pid: int, argv: list[str]) -> None:
+    """The real launch over the pending marker, in one step (a temp file
+    replaced): a reader sees the marker or the launch, never nothing."""
+    _atomic_write(run_dir / LAUNCH, json.dumps({"pid": pid, "started_at": _now().isoformat(timespec="seconds"),
+                                               "host": socket.gethostname(), "argv": argv[1:]}, indent=2))
 
 
 def _wants_keys(root: Path, run_dir: Path) -> bool:
@@ -439,7 +486,12 @@ def _one_at_a_time(home: Any) -> None:
 def launch_queued(home: Any) -> str | None:
     """Launch the run that has waited longest across the home, when nothing is
     active; `"slug/run"` of what was launched, or None. The server calls
-    this every few seconds."""
+    this every few seconds, and so do `evolvekit study wait` and `watch`.
+
+    Two processes may ask at once (the app's ticker, a terminal that waits):
+    `active_run` is asked again just before the launch, and the launch
+    claims the run by creating its pending `launch.json` exclusively, so
+    the same queued run is never launched twice."""
     with _launch_guard:
         if active_run(home) is not None:
             return None
@@ -453,8 +505,24 @@ def launch_queued(home: Any) -> str | None:
             return None
         _, slug, run_dir = min(waiting)
         root = run_dir.parent.parent
-        _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir))
-        (run_dir / QUEUED).unlink(missing_ok=True)  # the launch is the newer word anyway
+        if active_run(home) is not None or not _mark_pending(run_dir, exclusive=True):
+            return None  # another process launched something meanwhile
+        # The claim ends the wait: whoever reads the run from here on sees it starting.
+        try:
+            waited: str | None = (run_dir / QUEUED).read_text(encoding="utf-8")
+        except OSError:
+            waited = None
+        (run_dir / QUEUED).unlink(missing_ok=True)
+        try:
+            _launch(home, root, run_dir, [], with_keys=_wants_keys(root, run_dir), claimed=True)
+        except AppError:
+            # The launcher started nothing: queued again, as it was, and the
+            # next tick tries once more. Any other failure may have started
+            # the run, so it is never queued again (`_launch` keeps the marker).
+            if waited is not None:
+                (run_dir / QUEUED).write_text(waited, encoding="utf-8")
+            (run_dir / LAUNCH).unlink(missing_ok=True)
+            raise
         return f"{slug}/{run_dir.name}"
 
 
@@ -462,11 +530,15 @@ def stop(root: Path, run: str) -> dict[str, Any]:
     run_dir = _run_dir(root, run)
     state = phase(run_dir).get("phase")
     if state == "queued":
-        # It never started: nothing to keep. The directory goes, and the
-        # study is a draft again.
+        # It never started: nothing to keep. The dequeue claims the run as a
+        # launch does (`launch_queued`), so a launch in another process and
+        # this stop cannot both win: the directory goes only when this claim
+        # does, and the study is a draft again.
         with _launch_guard:
-            shutil.rmtree(run_dir, ignore_errors=True)
-        return {"stopping": False, "dequeued": True}
+            if _mark_pending(run_dir, exclusive=True):
+                shutil.rmtree(run_dir, ignore_errors=True)
+                return {"stopping": False, "dequeued": True}
+        state = phase(run_dir).get("phase")  # claimed by a launch meanwhile: it is starting
     if state not in ACTIVE:
         raise AppError("the run is not running", 409)
     (run_dir / STOP_REQUEST).write_text("stop\n", encoding="utf-8")
@@ -509,10 +581,6 @@ def _duration(seconds: float | None) -> str:
     return f"{hours} h {minutes} min" if minutes else f"{hours} h"
 
 
-def _pct(value: float | None, digits: int = 1) -> str:
-    return "" if value is None else f"{abs(value):.{digits}f} %"
-
-
 def _goal(study: Study, harness: Harness) -> dict[str, Any]:
     level = study.goal[0] if study.goal else None
     if level is None:
@@ -530,10 +598,6 @@ def _in_sentence(label: str) -> str:
     if first[:1].isupper() and first[1:] == first[1:].lower():
         return label[0].lower() + label[1:]
     return label
-
-
-def _better_word(direction: str) -> str:
-    return "lower" if direction == "lower" else "higher"
 
 
 def _what(study: Study) -> str:
@@ -848,137 +912,6 @@ def _by_case(runs: list[dict[str, Any]], start: str, best: str, kpi: str, direct
     return rows
 
 
-def _span(low: float, high: float) -> str:
-    """A 95 % interval of an improvement in percent, in words."""
-    if low > 0:
-        return f"likely between {low:.1f} % and {high:.1f} % better"
-    if high < 0:
-        return f"likely between {-high:.1f} % and {-low:.1f} % worse"
-    return f"somewhere between {-low:.1f} % worse and {high:.1f} % better"
-
-
-def _chance_words(p: float | None) -> str:
-    """A chance of a gain in twentieths: "about 19 in 20", with "almost
-    certain" and "1 in 20 or less" at the ends; nothing for no chance."""
-    if p is None:
-        return ""
-    if p >= 0.995:
-        return "almost certain"
-    if p <= 0.05:
-        return "1 in 20 or less"
-    if p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
-        # 0.897 would round to "about 18 in 20", which reads like the rule's
-        # 9 in 10 when the rule said no: say which side of it the chance is.
-        return f"under {round(USE_CHANCE * 10)} in 10"
-    return f"about {round(p * 20)} in 20"
-
-
-def _chance_of(summary: dict[str, Any]) -> float | None:
-    """The chance of a gain as the comparison says it -- or, for a comparison
-    written before it said so, from its mean and spread as `paired_summary`
-    finds it. None without two cases, or without a spread to go by."""
-    if summary.get("chance") is not None:
-        return float(summary["chance"])
-    n, mean, sd = int(summary.get("n") or 0), summary.get("mean"), summary.get("sd")
-    if n < 2 or mean is None or sd is None:
-        return None
-    if sd > 0:
-        return t_cdf(mean / (sd / math.sqrt(n)), n - 1)
-    return 1.0 if mean > 0 else 0.0 if mean < 0 else 0.5
-
-
-def _decision_of(final: dict[str, Any], summary: dict[str, Any]) -> str:
-    """The run's decision; a run made before runs decided gets it from the
-    comparison by the same rule, or from the interval when the comparison
-    gives no chance to apply the rule to."""
-    if final.get("decision"):
-        return str(final["decision"])
-    n, ci, chance = int(summary.get("n") or 0), summary.get("ci95"), _chance_of(summary)
-    if n >= 2 and chance is not None and ci:
-        return decide({**summary, "chance": chance, "worst": summary.get("worst", ci[0])})
-    if n == 0 or summary.get("mean") is None:
-        return "none"
-    if n == 1 or not ci:
-        return "single"
-    return "use" if ci[0] > 0 else "worse" if ci[1] < 0 else "keep"
-
-
-def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str,
-                 baseline: str = "") -> dict[str, Any]:
-    """The final check in a sentence, what to do about it in another, and the
-    rule that decided in a third: the app says "use it" only by `decide`."""
-    final = job.get("final") or {}
-    new = f"the new {what}"
-    they = "it is" if what.startswith("combination") else "they are"
-    keep = {"settings": "Keep your current settings", "data changes": "Keep your data as it is"}.get(
-        what, "Keep your current settings and data")
-    if baseline and what != "data changes":
-        keep += f" ({baseline})"
-    if final.get("skipped"):
-        reason = str(final["skipped"])
-        advice = (f"{keep}: the search found nothing better." if "starting point stayed the best" in reason else
-                  f"Not sure: nothing was held back to check {new} on. A study that holds back a few cases can tell.")
-        return {"state": "skipped", "line": reason[0].upper() + reason[1:] + ".", "advice": advice}
-    if final.get("stopped"):
-        return {"state": "stopped", "line": "The final check was stopped before it finished.",
-                "advice": "Run the final check to get an answer; the runs it already did are kept."}
-    if comparison is None:
-        return {"state": "missing", "line": "There is no final check for this run.", "advice": ""}
-    candidate = final.get("candidate") or next(iter(comparison.get("per_candidate") or {}), None)
-    result = (comparison.get("per_candidate") or {}).get(candidate) or {}
-    summary = result.get("summary") or {}
-    n, mean, ci = summary.get("n") or 0, summary.get("mean"), summary.get("ci95")
-    seeds = len(comparison.get("seeds") or [])
-    chance = _chance_of(summary)
-    worst = summary.get("worst") if summary.get("worst") is not None else (ci[0] if ci else None)
-    decision = _decision_of(final, summary)
-    better = _better_word(goal["direction"])
-    worse = "higher" if better == "lower" else "lower"
-    cases = f"{n} held-back case{'s' if n != 1 else ''}"
-    base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "decision": decision, "chance": chance,
-            "chance_words": _chance_words(chance), "worst_pct": worst, "rule": RULE_WORDS}
-    use_advice = f"Use {new}: {they} probably better on cases the search never saw."
-    if "levels" in result:
-        levels = result["levels"]
-        decision = final.get("decision") or ("use" if levels.get("confirmed") else "keep")
-        base["decision"] = decision
-        if decision == "use":
-            return {**base, "state": "confirmed", "levels": levels.get("levels"),
-                    "line": f"Probably better on {cases}: {levels.get('verdict')}.", "advice": use_advice}
-        return {**base, "state": "unclear", "levels": levels.get("levels"),
-                "line": f"Not proven on {cases}: {levels.get('verdict')}.",
-                "advice": f"{keep} for now: the gain is not proven."}
-    if mean is None:
-        return {**base, "state": "unclear", "line": "The final check has no comparable results.",
-                "advice": f"{keep} for now: the gain is not proven."}
-    word = better if mean >= 0 else worse
-    if ci is None or decision == "single":
-        return {**base, "state": "single",
-                "line": f"On the one held-back case: {_pct(mean)} {word} {goal['says']}.",
-                "advice": "Not sure: one held-back case is too few to tell. A study that holds back three or more can."}
-    low, high = ci
-    words = _chance_words(chance)
-    sure = words == "almost certain"
-    of_gain = "" if not words else "a gain almost certain" if sure else f"a chance of {words} of a gain"
-    if decision == "use":
-        start = "your starting point" + (f" ({baseline})" if baseline and what != "data changes" else "")
-        edge = (f"at least {_pct(worst)} better than {start}" if worst is not None and worst >= 0.05
-                else f"at worst about the same as {start}" if worst is not None and worst > -0.05
-                else f"at worst {_pct(worst)} worse than {start}")
-        how_sure = "" if not words else ", almost certain" if sure else f", a chance of {words}"
-        return {**base, "state": "confirmed",
-                "line": f"Probably better: {_pct(mean)} {better} {goal['says']} on {cases}{how_sure}; {edge}.",
-                "advice": use_advice}
-    if decision == "worse":
-        return {**base, "state": "worse",
-                "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']}{', ' + of_gain if of_gain else ''} "
-                        f"({_span(low, high)}).",
-                "advice": f"{keep}: {new} did worse on cases the search never saw."}
-    parts = ([of_gain] if of_gain else []) + [f"at worst {_pct(worst)} worse ({_span(low, high)})"]
-    return {**base, "state": "unclear", "line": f"Not proven on {cases}: {'; '.join(parts)}.",
-            "advice": f"{keep} for now: the gain is not proven."}
-
-
 def _runs_word(count: int) -> str:
     return f"{count} run{'s' if count != 1 else ''}"
 
@@ -1140,13 +1073,10 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         headline = (f"The best {what} found give{'s' if what.startswith('combination') else ''} {_pct(pct)} "
                     f"{_better_word(goal['direction'])} {goal['says']} than {start_words} {learned}.")
     final_state = job.get("final") or {}
-    comparison, check_runs = None, []
-    if final_state.get("comparison"):
-        comparison = _read(run_dir / final_state["comparison"])
-        check_runs = _read_list((run_dir / final_state["comparison"]).parent / "results.json")
+    comparison, check_runs = verdict_doc._check_of(run_dir, final_state)
     baseline = _baseline(study, harness, seed)
-    started, finished = _started(job, run_dir), job.get("finished_at")
-    used_s = (datetime.fromisoformat(finished) - started).total_seconds() if started and finished else None
+    facts = verdict_doc._run_facts(run_dir, job)
+    started, used_s = facts["started"], facts["used_s"]
     final = _final_words(job, comparison, goal, what, baseline)
     final["recheck"] = _recheck(final, plan, comparison, used_s) if job.get("phase") == "done" else None
     if final.get("state") in ("unclear", "worse", "single"):
@@ -1155,12 +1085,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     candidate = str(final_state.get("candidate") or "")
     held_start, held_best = _means(_paired(check_runs, BASELINE, candidate)) if candidate else ({}, {})
     seed_id, best_id = str((seed or {}).get("id") or ""), str((best or {}).get("id") or "")
-    by_case: dict[str, list[dict[str, Any]]] = {"learned": [], "held": []}
-    if goal["kpi"] and seed_id and best_id and seed_id != best_id:
-        by_case["learned"] = _by_case(_search_evals(run_dir, {seed_id, best_id}), seed_id, best_id,
-                                      goal["kpi"], goal["direction"])
-    if goal["kpi"] and candidate:
-        by_case["held"] = _by_case(check_runs, BASELINE, candidate, goal["kpi"], goal["direction"])
+    by_case = verdict_doc._by_case(run_dir, goal, seed_id, best_id, candidate, check_runs)
 
     kpis = []
     for name in study.kpis:
@@ -1183,32 +1108,7 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
     guardrails = [{"kpi": g.kpi, "max": g.max, "min": g.min} for g in study.guardrails]
     rules = [c.says for c in study.constraints]
 
-    changed = []
-    starting = (seed or {}).get("params") or {}
-    found = (best or {}).get("params") or {}
-    for name in study.tunables():
-        old, new = starting.get(name), found.get(name, starting.get(name))
-        if name in harness.settings:
-            setting = harness.settings[name]
-            label, help_text = setting.label, setting.help
-        else:
-            change = study.data[name]
-            lever = harness.levers.get(change.lever)
-            column = (lever.columns.get(change.column) if lever and change.column else None) or change.column or "in code"
-            label = change.says or f"{lever.label if lever else change.lever}: {column} where {change.where or 'all rows'}"
-            help_text = lever.help if lever else ""
-            today = _today(root, harness, change)
-            factor = {"scale": "×", "add": "+"}.get(change.mode, "=")
-            if today and _finite(new):
-                # The values it makes, not the factor: "3 → 2.82 (×0.939)".
-                changed.append({"name": name, "label": label, "old": old, "new": new, "changed": old != new,
-                                "help": f"{help_text} Today's value on the smallest case, and what the change makes of it.".strip(),
-                                "old_text": _span_text(today),
-                                "new_text": f"{_span_text(_changed_values(today, change.mode, new))} ({factor}{float(new):,.3g})"})
-                continue
-        changed.append({"name": name, "label": label, "help": help_text, "old": old, "new": new,
-                        "old_text": _describe_value(old), "new_text": _describe_value(new),
-                        "changed": old != new})
+    changed = verdict_doc._changed(root, study, harness, seed, best)
     kinds = {"settings"} if study.tuned_settings() else set()
     if study.data:
         kinds.add("data")
@@ -1219,14 +1119,31 @@ def results(root: Path, run: str, document_of: DocumentOf) -> dict[str, Any]:
         "time_per_case_s": float(compiled.get("time_limit_s") or study.limits.time_per_case_s),
         "hours": float(plan.get("hours") or study.budget.hours),
         "runs_per_case": study.limits.runs_per_case,
-        "tried": sum(1 for r in _rows(run_dir) if not r.get("rejected")),
+        "tried": facts["tried"],
         "started_at": started.astimezone().strftime("%Y-%m-%d %H:%M") if started else None,
         "took": _duration(used_s) if used_s is not None else None,
         "compared_with": baseline,
     }
+    # The learned-from figure is the verdict's own (the change of the plain averages), as the report
+    # says it; `pct` is the search's figure (the average of the per-case changes), kept for the Tries plot.
+    learned_pct = verdict_doc._learned_pct(seed, best, goal)
+    # The headline, the advice, the decision and its numbers are the verdict
+    # document's, so the page and `build_verdict` cannot say two things.
+    verdict = verdict_doc._document(root, run_dir, study, harness, job, final, comparison, by_case["held"], changed,
+                                    facts, learned_pct)
+    final["line"], final["advice"] = verdict["line"], verdict["advice"]
+    # The held-back table's change is the document's: the paired mean over the final check's runs.
+    paired = {row["name"]: row["change_pct"] for row in verdict["by_case"]}
+    by_case["held"] = [{**row, "change_pct": paired.get(row["case"], row["change_pct"])} for row in by_case["held"]]
+    if "decision" in final:
+        final["decision"] = verdict["decision"]
+    for key, name in (("mean", "mean_pct"), ("ci95", "ci95_pct"), ("worst_pct", "worst_pct"), ("chance", "chance"),
+                      ("chance_words", "chance_words")):
+        if key in final and name in verdict:
+            final[key] = verdict[name]
     data = {
         "run": run, "phase": job.get("phase"), "study": study.name, "harness": harness.title,
-        "headline": headline, "improvement_pct": pct, "goal": goal, "final": final, "kpis": kpis,
+        "headline": headline, "improvement_pct": pct, "learned_pct": learned_pct, "goal": goal, "final": final, "kpis": kpis,
         "guardrails": guardrails, "rules": rules, "changed": changed, "downloads": downloads, "by_case": by_case,
         "context": context,
         "best_id": (best or {}).get("id"), "is_seed": bool(best and seed and best.get("id") == seed.get("id")),
@@ -1251,22 +1168,15 @@ def _best_values(run_dir: Path, document_of: DocumentOf) -> dict[str, Any]:
 
 
 def _export(root: Path, run_dir: Path, name: str, values: dict[str, Any], case: str | None = None) -> bytes:
-    study, harness = load_study(root), load_harness(root / "harness")
-    scratch = run_dir / "downloads"
-    scratch.mkdir(exist_ok=True)
-    (scratch / "values.json").write_text(json.dumps(values, indent=2), encoding="utf-8")
-    suffix = {"settings_json": ".json", "settings_flags": ".txt", "data_changes": ".json", "requests": ".json"}.get(name, ".out")
-    out = scratch / f"{name}{'-' + Path(case).stem if case else ''}{suffix}"
-    argv = runner_command(study, harness, str(root / "harness" / "runner.py")) + [
-        "export", "--format", name, "--values", str(scratch / "values.json"), "--study", str(run_dir / STUDY_RUN),
-        "--out", str(out)]
-    if case:
-        argv += ["--case", str(safe_relative(root, case))]
-    done = subprocess.run(argv, cwd=run_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          timeout=EXPORT_TIMEOUT_S)
-    if done.returncode != 0 or not out.is_file():
-        said = (done.stderr.strip().splitlines() or ["no message"])[-1]
-        raise AppError(f"the export {name} failed: {said}", 500)
+    """One export of `values`: the file the final check wrote when it is of
+    these values, else written now (`execute.write_exports`)."""
+    target = str(safe_relative(root, case)) if case else None
+    out = export_path(run_dir, name, target)
+    if not (out.is_file() and _read(run_dir / "downloads" / "values.json") == values):
+        try:
+            write_exports(root, run_dir, values, names=[name], case=target)
+        except ExportFailed as exc:
+            raise AppError(str(exc), 500) from None
     return out.read_bytes()
 
 
@@ -1427,7 +1337,8 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font:13px/1.5 ui-m
 
 def state_line(root: Path, study: Study, document_of: DocumentOf | None = None) -> dict[str, Any]:
     """The home card's state in a few words: "draft · step 4 of 7", "running ·
-    1 h 10 min left · 3.2 % better so far", "finished · probably better: 3.1 %
+    round 2 of 6 · 1 h 10 min left · 3.2 % lower real cost so far, not checked yet" (the round only with
+    `document_of`; no time left when the rounds were set by hand), "finished · probably better: 3.1 %
     lower real cost", "finished · not proven on the held-back cases". A draft
     is `study` as it is today; a run is described by the study it was
     started with (the copy the latest run keeps). Besides the words, the
@@ -1462,6 +1373,15 @@ def _check_progress(run_dir: Path, job: dict[str, Any], plan: dict[str, Any], st
             done = sum(1 for line in handle if '"eval_finished"' in line)
     planned = 2 * cases * seeds
     return {"done": min(done, planned), "planned": planned}
+
+
+def _rounds_by_hand(plan: dict[str, Any], study: Study | None) -> bool:
+    """Whether the run's rounds were set by hand (`plan: {auto: false, generations: …}`):
+    then the rounds stop the search, and the hours are only an upper bound."""
+    if "adjusted" in plan:
+        return bool({"rounds", "generations"} & set(plan.get("adjusted") or ()))
+    chosen = getattr(study, "plan", None) or {}
+    return not chosen.get("auto", True) and bool({"rounds", "generations"} & set(chosen))
 
 
 def run_line(root: Path, study: Study | None, run_dir: Path, document_of: DocumentOf | None = None) -> dict[str, Any]:
@@ -1506,10 +1426,27 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         started, hours = _window(job, run_dir, float(plan.get("hours")
                                                       or (study.budget.hours if study is not None else 0)))
         left = max(0.0, hours * 3600 - (_now() - started).total_seconds()) if started and hours else None
-        line = "running" + (" · continued" if _continued(job) else "") + (f" · {_duration(left)} left" if left is not None else "")
+        if _rounds_by_hand(plan, study) and not _continued(job):
+            # The rounds stop a manual plan, not the hours: the hours' "time left" would be wrong.
+            left = None
+        planned = facts["rounds"]["planned"]
+        where = ""
+        if state == "check":
+            where = " · final check"
+        elif isinstance(last, int):
+            current = max(1, last + 1)
+            current = min(current, planned) if planned else current
+            where = f" · round {current}" + (f" of {planned}" if planned else "")
+        elif not _continued(job) and not job.get("resumed_at") and (
+                document_of is not None or not (run_dir / "events.jsonl").exists()):
+            # Live, and no round has reported yet (known: the status was read, or there are no events).
+            where = " · starting" + (f" round 1 of {planned}" if planned else "")
+        line = ("running" + (" · continued" if _continued(job) else "") + where
+                + (f" · {_duration(left)} left" if left is not None else ""))
         if document_of is not None and (run_dir / "events.jsonl").exists():
             if pct is not None and pct > 0:
-                line += f" · {_pct(pct)} better so far"
+                # Not "better": nothing claims that before the final check does.
+                line += f" · {_pct(pct)} {_better_word(goal['direction'])} {goal['says']} so far, not checked yet"
         facts.update({"left_s": left, "hours": hours, "continued": _continued(job) or bool(job.get("resumed_at")),
                       "finish_at": (started + timedelta(hours=hours)).astimezone().strftime("%H:%M") if started and hours else None})
         if state == "check":
@@ -1519,7 +1456,8 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
         final = job.get("final") or {}
         if final.get("skipped"):
             reason = str(final["skipped"]).split(":")[0].split(",")[0]  # "the starting point stayed the best"
-            return {"kind": "finished", "run": run_dir.name, "line": f"finished · {reason}", **facts, "decision": "skipped"}
+            return _with_verdict(root, run_dir, document_of, {"kind": "finished", "run": run_dir.name,
+                                                              "line": f"finished · {reason}", **facts, "decision": "skipped"})
         comparison = _read(run_dir / final["comparison"]) if final.get("comparison") else None
         summary = (((comparison or {}).get("per_candidate") or {}).get(final.get("candidate") or "") or {}).get("summary") or {}
         mean = summary.get("mean")
@@ -1529,15 +1467,34 @@ def run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docume
                       "n": int(summary.get("n") or 0)})
         if decision == "use":
             amount = f": {_pct(mean)} {_better_word(goal['direction'])} {goal['says']}" if isinstance(mean, (int, float)) else ""
-            return {"kind": "finished", "run": run_dir.name, "line": "finished · probably better" + amount, **facts}
-        if decision == "worse":
-            return {"kind": "finished", "tone": "bad", "run": run_dir.name, "line": "finished · worse on the held-back cases", **facts}
-        return {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not proven on the held-back cases", **facts}
+            card = {"kind": "finished", "run": run_dir.name, "line": "finished · probably better" + amount, **facts}
+        elif decision == "worse":
+            card = {"kind": "finished", "tone": "bad", "run": run_dir.name, "line": "finished · worse on the held-back cases", **facts}
+        else:
+            card = {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · not proven on the held-back cases", **facts}
+        return _with_verdict(root, run_dir, document_of, card)
     if state == "stopped":
         return {"kind": "stopped", "run": run_dir.name, "line": "stopped", **facts,
                 "check_stopped": bool((job.get("final") or {}).get("stopped"))}
     return {"kind": "failed", "run": run_dir.name, "line": "failed · " + str(job.get("error") or "see the run")[:80], **facts,
             "error": str(job.get("error") or "")}
+
+
+def _with_verdict(root: Path, run_dir: Path, document_of: DocumentOf | None, card: dict[str, Any]) -> dict[str, Any]:
+    """A finished card with the verdict's own words beside it (design 3.4): `verdict` holds the
+    document's `decision`, `line` and `advice`, and `says`, the decision in the state line's words
+    ("not proven on the held-back cases", "probably better"). Only with `document_of`, as the card
+    asks for it: a list of runs need not pay for a verdict per run; a run whose verdict cannot be
+    read keeps its card without one."""
+    if document_of is None:
+        return card
+    try:
+        document = verdict_doc.build_verdict(root, run_dir.name)
+    except Exception:  # noqa: BLE001 - a card must render even for a damaged run
+        return card
+    says = str(card["line"]).removeprefix("finished · ").split(":")[0]
+    return {**card, "verdict": {"decision": document.get("decision"), "line": document.get("line", ""),
+                                "advice": document.get("advice", ""), "says": says}}
 
 
 def next_study(home: Any, root: Path, run: str, name: str = "") -> str:

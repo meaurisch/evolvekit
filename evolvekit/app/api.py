@@ -19,7 +19,6 @@ from evolvekit.app.server import FileResponse, Request, route
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import plan_for, read_preview
 from evolvekit.harness.manifest import Harness
-from evolvekit.harness.probe import probe_application
 from evolvekit.harness.study import SettingChoice, save_study
 
 __all__ = ["ROUTES", "describe_harness"]
@@ -263,19 +262,7 @@ def detect(req: Request) -> list[dict[str, Any]]:
 
 def application(req: Request) -> dict[str, Any]:
     slug = req.params["slug"]
-    root, study, pinned = req.home.load(slug)
-    path = str(req.json().get("path") or "").strip().strip('"')
-    if not path:
-        raise AppError("path: where the application is")
-    if not Path(path).is_absolute():
-        raise AppError(f"give the full path to the application; {path!r} is not one")
-    probe = probe_application(pinned, path)
-    answer = {"path": path, "ok": probe.ok, "message": probe.message, "version": probe.version, "python": probe.python}
-    if probe.ok:
-        study.application_path = str(Path(path))
-        study.application_version = probe.version or ""
-        save_study(study, root)
-        req.home.remember_application(str(Path(path)))
+    answer = req.home.set_application(slug, str(req.json().get("path") or ""))
     return {"probe": answer, "study": _document(req, slug)}
 
 

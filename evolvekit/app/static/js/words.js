@@ -100,10 +100,11 @@
       c.timeline = { rounds: r.planned || Math.max(1, (r.done || 0) + 1), done: r.done || 0, running: s.phase === "check" ? null : (r.done || 0) + 1,
         check: s.phase === "check" && s.check ? [s.check.done, s.check.planned] : null };
     } else if (s.kind === "finished") {
-      var w = EK.answerWords(s);
-      c.kicker = EK.verdictWord(s.decision) + (s.n ? " · " + EK.plural(s.n, "held-back case") : "");
-      c.head = w.head;
-      c.sub = s.decision === "use" || s.decision === "keep" ? "" : w.sub;
+      // One world (design 3.4): the verdict's own line and advice, the label in the state line's words.
+      var v = s.verdict || { says: String(s.line || "finished").replace(/^finished · /, "").split(":")[0], line: "", advice: "" };
+      c.kicker = EK.capital(v.says);
+      c.head = v.line || EK.capital(v.says);
+      c.sub = v.advice || "";
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
     } else if (s.kind === "stopped") {
       c.kicker = s.check_stopped ? "Final check stopped" : "Stopped" + (r.done ? " · round " + (r.done + 1) : "");

@@ -179,3 +179,100 @@ def test_every_route_the_old_page_used_is_still_reachable():
             continue
         last = words[-1]
         assert re.search(rf"[\"'/]{re.escape(last)}[\"'/?]", SOURCE), f"{method} {literal}: nothing in the page calls it"
+
+
+# ---------------------------------------------------------------------------
+# the verdict: rendered from the results document, never composed on the page
+# ---------------------------------------------------------------------------
+
+STUDY_PAGE = (STATIC / "js" / "pages" / "study.js").read_text(encoding="utf-8")
+
+
+def _strip_branches(source: str) -> str:
+    """The body of the status strip's `strip()`: where the headline is chosen."""
+    start = source.index("function strip()")
+    return source[start:source.index("function foundWords()", start)]
+
+
+def test_the_study_page_headline_is_the_verdict_line_and_advice():
+    """Design 3.4: the page's headline and the sentence under it are the
+    results document's `final.line` and `final.advice`, verbatim."""
+    body = _strip_branches(STUDY_PAGE)
+    finished = body[body.index('d === "use"'):]
+    heads, subs = re.findall(r"head: ([^,]+),", finished), re.findall(r"sub: ([^,]+),", finished)
+    assert len(heads) >= 7 and set(heads) == {"verdictHead(f)"}, heads
+    assert len(subs) == len(heads) and set(subs) == {"verdictSub(f)"}, subs
+    assert "function verdictHead" in STUDY_PAGE and "f.line" in STUDY_PAGE[STUDY_PAGE.index("function verdictHead"):]
+    assert "f.advice" in STUDY_PAGE[STUDY_PAGE.index("function verdictSub"):]
+    for old in ("EK.better(f.mean)", "on one case", "One case gives no range, so no answer.", "but not sure enough"):
+        assert old not in finished, f"the page composes its own verdict again: {old!r}"
+
+
+def test_the_home_card_speaks_the_verdicts_words():
+    """One world: a finished card's lines are the verdict's `line` and `advice`
+    (the home document's `verdict`), its label the state line's words; the card
+    composes no verdict of its own."""
+    words = (STATIC / "js" / "words.js").read_text(encoding="utf-8")
+    card = words[words.index("EK.cardOf = function"):]
+    finished = card[card.index('s.kind === "finished"'):card.index('s.kind === "stopped"')]
+    assert "v.line" in finished and "v.advice" in finished and "v.says" in finished, finished
+    assert "s.verdict" in finished
+    for old in ("EK.answerWords", "EK.verdictWord", "EK.better", "on one case", "No answer"):
+        assert old not in finished, f"the card composes its own verdict again: {old!r}"
+
+
+def test_no_figure_on_the_study_page_says_better():
+    """The same number, one way: one decimal, "lower"/"higher" by the measure's
+    direction, in the chip and the held-back table; "better" only inside the line."""
+    parts = (STATIC / "js" / "parts.js").read_text(encoding="utf-8")
+    chip = parts[parts.index("EK.chosenChip = function"):parts.index("EK.hoverCard = function")]
+    assert "EK.better" not in chip and "on the cases it learned from, not checked" in chip
+    assert "EK.change(x.change_pct" in STUDY_PAGE, "the held-back table: one decimal, the measure's direction"
+    assert "mean of the paired runs" in STUDY_PAGE, "the table's column says what its figure is"
+    drawer = STUDY_PAGE[STUDY_PAGE.index("function comboDrawer"):STUDY_PAGE.index("function runsDrawer")]
+    assert "EK.better" not in drawer, "the combination drawer: one decimal and the direction, in every row"
+    assert "Details shows" not in STUDY_PAGE and "${r.final.line}" not in STUDY_PAGE, "the line is the headline, once"
+
+
+def test_the_change_words_round_like_the_report():
+    """`EK.change` in core.js, run under node: the report's `_change` words."""
+    import json
+    import shutil
+    import subprocess
+
+    from evolvekit.app.report import _change
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+    core = (STATIC / "js" / "core.js").read_text(encoding="utf-8")
+    cases = [(4.78, "lower"), (-7.43, "lower"), (7.46, "higher"), (0.01, "lower"), (None, "lower")]
+    script = ("var window = {}, document = {addEventListener: function () {}}, navigator = {}, location = {href: 'http://127.0.0.1/', hash: '', search: ''};\n"
+              + core + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(function (c) { return window.EK.change(c[0], c[1]); })));")
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == [_change(v, d) for v, d in cases]
+
+
+def test_the_verdict_words_are_escaped_once():
+    """`EK.figures` (the headline's path), run under node: an apostrophe is one
+    `&#39;`, never an entity whose digits were wrapped as a figure, and markup in
+    the words stays text."""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+    core = (STATIC / "js" / "core.js").read_text(encoding="utf-8")
+    lines = ["at worst 0.3 % worse than your starting point (Demo tour's own defaults).", "<b>&</b> 12"]
+    script = ("var window = {}, document = {addEventListener: function () {}}, navigator = {}, location = {href: 'http://127.0.0.1/', hash: '', search: ''};\n"
+              + core + "\nconsole.log(JSON.stringify(" + json.dumps(lines)
+              + ".map(function (t) { var E = window.EK; return String(E.html`<p>${E.figures(t)}</p>`); })));")
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert done.returncode == 0, done.stderr
+    tour, markup = json.loads(done.stdout)
+    assert tour == ('<p>at worst <span class="fig">0.3 %</span> worse than your starting point'
+                    " (Demo tour&#39;s own defaults).</p>"), tour
+    assert markup == '<p>&lt;b&gt;&amp;&lt;/b&gt; <span class="fig">12</span></p>', markup

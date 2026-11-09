@@ -1,16 +1,20 @@
 """`python -m evolvekit init | preflight | run | status | dashboard | leaderboard | confirm | export | stop
-| harness new/check/pack/install/list | study new/preview/compile/run`."""
+| harness new/check/pack/install/list/discover | study new/preview/compile/run`."""
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
+from evolvekit.app import AppError
+from evolvekit.harness import HarnessError
 from evolvekit.config import ConfigError, load_config
 from evolvekit.economics import DEFAULT_WINDOW, format_series, series
 from evolvekit.env import LoadedEnv, load_env_files
@@ -384,6 +388,14 @@ def build_parser() -> argparse.ArgumentParser:
     h_install.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
     h_list = harness.add_parser("list", help="the harnesses evolvekit can offer")
     h_list.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    h_discover = harness.add_parser(
+        "discover", help="what an application exposes, before a harness exists: a first list of candidate settings")
+    h_target = h_discover.add_mutually_exclusive_group(required=True)
+    h_target.add_argument("--program", metavar="PATH", help="a program: runs PATH --version and PATH --help")
+    h_target.add_argument("--python", metavar="PATH", help="a Python interpreter that imports --module")
+    h_discover.add_argument("--module", metavar="NAME", help="with --python: the module to import and read")
+    h_discover.add_argument("--json", action="store_true",
+                            help='print {"application", "settings", "notes"} for a script or an AI coding tool')
 
     p_app = sub.add_parser("app", help="the app: set up, run and read studies in the browser")
     p_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
@@ -392,19 +404,94 @@ def build_parser() -> argparse.ArgumentParser:
     p_app.add_argument("--shortcut", action="store_true",
                        help="write evolvekit.cmd to the Windows desktop, which starts the app with a double-click")
 
+    p_doctor = sub.add_parser("doctor", help="is this machine ready? (exit 0 when every check passes, else 1)")
+    p_doctor.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    p_doctor.add_argument("--app", metavar="PATH", help="also ask every harness whether this application is its own")
+    p_doctor.add_argument("--json", action="store_true", help="print the checks as a JSON list")
+
+    p_skill = sub.add_parser("skill", help="the skills that ship with evolvekit: list and install them")
+    skill = p_skill.add_subparsers(dest="skill_command", required=True)
+    skill.add_parser("list", help="the skills that ship with evolvekit")
+    k_install = skill.add_parser("install", help="write the skills into a project (.agents/skills, with a pointer in .claude/skills)")
+    k_install.add_argument("--dir", default=".", help="the project folder (default: the current folder)")
+    k_install.add_argument("--force", action="store_true", help="overwrite files that exist")
+
     p_study = sub.add_parser("study", help="make, preview, compile and run studies")
     study = p_study.add_subparsers(dest="study_command", required=True)
     s_new = study.add_parser("new", help="a new study folder from a harness (and a template)")
-    s_new.add_argument("directory")
+    s_new.add_argument("name", help="the study's name; its folder in the library home is made from it")
     s_new.add_argument("--harness", required=True, help="a harness folder, or the id of a known harness")
     s_new.add_argument("--template", help="a template id of the harness (default: a blank study)")
-    s_new.add_argument("--name", help="the study's name (default: the folder's)")
-    s_new.add_argument("--home", help="the library home, to find harnesses by id")
+    s_new.add_argument("--app", help="where the application is (a path)")
+    s_new.add_argument("--dir", help="write a standalone study folder here instead of into the library home")
+    s_new.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_new.add_argument("--json", action="store_true", help='print {"slug", "root"} and nothing else')
+    s_app = study.add_parser("application", help="say where a study's application is, or list the ones found here")
+    s_app.add_argument("slug", help="the study's name in the library home")
+    s_app.add_argument("path", nargs="?", help="the full path to the application")
+    s_app.add_argument("--detect", action="store_true", help="list the applications found on this computer")
+    s_app.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_app.add_argument("--json", action="store_true", help="print JSON and nothing else")
+    s_list = study.add_parser("list", help="the studies in the library home")
+    s_list.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_list.add_argument("--json", action="store_true", help='print a list of {"slug", "name", "harness", "state"}')
+    s_check = study.add_parser("check", help="name what is still missing before the study can run")
+    s_check.add_argument("slug", help="the study's name in the library home")
+    s_check.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_cases = study.add_parser("cases", help="add cases to a study and hold some back for the final check")
+    s_cases.add_argument("slug", help="the study's name in the library home")
+    s_cases.add_argument("--add", nargs="+", required=True, metavar="FILE", help="the case files to add")
+    s_cases.add_argument("--hold-back", type=int, help="how many cases to hold back (default: the suggestion)")
+    s_cases.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
+    s_cases.add_argument("--json", action="store_true", help='print {"added", "refused", "test"} and nothing else')
+    home_help = "the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)"
+    s_start = study.add_parser("start", help="start the study, as the app's Start does (queued while another study runs)")
+    s_start.add_argument("slug", help="the study's name in the library home")
+    s_start.add_argument("--wait", action="store_true", help="then wait until the run has ended, as study wait does")
+    s_start.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (exit 4)")
+    s_start.add_argument("--home", help=home_help)
+    s_start.add_argument("--json", action="store_true", help='print {"run", "started"|"queued"} (one JSON document per line)')
+    s_stop = study.add_parser("stop", help="ask the study's running run to stop, or take back a queued one")
+    s_stop.add_argument("slug", help="the study's name in the library home")
+    s_stop.add_argument("--home", help=home_help)
+    s_stop.add_argument("--json", action="store_true", help="print JSON and nothing else")
+    s_status = study.add_parser("status", help="where the study's run is: the state line, or the app's status document")
+    s_status.add_argument("slug", help="the study's name in the library home")
+    s_status.add_argument("--run", help="a run's id (default: the latest)")
+    s_status.add_argument("--home", help=home_help)
+    s_status.add_argument("--json", action="store_true", help="print the document the app's Running screen reads")
+    s_watch = study.add_parser("watch", help="the status every few seconds until the run ends; starts a queued run")
+    s_watch.add_argument("slug", help="the study's name in the library home")
+    s_watch.add_argument("--every", type=float, default=5.0, help="seconds between looks (default 5)")
+    s_watch.add_argument("--home", help=home_help)
+    s_watch.add_argument("--json", action="store_true", help="print one status document per line")
+    s_wait = study.add_parser("wait", help="wait until the run has ended (exit 0 done, 1 stopped or failed, 4 timeout)")
+    s_wait.add_argument("slug", help="the study's name in the library home")
+    s_wait.add_argument("--timeout", type=float, help="give up after this many seconds (exit 4; default: no limit)")
+    s_wait.add_argument("--home", help=home_help)
+    s_wait.add_argument("--json", action="store_true", help="print the verdict document")
+    s_verdict = study.add_parser("verdict", help="the final check's answer: the verdict and what to do about it")
+    s_verdict.add_argument("slug", help="the study's name in the library home")
+    s_verdict.add_argument("--run", help="a run's id (default: the latest)")
+    s_verdict.add_argument("--home", help=home_help)
+    s_verdict.add_argument("--json", action="store_true", help="print the verdict document")
+    s_report = study.add_parser("report", help="the report of a run: the verdict document, or --markdown for people")
+    s_report.add_argument("slug", help="the study's name in the library home")
+    s_report.add_argument("--run", help="a run's id (default: the latest)")
+    s_report.add_argument("--home", help=home_help)
+    form = s_report.add_mutually_exclusive_group()
+    form.add_argument("--markdown", action="store_true", help="the report as Markdown")
+    form.add_argument("--json", action="store_true", help="the verdict document (the default)")
+    s_open = study.add_parser("open", help="print the study's address in the app (starting the app if none runs) and open it")
+    s_open.add_argument("slug", help="the study's name in the library home")
+    s_open.add_argument("--no-browser", action="store_true", help="only print the address")
+    s_open.add_argument("--home", help=home_help)
     for name, text in (("preview", "solve the smallest training case at the starting values"),
                        ("compile", "compile the study into runs/<id>/evolvekit.yaml, with the automatic plan"),
                        ("run", "compile, search, and check the best on the held-back cases")):
         s_cmd = study.add_parser(name, help=text)
-        s_cmd.add_argument("directory")
+        s_cmd.add_argument("directory", help="a study folder, or the name of a study in the library home")
+        s_cmd.add_argument("--home", help="the library home (default: EVOLVEKIT_HOME, else ~/evolvekit)")
         if name != "preview":
             s_cmd.add_argument("--run-id", help="the run's folder name (default: the time)")
     return parser
@@ -804,6 +891,17 @@ def cmd_harness(args: argparse.Namespace) -> int:
         harness = library.install_harness(args.archive, Path(args.home) if args.home else None)
         print(f"installed {harness.title} {harness.version} in {harness.root}")
         return 0
+    if command == "discover":
+        from evolvekit.harness import discover
+
+        if args.python and not args.module:
+            raise ValueError("--python needs --module NAME: the module to import and read")
+        if args.program and args.module:
+            raise ValueError("--module goes with --python, not with --program")
+        found = (discover.discover_program(args.program) if args.program
+                 else discover.discover_python(args.python, args.module))
+        print(json.dumps(found, indent=2) if args.json else discover.render(found))
+        return 0
     entries = library.find_harnesses(Path(args.home) if args.home else None)
     if not entries:
         print("no harnesses: install one with  python -m evolvekit harness install FILE.zip")
@@ -816,6 +914,404 @@ def cmd_harness(args: argparse.Namespace) -> int:
     return 0
 
 
+def _home(args: argparse.Namespace):
+    from evolvekit.app.store import Home
+    from evolvekit.harness.library import default_home
+
+    return Home(args.home or default_home())
+
+
+def _full_path(path: str) -> str:
+    """A path given on the command line, relative to where the command runs,
+    made whole: the app and its API take full paths only."""
+    path = str(path).strip().strip('"')
+    return str(Path(path).resolve()) if path else path
+
+
+def _study_root(value: str, args: argparse.Namespace) -> Path:
+    """A study given as a folder on disk, else as a name in the library home
+    (the home is only opened when the value is not a folder)."""
+    folder = Path(value)
+    if folder.is_dir():
+        if not folder.is_absolute() and folder.name == value and (_home(args).studies_dir / value / "study.yaml").is_file():
+            print(f"using the folder {folder.resolve()}", file=sys.stderr)
+        return folder
+    return _home(args).study_root(value)
+
+
+def _study_library_command(command: str, args: argparse.Namespace) -> int:
+    from evolvekit.app import jobs
+    from evolvekit.app.detect import detect
+    from evolvekit.app.store import STEPS
+
+    home = _home(args)
+    if command == "list":
+        rows = []
+        for slug in home.slugs():
+            root, study, harness = home.load(slug)
+            rows.append({"slug": slug, "name": study.name, "harness": harness.title,
+                         "state": jobs.state_line(root, study, build_status)["line"]})  # the round, as the README shows
+        if args.json:
+            print(json.dumps(rows))
+        for row in [] if args.json else rows:
+            print(f"{row['slug']}  {row['name']}  {row['harness']}  {row['state']}")
+        return 0
+    slug = args.slug
+    if command == "check":
+        problems = home.problems(slug)
+        for problem in problems:
+            print(f"{problem['key']}: {problem['text']}" if problem["key"] != problem["text"] else problem["text"],
+                  file=sys.stderr)
+        if problems:
+            return 2
+        _advance_step(home.study_root(slug), len(STEPS))  # ready: the Set up's last step, Review and start
+        print("ready: no problems")
+        print(_plan_line(home.load(slug)[1]))
+        _say_next(args, f"study start {slug}")
+        return 0
+    if command == "application":
+        if args.detect:
+            _, _, harness = home.load(slug)
+            found = detect(harness, recent=home.settings()["recent_applications"])
+            if args.json:
+                print(json.dumps(found))
+            for item in [] if args.json else found:
+                print(f"{item['message']}  {item['path']}")
+            return 0
+        if not args.path:
+            raise AppError("path: where the application is (or --detect to look for it)")
+        answer = home.set_application(slug, _full_path(args.path))
+        if args.json:
+            print(json.dumps(answer))
+        elif answer["ok"]:
+            print(f"{answer['path']}" + (f" (version {answer['version']})" if answer["version"] else ""))
+        if not answer["ok"]:
+            print(answer["message"], file=sys.stderr)
+            return 1
+        _advance_step(home.study_root(slug), _STEP_AFTER_APPLICATION)
+        return 0
+    files: list[Path] = []
+    for value in args.add:
+        if any(mark in value for mark in "*?[") and not Path(value).is_file():
+            # PowerShell and cmd hand a pattern over as it is: expand it here.
+            matches = sorted(glob.glob(value))
+            if not matches:
+                print(f"no file matches {value}", file=sys.stderr)
+                return 1
+            files.extend(Path(m) for m in matches)
+        else:
+            files.append(Path(value))
+    result = home.add_cases(slug, files, hold_back=args.hold_back)
+    if args.json:
+        print(json.dumps(result))
+    else:
+        n = len(result["added"])
+        print(f"{n} case{'' if n == 1 else 's'} added, {len(result['test'])} held back" if n else "nothing added")
+    for refused in result["refused"]:
+        print(refused["reason"], file=sys.stderr)
+    if result["refused"]:
+        return 1
+    if result["added"]:
+        _advance_step(home.study_root(slug), _STEP_AFTER_CASES)
+        _say_next(args, f"study check {slug}")
+    return 0
+
+
+_STEP_AFTER_APPLICATION = 3
+"""The Set up's step after Application (3, Cases): where `study application` leaves a study."""
+_STEP_AFTER_CASES = 4
+"""The step after Cases (4, What may change): where `study cases` leaves a study."""
+
+
+def _advance_step(root: Path, step: int) -> None:
+    """Move the study's Set up step (the app's "draft · step N of 7") on to
+    `step`, never back: a command finished the step before it."""
+    from evolvekit.harness.study import load_study, save_study
+
+    study = load_study(root)
+    if study.step < step:
+        study.step = step
+        save_study(study, root)
+
+
+WAIT_EVERY_S = 2.0
+"""How often `study wait` looks at the run, and ticks the queue."""
+_ENDED = ("done", "stopped", "failed")
+
+
+def _tick_queue(home) -> None:
+    """Launch the run that waits longest when nothing is active, as the app's
+    ticker does, so a queued study starts with no app open. A launch that
+    fails -- any study's, for any reason -- is said in one line and the wait
+    goes on, as the app's ticker does: the next tick tries again."""
+    from evolvekit.app import jobs
+
+    try:
+        jobs.launch_queued(home)
+    except Exception as exc:  # noqa: BLE001 - a fault in another study's launch does not end this wait
+        print(f"could not start a queued run: {exc}", file=sys.stderr)
+
+
+def _gone(run_dir: Path, state: str | None) -> bool:
+    """Whether the run has left: its folder is gone, or it reads as nothing
+    -- not queued, no launch under way, no job -- as a dequeue leaves it.
+    A run with a `job.json` is never gone, whatever its phase reads as."""
+    from evolvekit.app import jobs
+
+    if not run_dir.is_dir():
+        return True
+    return (state == "unknown" and not (run_dir / jobs.QUEUED).exists() and not (run_dir / jobs.LAUNCH).exists()
+            and not (run_dir / "job.json").exists())
+
+
+def _say_gone(run: str) -> int:
+    print(f"run {run} is gone: it was taken out of the queue, or its folder was removed", file=sys.stderr)
+    return 1
+
+
+def _run_of(root: Path, run: str | None = None) -> str:
+    from evolvekit.app import jobs
+
+    run = run or jobs.latest_run(root)
+    if not run:
+        raise AppError("the study has not been started yet", 404)
+    return run
+
+
+def _home_flag(home: str | None) -> str:
+    """` --home "<home>"` as the user wrote it, quoted for any shell; nothing without one."""
+    return f' --home "{home}"' if home else ""
+
+
+def _say_next(args: argparse.Namespace, *commands: str) -> None:
+    """The next step for people, on stderr (`next: evolvekit study start depot-a`), with the
+    `--home` the user passed: never on stdout and never with `--json`, so scripts read what they did."""
+    if getattr(args, "json", False):
+        return
+    sys.stdout.flush()  # the command's own result first: a piped stdout is buffered, stderr is not
+    flag = _home_flag(getattr(args, "home", None))
+    said = ", or ".join("evolvekit " + command + flag for command in commands)
+    print(f"next: {said}", file=sys.stderr)
+
+
+def _plan_line(study) -> str:
+    """The plan `study check` says the study will run, as study.yaml writes it
+    (no solving): "plan: 2 rounds × 2 combinations, budget 0.05 h", or
+    "plan: automatic (budget 0.1 h)"."""
+    plan, budget = dict(study.plan or {}), f"budget {float(study.budget.hours):g} h"
+    if plan.get("auto", True):
+        return f"plan: automatic ({budget})"
+    rounds, children = plan.get("rounds", plan.get("generations")), plan.get("children")
+    shape = " × ".join(part for part in (
+        f"{rounds} round{'' if rounds == 1 else 's'}" if rounds else "",
+        f"{children} combination{'' if children == 1 else 's'}" if children else "") if part)
+    return f"plan: {shape}, {budget}" if shape else f"plan: set by hand ({budget})"
+
+
+def _say_verdict(document: dict) -> None:
+    """The verdict's sentence, then what to do about it, one per line."""
+    print(document["line"])
+    if document.get("advice"):
+        print(document["advice"])
+
+
+OPEN_WAIT_S = 15.0
+"""How long `study open` waits for an app it started to say it is running."""
+APP_LOG = "app.log"
+"""Where the output of an app that `study open` started goes, in the home."""
+
+
+def _study_open(args: argparse.Namespace) -> int:
+    """Print the study's address in the running app -- starting the app,
+    detached, when none runs -- and open it unless `--no-browser`."""
+    import subprocess
+
+    from evolvekit.app import detach
+    from evolvekit.app.running import read_running
+    from evolvekit.dashboard import open_in_browser
+
+    home = _home(args)
+    home.study_root(args.slug)  # no app is started for a study that is not there
+    running = read_running(home.root)
+    if running is None:
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        argv = [sys.executable, "-m", "evolvekit", "app", "--home", str(home.root), "--no-browser"]
+        try:
+            detach.spawn_detached(argv, cwd=home.root, env=env, log=home.root / APP_LOG)
+        except (detach.DetachError, subprocess.TimeoutExpired):
+            pass  # the wait below says so
+        deadline = time.monotonic() + OPEN_WAIT_S
+        while running is None and time.monotonic() < deadline:
+            time.sleep(0.2)
+            running = read_running(home.root)
+        if running is None:
+            print("the app did not start; run `evolvekit app` and look at its output", file=sys.stderr)
+            return 1
+    url = f"{running['url']}#/study/{args.slug}"
+    print(url, flush=True)
+    if not args.no_browser:
+        open_in_browser(url)
+    return 0
+
+
+def _verdict_command(command: str, args: argparse.Namespace) -> int:
+    """`study verdict` and `study report`: from the verdict document."""
+    from evolvekit.app import jobs
+    from evolvekit.app.report import render_report
+    from evolvekit.app.verdict import build_verdict
+
+    root = _home(args).study_root(args.slug)
+    document = build_verdict(root, args.run)
+    if command == "verdict":
+        if args.json:
+            print(json.dumps(document))
+        else:
+            _say_verdict(document)
+    elif args.markdown:
+        print(render_report(document, jobs.results(root, document["run"], build_status), root=root), end="")
+    else:
+        print(json.dumps(document))
+    return 0
+
+
+def _wait(home, slug: str, timeout: float | None, as_json: bool, args: argparse.Namespace | None = None) -> int:
+    """`study wait`: until the latest run has ended -- 0 done (the verdict),
+    1 stopped or failed, 4 when `timeout` seconds pass first. For people (not
+    `as_json`), the state line on stderr whenever it changes, as `study watch`
+    prints it. With `args`, a run that is done says the next step on stderr."""
+    from evolvekit.app import jobs
+    from evolvekit.app.verdict import build_verdict
+
+    root, study, _ = home.load(slug)
+    run = _run_of(root)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the one check of a run's name
+    deadline = None if timeout is None else time.monotonic() + timeout
+    said = None
+    try:
+        while True:
+            _tick_queue(home)
+            state = jobs.phase(run_dir).get("phase")
+            if state in _ENDED:
+                break
+            if _gone(run_dir, state):
+                return _say_gone(run)
+            if not as_json:
+                # What `study watch` prints, on stderr and once per change: a long wait is not a hang.
+                # The progress is cosmetic: a file half-written by the job must never end the wait.
+                try:
+                    line = jobs.run_line(root, study, run_dir, build_status)["line"]
+                except Exception:  # noqa: BLE001 - progress only
+                    line = said
+                if line != said:
+                    print(line, file=sys.stderr, flush=True)
+                    said = line
+            if deadline is not None and time.monotonic() >= deadline:
+                print(f"run {run} is still {state} after {timeout:g} s; it goes on "
+                      f"(evolvekit study wait {slug} waits again)", file=sys.stderr)
+                return 4
+            pause = WAIT_EVERY_S if deadline is None else min(WAIT_EVERY_S, deadline - time.monotonic())
+            time.sleep(max(0.0, pause))
+    except KeyboardInterrupt:
+        print(f"stopped waiting; run {run} goes on", file=sys.stderr)
+        return 130
+    job = jobs.phase(run_dir)
+    try:
+        document = build_verdict(root, run)
+    except (AppError, HarnessError):
+        if state == "done":
+            raise
+        document = {"study": slug, "run": run, "phase": state, "error": job.get("error")}
+    if as_json:
+        print(json.dumps(document))
+    elif state == "done":
+        _say_verdict(document)
+    else:
+        print(jobs.run_line(root, study, run_dir, build_status)["line"])
+    if state != "done" and job.get("error"):
+        print(job["error"], file=sys.stderr)
+    if state == "done" and args is not None:
+        _say_next(args, f"study report {slug} --markdown", f"study open {slug}")
+    return 0 if state == "done" else 1
+
+
+def _watch(home, slug: str, every: float, as_json: bool) -> int:
+    """`study watch`: the status every `every` seconds until the run ends --
+    a document per line with `as_json`, else the state line when it changes."""
+    from evolvekit.app import jobs
+
+    root, study, _ = home.load(slug)
+    run = _run_of(root)
+    run_dir = jobs._run_dir(root, run)  # noqa: SLF001 - the one check of a run's name
+    said = None
+    try:
+        while True:
+            _tick_queue(home)
+            if _gone(run_dir, jobs.phase(run_dir).get("phase")):
+                return _say_gone(run)
+            if as_json:
+                document = jobs.status(root, run, build_status)
+                state = document.get("phase")
+                print(json.dumps(document), flush=True)
+            else:
+                state = jobs.phase(run_dir).get("phase")
+                line = jobs.run_line(root, study, run_dir, build_status)["line"]
+                if line != said:
+                    print(line, flush=True)
+                    said = line
+            if state in _ENDED:
+                return 0 if state == "done" else 1
+            time.sleep(max(0.0, every))
+    except KeyboardInterrupt:
+        print(f"stopped watching; run {run} goes on", file=sys.stderr)
+        return 130
+
+
+def _study_run_command(command: str, args: argparse.Namespace) -> int:
+    """`study start | stop | status | watch | wait`: the app's runner
+    (`evolvekit.app.jobs`), on disk, whether or not the app is open."""
+    from evolvekit.app import jobs
+
+    home = _home(args)
+    slug = args.slug
+    if command == "wait":
+        return _wait(home, slug, args.timeout, args.json, args)
+    if command == "watch":
+        return _watch(home, slug, args.every, args.json)
+    root, study, _ = home.load(slug)
+    if command == "start":
+        answer = jobs.start(home, root)
+        run = answer["run"]
+        if answer.get("queued"):
+            other = jobs._waiting_for(root) or "another study"  # noqa: SLF001 - the name the app's card shows
+            document = {"run": run, "queued": True}
+            line = (f"queued behind {other}; it starts when that study finishes "
+                    "(the app or `evolvekit study wait` starts it)")
+        else:
+            document, line = {"run": run, "started": True}, f"started run {run}"
+        print(json.dumps(document) if args.json else line, flush=True)
+        if args.wait:
+            return _wait(home, slug, args.timeout, args.json, args)
+        _say_next(args, f"study wait {slug}", f"study watch {slug}")
+        return 0
+    if command == "stop":
+        run = _run_of(root)
+        answer = jobs.stop(root, run)
+        if args.json:
+            print(json.dumps(answer))
+        elif answer.get("dequeued"):
+            print(f"dequeued run {run}: it never started, and the study is a draft again")
+        else:
+            print(f"asked run {run} to stop (evolvekit study wait {slug} returns when it has)")
+        return 0
+    if args.json:
+        print(json.dumps(jobs.status(root, _run_of(root, args.run), build_status)))
+    elif args.run:
+        print(jobs.run_line(root, study, jobs._run_dir(root, args.run), build_status)["line"])  # noqa: SLF001
+    else:
+        print(jobs.state_line(root, study, build_status)["line"])
+    return 0
+
+
 def cmd_study(args: argparse.Namespace) -> int:
     from evolvekit.harness import execute, library
     from evolvekit.harness.compile import write_run
@@ -823,14 +1319,55 @@ def cmd_study(args: argparse.Namespace) -> int:
 
     command = args.study_command
     if command == "new":
-        folder = Path(args.directory)
-        study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name or folder.name, args.template)
-        print(f"wrote {folder / 'study.yaml'} ({study.harness_id} {study.harness_version}"
-              + (f", template {study.template}" if study.template else "") + ")")
-        print("next: put the cases in cases/, fill in study.yaml, then  python -m evolvekit study run "
-              f"{folder}")
+        if args.dir:
+            folder = Path(args.dir)
+            study = library.create_study(folder, _harness_folder(args.harness, args.home), args.name, args.template)
+            if args.app:
+                from evolvekit.app.store import set_application
+
+                answer = set_application(folder, _full_path(args.app))
+                if not answer["ok"]:
+                    print(f"{answer['message']} (the study {folder} is made; say where the application is in "
+                          "its study.yaml)", file=sys.stderr)
+                    return 1
+                _advance_step(folder, _STEP_AFTER_APPLICATION)
+            if args.json:
+                print(json.dumps({"slug": folder.name, "root": str(folder.resolve())}))
+                return 0
+            print(f"wrote {folder / 'study.yaml'} ({study.harness_id} {study.harness_version}"
+                  + (f", template {study.template}" if study.template else "") + ")")
+            print("next: put the cases in cases/, fill in study.yaml, then  python -m evolvekit study run "
+                  f"{folder}")
+            return 0
+        home = _home(args)
+        given = Path(args.harness)  # a harness folder on disk, else an id the home knows
+        slug = home.create_study(args.harness, args.template, args.name, folder=given if given.is_dir() else None)
+        answer = None
+        if args.app:
+            answer = home.set_application(slug, _full_path(args.app))
+            if not answer["ok"]:
+                print(f"{answer['message']} (the study {slug} is made; say where the application is with "
+                      f"study application {slug} PATH)", file=sys.stderr)
+                return 1
+            _advance_step(home.study_root(slug), _STEP_AFTER_APPLICATION)
+        if args.json:
+            print(json.dumps({"slug": slug, "root": str(home.study_root(slug))}))
+            return 0
+        print(slug, flush=True)  # the result before the application's line and the hint on stderr
+        if answer is not None:
+            print(f"application: {answer['path']}" + (f" (version {answer['version']})" if answer.get("version") else ""),
+                  file=sys.stderr)
+        _say_next(args, f"study cases {slug} --add <files> --hold-back N")
         return 0
-    folder = Path(args.directory)
+    if command in ("application", "list", "check", "cases"):
+        return _study_library_command(command, args)
+    if command in ("start", "stop", "status", "watch", "wait"):
+        return _study_run_command(command, args)
+    if command in ("verdict", "report"):
+        return _verdict_command(command, args)
+    if command == "open":
+        return _study_open(args)
+    folder = _study_root(args.directory, args)
     if command == "preview":
         result = execute.preview(folder)
         if not result["ok"]:
@@ -860,7 +1397,39 @@ def cmd_study(args: argparse.Namespace) -> int:
     return 0 if job["phase"] in ("done", "stopped") else 1
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from evolvekit.doctor import checks
+    from evolvekit.harness.library import default_home
+
+    results = checks(Path(args.home or default_home()), app=_full_path(args.app) if args.app else None)
+    if args.json:
+        print(json.dumps(results, indent=2))
+    else:
+        for item in results:
+            print(f"{'✓' if item['ok'] else '✗'} {item['name']}: {item['message']}")
+            if not item["ok"]:
+                print(f"    fix: {item['fix']}")
+    return 0 if all(item["ok"] for item in results) else 1
+
+
+def cmd_skill(args: argparse.Namespace) -> int:
+    from evolvekit import skills
+
+    if args.skill_command == "list":
+        for name in skills.available():
+            print(name)
+        return 0
+    target = Path(args.dir)
+    result = skills.install(target, force=args.force)
+    for verb, key, suffix in (("wrote", "written", ""), ("skipped", "skipped", " (exists)")):
+        for path in result[key]:
+            print(f"{verb} {path.relative_to(target).as_posix()}{suffix}")
+    return 0
+
+
 _COMMANDS = {
+    "skill": cmd_skill,
+    "doctor": cmd_doctor,
     "confirm": cmd_confirm,
     "export": cmd_export,
     "init": cmd_init,
@@ -913,14 +1482,21 @@ def _tolerant_output() -> None:
     `UnicodeEncodeError` while being printed, a `ValueError` that `main` turns
     into exit 1: `preflight` reported "warnings" for a broken harness, and a
     wrapper that stops only on 2 went ahead. Unencodable characters are
-    written as escapes instead."""
+    written as escapes instead.
+
+    A pipe is written as UTF-8: a tool (a coding agent) that reads the CLI
+    then gets ✓ and · rather than escapes. A console keeps its own encoding
+    (Python already writes UTF-8 to the Windows console)."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
-            reconfigure(errors="backslashreplace")
-        except (ValueError, OSError):  # a stream that cannot be reconfigured is left alone
+            if stream.isatty():
+                reconfigure(errors="backslashreplace")
+            else:  # one call: encoding alone would reset the errors to strict
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError, AttributeError):  # a stream that cannot be reconfigured is left alone
             pass
 
 
@@ -930,12 +1506,18 @@ def main(argv: list[str] | None = None) -> int:
     _load_env(args)
     try:
         return _COMMANDS[args.command](args)
+    except AppError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
     except RunLockError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
+    except HarnessError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -34,7 +34,7 @@ import time
 
 
 def main() -> int:
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--version", action="version", version="cli-solver 1.0")
     p.add_argument("--instance", required=True)
     p.add_argument("--seed", type=int, default=0)

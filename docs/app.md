@@ -47,6 +47,7 @@ opened again at any time:
 ~/evolvekit/
   settings.yaml        the AI provider and models, the applications used before
   .env                 API keys: written by the app, never shown again
+  app.json             while the app runs: where it is, and the key of this launch
   harnesses/           harnesses you installed
   studies/<name>/      one folder per study: study.yaml, the pinned harness,
                        cases/, inputs/, preview/, runs/
@@ -54,6 +55,38 @@ opened again at any time:
 
 A study folder is self-contained: copy it to another computer, point it at
 the application there, and it runs.
+
+**One library, whoever made the study.** The command line
+(`evolvekit study …`, see
+[A study from the command line](../README.md#a-study-from-the-command-line))
+reads and writes the same library through the same code. A study made on the
+command line appears on Home, with its state and its answer; a study made
+here can be started, watched and read from the command line; and a study
+started from either runs the same way, whether the app is open or not.
+`evolvekit study open NAME` prints the study's address in the running app —
+starting the app, without a browser window of its own, when none runs — and
+opens it.
+
+**`app.json`.** As soon as the app is listening it writes `app.json` in the
+library home, and removes it when it stops cleanly:
+
+```json
+{"pid": 1234, "started_at": "2026-11-07T10:00:00+00:00", "host": "127.0.0.1",
+ "port": 8780, "url": "http://127.0.0.1:8780/?token=…"}
+```
+
+That is how a command finds the running app. The `url` carries the key of
+this launch, so the key is on disk while the app runs. That is a deliberate
+choice, and acceptable for the same reasons the app is safe at all: the file
+sits beside `.env`, which already holds your API keys; it is private to you
+(on Linux and macOS it is made readable by you alone, mode 0600; on Windows,
+which has no such mode, it is as private as the folder it is in, your user
+folder by default); and the app's other protections stay —
+it listens only on 127.0.0.1, accepts changes only from its own page, and
+answers no API call without the key. A file left behind by an app that is no
+longer running (its process is gone, or the process with that number is not
+the app that wrote it) counts as "not running": it is ignored, removed, and
+written again by the next app.
 
 **Home** shows your studies as cards: each says where the study is
 (*Running · round 7 of 12*, *Queued*, *Finished · 4 held-back cases*), its
@@ -140,19 +173,29 @@ must keep), **Data changes** and AI help.
 The **status strip** at the top says the study's one answer right now —
 *Searching · round 7 of 12 · Best so far: 1.95 % better · Not checked yet* —
 and becomes the verdict when the final check has decided. Nothing says *use
-it* before then. The app decides by one fixed rule, stated under the answer:
+it* before then. Once there is a verdict, the strip's headline and the
+sentence under it are the verdict's own `line` and `advice`, word for word,
+as `evolvekit study verdict` prints them: the page never composes its own.
+While the final check runs there is no verdict yet, so the strip says *No
+answer yet*. The app decides by one fixed rule, stated under the answer:
 *use it at 9 in 10 or better, worst within 1 %* — the chance of a gain at
 least 9 in 10 and the worst plausible case within 1 % of today. Every
 estimate shows its likely range as a band through *today*, with both ends
 marked, *worst* and *best*, and the dashed 1 % limit.
 
-- **Use it** (the strip turns orange): the improvement on the goal's measure
-  — *1.40 % better on cost as PyVRP counts it (lower)* — with the chance and
-  the worst case; *Save settings file* and *Copy* a summary.
-- **Keep today's settings**: better on average, but not sure enough (*chance
-  under 9 in 10*, or a worst case beyond 1 %); *Check with more runs* keeps
-  the runs it did and adds others.
-- **Worse**, a number on **one case** (no range, so no answer), **nothing beat
+- **Use it** (the strip turns orange): *Probably better: 1.4 % lower cost
+  on 3 held-back cases, a chance of about 19 in 20; …*, then *Use the new
+  settings: they are probably better on cases the search never saw.*;
+  *Save settings file* and *Copy* a summary.
+- **Keep**: *Not proven on 3 held-back cases: …* (*chance under 9 in 10*,
+  or a worst case beyond 1 %), then *Keep today's settings … for now: the
+  gain is not proven.*; *Check with more runs* keeps the runs it did and
+  adds others.
+- **One case**: *Not proven, one held-back case: 4.8 % lower tour length.*,
+  then *Keep today's settings …: one held-back case is too few cases to tell
+  (the 11 runs were all on it); a study that holds back three or more can.*;
+  *Hold back more cases*.
+- **Worse**, **nothing beat
   the starting point**, a **stopped** check (*Continue the check*), a study
   **stopped by you** (*Run the final check*, *Carry on*) or **by an error**
   (*Continue where it stopped*), and **queued** (*Remove from queue*).
@@ -175,6 +218,12 @@ combination and its family — the combinations it came from, back to today's
 settings — are marked on the Tries plot. *Details* shows one combination in
 full: every setting it changed, its result case by case, and for a run that
 failed, what it printed and how it was started.
+
+Every figure for a combination is written as the report writes it: one
+decimal and the measure's own direction, never *better* — the chosen
+combination's chip reads *Combination 2 · 7.5 % lower on the cases it
+learned from, not checked*. The held-back table under *Details* gives each
+case's change as the verdict computes it, the mean of the paired runs.
 
 | Dark | Phone |
 |---|---|
@@ -277,7 +326,7 @@ everything it does.
 | *… is thin* under the plan | take one of the fixes it offers, or accept that the search may miss the best |
 | *fewer than 3 rounds* | take one of the three ways out the plan offers |
 | *Not proven on the held-back cases* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
-| *Keep your current settings* and you have time | *Continue for another …*: the search goes on from its best, and the check runs again |
+| *Keep today's settings* and you have time | *Continue for another …*: the search goes on from its best, and the check runs again |
 | *the starting point breaks a guardrail* | the guardrail is stricter than today's plans: loosen it, or give the application more time per case |
 | *It failed* after a restart of the computer | *Continue where it stopped*: the run goes on from its last round |
 | *It failed* | the message says why; fix that, then *Start it again* |
@@ -319,6 +368,33 @@ outside its folder); `POST …/cases/{name}/restore` brings a removed case
 back; `GET /api/compare?a=<name>[/<run>]&b=<name>[/<run>]` is two runs side
 by side. A run is `python -m evolvekit.app.job STUDY RUN`, started so that it
 outlives the app.
+
+**The verdict document.** The verdict is computed in one place:
+`build_verdict(root, run)` in `evolvekit/app/verdict.py`. It reads the study
+folder, the run's `job.json` and its `confirm/final/` files, needs no server,
+and returns one document. The Study page (through `results`), `evolvekit
+study verdict`, `study wait` and the report (`study report --markdown`,
+`evolvekit/app/report.py`) all render from it, so they cannot disagree;
+`evolvekit study verdict NAME --json` prints it. Its keys keep the engine's
+names:
+
+| Key | Holds |
+|---|---|
+| `schema` | 1; bumped when a key changes meaning |
+| `study`, `run`, `phase` | the study's folder name, the run, and where the job is (`queued`, `starting`, `search`, `check`, `done`, `stopped`, `failed`) |
+| `decision` | `use`, `keep` or `worse` by the rule; `none` (nothing beat the starting point), `single` (one held-back case), `pending` (no final check yet), `stopped` (the check was stopped), `skipped` (any other skip, such as no held-back cases) |
+| `reason` | with `none` and `skipped`: the sentence the run recorded |
+| `line`, `advice` | the verdict's one sentence, as the Study page shows it, and the sentence after it |
+| `measure` | `{"kpi", "label", "unit", "direction"}` of the measure that decided |
+| `held_back` | `{"cases", "runs_per_case"}` |
+| `mean_pct`, `ci95_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point; absent with `pending`, `stopped` and `skipped` |
+| `levels` | with goals in order of importance: one entry per goal with the same keys, `deciding: true` on the one that decided |
+| `learned_from` | `{"cases", "pct"}`: the cases the search learned from, labelled as such |
+| `rule` | the fixed rule, in words |
+| `by_case` | one row per held-back case: `name`, `start`, `best`, `change_pct`, `outcome` (`better`, `worse`, `same`, `failed`) |
+| `changed` | the settings and data changes of the best combination: `name`, `label`, `from`, `to` |
+| `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
+| `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
 
 The page is plain HTML, CSS and JavaScript with no build step, under
 `evolvekit/app/static/`: `app.html` (the shell), `css/tokens.css` (every

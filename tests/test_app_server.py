@@ -190,6 +190,13 @@ def test_the_dashboard_needs_the_token(app):
     assert call(app, "GET", f"{dashboard}api/status?token={app.token}", token=None)[0] == 200
 
 
+def test_a_folder_is_not_a_harness_id(app):
+    folder = str(Path(__file__).resolve().parents[1] / "harnesses" / "demo-tour")
+    status, body = call(app, "POST", "/api/studies", {"harness": folder, "template": "tune", "name": "Folder"})
+    assert status == 404 and "no harness" in body["error"]
+    assert app.home.slugs() == []
+
+
 def test_keys_are_accepted_and_never_sent_back(app, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     status, body = call(app, "PUT", "/api/settings", {"keys": {"OPENROUTER_API_KEY": "sk-or-v1-secret"}})
@@ -442,3 +449,17 @@ def test_a_removed_case_can_be_restored(app):
     restored = next(c for c in document["cases"] if c["name"] == "town-40.json")
     assert restored["inspected"]["ok"] is True
     assert call(app, "POST", "/api/studies/cases/cases/town-40.json/restore")[0] == 404
+
+
+def test_app_writes_and_clears_running_file(tmp_path):
+    from evolvekit.app.running import read_running
+
+    home = tmp_path / "home"
+    server = AppServer(home, port=0)
+    try:
+        doc = read_running(home)
+        assert doc is not None
+        assert doc["port"] == server.port and doc["url"] == server.url_with_token
+    finally:
+        server.stop()
+    assert read_running(home) is None

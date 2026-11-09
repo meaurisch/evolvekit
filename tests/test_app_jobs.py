@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from evolvekit.app import jobs
+from evolvekit.app import detach, jobs
 from evolvekit.app.server import AppServer
 from evolvekit.events import utc_now
 from test_app_server import call
@@ -400,7 +400,7 @@ def test_two_starts_in_one_second_get_two_visible_run_ids(app, monkeypatch):
     fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(jobs, "_now", lambda: fixed)
 
-    def launched_and_done(home, root, run_dir, extra, *, with_keys):  # a run that finished within the second
+    def launched_and_done(home, root, run_dir, extra, *, with_keys, **kwargs):  # a run that finished within the second
         (run_dir / "job.json").write_text(json.dumps({"phase": "done", "pid": 2 ** 22 + 7, "started_at": fixed.isoformat(),
                                                        "finished_at": fixed.isoformat()}), encoding="utf-8")
         return 2 ** 22 + 7
@@ -503,7 +503,7 @@ def test_a_run_gets_the_api_keys_only_when_ai_help_is_on(tmp_path, monkeypatch):
         seen.append(kwargs["env"])
         return type("Done", (), {"stdout": "4242\n", "stderr": ""})()
 
-    monkeypatch.setattr(jobs.subprocess, "run", fake_run)
+    monkeypatch.setattr(detach.subprocess, "run", fake_run)  # the launcher runs in detach.spawn_detached
     jobs._launch(home, run_dir.parent.parent, run_dir, [], with_keys=False)
     jobs._launch(home, run_dir.parent.parent, run_dir, [], with_keys=True)
     assert "OPENROUTER_API_KEY" not in seen[0] and "OTHER_SECRET" not in seen[0]

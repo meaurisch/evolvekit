@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -75,6 +76,8 @@ __all__ = [
     "smallest_case",
     "study_harness",
     "run_test",
+    "write_exports",
+    "ExportFailed",
 ]
 
 PREVIEW = "preview"
@@ -82,6 +85,10 @@ PREVIEW_TIME_LIMIT_S = 10.0
 """The preview's time limit, at most: it shows what the application reports
 and measures its overhead, and neither needs the study's full time per case."""
 JOB = "job.json"
+DOWNLOADS = "downloads"
+"""`runs/<id>/downloads/`: the exports of a run's best, written by the final check."""
+EXPORT_SUFFIX = {"settings_json": ".json", "settings_flags": ".txt", "data_changes": ".json", "requests": ".json"}
+EXPORT_TIMEOUT_S = 300
 
 
 def _now() -> str:
@@ -617,16 +624,95 @@ def _time_left(job: Job, plan: Plan) -> Callable[[], float]:
     return lambda: hours * 3600.0 - (datetime.now(timezone.utc) - started).total_seconds()
 
 
+class ExportFailed(HarnessError):
+    """The harness's runner did not write an export."""
+
+
+def export_path(run_dir: str | Path, name: str, case: str | None = None) -> Path:
+    """Where the export `name` of a run is written: `downloads/<name>.<suffix>`,
+    or `downloads/<name>-<case>.<suffix>` for a per-case export."""
+    return Path(run_dir) / DOWNLOADS / f"{name}{'-' + Path(case).stem if case else ''}{EXPORT_SUFFIX.get(name, '.out')}"
+
+
+def _best_values(run_dir: Path) -> dict[str, Any]:
+    best = rank(list(read_jsonl(run_dir / "runs.jsonl")), 1)
+    if not best:
+        raise HarnessError(f"runs/{run_dir.name}: the run has no result to export yet")
+    return dict(best[0].get("params") or {})
+
+
+def write_exports(root: str | Path, run_dir: str | Path, values: dict[str, Any] | None = None, *,
+                  names: list[str] | None = None, case: str | None = None) -> list[Path]:
+    """The harness's exports of `values` (the run's best when None) into
+    `runs/<id>/downloads/`, by the harness's runner: every export that applies
+    to what the study tunes (settings, data), a per-case export (`requests`)
+    once per case -- or only `names`, for `case` alone when given. Exports
+    written from other values are removed first, so what is in the folder is
+    always of one set of values. Returns the files written; raises
+    `ExportFailed` when the runner does not write one."""
+    root, run_dir = Path(root), Path(run_dir)
+    study, harness = load_study(root), study_harness(root)
+    if values is None:
+        values = _best_values(run_dir)
+    if names is None:
+        tuned = run_study_of(root, run_dir)
+        kinds = ({"settings"} if tuned.tuned_settings() else set()) | ({"data"} if tuned.data else set())
+        names = [name for name, export in harness.exports.items() if export.applies_to in kinds]
+        cases = tuned.training + tuned.test
+    else:
+        cases = [case] if case else []
+    scratch = run_dir / DOWNLOADS
+    scratch.mkdir(exist_ok=True)
+    stored = scratch / "values.json"
+    try:
+        same = json.loads(stored.read_text(encoding="utf-8")) == values
+    except (OSError, ValueError):
+        same = False
+    if not same:
+        for old in scratch.iterdir():
+            if old.is_file() and old != stored:
+                old.unlink()
+    stored.write_text(json.dumps(values, indent=2), encoding="utf-8")
+    runner = runner_command(study, harness, str(root / "harness" / "runner.py"))
+    written = []
+    for name in names:
+        for one in (cases if name == "requests" else [case] if case else [None]):
+            out = export_path(run_dir, name, one)
+            argv = runner + ["export", "--format", name, "--values", str(stored), "--study", str(run_dir / STUDY_RUN),
+                             "--out", str(out)]
+            if one:
+                argv += ["--case", str((root / one).resolve())]
+            done = subprocess.run(argv, cwd=run_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                  timeout=EXPORT_TIMEOUT_S)
+            if done.returncode != 0 or not out.is_file():
+                said = (done.stderr.strip().splitlines() or ["no message"])[-1]
+                raise ExportFailed(f"the export {name} failed: {said}")
+            written.append(out)
+    return written
+
+
+def _write_exports(run_dir: Path, log: Callable[[str], None]) -> None:
+    """The exports of the run's best, so a finished run always has its files;
+    the answer stands without them when the runner cannot write one."""
+    try:
+        write_exports(run_dir.parent.parent, run_dir)
+    except Exception as exc:  # noqa: BLE001 - an export is a convenience, the verdict is the result
+        log(f"final check: the exports could not be written: {exc}")
+
+
 def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,
                  extend: bool = True) -> None:
     """The best against the starting point on the held-back cases; with
     `extend`, more runs per case while time remains and the answer is open."""
     if not study.test:
+        _write_exports(run_dir, log)
         job.finish("done", final={"skipped": "no cases were held back, so there is no final check"})
         return
     rows = list(read_jsonl(run_dir / "runs.jsonl"))
     best = rank(rows, 1)
     if not best or best[0].get("operator") == "human-seed":
+        if best:
+            _write_exports(run_dir, log)
         job.finish("done", final={"skipped": "the starting point stayed the best: there is nothing to check"})
         return
     job.update(phase="check")
@@ -644,5 +730,6 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
         stop.close()
     (cid, result), = comparison.per_candidate.items()
     decision = _decision(result)
+    _write_exports(run_dir, log)
     job.finish("done", final={"candidate": cid, "confirmed": decision == "use", "decision": decision,
                               "seeds": seeds, "comparison": "confirm/final/comparison.json"})
