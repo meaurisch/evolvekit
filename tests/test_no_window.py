@@ -67,6 +67,9 @@ def test_the_flag_reaches_the_calls_on_windows(monkeypatch, tmp_path):
     from evolvekit.providers.claude_cli import ClaudeCliProvider
 
     monkeypatch.setattr(sys, "platform", "win32")
+    # With the platform faked, `shutil.which` takes its Windows branch (no `_winapi` on Linux) and
+    # `claude` need not be installed: the provider's lookup is the machine-dependent part, so it is fixed.
+    monkeypatch.setattr(ClaudeCliProvider, "_resolve", lambda self: self._executable)
     seen: list[tuple[str, int]] = []
 
     def run(argv, **kwargs):

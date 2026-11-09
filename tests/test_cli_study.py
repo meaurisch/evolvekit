@@ -312,6 +312,12 @@ def test_compile_takes_the_models_of_settings_on_a_study_with_ai(tmp_path, capsy
     assert main(["study", "cases", "depot-a", "--add", *map(str, SAMPLES), "--hold-back", "1", "--home", str(tmp_path)]) == 0
     _with_ai(tmp_path, "depot-a", **({"code": {**_study_yaml(tmp_path)["vary"]["code"], "repo": str(app.parent)}}
                                      if template == "faster" else {}))
+    # Hours enough for the plan on any machine: the preview's overhead (git, the interpreter) is far
+    # larger on a CI runner than here, and at 0.1 h a slow runner is told "fewer than 3 rounds".
+    study_yaml = tmp_path / "studies" / "depot-a" / "study.yaml"
+    data = yaml.safe_load(study_yaml.read_text(encoding="utf-8"))
+    data["budget"]["hours"] = 1.0
+    study_yaml.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     capsys.readouterr()
     assert main(["study", "compile", "depot-a", "--home", str(tmp_path)]) == 2
     err = capsys.readouterr().err
