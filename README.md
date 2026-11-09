@@ -1080,8 +1080,11 @@ last). It is enforced twice:
 
 - **Before each generation**, one that would not finish in time is not started: "time limit:
   another round would not finish within 2 h". How long one takes is projected from the longest of
-  the last two; with only the seed done, from the seed's duration times the number of children --
-  an upper bound when a cheaper stage screens first.
+  the last two; with only the seed done, from the seed's own stages, as the plan counts a round:
+  each stage's waves of runs on its workers, every child on the first stage and at most
+  `top_k_per_generation` after a stage that promotes so few, plus the AI's time per child. Then the
+  reason says it is a projection: "time limit: its first round would not finish within 0.124 h
+  (0.01 h used; its first round would take about 0.12 h)".
 - **During a generation**, a watcher looks every second. When the limit is reached, evaluations in
   flight are stopped and counted as *abandoned* -- not failed: nothing went wrong -- and none is
   started. The generation is not recorded (its children stay in `pending.json`), and the run ends
@@ -1673,7 +1676,7 @@ Every command:
 | `study wait SLUG [--timeout S] [--json]` | returns when the run has ended: exit 0 with the verdict when it is done, 1 when it stopped or failed, 4 on timeout; starts a queued run. On a scheduled study, when the campaign has its answer: 0 with the verdict, 1 when it paused or ended without a finished run |
 | `study verdict SLUG [--run ID] [--json]` | the verdict and what to do about it; `--json` the verdict document |
 | `study report SLUG [--run ID] [--markdown \| --json]` | the report: Markdown for people, else the verdict document |
-| `study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`, and its path; exit 2 for a settings study, or when the starting point stayed the best |
+| `study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`, and its path; exit 2 for a settings study, or when the starting point stayed the best or the search did not run |
 | `study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints what it will do; with `--yes` makes the branch, pushes it and opens the PR. Exit 0 printed or done, 1 failed while doing it, 2 refused |
 | `study open SLUG [--no-browser]` | prints the study's address in the app, starting the app (`app --service`) when none runs, and opens it |
 | `app [--home DIR] [--port N] [--no-browser]` | the app in the browser ([The app](#the-app)); a second `app` on the same library opens the first |
@@ -1924,7 +1927,7 @@ change that does not apply on `HEAD` is refused with the path of
 `best.patch`. `study pr` does not refuse a verdict that says to keep today's
 code: it prints that line first, so read it before `--yes`. It refuses, exit
 2, a settings study (`this study changed settings, not code; the settings
-file is at …`), a run whose starting point stayed the best, and a run that
+file is at …`), a run whose starting point stayed the best or whose search did not run, and a run that
 has not ended; exit 1 is a failure while doing it (the branch exists, a hook
 refused the commit, the push or `gh` failed), with what was made so far.
 

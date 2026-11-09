@@ -638,7 +638,9 @@ the first thing Set up lacks as `{"step", "key", "text"}`, or `null`),
 `/api/harnesses/{id}` (its `learned`: per setting `tuned_in`, `importance`,
 `importance_n`, `winners`, `direction` and `leaned`, the median of the
 settings studies' search-best values — the lower middle for a whole number,
-the most common value of a choice, `null` on a tie or with none), `POST /api/shutdown` (what
+the most common value of a choice, `null` on a tie or with none; a study
+whose search did not run is listed in `studies` with `not_run: true` and
+counts in none of these), `POST /api/shutdown` (what
 `evolvekit app stop` sends: it answers `{"stopping": true}` and the app ends
 cleanly), `/api/settings`,
 `/api/harnesses`, `POST /api/detect?study=` (looks for installed copies of the

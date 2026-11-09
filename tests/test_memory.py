@@ -218,3 +218,24 @@ def test_data_changes_in_the_status_items_are_not_settings(tmp_path):
     shutil_copy.write_text(yaml.safe_dump(study, sort_keys=False), encoding="utf-8")
     got = memory.learned(home, "demo-tour", document_of=docs.get)
     assert "stop_weight" not in got["settings"] and got["notes"] == []
+
+
+def test_a_study_whose_search_did_not_run_is_listed_and_adds_up_nothing(tmp_path):
+    """Persona p5 fix round 1, I2: a run that stopped before its first round "found" the starting point; it
+    stays in the studies with its line, and is no study that tuned, ranked or leaned anywhere."""
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "One", decision="keep", best={"neighbours": 4}, importance={"neighbours": (0.6, 20)},
+             finished_at="2026-10-01")
+    root = finished(home, docs, "Idle", decision="keep", best={"neighbours": 8}, importance={"neighbours": (0.1, 20)},
+                    finished_at="2026-10-08")
+    job_path = root / "runs" / "r1" / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["search"] = {"generations": 0, "aborted": False, "stop_reason": "time limit: …"}
+    job["final"] = {"skipped": "the search did not run: there was not enough time left for its first round",
+                    "not_run": True}
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    got = memory.learned(home, "demo-tour", document_of=docs.get)
+    idle = next(s for s in got["studies"] if s["name"] == "Idle")
+    assert idle["line"].startswith("The search did not run") and idle["not_run"] is True
+    n = got["settings"]["neighbours"]
+    assert n["tuned_in"] == 1 and n["importance"] == pytest.approx(0.6) and n["leaned"] == 4

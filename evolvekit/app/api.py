@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import zipfile
 from pathlib import Path
@@ -199,16 +200,42 @@ def install(req: Request) -> dict[str, Any]:
     return {**describe_harness(harness), "already": None if before is None else "built in" if before else "installed"}
 
 
+FOLDER_ZIP_MAX = 100 * 2 ** 20
+"""The most a harness folder pasted into Home's box may hold (its environments, caches and git left out)."""
+_FOLDER_SKIP = ("__pycache__", ".git")
+
+
 def _zipped_folder(folder: Path) -> bytes:
     """A harness folder as the .zip `install` takes: its files under the
-    folder's name, without Python's caches. A folder that is not a harness
-    is refused by the install, as a zip that is not one is."""
+    folder's name. Refused before anything of it is read when it has no
+    `harness.yaml` (a pasted `C:\\Users\\me` is not zipped whole), and above
+    FOLDER_ZIP_MAX; a Python environment (`.venv*`), Python's caches and
+    `.git` are left out (persona p5 fix round 1, M6). The install checks the
+    rest, as for any zip."""
+    if not (folder / "harness.yaml").is_file():
+        raise AppError(f"{folder} has no harness.yaml, so it is not a harness folder; give the harness's own "
+                       "folder, or its .zip file")
+    files, size = [], 0
+    for top, dirs, names in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if d not in _FOLDER_SKIP and not d.startswith(".venv"))
+        for name in sorted(names):
+            file = Path(top) / name
+            if file.suffix == ".pyc" or not file.is_file():
+                continue
+            size += file.stat().st_size
+            if size > FOLDER_ZIP_MAX:
+                raise AppError(f"{folder} holds more than {_bytes_words(FOLDER_ZIP_MAX)}; a harness is much smaller "
+                               "(its Python environment is not part of it)")
+            files.append(file)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
-        for file in sorted(folder.rglob("*")):
-            if file.is_file() and "__pycache__" not in file.relative_to(folder).parts and file.suffix != ".pyc":
-                bundle.write(file, (Path(folder.name) / file.relative_to(folder)).as_posix())
+        for file in files:
+            bundle.write(file, (Path(folder.name) / file.relative_to(folder)).as_posix())
     return buffer.getvalue()
+
+
+def _bytes_words(count: int) -> str:
+    return f"{count // 2 ** 20} MB" if count >= 2 ** 20 else f"{count} B"
 
 
 def harness(req: Request) -> dict[str, Any]:

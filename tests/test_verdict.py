@@ -730,9 +730,36 @@ def test_a_search_that_did_not_run_never_says_it_found_nothing_better(tmp_path):
     words = [render_report(v, page), jobs.report_html(page), page["summary_text"]]
     card = jobs.run_line(root, load_study(root), root / "runs" / run, document_of)  # Past runs and Home's card
     assert card["line"] == "finished · the search did not run" and card["not_run"] and card["decision"] == "skipped"
+    assert card["can_continue"] is True and card["continue_h"] > 0 and card["scheduled"] is False  # Home continues it
     assert card["verdict"]["line"] == v["line"]
     for text in words + [card["line"], card["verdict"]["advice"]]:
         assert "found nothing better" not in text and "stayed the best" not in text and "beat your starting" not in text
     assert all(v["line"] in text for text in words)
     assert v["how_it_ran"] == "None of the 4 planned rounds ran: only today's settings were measured."
     assert v["learned_from"]["pct"] is None, "a search that did not run learned nothing"
+    assert "Combinations tried</div><div class='v'>0, plus today&#x27;s settings" in jobs.report_html(page), "M5"
+
+
+@pytest.mark.parametrize("what,said", [
+    ("settings", "only today's settings were measured"),
+    ("code change", "only today's code was measured"),
+    ("data changes", "only the data as it is was measured"),
+    ("combination of settings and data changes", "only today's settings and data were measured"),
+])
+def test_a_search_that_did_not_run_names_what_was_measured(what, said):
+    # Persona p5 fix round 1, M2: by what the study changes; nothing at all when the starting point was cut short.
+    from evolvekit.app.verdict import how_it_ran
+
+    job = {"search": {"generations": 0, "stop_reason": "time limit: its first round would not finish within 0.124 h"}}
+    plan = {"rounds": 4, "combinations": 48}
+    assert how_it_ran(job, plan, 1, False, what=what) == f"None of the 4 planned rounds ran: {said}."
+    assert how_it_ran(job, plan, 0, False, what=what) == "None of the 4 planned rounds ran: nothing was measured."
+
+
+def test_the_seed_cut_by_the_time_limit_is_said_in_its_own_words():
+    from evolvekit.harness.execute import not_run_words
+
+    assert not_run_words("time limit reached: 0.12 h of active run time, budget.max_hours is 0.124 h") == (
+        "the time ran out before its first round")
+    assert not_run_words("time limit: its first round would not finish within 0.124 h (…)") == (
+        "there was not enough time left for its first round")

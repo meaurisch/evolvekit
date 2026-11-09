@@ -60,6 +60,9 @@ class Finished:
     """"settings", "data", "both", "code", "bakeoff" or "per_group"."""
     study: Study
     pinned: Harness
+    not_run: bool = False
+    """The search stopped before its first round (`verdict.not_run`): listed with its line, and adding up no
+    setting -- its "best" is the starting point, which it never searched from (persona p5, I2)."""
 
 
 def _moment(value: Any, fallback: datetime) -> datetime:
@@ -102,6 +105,7 @@ def _words(root: Path, run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
 def finished_studies(home: Any, harness_id: str) -> list[Finished]:
     """Each study on `harness_id` (archived ones too, the trash not): its newest `done` run, oldest first."""
     from evolvekit.app import jobs
+    from evolvekit.app import verdict as verdict_doc
 
     found: list[Finished] = []
     folder = Path(home.studies_dir)
@@ -131,7 +135,8 @@ def finished_studies(home: Any, harness_id: str) -> list[Finished]:
             at = _moment(job.get("finished_at") or job.get("started_at"), fallback)
             words = _words(root, run_dir, job)
             found.append(Finished(root.name, study.name, root, run_dir.name, run_dir, at, words["decision"], words["line"],
-                                  _kind(run_dir, job, study), study, pinned))
+                                  _kind(run_dir, job, study), study, pinned,
+                                  not_run=verdict_doc._not_run(job.get("final") or {})))
             break
     return sorted(found, key=lambda f: (f.finished_at, f.slug))
 
@@ -214,7 +219,7 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
     finished = finished_studies(home, harness_id)
     out: dict[str, Any] = {
         "studies": [{"slug": f.slug, "name": f.name, "run": f.run, "finished_at": f.finished_at.isoformat(),
-                     "decision": f.decision, "line": f.line, "kind": f.kind} for f in finished],
+                     "decision": f.decision, "line": f.line, "kind": f.kind, "not_run": f.not_run} for f in finished],
         "settings": {}, "notes": [],
     }
     current = current_harness(home, harness_id, finished)
@@ -222,8 +227,8 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
         return out
     seen: dict[str, dict[str, Any]] = {}
     for f in finished:
-        if f.kind not in ("settings", "both"):
-            continue
+        if f.kind not in ("settings", "both") or f.not_run:
+            continue  # a search that did not run tuned nothing: no count, importance, winner or lean
         gone, changed = [], []
         for item in _items(f.run_dir, document_of):
             name = item["name"]

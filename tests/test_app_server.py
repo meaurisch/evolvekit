@@ -335,7 +335,28 @@ def test_a_harness_is_installed_from_a_folder_on_this_computer(app, tmp_path):
     status, harness = call(app, "POST", "/api/harnesses", {"path": str(folder)})
     assert status == 200 and harness["id"] == "demo-tour" and harness["title"] and harness["version"], harness
     status, body = call(app, "POST", "/api/harnesses", {"path": str(tmp_path)})
-    assert status == 400, "a folder that is not a harness is refused, as a zip that is not one is"
+    assert status == 400 and "has no harness.yaml" in body["error"], "refused before anything of it is read (M6)"
+
+
+def test_a_harness_folder_is_zipped_without_environments_caches_or_git_and_not_past_its_cap(tmp_path, monkeypatch):
+    import io
+    import shutil
+    import zipfile
+
+    from evolvekit.app import api
+    from evolvekit.app import AppError
+
+    folder = tmp_path / "pyvrp"
+    shutil.copytree(DEMO, folder, ignore=shutil.ignore_patterns("__pycache__"))
+    for junk in (".venv/Lib/site.py", ".venv-pyvrp/Scripts/python.txt", ".git/HEAD", "kit/__pycache__/x.pyc"):
+        (folder / junk).parent.mkdir(parents=True, exist_ok=True)
+        (folder / junk).write_text("junk", encoding="utf-8")
+    names = zipfile.ZipFile(io.BytesIO(api._zipped_folder(folder))).namelist()
+    assert "pyvrp/harness.yaml" in names
+    assert not [n for n in names if "/.venv" in n or "/.git/" in n or "__pycache__" in n], names
+    monkeypatch.setattr(api, "FOLDER_ZIP_MAX", 10)
+    with pytest.raises(AppError, match="more than 10 B"):
+        api._zipped_folder(folder)
 
 
 def test_the_detection_list_answers_for_a_study(app):

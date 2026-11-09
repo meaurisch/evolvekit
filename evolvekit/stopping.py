@@ -190,9 +190,12 @@ class RunStop:
             )
         return self.reason if self.event.is_set() else None
 
-    def before_generation(self, projected_s: float | None) -> str | None:
+    def before_generation(self, projected_s: float | None, *, first: bool = False) -> str | None:
         """Why not to start another generation, or `None`. `projected_s` is how
-        long one may take; one that would end past the limit is not started."""
+        long one may take; one that would end past the limit is not started.
+        `first`: no round has run yet, so the figure is a projection from the
+        starting point, and the reason says so ("its first round would take
+        about 0.03 h"), never "a round has taken" (persona p5, M1)."""
         reason = self.poll()
         if reason is not None:
             return reason
@@ -200,6 +203,11 @@ class RunStop:
             return None
         elapsed = self.elapsed_s()
         if elapsed + projected_s > self.max_s:
+            if first:
+                return (
+                    f"time limit: its first round would not finish within {_hours(self.max_hours)} "
+                    f"({elapsed / 3600:.2f} h used; its first round would take about {projected_s / 3600:.2f} h)"
+                )
             return (
                 f"time limit: another round would not finish within {_hours(self.max_hours)} "
                 f"({elapsed / 3600:.2f} h used; a round has taken up to {projected_s / 3600:.2f} h)"

@@ -687,7 +687,8 @@
   function codeChange(ch) {
     var r = st.results || {};
     if (isBakeoff()) return html`<p class="type-body ink-2">Each branch’s own answer is on the page that shows them side by side.</p>`;
-    if (!ch.length) return html`<p class="type-body ink-2">${r.is_seed ? "Nothing: today’s code stayed the best." : "No change to the code."}</p>`;
+    // A code study's search that did not run: nothing found, nothing stayed best (persona p5 fix round 1, I1).
+    if (!ch.length) return html`<p class="type-body ink-2">${(r.final || {}).not_run ? "Nothing: the search did not run." : r.is_seed ? "Nothing: today’s code stayed the best." : "No change to the code."}</p>`;
     var c = ch[0];
     return html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Source</th><th>Today’s code</th><th>The change</th></tr></thead><tbody>
       <tr><td>${c.label || "The source"}</td><td class="mono">${c.old_text}</td><td class="new">${c.new_text}</td></tr></tbody></table></div>

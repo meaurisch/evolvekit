@@ -56,6 +56,17 @@ def test_a_round_that_would_not_finish_in_time_is_not_started(tmp_path):
     assert not stop.triggered, "nothing is running: the run simply does not start another round"
 
 
+def test_a_first_round_that_would_not_finish_says_it_is_a_projection(tmp_path):
+    # Persona p5 fix round 1, M1: with only the starting point measured no round "has taken" anything.
+    clock = Clock()
+    stop = RunStop(tmp_path, max_hours=0.124, clock=clock)
+    stop.start(used_s=36.0, watch=False)
+    reason = stop.before_generation(projected_s=432.0, first=True)
+    assert reason == ("time limit: its first round would not finish within 0.124 h "
+                      "(0.01 h used; its first round would take about 0.12 h)")
+    assert "has taken" not in reason
+
+
 def test_without_a_limit_nothing_is_projected(tmp_path):
     stop = RunStop(tmp_path, max_hours=None, clock=Clock())
     stop.start(used_s=1e9, watch=False)
@@ -189,7 +200,8 @@ def test_a_round_that_would_not_finish_within_the_limit_is_not_started(tmp_path)
     # the four seconds the run is given.
     driver = _driver(tmp_path, {"sleep": 1.0}, max_hours=4 / 3600, children=4)
     summary = driver.run()
-    assert summary.stop_reason.startswith("time limit: another round would not finish within")
+    assert summary.stop_reason.startswith("time limit: its first round would not finish within")
+    assert "its first round would take about" in summary.stop_reason
     assert summary.generations == 0 and [r["generation"] for r in driver.ledger.runs()] == [0]
 
 

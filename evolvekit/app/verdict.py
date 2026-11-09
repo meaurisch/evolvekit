@@ -70,14 +70,14 @@ _STAYED_BEST = "starting point stayed the best"
 """What `execute._final_check` records when no combination beat the start."""
 _NOT_RUN = "the search did not run"
 """What `execute._final_check` records when the search stopped before its first round (`execute.NOT_RUN`)."""
+DOWNLOADS = "downloads"
+VALUES = "values.json"
+"""The values the exports in `downloads/` were written from: an input, not an export."""
 
 
 def _not_run(final: dict[str, Any]) -> bool:
     """Whether the run's search stopped before its first round (`execute.NOT_RUN`)."""
     return bool(final.get("not_run")) or str(final.get("skipped") or "").startswith(_NOT_RUN)
-DOWNLOADS = "downloads"
-VALUES = "values.json"
-"""The values the exports in `downloads/` were written from: an input, not an export."""
 
 
 def _pct(value: float | None, digits: int = 1) -> str:
@@ -535,7 +535,8 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     plan = jobs._plan(run_dir, job)
     if not job.get("bakeoff"):
         document["planned"] = {"rounds": plan.get("rounds"), "combinations": plan.get("combinations")}
-    ran = how_it_ran(job, plan, facts["tried"], bool(study.budget.ai_enabled), repeated=_repeated(run_dir))
+    ran = how_it_ran(job, plan, facts["tried"], bool(study.budget.ai_enabled), repeated=_repeated(run_dir),
+                     what=jobs._what(study))
     if ran:
         document["how_it_ran"] = ran
     spent = ai_spent(run_dir, study, job)
@@ -594,7 +595,14 @@ AI_BUDGET_STOPS = ("the AI budget was used up", "budget.max_usd reached")
 """How a search's stop reason starts when its AI budget ended it (`budget.AI_USED_UP`, `BudgetGuard.check`)."""
 
 
-def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool, *, repeated: int = 0) -> str:
+_MEASURED = {"settings": "only today's settings were measured", "code change": "only today's code was measured",
+             "data changes": "only the data as it is was measured",
+             "combination of settings and data changes": "only today's settings and data were measured"}
+"""What a search that did not run measured, by what the study changes (`jobs._what`)."""
+
+
+def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool, *, repeated: int = 0,
+               what: str = "settings") -> str:
     """Whenever fewer rounds ran than the plan said (persona p4, H7), the
     sentence that says so, with the reason from the stop: "Ran 2 of the 11
     planned rounds (25 combinations, about 132 planned): the time ran out; the
@@ -622,9 +630,11 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
     counts = f" ({', '.join(combinations)})" if combinations else ""
     rounds = f"Ran {done} of the {planned} planned round{'s' if planned != 1 else ''}"
     if done == 0 and planned > 0:
-        # The search did not run (persona p5, J1): the line says why; this says only what was measured --
-        # never that "the rounds took longer than the plan assumed", which no round did.
-        return f"None of the {planned} planned round{'s' if planned != 1 else ''} ran: only today's settings were measured."
+        # The search did not run (persona p5, J1): the line says why; this says only what was measured, by
+        # what the study changes, or nothing when the starting point itself was cut short (fix round 1, M2)
+        # -- never that "the rounds took longer than the plan assumed", which no round did.
+        measured = _MEASURED.get(what, _MEASURED["settings"]) if tried else "nothing was measured"
+        return f"None of the {planned} planned round{'s' if planned != 1 else ''} ran: {measured}."
     if reason.startswith(AI_BUDGET_STOPS):
         if done < planned:
             return f"{rounds}{counts}: the AI budget was used up."

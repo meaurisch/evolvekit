@@ -1728,7 +1728,10 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
         named = f" ({data['per_group']['group']})" if data.get("per_group") else ""
         by_case = f"<h2>{esc(label[:1].upper() + label[1:])}, case by case{esc(named)}</h2>" + by_case
     facts = [("Time per case", _duration(context["time_per_case_s"])), ("Time for the study", _duration(context["hours"] * 3600)),
-             ("Combinations tried", str(context["tried"]))]
+             # The starting point is no combination the search tried: "0, plus today's settings" for a search
+             # that did not run, as the Markdown counts it (fix round 1, M5).
+             ("Combinations tried", f"{context['tried'] - 1}, plus today's settings" if isinstance(context["tried"], int)
+              and context["tried"] >= 1 else str(context["tried"]))]
     if context.get("took"):
         facts.append(("It took", context["took"]))
     if context.get("started_at"):
@@ -2146,8 +2149,11 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
             reason = str(final["skipped"]).split(":")[0].split(",")[0]  # "the starting point stayed the best"
             card = {"kind": "finished", "run": run_dir.name, "line": f"finished · {reason}", **facts, "decision": "skipped"}
             if verdict_doc._not_run(final):
-                # "finished · the search did not run": the card offers Continue, never "nothing better" (J1).
-                card.update({"not_run": True, "tone": "warn"})
+                # "finished · the search did not run": the card offers Continue, never "nothing better" (J1),
+                # and Home continues it as the Study page does (`continue_h`: the study's hours; fix round 1, M4).
+                card.update({"not_run": True, "tone": "warn", "can_continue": can_continue(run_dir, job),
+                             "continue_h": float(study.budget.hours) if study is not None else float(plan.get("hours") or 0),
+                             "scheduled": bool(study is not None and study.schedule is not None)})
             return _with_verdict(root, run_dir, document_of, card)
         comparison = verdict_doc._check_of(run_dir, final)[0]  # marks a change no run told from today's
         results = (comparison or {}).get("per_candidate") or {}

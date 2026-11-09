@@ -660,6 +660,8 @@ def not_run_words(stop_reason: Any) -> str:
     follows "The search did not run: ". The engine's own reason for anything
     it has no plain words for."""
     reason = str(stop_reason or "").strip()
+    if reason.startswith("time limit reached"):
+        return "the time ran out before its first round"  # the limit itself, reached on the starting point
     if reason.startswith("time limit"):
         return "there was not enough time left for its first round"
     if reason.startswith(("budget.max_usd", "budget.max_tokens", "the AI budget was used up")):

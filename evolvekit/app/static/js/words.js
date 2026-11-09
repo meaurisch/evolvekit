@@ -142,8 +142,16 @@
       if (v.why_keep) c.why = v.why_keep;
       c.sub = v.advice || "";
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
-      // Stopped before its first round (persona p5, J1): the way on is Continue, on the study's page.
-      if (s.not_run) { c.kickerTone = "warning"; c.actions = [{ text: "Continue", act: "open-study", arg: s.slug, kind: "primary" }]; }
+      // Stopped before its first round (persona p5, J1): the way on is Continue, from the card itself, as the
+      // Study page's (fix round 1, M4); a study with a schedule keeps the time for its next window.
+      if (s.not_run) {
+        c.kickerTone = "warning";
+        if (s.can_continue) {
+          var more = EK.hours(s.continue_h || 1);
+          c.actions = [{ text: s.scheduled ? "Search " + more + " more in the next window" : "Continue for " + more + " more",
+            act: "continue-run", arg: s.slug, kind: "primary" }];
+        }
+      }
     } else if (s.kind === "campaign") {
       // Between windows (D20): the campaign's own words; no claim, the run is not checked yet.
       var camp = s.campaign || {};

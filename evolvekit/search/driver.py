@@ -750,7 +750,8 @@ class Driver:
                     "the final stage per calendar day"
                 )
                 break
-            halt = self.run_stop.before_generation(self._projected_s())
+            halt = self.run_stop.before_generation(
+                self._projected_s(), first=not any(g >= 1 for g in self._durations))
             if halt is not None:
                 summary.stop_reason = halt
                 break

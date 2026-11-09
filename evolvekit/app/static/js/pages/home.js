@@ -205,7 +205,18 @@
       },
       "compare-with": function (el) { EK.go("#/compare?a=" + EK.q(el.getAttribute("data-arg"))); },
       runs: function (el) { EK.go("#/study/" + EK.q(el.getAttribute("data-arg")) + "?runs=1"); },
-      "open-study": function (el) { EK.go("#/study/" + EK.q(el.getAttribute("data-arg"))); },
+      "continue-run": function (el) {
+        // A run whose search did not run, continued from its card with the study's hours (fix round 1, M4):
+        // the same request as the Study page's Continue; once at a time.
+        var s = find(el.getAttribute("data-arg"));
+        if (!s || el.disabled) return;
+        el.disabled = true;
+        el.setAttribute("aria-busy", "true");
+        EK.post(EK.studyPath(s.slug, "/continue"), { run: s.run }).then(function (res) {
+          EK.toast("done", res && res.scheduled ? res.words : "Searching on for " + EK.hours(s.continue_h || 1));
+          freshRender();
+        }, function (err) { el.disabled = false; el.removeAttribute("aria-busy"); EK.fail(err); });
+      },
       zip: function (el) { EK.closeMenus(); location.href = EK.withToken(EK.studyPath(el.getAttribute("data-arg"), "/download/study")); },
       archive: function (el) {
         var s = find(el.getAttribute("data-arg"));

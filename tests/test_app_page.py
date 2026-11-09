@@ -1073,13 +1073,14 @@ START_PAGE = (STATIC / "js" / "pages" / "start.js").read_text(encoding="utf-8")
 
 def test_a_search_that_did_not_run_says_so_on_home_and_offers_continue():
     out = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "t", name: "T", kind: "finished", decision: "skipped",
-        not_run: true, line: "finished · the search did not run",
+        not_run: true, can_continue: true, continue_h: 0.167, line: "finished · the search did not run",
         verdict: {says: "the search did not run", decision: "skipped",
                   line: "The search did not run: there was not enough time left for its first round.",
                   advice: "Keep today's settings for now: nothing was searched yet. Continue the run to give the search its time."}})));""")
     assert out["kicker"] == "The search did not run" and out["head"].startswith("The search did not run: ")
-    assert out["actions"] == [{"text": "Continue", "act": "open-study", "arg": "t", "kind": "primary"}]
-    assert '"open-study"' in HOME_PAGE
+    assert out["actions"] == [{"text": "Continue for 10 min more", "act": "continue-run", "arg": "t", "kind": "primary"}]
+    act = HOME_PAGE[HOME_PAGE.index('"continue-run": function'):]
+    assert 'EK.post(EK.studyPath(s.slug, "/continue"), { run: s.run })' in act[:800], "the Study page's request (M4)"
     words = _node("""process.stdout.write(JSON.stringify([EK.answerWords({decision: "skipped", not_run: true}).head,
         EK.answerWords({decision: "skipped"}).head]));""")
     assert words == ["The search did not run", "Nothing beat the starting point"]
@@ -1087,6 +1088,8 @@ def test_a_search_that_did_not_run_says_so_on_home_and_offers_continue():
     assert 'd === "skipped" && f.not_run' in strip and '"The search did not run"' in strip
     table = _page_function(STUDY_PAGE, "changedTable")
     assert '"Nothing: the search did not run."' in table, "never 'the starting point stayed the best' for it"
+    code = _page_function(STUDY_PAGE, "codeChange")
+    assert code.index("(r.final || {}).not_run") < code.index("today’s code stayed the best"), "a code study too (I1)"
 
 
 def test_a_continuation_says_how_much_more_and_a_restart_says_restart():
