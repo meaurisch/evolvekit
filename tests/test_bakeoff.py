@@ -91,9 +91,13 @@ def test_bakeoff_two_refs_on_demo_tour(tmp_path):
     chosen = ref_of[job["final"]["candidate"]]
     own = next(c for c in verdict["candidates"] if c["ref"] == chosen)
     if own["decision"] == "use":  # decision 32: the chosen branch's line, said as one of N
+        comparison = json.loads((folder / "runs" / "b1" / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
+        k = (comparison["per_candidate"][job["final"]["candidate"]].get("holm") or {}).get("k", 1)
+        # `same` gave exactly today's result, so it is outside Holm's family: k counts the branches that differed.
+        cost = f" Chosen among {k} branches: the true gain is likely smaller than shown." if k >= 2 else ""
         assert verdict["decision"] == "use" and verdict["line"] == (
-            f"Of 2 branches, {chosen}: {own['line'][0].lower()}{own['line'][1:]} "
-            "Chosen among 2 branches: the true gain is likely smaller than shown.")
+            f"Of 2 branches, {chosen}: {own['line'][0].lower()}{own['line'][1:]}{cost}")
+        assert ("Chosen among" in verdict["line"]) == (k >= 2)
     else:
         assert verdict["decision"] == "keep"
         assert verdict["line"] == "None of the 2 branches is shown to beat the starting point."
