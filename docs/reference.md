@@ -117,7 +117,7 @@ interrupted or dead.
 | Section | Answers |
 |---|---|
 | `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
-| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero, as `confirm` judges — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
+| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero (the search's own reading, not `confirm`'s rule, which is a chance of a gain) — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
 | `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
 | `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
 | `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
@@ -1704,7 +1704,7 @@ note: With 2 held-back cases a 'use' is unlikely: the worst case stays wide. Hol
 ```
 
 Three is the number [examples/cli-solver](../examples/cli-solver/README.md#4-find-out-whether-it-is-real)
-gives: with two, "not distinguishable" is the likely answer even for a real
+gives: with two, "not proven" is the likely answer even for a real
 gain. `study compile` ends its plan line with the same note, and the app
 shows it before the start and on the Study page (`notes` in the study's and
 the run's status documents).
@@ -2284,10 +2284,19 @@ cases. The kinds of case are a choice among several, so once every kind is
 checked Holm's step-down runs over them (see the rule under
 [`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export)): a
 kind's *use* is read only then, and until then its line says *Its answer is
-read once every kind of case is checked.* In a seeded simulation, 3 kinds of
-case with no true gain paid 5.0 % family-wise (14.4 % without Holm). A kind
-that fails Holm becomes keep, with *Not proven on N held-back cases with k kinds
-of case compared*. The verdict's rule: *use* only when every group checked on
+read once every kind of case is checked.* (If the run stops or fails first, it
+says *Its answer was not read: the run ended before every kind of case was
+checked.*, and while every group that has no answer is one of these, the run's
+line is *Per kind of case: not every kind of case is read yet.*) Each kind's own
+check is read once and, while its answer is open, extended and read again before
+Holm runs, so a chance of a gain after the second read is no longer a single
+read's: in a seeded simulation of the real procedure, 3 kinds of case with no
+true gain and runs noisier than cases (the worst case) said use for some kind
+of case in 8.7 % of studies with 2 held-back cases each and 8.4 % with 4
+(40 000 studies each; about 25 % without Holm) — under 10 %, not Holm's 5 %.
+A kind that fails Holm becomes keep, with *Not proven on N held-back cases with
+k kinds of case compared*, and its `comparison.md` says *Judged with the k kinds
+of case together (Holm)*. The verdict's rule: *use* only when every group checked on
 two or more held-back cases says use; with no such group, `single`; else
 `keep`, naming the first group that does not (`Per kind of case: not every
 group is shown to beat today's settings (large: keep).`). `study verdict`

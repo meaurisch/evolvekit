@@ -82,7 +82,7 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 
 | Key | Holds |
 |---|---|
-| `schema` | 1; bumped when a key changes meaning |
+| `schema` | 2 (1 before the verdict read a chance of a gain); bumped when a key changes meaning |
 | `study`, `run` | the study's slug and the run's id |
 | `phase` | `queued`, `starting`, `search`, `check`, `done`, `stopped` or `failed` |
 | `decision` | the answer, one of the values below |
@@ -92,9 +92,11 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `advice` | the one sentence after it, what to do |
 | `measure` | the deciding measure: its label, unit and direction |
 | `held_back` | `cases`, `runs_per_case`: how many held-back cases, and the runs per case |
-| `mean_pct`, `ci95_pct`, `worst_pct` | the paired change in percent of the starting point, its 95 % range, the worst case |
+| `mean_pct`, `ci95_pct`, `worst_pct` | the paired change in percent of the starting point, its 95 % range, and the 5 % bound the rule reads (at least this, with a chance of 19 in 20): not the worst that can happen; with several goals, those of the level the answer is read on |
 | `chance`, `chance_words` | how likely the gain is real, and in words |
-| `levels` | with several goals: one entry per goal, `deciding: true` on the one that decided |
+| `levels` | with several goals: one entry per goal (with its own `chance`), `deciding: true` on the one that decided, `read_on: true` on the one the answer is read on |
+| `numbers_from` | with several goals: `level`, `kpi`, `unit`, `deciding`: which level the figures above are |
+| `limited_by` | `"cases"` when only more held-back cases could firm the answer up: the check added no runs, and more runs will not help; hold back more cases |
 | `learned_from` | `cases`, `pct`: the training cases and their gain, labelled as such |
 | `rule` | the fixed rule in words |
 | `by_case` | one row per held-back case, with `name`, `start`, `best`, `change_pct`, `outcome` |
