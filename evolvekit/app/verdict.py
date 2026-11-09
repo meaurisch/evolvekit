@@ -45,7 +45,10 @@ starting point by the same rule (numbers absent while there is no answer, and
 for a branch that changed no run, which has `same: true` instead); `by_case`
 is that branch's held-back rows, in the keys of the run's own `by_case`. Its own
 `decision` and `line` are the chosen branch's -- the largest mean among those
-whose decision is `use` -- said as one of N, or `keep` with "None of the N
+whose decision is `use` -- said as one of N (with N of 2 or more it adds that
+the branch was chosen among N, so its true gain is likely smaller than shown;
+a branch whose own chance passes the rule but not Holm's over the branches is
+`keep`, its line says so), or `keep` with "None of the N
 branches is shown to beat the starting point." and then no figures, held-back
 rows or changes of its own: no unnamed branch speaks for the run. The key
 exists only on bake-off runs.
@@ -300,6 +303,13 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                 "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']}{', ' + of_gain if of_gain else ''} "
                         f"({_span(low, high)}).",
                 "advice": f"{keep}: {new} did worse on cases the search never saw."}
+    held = result.get("holm") or {}
+    if held.get("passed") is False and held.get("own") == "use":
+        # Its own chance passes the rule, but chosen among its rivals it does not (Holm): the line says why.
+        parts = ([of_gain] if of_gain else []) + [f"its 95 % range is {_span(low, high)}"]
+        return {**base, "state": "unclear",
+                "line": f"Not proven on {cases} with {held['k']} {held['what']} compared: {'; '.join(parts)}.",
+                "advice": f"{keep} for now: the gain is not proven among {held['k']} {held['what']} compared."}
     if posterior:
         # "At worst" is the 5 % quantile the rule reads; the 95 % range has its own words, its ends named as such.
         edge = (f"at worst {_pct(worst)} worse" if worst < -0.05 else "at worst about the same"
@@ -801,6 +811,8 @@ def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
 
     if chosen is not None and chosen["decision"] in ("use", "single"):
         document["decision"], document["line"] = chosen["decision"], named(chosen)
+        if chosen["decision"] == "use" and count >= 2:
+            document["line"] += f" Chosen among {count} branches: the true gain is likely smaller than shown."
         if chosen["decision"] == "use":
             document["advice"] = f"Use the code of {chosen['ref']}: it is probably better on cases no branch was made for."
         return str(document["decision"]), True

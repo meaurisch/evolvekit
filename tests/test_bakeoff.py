@@ -252,8 +252,9 @@ def test_compare_page_lists_candidates(tmp_path):
     assert all(set(c) >= {"ref", "commit", "decision", "line", "mean_pct", "ci95_pct", "worst_pct", "chance"}
                for c in verdict["candidates"])
     line = verdict["candidates"][1]["line"]
-    assert verdict["decision"] == "use" and verdict["line"] == f"Of 2 branches, restart: {line[0].lower()}{line[1:]}", \
-        "the run's line is its chosen candidate's, said as one of two"
+    assert verdict["decision"] == "use" and verdict["line"] == (
+        f"Of 2 branches, restart: {line[0].lower()}{line[1:]} "
+        "Chosen among 2 branches: the true gain is likely smaller than shown."),         "the run's line is its chosen candidate's, said as one of two, and what choosing costs"
     assert verdict["candidates"][0]["mean_pct"] == -0.5 and verdict["candidates"][0]["line"].startswith("Not proven")
     assert "2 branches were compared; the more are compared, the likelier one looks ahead by chance." in render_report(verdict)
     plain_root, _ = study_with_runs(tmp_path / "plain")
@@ -554,3 +555,25 @@ def test_each_branch_carries_its_own_figures_case_by_case(tmp_path):
     assert f"| Branch | Commit | Verdict | {held} |" in branches
     assert "| 4.2 % lower |" in branches and "| 0.5 % higher |" in branches
     assert jobs.results(root, RUN, document_of)["candidates"] == verdict["candidates"], "the Compare page reads the same"
+
+
+def test_one_branch_is_not_said_to_be_chosen_among_one(tmp_path):
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    finished_run(run_dir, decision="use")
+    _as_bakeoff(run_dir, only="c1")
+    assert "Chosen among" not in build_verdict(root, RUN)["line"]
+
+
+def test_a_branch_held_back_by_its_rivals_says_why(tmp_path):
+    """Its own chance passes the rule; among two branches it does not, and the line says so."""
+    root, _ = study_with_runs(tmp_path)
+    run_dir = root / "runs" / RUN
+    finished_run(run_dir, decision="keep")
+    _as_bakeoff(run_dir, {"c1": "keep", "c2": "keep"})
+    path = run_dir / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    comparison["per_candidate"]["c1"]["holm"] = {"k": 2, "what": "branches", "own": "use", "passed": False}
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+    line = next(c["line"] for c in build_verdict(root, RUN)["candidates"] if c["ref"] == "restart")
+    assert line.startswith("Not proven on 1 held-back case with 2 branches compared: "), line

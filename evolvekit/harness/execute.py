@@ -682,7 +682,9 @@ def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
     row per branch (its own change, `tree.diff_between`, and its commit).
     `job.final.candidate` is the branch with the largest mean among those whose
     own decision is `use`, else the largest mean (decision 32); `final.decisions`
-    holds every branch's. A run whose check was stopped is checked again on the
+    holds every branch's. The branches are a choice among several, so with two
+    or more each keeps `use` only when Holm over the branches passes too
+    (`confirm.apply_holm`). A run whose check was stopped is checked again on the
     same rows (the runs already done are kept); `seeds` asks for that many runs
     per case. Returns the final `job.json`."""
     from evolvekit import tree
@@ -753,7 +755,7 @@ def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
         try:
             comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:checks]),
                                  candidates=",".join(ids), instances=[f"{UP}/{case}" for case in study.test],
-                                 label="final", log=log, stop=stop.event)
+                                 label="final", family=True, log=log, stop=stop.event)
         except ConfirmStopped:
             job.finish("stopped", search=_no_search(None), final={"stopped": True})
             return job.state

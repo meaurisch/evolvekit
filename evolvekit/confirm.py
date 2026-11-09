@@ -49,7 +49,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import fmean
-from typing import TYPE_CHECKING, Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from evolvekit.candidate import SEED_OPERATOR, Candidate, splice_block
 from evolvekit.config import Config, ConfigError, StageConfig
@@ -61,7 +61,7 @@ from evolvekit.leaderboard import rank
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import run_lock
 from evolvekit.stats import _betainc, _t95, paired_summary, t_cdf, wilcoxon_signed_rank  # noqa: F401  (re-exported: importers below)
-from evolvekit.stats import log_gain, margin_log, pct_from_log, posterior_mean_t
+from evolvekit.stats import holm, log_gain, margin_log, pct_from_log, posterior_mean_t
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
     from evolvekit.tree import Tree
@@ -69,7 +69,7 @@ if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
 __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
     "t_cdf", "decide", "decision_of", "verdict_summary", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT",
-    "WORSE_CHANCE", "RULE_WORDS", "LEGACY_RULE_WORDS", "is_posterior",
+    "WORSE_CHANCE", "RULE_WORDS", "LEGACY_RULE_WORDS", "is_posterior", "apply_holm",
 ]
 
 BASELINE = "baseline"
@@ -151,7 +151,38 @@ def decision_of(result: dict[str, Any]) -> str:
         return "keep"
     if "levels" in result:
         return "use" if result["levels"]["confirmed"] else "keep"
-    return decide(result["summary"])
+    decision = decide(result["summary"])
+    if decision == "use" and (result.get("holm") or {}).get("passed") is False:
+        return "keep"  # its own chance passes the rule; chosen among its rivals, it does not
+    return decision
+
+
+HOLM_ALPHA = 1.0 - USE_CHANCE
+"""Holm's level over the candidates or branches of a family: one minus the chance "use" needs."""
+
+
+def apply_holm(results: Mapping[str, dict[str, Any]], *, what: str) -> None:
+    """Pay for a choice among several: each result of the family that is
+    `use` by its own summary keeps it only when Holm's step-down over the
+    family passes on p = 1 - P(gain > 0) at `HOLM_ALPHA` (decision 13: one
+    leg, the rule's own chance). The family is the results that are not
+    `identical`, have no `levels`, and carry A1's posterior over two
+    instances or more; with fewer than two of them there is no choice and
+    nothing changes. Each member gets `result["holm"] = {"k", "what",
+    "own", "passed"}` (`own` is `decide` of its summary); `decision_of`
+    reads it. `what` is "branches", "candidates" or "kinds of case"."""
+    family = {
+        cid: r for cid, r in results.items()
+        if not r.get("identical") and "levels" not in r and (r.get("summary") or {}).get("n", 0) >= 2
+        and is_posterior(r["summary"]) and r["summary"].get("chance") is not None
+    }
+    if len(family) < 2:
+        for r in results.values():
+            r.pop("holm", None)
+        return
+    passed = holm({cid: 1.0 - float(r["summary"]["chance"]) for cid, r in family.items()}, HOLM_ALPHA)
+    for cid, r in family.items():
+        r["holm"] = {"k": len(family), "what": what, "own": decide(r["summary"]), "passed": passed[cid]}
 
 
 CASES_LIMIT_SHARE = 0.25
@@ -391,6 +422,7 @@ def confirm(
     instances: Sequence[str] | None = None,
     label: str = "confirm",
     against: str | None = None,
+    family: bool = False,
     log: Callable[[str], None] = print,
     stop: threading.Event | None = None,
 ) -> Comparison:
@@ -398,7 +430,10 @@ def confirm(
 
     `stop`, once set, stops the runs in flight and starts no other, and the
     comparison ends with `ConfirmStopped` instead of a verdict on half the
-    pairs."""
+    pairs.
+
+    `family`: the candidates are a choice among several (a bake-off), so each
+    pays for it (`apply_holm`); `candidates="top:N"` with N > 1 always is."""
     run_dir = Path(run_dir)
     rows = list(read_jsonl(run_dir / "runs.jsonl"))
     if against is not None:
@@ -432,6 +467,8 @@ def confirm(
         stage = _with_instances(config, stage, instances)
 
     chosen = _select(rows, candidates)
+    top = candidates.startswith("top:")
+    family = family or (top and len(chosen) > 1)
     _disambiguate([seed_row, *chosen])
     names = [str(r["id"]) for r in chosen]
     twice = sorted({n for n in names if names.count(n) > 1})
@@ -482,7 +519,8 @@ def confirm(
                                 **on_tree(config.problem, tree_made)))
                 made.append(tree_made)
             _compare(config, comparison, stage, jobs, made, work=work, seeds=seeds, label=label, log=log,
-                     events=events, heartbeat=heartbeat, stop=stop)
+                     events=events, heartbeat=heartbeat, stop=stop,
+                     family=("candidates" if top else "branches") if family else None)
         finally:
             if config.problem.tree is not None:
                 _put_trees_back(config, work, log)
@@ -492,9 +530,10 @@ def confirm(
 def _compare(
     config: Config, comparison: Comparison, stage: StageConfig, jobs: list[Job], made: list[Tree | None], *,
     work: Path, seeds: Sequence[int], label: str, log: Callable[[str], None], events: EventLog,
-    heartbeat: Heartbeat, stop: threading.Event | None,
+    heartbeat: Heartbeat, stop: threading.Event | None, family: str | None = None,
 ) -> None:
-    """Every configuration's runs, then the statistics and the files."""
+    """Every configuration's runs, then the statistics and the files.
+    `family` names what the candidates are a choice among (`apply_holm`)."""
     out_dir = work.parent
     planned = len(jobs) * len(stage.instances) * len(seeds)
     log(
@@ -560,6 +599,8 @@ def _compare(
         raise
 
     _analyse(comparison)
+    if family:
+        apply_holm(comparison.per_candidate, what=family)
     (out_dir / "results.json").write_text(json.dumps(comparison.runs, indent=1), encoding="utf-8")
     (out_dir / "comparison.json").write_text(json.dumps(comparison.to_json(), indent=1), encoding="utf-8")
     (out_dir / "comparison.md").write_text(render_markdown(comparison), encoding="utf-8", newline="\n")
@@ -922,6 +963,10 @@ def render_markdown(comparison: Comparison) -> str:
     for cid, result in comparison.per_candidate.items():
         s = result["summary"]
         lines += [f"## `{cid}` against the baseline", ""]
+        holm_info = result.get("holm")
+        if holm_info:
+            lines += [f"Chosen among {holm_info['k']} {holm_info['what']} (Holm): "
+                      f"{'passes' if holm_info['passed'] else 'does not pass'} the rule's chance at its stricter level.", ""]
         if result.get("levels"):
             lines += _levels_markdown(result["levels"])
         sizes = result.get("failure_counted_as_pct")

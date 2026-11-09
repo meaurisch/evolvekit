@@ -23,7 +23,7 @@ from typing import Any, Hashable, Mapping, Sequence
 
 __all__ = [
     "t_cdf", "wilcoxon_signed_rank", "paired_summary", "per_instance_means",
-    "log_gain", "pct_from_log", "margin_log", "Posterior", "posterior_mean_t",
+    "log_gain", "pct_from_log", "margin_log", "Posterior", "posterior_mean_t", "holm",
 ]
 
 # Two-sided 95 % critical values of Student's t, by degrees of freedom.
@@ -299,3 +299,17 @@ def margin_log(margin_pct: float, direction: str) -> float:
     if _sign(direction) > 0:
         return -math.log(1.0 + margin_pct / 100.0)
     return math.log(1.0 - margin_pct / 100.0)
+
+
+def holm(pvalues: Mapping[str, float], alpha: float) -> dict[str, bool]:
+    """Holm's step-down over a family: sorted ascending, the i-th smallest p
+    (1-based) passes while `p <= alpha / (k - i + 1)`; the first failure fails
+    every larger one. The family-wise chance of passing any true null is at
+    most `alpha`. An empty family gives `{}`."""
+    k = len(pvalues)
+    passed: dict[str, bool] = {key: False for key in pvalues}
+    for i, (key, p) in enumerate(sorted(pvalues.items(), key=lambda item: item[1]), start=1):
+        if p > alpha / (k - i + 1):
+            break
+        passed[key] = True
+    return passed

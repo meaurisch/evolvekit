@@ -882,3 +882,52 @@ def test_runs_dominated_by_their_own_noise_are_called_case_limited_in_under_one_
     rng = random.Random(25)
     limited = sum(not runs_can_help(_a_study(rng, gains=[0.0] * 4, run_sd=0.02)(3)) for _ in range(400))
     assert 5 <= limited < 40, f"{limited} of 400 (about 5 % expected: 21)"
+
+
+def test_holm_steps_down():
+    from evolvekit.stats import holm
+
+    assert holm({"a": 0.01, "b": 0.03, "c": 0.04}, 0.05) == {"a": True, "b": False, "c": False}
+    assert holm({"a": 0.01, "b": 0.02, "c": 0.04}, 0.05) == {"a": True, "b": True, "c": True}
+    assert holm({"a": 0.02, "b": 0.03, "c": 0.04}, 0.05) == {"a": False, "b": False, "c": False}
+    assert holm({"a": 0.04}, 0.05) == {"a": True} and holm({}, 0.05) == {}
+
+
+def _posterior_summary(chance: float) -> dict:
+    return {"n": 4, "chance": chance, "chance_margin": chance, "worst": 1.0, "posterior": {}}
+
+
+def test_top_n_pays_for_choosing_among_its_candidates():
+    from evolvekit.confirm import apply_holm
+
+    results = {"g1": {"summary": _posterior_summary(0.999)}, "g2": {"summary": _posterior_summary(0.96)},
+               "g3": {"summary": _posterior_summary(0.5)}}
+    apply_holm(results, what="candidates")
+    assert decide(results["g2"]["summary"]) == "use", "alone, 0.96 passes the rule"
+    assert decision_of(results["g1"]) == "use" and decision_of(results["g2"]) == "keep"
+    assert results["g2"]["holm"] == {"k": 3, "what": "candidates", "own": "use", "passed": False}
+    alone = {"g2": {"summary": _posterior_summary(0.96)}}
+    apply_holm(alone, what="candidates")
+    assert "holm" not in alone["g2"] and decision_of(alone["g2"]) == "use", "one is no family"
+    old = {"a": {"summary": {"n": 4, "chance": 0.95, "worst": 0.1}}, "b": {"summary": _posterior_summary(0.96)},
+           "c": {"summary": _posterior_summary(0.5), "identical": True}}
+    apply_holm(old, what="branches")
+    assert not any("holm" in r for r in old.values()), "a comparison before A1, and an identical run, are no family"
+
+
+def test_four_null_branches_say_use_in_at_most_five_percent_of_bakeoffs_with_holm():
+    """Family-wise false "use" with k = 4 equal branches: Holm bounds it by alpha = 5 %
+    (asserted at 8 % over 400 seeded bake-offs, i.e. plus sampling margin)."""
+    from evolvekit.confirm import apply_holm
+
+    rng = random.Random(32)
+    runs, any_use, any_use_alone = 400, 0, 0
+    for _ in range(runs):
+        results = {f"b{i}": _a_study(rng, gains=[rng.gauss(0.0, 0.02) for _ in range(4)], run_sd=0.005)(3)
+                   for i in range(4)}
+        any_use_alone += any(decision_of(r) == "use" for r in results.values())
+        apply_holm(results, what="branches")
+        any_use += any(decision_of(r) == "use" for r in results.values())
+    print(f"family-wise false use, 4 null branches: {any_use / runs:.3f} with Holm, {any_use_alone / runs:.3f} without")
+    assert any_use <= 0.08 * runs, f"{any_use} of {runs} bake-offs of four equal branches named one better"
+    assert any_use <= any_use_alone
