@@ -14,6 +14,7 @@ from datetime import datetime
 
 import pytest
 
+from evolvekit import resources
 from evolvekit.app import detach, scheduler, service
 from evolvekit.app.running import read_running, write_running
 from evolvekit.app.server import AppServer
@@ -205,6 +206,12 @@ def test_uninstall_startup(tmp_path):
         assert words in text and "rm " in text
 
 
+def test_service_argv_refuses_an_empty_python(tmp_path):
+    for empty in ("", "  "):
+        with pytest.raises(ValueError):
+            service.service_argv(tmp_path, python=empty)
+
+
 def test_python_for_runs_is_never_pythonw(tmp_path, monkeypatch):
     (tmp_path / "python.exe").write_bytes(b"")
     (tmp_path / "pythonw.exe").write_bytes(b"")
@@ -216,12 +223,12 @@ def test_runs_are_launched_with_python_for_runs(tmp_path, monkeypatch):
     from evolvekit.app import jobs
 
     seen = []
-    monkeypatch.setattr(detach, "python_for_runs", lambda: "the-python")
+    monkeypatch.setattr(resources, "python_argv", lambda: ["the-python"])
     monkeypatch.setattr(jobs, "_spawn", lambda env, argv, root, run_dir: seen.append(argv) or 4242)
     run_dir = tmp_path / "study" / "runs" / "r1"
     run_dir.mkdir(parents=True)
     jobs._launch(Home(tmp_path / "home"), tmp_path / "study", run_dir, [], with_keys=False)
-    assert seen[0][0] == "the-python"
+    assert seen[0][:3] == ["the-python", "-m", "evolvekit.app.job"]
 
 
 def test_a_second_app_on_the_same_home_opens_the_first(tmp_path, capsys):
@@ -283,7 +290,7 @@ def test_study_open_starts_the_service(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     seen = []
     monkeypatch.setattr(detach, "spawn_detached", lambda argv, **kwargs: seen.append((list(argv), kwargs)) or 4242)
-    monkeypatch.setattr(detach, "python_for_runs", lambda: "the-python")
+    monkeypatch.setattr(resources, "python_argv", lambda: ["the-python"])
     monkeypatch.setattr(cli, "OPEN_WAIT_S", 0.5)
     assert main(["study", "open", "depot-a", "--no-browser", "--home", str(home)]) == 1  # nothing really started
     argv, kwargs = seen[0]

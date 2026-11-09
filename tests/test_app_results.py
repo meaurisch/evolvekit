@@ -590,3 +590,40 @@ def test_while_the_ai_writes_a_rounds_changes_the_status_says_how_many(tmp_path,
     with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"type": "stage_started", "stage": "full"}) + "\n")
     assert jobs.status(root, run_dir.name, _rounds_done(5.077))["writing"] is None, "the round's runs started"
+
+
+def test_a_study_without_ai_never_says_it_writes_changes(tmp_path, monkeypatch):
+    """Persona p5, J6: "Writing changes: 12 of 12." on a study with AI off -- its children are drawn by the
+    operators that call no model, in an instant."""
+    import json
+
+    root, run_dir = _live_search(tmp_path, monkeypatch)
+    events = [{"type": "run_started"}, {"type": "generation_started", "generation": 0, "children_planned": 0},
+              {"type": "stage_started", "stage": "full"}, {"type": "generation_finished", "generation": 0},
+              {"type": "generation_started", "generation": 1, "children_planned": 12}]
+    events += [{"type": "candidate_bred", "generation": 1, "ok": True, "operator": "param_local"} for _ in range(12)]
+    (run_dir / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    status = jobs.status(root, run_dir.name, _rounds_done(5.077))
+    assert status["writing"] is None and not status["now"].startswith("Writing changes")
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    assert jobs.writing(run_dir, {**job, "plan": {**(job.get("plan") or {}), "ai_change_s": 0.0}}) is None
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "candidate_bred", "generation": 1, "ok": True, "operator": "diff"}) + "\n")
+    assert jobs.writing(run_dir, {**job, "plan": {"ai_change_s": 10.0}}) == {"done": 12, "planned": 12}
+
+
+def test_a_continuations_card_says_how_much_more_time_it_was_given(tmp_path, monkeypatch):
+    import json
+
+    from evolvekit.harness.study import load_study
+
+    root, run_dir = _live_search(tmp_path, monkeypatch)
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    moment = "2026-11-09T02:06:46+00:00"
+    (run_dir / "job.json").write_text(json.dumps({**job, "resumed_at": moment, "continued_at": moment,
+                                                  "hours_added": 0.167}), encoding="utf-8")
+    card = jobs.run_line(root, load_study(root), run_dir)
+    assert card["continued"] and card["added_h"] == 0.167 and card["restarted"] is False
+    (run_dir / "job.json").write_text(json.dumps({**job, "resumed_at": moment}), encoding="utf-8")
+    card = jobs.run_line(root, load_study(root), run_dir)
+    assert card["continued"] and card["added_h"] is None and card["restarted"] is True

@@ -263,6 +263,11 @@
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Final check done · 1 held-back case", head: verdictHead(f),
         sub: verdictSub(f), right: "range", range: [f.mean, null, null], caption: "One case: a number, no range",
         acts: [{ text: "Hold back more cases", kind: "secondary", act: "next" }] });
+    } else if (d === "skipped" && f.not_run) {
+      // The search stopped before its first round (persona p5, J1): why, in plain words, and Continue first.
+      Object.assign(x, { mark: "none", kickerTone: "warning", kicker: "The search did not run" + (s.time && s.time.used ? " · " + s.time.used : ""),
+        head: verdictHead(f), sub: verdictSub(f), caption: "No round ran · no final check", stoppedAt: true,
+        acts: continueActs("Continue for " + EK.hours(continueHours()) + " more").map(function (a, i) { return i === 0 ? Object.assign({}, a, { kind: "primary" }) : a; }) });
     } else if (d === "skipped") {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Search done" + (s.time && s.time.used ? " · " + s.time.used : ""),
         head: verdictHead(f), sub: verdictSub(f),
@@ -487,7 +492,9 @@
       plotPoints.push({ el: "setting", setting: p.name, points: sp.points });
       return html`<div class="setting-panel"><h3>${labelOf(p.name)}</h3><span class="type-small ink-2">${sp.good || "Today: " + EK.valueText(p, p.default)}</span>${EK.raw(sp.svg)}</div>`;
     });
-    return html`<p class="type-small ink-2">${EK.plural(params.length, "setting")} tuned, the ones that moved the result most first. The band: values in tries over 1 % better.</p>
+    // The band in the goal's own direction word, and not checked: nothing claims "better" before the final check (J6).
+    var g = goalOf() || {}, band = "values in tries over 1 % " + (g.direction === "higher" ? "higher" : "lower") + (g.says ? " " + g.says : "") + " (not checked)";
+    return html`<p class="type-small ink-2">${EK.plural(params.length, "setting")} tuned, the ones that moved the result most first. The band: ${band}.</p>
       <div class="settings-grid">${panels}</div>
       ${params.length > 6 && !st.showAllSettings ? html`<p>${EK.link("Show all " + params.length, { act: "all-settings" })}</p>` : ""}`;
   }
@@ -669,7 +676,9 @@
   function changedTable() {
     var ch = ((st.results || {}).changed || []).filter(function (c) { return c.changed; });
     if (isCode()) return codeChange(ch);
-    if (!ch.length) return html`<p class="type-body ink-2">${(st.results || {}).is_seed ? "Nothing: the starting point stayed the best." : "No changes."}</p>`;
+    // A search that did not run found nothing and kept nothing as best (persona p5, J1).
+    var notRun = !!((st.results || {}).final || {}).not_run;
+    if (!ch.length) return html`<p class="type-body ink-2">${notRun ? "Nothing: the search did not run." : (st.results || {}).is_seed ? "Nothing: the starting point stayed the best." : "No changes."}</p>`;
     return html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Today</th><th>New</th></tr></thead><tbody>
       ${ch.map(function (c) { return html`<tr><td>${c.label || c.name}${c.help ? html`<br><span class="ink-2">${c.help}</span>` : ""}</td><td>${c.old_text}</td><td class="new">${c.new_text}</td></tr>`; })}</tbody></table></div>`;
   }
@@ -678,7 +687,8 @@
   function codeChange(ch) {
     var r = st.results || {};
     if (isBakeoff()) return html`<p class="type-body ink-2">Each branch’s own answer is on the page that shows them side by side.</p>`;
-    if (!ch.length) return html`<p class="type-body ink-2">${r.is_seed ? "Nothing: today’s code stayed the best." : "No change to the code."}</p>`;
+    // A code study's search that did not run: nothing found, nothing stayed best (persona p5 fix round 1, I1).
+    if (!ch.length) return html`<p class="type-body ink-2">${(r.final || {}).not_run ? "Nothing: the search did not run." : r.is_seed ? "Nothing: today’s code stayed the best." : "No change to the code."}</p>`;
     var c = ch[0];
     return html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Source</th><th>Today’s code</th><th>The change</th></tr></thead><tbody>
       <tr><td>${c.label || "The source"}</td><td class="mono">${c.old_text}</td><td class="new">${c.new_text}</td></tr></tbody></table></div>
@@ -691,17 +701,18 @@
     var dl = (r.downloads || []).map(function (x) {
       return EK.link(x.label, { href: EK.withToken(EK.studyPath(st.slug, "/download/" + EK.q(x.name) + "?run=" + EK.q(st.run) + groupQ())), download: true, icon: EK.gl("file", 18) });
     });
-    var keepIt = d !== "use", code = isCode();
+    var keepIt = d !== "use", code = isCode(), notRun = !!(r.final || {}).not_run;
     var title = code ? (keepIt ? "Code to keep" : "The code change to use") : (keepIt ? "Settings to keep" : "Settings to use");
     if (perGroup()) title += " · " + perGroup().group;  // a per-group run: the group shown, by its own verdict
     return html`<section class="section" aria-labelledby="hand-title"><h2 id="hand-title">${title}</h2>
       ${keepIt ? html`<p class="type-body strong">Nothing to change: ${EK.keepWords({ what: whatOf() }).replace(/^Keep /, "keep ")}${(r.context || {}).compared_with ? " (" + r.context.compared_with + ")" : ""}.</p>
-        <p class="type-small ink-2">${code && isBakeoff() ? "Keep today’s code: no branch is shown to beat it."
+        <p class="type-small ink-2">${notRun ? "The search did not run, so there is nothing it found to show."
+          : code && isBakeoff() ? "Keep today’s code: no branch is shown to beat it."
           : code ? "Keep today’s code. Below it is the change that came closest: not proven on held-back cases, so not recommended."
           : "Hand over today’s settings. Below them is what the search found: not proven on held-back cases, so not recommended."}</p>` : ""}
       ${changedTable()}
       <div class="actions">${keepIt && hasExport("settings_json") ? EK.button("Show today’s settings", { act: "show-today" }) : ""}
-        ${hasExport("settings_json") ? EK.button(keepIt ? "Settings found, not recommended" : "Show the settings file", { kind: "secondary", act: "show-settings" }) : ""}
+        ${hasExport("settings_json") && !notRun ? EK.button(keepIt ? "Settings found, not recommended" : "Show the settings file", { kind: "secondary", act: "show-settings" }) : ""}
         ${EK.button("Copy a summary", { kind: "secondary", act: "copy-summary" })}
         ${EK.link("Open the report", { href: EK.withToken(EK.studyPath(st.slug, "/download/report?run=" + EK.q(st.run) + groupQ() + "&view=1")), target: "_blank" })}</div>
       <div class="link-row">${dl}${EK.link("Save the study as zip", { href: EK.withToken(EK.studyPath(st.slug, "/download/study")), download: true })}</div></section>`;
@@ -778,7 +789,7 @@
       parts.push(html`<div class="facts-grid">
         <div class="fact"><span class="type-label">Time per case</span><span>${EK.duration(c.time_per_case_s)}</span></div>
         <div class="fact"><span class="type-label">Time in total</span><span>${EK.hours(c.hours)}${c.took ? " · took " + c.took : ""}</span></div>
-        <div class="fact"><span class="type-label">Combinations</span><span>${c.tried != null ? EK.int(c.tried) + " tried" : ""}</span></div>
+        <div class="fact"><span class="type-label">Combinations</span><span>${c.tried != null ? EK.int(Math.max(0, c.tried - 1)) + " tried, plus " + (whatOf() === "code" ? "today’s code" : whatOf() === "data" ? "the data as it is" : "today’s settings") : ""}</span></div>
         <div class="fact"><span class="type-label">Starting point</span><span>${c.compared_with || ""}</span></div>
         ${spent ? html`<div class="fact"><span class="type-label">AI spend</span><span id="details-spent">${spent.line}</span></div>` : ""}</div>`);
       // How much of the plan ran, when less did: the verdict document's own sentence.

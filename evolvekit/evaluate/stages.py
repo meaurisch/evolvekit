@@ -22,7 +22,6 @@ import math
 import shlex
 import string
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -31,6 +30,7 @@ from pathlib import Path
 from statistics import fmean, stdev
 from typing import TYPE_CHECKING, Any, Callable
 
+from evolvekit import resources
 from evolvekit.config import ProblemConfig, StageConfig, embedded_params
 from evolvekit.app.detach import no_window_flags
 from evolvekit.evaluate.cache import EvalCache
@@ -244,7 +244,7 @@ def build_command(template: str, *, tree: Path, python: str | None = None) -> li
     tokens = shlex.split(template, posix=True)
     if not tokens:
         raise ValueError("the build command is empty")
-    interpreter = python or sys.executable
+    interpreter = python or resources.python_argv()[0]
     return [token.replace("{tree}", str(tree)).replace("{python}", interpreter) for token in tokens]
 
 
@@ -405,7 +405,7 @@ def _import_check(candidate_path: Path, timeout: float) -> str | None:
     )
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", snippet, str(candidate_path)],
+            [*resources.python_code_argv(snippet), str(candidate_path)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -475,7 +475,7 @@ def _resolve_parameters(
     )
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", snippet, str(candidate_path)],
+            [*resources.python_code_argv(snippet), str(candidate_path)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -545,7 +545,7 @@ def build_argv(
         "inputs": ",".join(inputs),
         "out": str(out),
         "seed": str(seed),
-        "python": sys.executable,
+        "python": resources.python_argv()[0],  # one token; frozen the cli exe, which runs the .py after it (D3)
         "instance": instance or "",
         "params_json": str(params_json) if params_json is not None else "",
         "app": app or "",

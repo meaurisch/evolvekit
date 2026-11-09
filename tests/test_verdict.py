@@ -124,7 +124,30 @@ def test_results_learned_figure_is_the_verdict_learned_from(use_run):
     r = jobs.results(root, run, document_of)
     assert v["learned_from"]["pct"] == pytest.approx(7.5)
     assert r["learned_pct"] == v["learned_from"]["pct"]
-    assert r["improvement_pct"] == pytest.approx(4.2), "the search's own figure stays for the Tries plot"
+    assert r["improvement_pct"] == pytest.approx(7.5), "one search figure: the Tries plot reads the same one"
+
+
+def test_the_search_figure_is_one_on_every_surface(use_run):
+    """persona p5, K1: report.html said 3.8 % where the Study page said 1.8 % -- the status document's mean of
+    per-case changes against the change of the plain averages. The page's status, the results, the HTML report
+    and the Markdown (report and summary) give the verdict's learned-from figure."""
+    from evolvekit.app.report import render_report
+
+    root, run = use_run
+    path = root / "runs" / run / "runs.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows[0]["kpis"].update({"tour_length": 1.0, "tour_length_raw": 100.0})
+    rows[1]["kpis"].update({"tour_length": 0.9257, "tour_length_raw": 92.5})
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    v = build_verdict(root, run)
+    page = jobs.results(root, run, document_of)
+    assert v["learned_from"]["pct"] == pytest.approx(7.5)
+    figure = "7.5 % lower"
+    assert figure in jobs.status(root, run, document_of)["best"]["says"]
+    for name, text in (("html report", jobs.report_html(page)), ("markdown report", render_report(v, page)),
+                       ("summary", page["summary_text"])):
+        assert "4.2 % lower tour length than" not in text, name
+        assert figure in text, name
 
 
 def test_advice_for_use_says_use(use_run):
@@ -675,3 +698,117 @@ def test_why_keep_is_never_given_when_the_goal_has_levels(tmp_path):
     v = build_verdict(root, run)
     assert v["decision"] == "keep" and v.get("levels") and "why_keep" not in v
     assert "why_keep" not in jobs.results(root, run, document_of)["final"]
+
+
+# -- a search that did not run (persona p5, J1) -----------------------------------
+
+NOT_RUN = "the search did not run: there was not enough time left for its first round"
+
+
+def _not_run(tmp_path: Path) -> tuple[Path, str]:
+    """The intern's first run: the starting point measured, then the time limit refused round 1."""
+    root, run = _run_of(tmp_path, "pending")
+    run_dir = root / "runs" / run
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    job["plan"] = {"hours": 0.167, "rounds": 4, "combinations": 48}
+    job["search"] = {"generations": 0, "stop_reason": "time limit: another round would not finish within 0.124 h "
+                     "(0.01 h used; a round has taken up to 0.12 h)", "best_id": "seed", "aborted": False}
+    job["final"] = {"skipped": NOT_RUN, "not_run": True}
+    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    rows = [json.loads(line) for line in (run_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+    (run_dir / "runs.jsonl").write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")  # the starting point only
+    (run_dir / "evolvekit.yaml").write_text("{}\n", encoding="utf-8")  # compiled: the run can go on
+    return root, run
+
+
+def test_the_final_check_of_a_search_that_did_not_run_says_why(tmp_path):
+    from evolvekit.harness.execute import Job, _final_check, not_run_words
+
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "runs.jsonl").write_text('{"id": "seed", "operator": "human-seed", "score": -100.0}\n', encoding="utf-8")
+    job = Job(run_dir, run_id="r1", study="s", plan={})
+    job.update(search={"generations": 0, "aborted": False, "best_id": "seed",
+                       "stop_reason": "time limit: another round would not finish within 0.124 h (0.01 h used; "
+                                      "a round has taken up to 0.12 h)"})
+    _final_check(None, None, None, run_dir, job, lambda line: None)  # type: ignore[arg-type]
+    assert job.state["phase"] == "done" and job.state["final"] == {"skipped": NOT_RUN, "not_run": True}
+    assert not_run_words("budget.max_full_evals_per_day reached: 94 of 94") == (
+        "today's limit on full runs was reached before its first round")
+    assert not_run_words("the AI budget was used up: $0.01 of $1.00 left") == "the AI budget was used up before its first round"
+
+
+def test_a_search_that_did_not_run_never_says_it_found_nothing_better(tmp_path):
+    from evolvekit.app.report import render_report
+    from evolvekit.harness.study import load_study
+
+    root, run = _not_run(tmp_path)
+    v = build_verdict(root, run)
+    assert v["line"] == "The search did not run: there was not enough time left for its first round."
+    assert v["advice"] == ("Keep today's settings (Demo tour's own defaults) for now: nothing was searched yet. "
+                           "Continue the run to give the search its time.")
+    assert v["decision"] == "skipped" and v["not_run"] is True
+    page = jobs.results(root, run, document_of)
+    assert page["headline"] == v["line"] and page["final"]["not_run"] and page["can_continue"] is True
+    words = [render_report(v, page), jobs.report_html(page), page["summary_text"]]
+    card = jobs.run_line(root, load_study(root), root / "runs" / run, document_of)  # Past runs and Home's card
+    assert card["line"] == "finished · the search did not run" and card["not_run"] and card["decision"] == "skipped"
+    assert card["can_continue"] is True and card["continue_h"] > 0 and card["scheduled"] is False  # Home continues it
+    assert card["verdict"]["line"] == v["line"]
+    for text in words + [card["line"], card["verdict"]["advice"]]:
+        assert "found nothing better" not in text and "stayed the best" not in text and "beat your starting" not in text
+    assert all(v["line"] in text for text in words)
+    assert v["how_it_ran"] == "None of the 4 planned rounds ran: only today's settings were measured."
+    assert v["learned_from"]["pct"] is None, "a search that did not run learned nothing"
+    ran = jobs.report_html(page)
+    assert "Combinations tried" not in ran and "How it ran</div><div class='v'>None of the 4 planned rounds ran" in ran, "as the Markdown"
+    counted = jobs.report_html({k: v for k, v in page.items() if k != "how_it_ran"})
+    assert "Combinations tried</div><div class='v'>0, plus today&#x27;s settings" in counted, "M5"
+
+
+@pytest.mark.parametrize("what,said", [
+    ("settings", "only today's settings were measured"),
+    ("code change", "only today's code was measured"),
+    ("data changes", "only the data as it is was measured"),
+    ("combination of settings and data changes", "only today's settings and data were measured"),
+])
+def test_a_search_that_did_not_run_names_what_was_measured(what, said):
+    # Persona p5 fix round 1, M2: by what the study changes; nothing at all when the starting point was cut short.
+    from evolvekit.app.verdict import how_it_ran
+
+    job = {"search": {"generations": 0, "stop_reason": "time limit: its first round would not finish within 0.124 h"}}
+    plan = {"rounds": 4, "combinations": 48}
+    assert how_it_ran(job, plan, 1, False, what=what) == f"None of the 4 planned rounds ran: {said}."
+    assert how_it_ran(job, plan, 0, False, what=what) == "None of the 4 planned rounds ran: nothing was measured."
+
+
+def test_the_seed_cut_by_the_time_limit_is_said_in_its_own_words():
+    from evolvekit.harness.execute import not_run_words
+
+    assert not_run_words("time limit reached: 0.12 h of active run time, budget.max_hours is 0.124 h") == (
+        "the time ran out before its first round")
+    assert not_run_words("time limit: its first round would not finish within 0.124 h (…)") == (
+        "there was not enough time left for its first round")
+
+
+def test_a_time_below_the_harness_own_is_said_in_the_report_and_the_plan(use_run):
+    """persona p5, K2: 5 s a case against the harness's 1 min was never said. Below the harness's own time per
+    case the verdict, the HTML report, the Markdown and the summary say it, once, in the same words."""
+    from evolvekit.app.report import render_report
+    from evolvekit.harness.study import load_study, save_study
+
+    root, run = use_run
+    note = "Tuned at 1 s a case; Demo tour's own time is 2 s: settings found here may not hold at a longer time limit."
+    assert "time_note" not in build_verdict(root, run), "the study's time is the harness's own"
+    study = load_study(root)
+    study.limits.time_per_case_s = 1
+    save_study(study, root)
+    v = build_verdict(root, run)
+    page = jobs.results(root, run, document_of)
+    assert v["time_note"] == note and page["time_note"] == note
+    html = jobs.report_html(page)
+    assert html.count("Tuned at 1 s a case") == 1 and "Demo tour&#x27;s own time is 2 s" in html
+    assert note.rstrip(".") in render_report(v, page) and note in page["summary_text"]
+    study.limits.time_per_case_s = 5
+    save_study(study, root)
+    assert "time_note" not in build_verdict(root, run), "above the harness's own time: nothing to say"

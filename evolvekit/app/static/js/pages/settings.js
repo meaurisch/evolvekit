@@ -22,6 +22,16 @@
     });
   }
 
+  /* What the notice says once the app has stopped, for how it was started: the installer
+     (`frozen`: evolvekit-app.exe, updated by extracting a new zip) or pip (`evolvekit app`). A study
+     that is running holds the app folder's files, so a new version goes over it only when none is. */
+  function stoppedWords(frozen) {
+    var words = "The app has stopped. Studies that are running carry on. ";
+    if (!frozen) return words + "To open it again, run evolvekit app.";
+    return words + "To open it again, double-click evolvekit-app.exe. To update the app, extract the new version over its folder " +
+      "only when no study is running (Home shows them); while one runs, extract it into a new folder and start it from there.";
+  }
+
   function hasKeys() { return svc(st.provider).keys.every(function (k) { return st.saved.keys[k[0]] && st.keys[k[0]] !== ""; }); }
   function head() {
     var c = st.check, p = st.provider;
@@ -94,6 +104,9 @@
       <details class="expert"><summary>Models and prices</summary><div class="sub-section">
         ${EK.textInput({ id: "model-search", label: "Model for AI search help", value: st.models.search || "", mono: true, hint: "The model that proposes combinations, when AI help is on." })}
         ${p === "copilot-cli" ? html`<p class="type-small ink-2">Copilot counts requests in your plan, so no price is needed.</p>` : priceTable()}</div></details>
+      <div class="sub-section"><h2 class="type-heading">This app</h2>
+        <p class="type-body">The app runs on this computer until you stop it. Studies that are running carry on.</p>
+        <div class="actions">${EK.button("Stop the app", { kind: "secondary", act: "stop-app" })}</div></div>
       <div class="link-row">${EK.link("Library folder", { act: "library" })}</div></div></div>`, acts(main));
     EK.companion.show({ phase: st.check && st.check.ok ? "cocoon" : "cocoon-asleep", say: head() + "." });
   }
@@ -162,6 +175,11 @@
       "how-admin": function () {
         EK.openDrawer({ title: "Ask your admin", body: html`<p class="type-body">Ask them to turn on Copilot CLI in your organisation’s Copilot policies.</p>
           <p class="type-small ink-2">Copilot CLI said: “Access denied by policy settings”.</p>` });
+      },
+      "stop-app": function () {
+        return EK.post("/api/shutdown").then(function () {
+          EK.mount(main, html`<div class="page"><div class="page-inner" style="max-width:784px">${EK.notice("info", stoppedWords(st.saved.frozen))}</div></div>`);
+        }).catch(EK.fail);
       },
       library: function () {
         EK.openDrawer({ title: "Library folder", body: html`<p class="code">${st.saved.home || ""}</p><div class="actions">${EK.button("Copy the path", { kind: "secondary", act: "copy" })}</div>`,

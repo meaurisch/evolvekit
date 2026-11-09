@@ -28,6 +28,7 @@ from evolvekit.harness import HarnessError
 from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
 from evolvekit.harness.sdk import SDK_PATH
 from evolvekit.harness.study import Study, save_study, study_from_template
+from evolvekit.resources import builtin_harnesses, package_root
 
 __all__ = [
     "BUILT_IN",
@@ -49,8 +50,11 @@ MAX_UNPACKED = 500 * 1024 * 1024
 """What a harness zip may hold: a harness is a runner, a manifest and some
 samples. Judged from the archive's directory, before anything is written."""
 
-BUILT_IN = Path(__file__).resolve().parents[2] / "harnesses"
-"""`harnesses/` of the checkout evolvekit runs from (absent in an installed package)."""
+BUILT_IN = builtin_harnesses()
+"""`harnesses/` of the checkout evolvekit runs from (absent in an installed package).
+`find_harnesses` asks `builtin_harnesses()` afresh, so a frozen process finds the bundle's."""
+
+AGENTS_TEMPLATE = package_root() / "harness" / "templates" / "AGENTS.md"
 
 ORIGIN = "harness-origin.txt"
 """In a study folder: the absolute path of the harness folder the study was made
@@ -87,20 +91,21 @@ def find_harnesses(home: Path | None = None) -> list[HarnessEntry]:
     installed = (home or default_home()) / "harnesses"
     if installed.is_dir():
         folders += [(p, False) for p in sorted(installed.iterdir()) if (p / "harness.yaml").is_file()]
-    if BUILT_IN.is_dir():
-        folders += [(p, True) for p in sorted(BUILT_IN.iterdir()) if (p / "harness.yaml").is_file()]
+    built_in = builtin_harnesses()
+    if built_in.is_dir():
+        folders += [(p, True) for p in sorted(built_in.iterdir()) if (p / "harness.yaml").is_file()]
     entries = []
     seen: set[str] = set()
-    for folder, built_in in folders:
+    for folder, is_built_in in folders:
         try:
             harness = load_harness(folder)
         except HarnessError as exc:
-            entries.append(HarnessEntry(folder, None, str(exc), built_in))
+            entries.append(HarnessEntry(folder, None, str(exc), is_built_in))
             continue
         if harness.key in seen:
             continue  # an installed copy wins over the built-in of the same version
         seen.add(harness.key)
-        entries.append(HarnessEntry(folder, harness, "", built_in))
+        entries.append(HarnessEntry(folder, harness, "", is_built_in))
     return entries
 
 
@@ -252,5 +257,5 @@ def new_harness(target: str | Path, *, source: str | Path | None = None, kind: s
 
         write_skeleton(target, kind)
     shutil.copyfile(SDK_PATH, target / "evk_harness.py")
-    shutil.copyfile(Path(__file__).with_name("templates") / "AGENTS.md", target / "AGENTS.md")
+    shutil.copyfile(AGENTS_TEMPLATE, target / "AGENTS.md")
     return target

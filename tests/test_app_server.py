@@ -197,6 +197,13 @@ def test_a_folder_is_not_a_harness_id(app):
     assert app.home.slugs() == []
 
 
+def test_settings_say_whether_the_app_is_installed(app, monkeypatch):
+    from evolvekit import resources
+    assert call(app, "GET", "/api/settings")[1]["frozen"] is False
+    monkeypatch.setattr(resources, "is_frozen", lambda: True)
+    assert call(app, "GET", "/api/settings")[1]["frozen"] is True
+
+
 def test_keys_are_accepted_and_never_sent_back(app, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     status, body = call(app, "PUT", "/api/settings", {"keys": {"OPENROUTER_API_KEY": "sk-or-v1-secret"}})
@@ -262,6 +269,10 @@ def test_a_study_through_its_steps(app):
 
     status, plan = call(app, "GET", "/api/studies/tours/plan")
     assert status == 200 and plan["estimated"] is True and plan["summary"]
+    assert plan["time_note"].startswith("Tuned at 0.5 s a case; ") and "may not hold at a longer time limit" in plan["time_note"]
+    call(app, "PATCH", "/api/studies/tours", {"limits": {"time_per_case_s": 2, "retries": 1, "runs_per_case": 1}})
+    assert call(app, "GET", "/api/studies/tours/plan")[1]["time_note"] is None, "the harness's own time: nothing to say"
+    call(app, "PATCH", "/api/studies/tours", {"limits": {"time_per_case_s": 0.5, "retries": 1, "runs_per_case": 1}})
     status, body = call(app, "DELETE", "/api/studies/tours/cases/town-40.json")
     assert status == 200 and "cases/town-40.json" not in body["study"]["cases"]["training"]
     status, home = call(app, "GET", "/api/home")
@@ -316,7 +327,40 @@ def test_a_harness_is_installed_from_a_path_on_this_computer(app, tmp_path):
     status, home = call(app, "GET", "/api/home")
     assert any(h["id"] == "demo-tour" and not h["built_in"] for h in home["harnesses"]), "the installed copy is listed"
     status, body = call(app, "POST", "/api/harnesses", {"path": "pyvrp-1.0.0.zip"})
-    assert status == 400 and "full path" in body["error"]
+    assert status == 400 and "full path of a harness folder or its .zip file" in body["error"]
+
+
+def test_a_harness_is_installed_from_a_folder_on_this_computer(app, tmp_path):
+    # Persona p5, J2: the box says "a harness folder or zip on this computer", and both are taken.
+    import shutil
+
+    folder = tmp_path / "my harness"
+    shutil.copytree(DEMO, folder, ignore=shutil.ignore_patterns("__pycache__"))
+    status, harness = call(app, "POST", "/api/harnesses", {"path": str(folder)})
+    assert status == 200 and harness["id"] == "demo-tour" and harness["title"] and harness["version"], harness
+    status, body = call(app, "POST", "/api/harnesses", {"path": str(tmp_path)})
+    assert status == 400 and "has no harness.yaml" in body["error"], "refused before anything of it is read (M6)"
+
+
+def test_a_harness_folder_is_zipped_without_environments_caches_or_git_and_not_past_its_cap(tmp_path, monkeypatch):
+    import io
+    import shutil
+    import zipfile
+
+    from evolvekit.app import api
+    from evolvekit.app import AppError
+
+    folder = tmp_path / "pyvrp"
+    shutil.copytree(DEMO, folder, ignore=shutil.ignore_patterns("__pycache__"))
+    for junk in (".venv/Lib/site.py", ".venv-pyvrp/Scripts/python.txt", ".git/HEAD", "kit/__pycache__/x.pyc"):
+        (folder / junk).parent.mkdir(parents=True, exist_ok=True)
+        (folder / junk).write_text("junk", encoding="utf-8")
+    names = zipfile.ZipFile(io.BytesIO(api._zipped_folder(folder))).namelist()
+    assert "pyvrp/harness.yaml" in names
+    assert not [n for n in names if "/.venv" in n or "/.git/" in n or "__pycache__" in n], names
+    monkeypatch.setattr(api, "FOLDER_ZIP_MAX", 10)
+    with pytest.raises(AppError, match="more than 10 B"):
+        api._zipped_folder(folder)
 
 
 def test_the_detection_list_answers_for_a_study(app):

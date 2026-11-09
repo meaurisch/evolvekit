@@ -24,14 +24,15 @@ bookmark of the bare address, or the page from an earlier launch, shows one
 sentence asking you to), and the page keeps the key for as long as the tab is
 open. Keep the window it runs in open while you work; closing it stops the
 app, not the studies that are running — they carry on, and the app shows
-them again when it is back.
+them again when it is back. The app from the installer has no window: see
+[From the installer](#from-the-installer-windows) for how to stop it.
 
 | Option | Does |
 |---|---|
 | `--home DIR` | the library to use (default: `EVOLVEKIT_HOME`, else `~/evolvekit`) |
 | `--port N` | the first port to try (default 8780) |
 | `--no-browser` | print the address instead of opening a browser |
-| `--shortcut` | Windows: put `evolvekit.cmd` on the desktop, which starts the app with a double-click |
+| `--shortcut` | Windows: put `evolvekit.cmd` on the desktop, which starts the app with a double-click; with the installer, the shortcut starts `evolvekit-app.exe` |
 | `--service` | no browser or console: the app logs to `<home>/app.log` (rotated at 5 MB, two kept) and keeps campaigns' windows; `study open` starts it this way |
 | `stop` | `evolvekit app stop`: stops the app of this library cleanly (exit 1 when it did not stop within 10 s) |
 | `install-startup` / `uninstall-startup` | start `app --service` at logon, or no longer. Windows: registers (or removes) the logon task "evolvekit app" and prints what it runs; macOS and Linux: prints the launchd agent or systemd unit to install, and the commands. On Windows this is not yet tried on a real logon |
@@ -39,6 +40,35 @@ them again when it is back.
 
 A second `evolvekit app` on the same library opens the first instead of
 starting another.
+
+### From the installer (Windows)
+
+The installer is one zip, `evolvekit-app-<version>-win64.zip`, from whoever
+builds evolvekit for your team (`python tasks.py dist`); it needs no Python.
+Extract it into a folder of your own (Downloads, Desktop, Documents — never
+`C:\Users\<you>\evolvekit`, which is your library) and double-click
+`evolvekit-app.exe`: after Windows's *Extract All* it is in
+`<zip name>\evolvekit-app\evolvekit-app.exe`, one folder further in than the
+folder Extract All makes. The exe is unsigned: if SmartScreen says *Windows
+protected your PC*, choose *More info*, then *Run anyway*, for a zip from your
+team only; if Windows or an antivirus blocks it with no *Run anyway*, ask your
+IT team. The browser opens at the app; double-clicking again opens the app
+that is running. Having no window, it logs to `<home>/app.log` as the service
+does. If no browser opens, run
+`"<the app's folder>\evolvekit-cli.exe" --no-browser` from a terminal in a
+folder of yours: it prints the address. PyVRP is not inside: install
+`pyvrp-1.0.0.zip`, which comes beside the app's zip, from Home.
+
+**Stopping it:** Settings → *Stop the app*, or `evolvekit app stop`
+(`"<the app's folder>\evolvekit-cli.exe" app stop`). Runs that are going carry on. Your library stays
+`C:\Users\<you>\evolvekit` (or `EVOLVEKIT_HOME`), never the app's folder.
+**Updating:** never extract a new zip over a folder whose files are in use: a
+study that is running holds them. When Home shows no study running, stop the
+app and extract over the old folder; while one runs, extract into a new folder
+and start it from there (make the shortcut and the logon task again from the
+new folder if you use them). The README's
+[For planners: the installer](../README.md#for-planners-the-installer) has the
+rest: the command line, updating and removing.
 
 ### The app as a service
 
@@ -69,7 +99,8 @@ python -m evolvekit app uninstall-startup
 ```
 
 On Windows the first registers the logon task "evolvekit app" (it starts
-`pythonw.exe`, with no console window; it does not end after 72 hours or stop
+`pythonw.exe`, or the installed app's `evolvekit-app.exe`, with no console
+window; it does not end after 72 hours or stop
 on battery) and prints what it runs; the second removes the task. There is one
 such task per user, so one library starts at logon: the last one installed.
 Installing it for another library replaces the first one's task, and says so
@@ -130,7 +161,7 @@ opened again at any time:
   settings.yaml        the AI provider and models, the applications used before
   .env                 API keys: written by the app, never shown again
   app.json             while the app runs: where it is, and the key of this launch
-  app.log              what `app --service` did (no key in it)
+  app.log              what `app --service`, or the installer's double-clicked app, did (no key in it)
   clock.json           only during a rehearsal (`app --clock`), while that app runs
   harnesses/           harnesses you installed
   studies/<name>/      one folder per study: study.yaml, the pinned harness,
@@ -336,7 +367,8 @@ estimate shows its likely range as a band through *today*, with both ends
 marked, *worst* and *best*, and the dashed 1 % limit.
 
 While a round's changes are being written by the AI the strip says so —
-*Writing changes: 7 of 12.* — until that round's runs begin. Under a live
+*Writing changes: 7 of 12.* — until that round's runs begin; a study without
+AI help writes no changes, so it never says it. Under a live
 run's sentence the strip gives two facts as the status document says them:
 what the AI has spent of its cap (*AI: $0.42 of $1.00*, or *AI: 4 requests*
 for a provider that counts requests), and after the first round, when the
@@ -451,7 +483,11 @@ case's change as the verdict computes it, the mean of the paired runs.
 Further down: **Settings to use** (or **Settings to keep**, when the answer
 is keep, with today's settings first) — what changed (old value → new, with what
 each setting does), *Show the settings file*, *Copy a summary*, *Open the
-report* (every number on one page, to read or send as `report.html`), the
+report* (every number on one page, to read or send as `report.html`: it
+leads with the verdict's line and advice; the search's figure comes after
+it, on the cases the search learned from, not checked; and when the verdict
+is not use, the settings file in it is headed *Settings found, not
+recommended (the verdict says keep today's)*), the
 harness's files (the settings, as flags, the data changes, the changed
 requests) and the study itself as one zip; **What next** — *Continue for
 another 22 h* (the same run goes on: the rounds done are kept, then the final
@@ -582,7 +618,8 @@ everything it does.
 | *… was already built in* after installing a `.zip` | nothing to do: that harness was there already |
 | a case *cannot be read* | open it: it is not a request the harness knows, or it is damaged; remove it |
 | *… is thin* under the plan | take one of the fixes it offers, or accept that the search may miss the best |
-| *fewer than 3 rounds* | take one of the three ways out the plan offers |
+| *fewer than 3 rounds* | press one of the plan's buttons (*Give each case 19 s*, *Allow 30 minutes*): each sets its value and works the plan out again; or take the other way out it names |
+| *The search did not run: …* | the time or a limit ended the run before its first round, so nothing was searched or compared: *Continue for …* gives the search its time |
 | *Not proven on the held-back cases* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
 | *Keep today's settings* and you have time | *Continue for another …*: the search goes on from its best, and the check runs again |
 | *the starting point breaks a guardrail* | the guardrail is stricter than today's plans: loosen it, or give the application more time per case |
@@ -601,7 +638,9 @@ the first thing Set up lacks as `{"step", "key", "text"}`, or `null`),
 `/api/harnesses/{id}` (its `learned`: per setting `tuned_in`, `importance`,
 `importance_n`, `winners`, `direction` and `leaned`, the median of the
 settings studies' search-best values — the lower middle for a whole number,
-the most common value of a choice, `null` on a tie or with none), `POST /api/shutdown` (what
+the most common value of a choice, `null` on a tie or with none; a study
+whose search did not run is listed in `studies` with `not_run: true` and
+counts in none of these), `POST /api/shutdown` (what
 `evolvekit app stop` sends: it answers `{"stopping": true}` and the app ends
 cleanly), `/api/settings`,
 `/api/harnesses`, `POST /api/detect?study=` (looks for installed copies of the
@@ -725,6 +764,7 @@ names:
 | `study`, `run`, `phase` | the study's folder name, the run, and where the job is (`queued`, `starting`, `search`, `check`, `done`, `stopped`, `failed`) |
 | `decision` | `use`, `keep` or `worse` by the rule; `none` (nothing beat the starting point), `single` (one held-back case), `pending` (no final check yet), `stopped` (the check was stopped), `skipped` (any other skip, such as no held-back cases) |
 | `reason` | with `none` and `skipped`: the sentence the run recorded |
+| `not_run` | `true` with `skipped` when the search stopped before its first round: `line` is "The search did not run: <why, in plain words>." (such as *there was not enough time left for its first round*), the advice says nothing was searched and to continue it; the page, its Past runs and Home's card say the same and offer *Continue*, never "found nothing better" |
 | `line`, `advice` | the verdict's one sentence, as the Study page shows it, and the sentence after it |
 | `measure` | `{"kpi", "label", "unit", "direction"}` of the measure that decided |
 | `held_back` | `{"cases", "runs_per_case"}` |
@@ -739,6 +779,7 @@ names:
 | `files` | the exports in `runs/<id>/downloads/`, relative to the study folder |
 | `started_at`, `finished_at`, `elapsed_s`, `rounds`, `combinations` | how it ran |
 | `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
+| `time_note` | only when the study's time per case is below the harness's own: "Tuned at 5 s a case; PyVRP's own time is 1 min: settings found here may not hold at a longer time limit." — Set up says it too (the Time row and the plan's notes), and the report's *How it ran* |
 | `how_it_ran` | whenever fewer rounds ran than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …", with the reason from the stop (*the time ran out*, *the search time was used*, *stopped*, *the search stopped early (…)*, *the AI budget was used up*); when every round ran but some combinations repeated one already tried, "Ran all 17 planned rounds (176 combinations, about 204 planned): 29 of the combinations tried repeated one already tried and were not measured again." (what it knows, not a claim that it is the whole shortfall) — the Study page shows it under Details |
 | `why_keep` | only on a `keep` whose held-back cases all moved the goal's way while its range still allows a loss: one sentence after `line` that says why it is still keep, "Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer answer." (up to three cases' figures, else "Every one of the N held-back cases was lower"); never on `use`, `worse`, a keep with no difference or a goal with levels (the range there is the first measure's, while another level may be what kept it), and never a gain. `results` carries it (and its `final`, and the text to paste after its *Final check* line), a finished card's `verdict`, the report and `study verdict` say it after the line |
 | `spent` | only on a run with AI help: what its AI spent, from the run's `usage.jsonl`: `{"usd", "cap_usd", "line"}` with the line "AI: $0.87 of $1.00", or `{"requests", "line"}` ("AI: 14 requests") for a provider that counts requests; a fact, not a claim |

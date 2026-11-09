@@ -14,7 +14,8 @@ the paired mean of the runs' changes (the statistic of `mean_pct`), so the two
 need not agree with each other. `combinations` counts every combination the
 search measured, the starting point among them: a plan of 2 combinations a
 round for 2 rounds gives 5. `planned` holds the plan's `rounds` and
-`combinations`; `how_it_ran`, only when fewer rounds ran than planned (or all
+`combinations`; `time_note`, only when the time per case is below the harness's own (the settings may not hold
+at a longer limit); `how_it_ran`, only when fewer rounds ran than planned (or all
 of them, but some combinations repeated one already tried) or its AI budget
 was used up, says so in a sentence (`how_it_ran`). `why_keep`, only on a
 `keep` whose held-back cases all moved the goal's way while its range still
@@ -53,7 +54,7 @@ from typing import Any
 
 from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, t_cdf
 
-__all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "no_difference_line",
+__all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "why_keep"]
 
 SCHEMA = 1
@@ -68,9 +69,16 @@ NUMBERS = ("mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words")
 _NO_ANSWER = ("pending", "stopped", "skipped")
 _STAYED_BEST = "starting point stayed the best"
 """What `execute._final_check` records when no combination beat the start."""
+_NOT_RUN = "the search did not run"
+"""What `execute._final_check` records when the search stopped before its first round (`execute.NOT_RUN`)."""
 DOWNLOADS = "downloads"
 VALUES = "values.json"
 """The values the exports in `downloads/` were written from: an input, not an export."""
+
+
+def _not_run(final: dict[str, Any]) -> bool:
+    """Whether the run's search stopped before its first round (`execute.NOT_RUN`)."""
+    return bool(final.get("not_run")) or str(final.get("skipped") or "").startswith(_NOT_RUN)
 
 
 def _pct(value: float | None, digits: int = 1) -> str:
@@ -191,6 +199,12 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
             "code change": "Keep today's code"}.get(what, "Keep today's settings and data")
     if baseline and what not in ("data changes", "code change"):
         keep += f" ({baseline})"
+    if final.get("skipped") and _not_run(final):
+        # Stopped before its first round (persona p5, J1): nothing was searched, so nothing is said about
+        # what a search would find -- only why it did not run, and that Continue gives it its time.
+        reason = str(final["skipped"])
+        return {"state": "skipped", "not_run": True, "line": reason[0].upper() + reason[1:] + ".",
+                "advice": f"{keep} for now: nothing was searched yet. Continue the run to give the search its time."}
     if final.get("skipped"):
         reason = str(final["skipped"])
         advice = (f"{keep}: the search found nothing better." if "starting point stayed the best" in reason else
@@ -472,6 +486,8 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                                 "decision": decision}
     if decision in ("skipped", "none"):
         document["reason"] = str(final.get("skipped") or "")
+    if words.get("not_run"):
+        document["not_run"] = True  # the search stopped before its first round: Continue gives it its time
     document["line"], document["advice"] = words.get("line", ""), words.get("advice", "")
     seed_row = next((r for r in jobs._rows(run_dir) if r.get("operator") == "human-seed"), None)
     candidates = (_candidates(job, comparison, goal, jobs._what(study), baseline, str((seed_row or {}).get("commit") or ""),
@@ -496,7 +512,9 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     if levels and named and not same:
         document["levels"] = levels
     # A bake-off with no branch shown ahead names no branch: no figure of an unnamed one here either.
-    document["learned_from"] = {"cases": len(study.training), "pct": learned_pct if named else None}
+    # A search that did not run learned nothing: no figure, not even "the same" (persona p5, J1).
+    document["learned_from"] = {"cases": len(study.training),
+                                "pct": learned_pct if named and not words.get("not_run") else None}
     document["rule"] = RULE_WORDS
     document["by_case"] = _held_rows(result, held)
     # Not with goals in order of importance: the range and the rows are the first measure's, while
@@ -518,9 +536,12 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     plan = jobs._plan(run_dir, job)
     if not job.get("bakeoff"):
         document["planned"] = {"rounds": plan.get("rounds"), "combinations": plan.get("combinations")}
-    ran = how_it_ran(job, plan, facts["tried"], bool(study.budget.ai_enabled), repeated=_repeated(run_dir))
+    ran = how_it_ran(job, plan, facts["tried"], bool(study.budget.ai_enabled), repeated=_repeated(run_dir),
+                     what=jobs._what(study))
     if ran:
         document["how_it_ran"] = ran
+    if time_note(study.limits.time_per_case_s, harness):
+        document["time_note"] = time_note(study.limits.time_per_case_s, harness)
     spent = ai_spent(run_dir, study, job)
     if spent is not None:
         document["spent"] = spent
@@ -577,7 +598,33 @@ AI_BUDGET_STOPS = ("the AI budget was used up", "budget.max_usd reached")
 """How a search's stop reason starts when its AI budget ended it (`budget.AI_USED_UP`, `BudgetGuard.check`)."""
 
 
-def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool, *, repeated: int = 0) -> str:
+_MEASURED = {"settings": "only today's settings were measured", "code change": "only today's code was measured",
+             "data changes": "only the data as it is was measured",
+             "combination of settings and data changes": "only today's settings and data were measured"}
+"""What a search that did not run measured, by what the study changes (`jobs._what`)."""
+
+
+def time_note(time_per_case_s: Any, harness: Any) -> str | None:
+    """Said where the time per case is chosen (Set up) and in the report's How it ran (persona p5, K2):
+    a time per case below the harness's own default is a time limit the application is not used at, so
+    "Tuned at 5 s a case; PyVRP's own time is 1 min: settings found here may not hold at a longer time
+    limit." None when the harness takes no time limit, or the study's time is the default or above."""
+    from evolvekit.app import jobs
+
+    limit = getattr(harness, "time_limit", None)
+    default = getattr(limit, "default_s", None)
+    seconds = _number(time_per_case_s)
+    if not getattr(limit, "accepts", False) or default is None or seconds is None or not 0 < seconds < float(default):
+        return None
+    def said(value: float) -> str:  # a second or less keeps its fraction ("0.5 s"); the rest as the page counts a time
+        return f"{jobs._number(value)} s" if value < 90 else jobs._duration(value)
+
+    return (f"Tuned at {said(seconds)} a case; {harness.title}'s own time is {said(float(default))}: "
+            "settings found here may not hold at a longer time limit.")
+
+
+def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai: bool, *, repeated: int = 0,
+               what: str = "settings") -> str:
     """Whenever fewer rounds ran than the plan said (persona p4, H7), the
     sentence that says so, with the reason from the stop: "Ran 2 of the 11
     planned rounds (25 combinations, about 132 planned): the time ran out; the
@@ -604,6 +651,12 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
         combinations.append(f"about {plan['combinations']} planned")
     counts = f" ({', '.join(combinations)})" if combinations else ""
     rounds = f"Ran {done} of the {planned} planned round{'s' if planned != 1 else ''}"
+    if done == 0 and planned > 0:
+        # The search did not run (persona p5, J1): the line says why; this says only what was measured, by
+        # what the study changes, or nothing when the starting point itself was cut short (fix round 1, M2)
+        # -- never that "the rounds took longer than the plan assumed", which no round did.
+        measured = _MEASURED.get(what, _MEASURED["settings"]) if tried else "nothing was measured"
+        return f"None of the {planned} planned round{'s' if planned != 1 else ''} ran: {measured}."
     if reason.startswith(AI_BUDGET_STOPS):
         if done < planned:
             return f"{rounds}{counts}: the AI budget was used up."

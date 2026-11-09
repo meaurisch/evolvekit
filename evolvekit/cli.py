@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from evolvekit import __version__
+from evolvekit import resources
 from evolvekit.app import AppError
 from evolvekit.harness import HarnessError
 from evolvekit.harness.plan import plan_notes
@@ -214,7 +215,7 @@ OPENROUTER_API_KEY=
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m evolvekit",
+        prog=resources.CLI_EXE if resources.is_frozen() else "python -m evolvekit",
         description="LLM-driven evolutionary program search with a hard cost budget.",
     )
     parser.add_argument("--version", action="version", version=f"evolvekit {__version__}")
@@ -736,7 +737,9 @@ def _app_clock(args: argparse.Namespace) -> tuple[datetime | None, float] | None
 def cmd_app(args: argparse.Namespace) -> int:
     """Serve the app for a library home until Ctrl+C (or `app stop`). Runs started from it carry
     on when it stops. One app per home: a second start opens the first. `--service`: no browser and
-    no console, a log in the home. `install-startup`, `uninstall-startup`, `stop`: `app.service`."""
+    no console, a log in the home. A process with no console at all (the double-clicked
+    `evolvekit-app.exe`) logs to the home as the service does, and still opens the browser.
+    `install-startup`, `uninstall-startup`, `stop`: `app.service`."""
     from evolvekit.app import scheduler, service
     from evolvekit.app.running import read_running
     from evolvekit.app.server import DEFAULT_PORT, AppServer
@@ -756,36 +759,41 @@ def cmd_app(args: argparse.Namespace) -> int:
                   "`python -m evolvekit app`", file=sys.stderr)
             return 1
         target = _desktop() / "evolvekit.cmd"
-        target.write_text(
-            "@echo off\r\ntitle evolvekit\r\n"
-            f'"{sys.executable}" -m evolvekit app --home "{home}"\r\n'
-            "pause\r\n",
-            encoding="utf-8",
-        )
-        print(f"wrote {target}: double-click it to start the app, and keep its window open while you work")
+        if resources.is_frozen():  # the app exe is windowless: start it, and this window closes
+            start = f'start "" "{resources.bundle_dir() / resources.APP_EXE}" --home "{home}"\r\n'
+            said = "double-click it to start the app"
+        else:
+            start = f'"{resources.python_argv()[0]}" -m evolvekit app --home "{home}"\r\npause\r\n'
+            said = "double-click it to start the app, and keep its window open while you work"
+        # UTF-8 and CRLF as written (newline=""): cmd.exe reads a .cmd in the OEM code page unless told (D9)
+        target.write_text("@echo off\r\nchcp 65001 >nul\r\ntitle evolvekit\r\n" + start, encoding="utf-8", newline="")
+        print(f"wrote {target}: {said}")
         return 0
     clock = _app_clock(args)
     if clock is None:
         return 2
+    logged = args.service or _no_console()
     running = read_running(home)
     if running is not None:  # one app per home: two tickers never share one
         unset = ("the rehearsal clock was not set: stop that app first (evolvekit app stop), then start it with --clock"
                  if clock[0] is not None else None)
-        if args.service:
+        if logged:
             logger = service.start_logging(home)
             logger.info("already running at %s (the key is in app.json)", service.address(str(running.get("url"))))
             if unset:
                 logger.info("%s", unset)
             service.stop_logging(logger)
-            return 0
-        print(f"the app is already running for this library: {running.get('url')}", flush=True)
-        if unset:
-            print(unset, file=sys.stderr, flush=True)
+            if args.service:
+                return 0
+        else:
+            print(f"the app is already running for this library: {running.get('url')}", flush=True)
+            if unset:
+                print(unset, file=sys.stderr, flush=True)
         if not args.no_browser:
             open_in_browser(str(running.get("url")))
         return 0
-    if args.service:
-        return _serve_service(home, args.port or DEFAULT_PORT, clock)
+    if logged:
+        return _serve_service(home, args.port or DEFAULT_PORT, clock, browser=not args.service and not args.no_browser)
     server = AppServer(home, port=args.port or DEFAULT_PORT)
     try:
         _set_clock(home, clock)
@@ -817,9 +825,19 @@ def _set_clock(home: Path, clock: tuple[datetime | None, float]) -> None:
         scheduler.write_clock(home, start, speed)
 
 
-def _serve_service(home: Path, port: int, clock: tuple[datetime | None, float]) -> int:
+def _no_console() -> bool:
+    """This process has no console: the installed app's windowless `evolvekit-app.exe` (a
+    double-click, whatever handles it was started with), or any process with no console streams at
+    all (a `pythonw.exe`). What the app says would go nowhere, so it goes to `<home>/app.log`."""
+    if resources.is_frozen() and resources.exe_name().lower() == resources.APP_EXE.lower():
+        return True
+    return sys.__stdout__ is None or sys.__stderr__ is None
+
+
+def _serve_service(home: Path, port: int, clock: tuple[datetime | None, float], *, browser: bool = False) -> int:
     """`app --service`: what it says, and the ticker's lines and tracebacks, go to `<home>/app.log`;
-    no browser, no console. It ends on `app stop` (or a service manager's SIGTERM), cleanly."""
+    no browser, no console. It ends on `app stop` (or a service manager's SIGTERM), cleanly. With
+    `browser` (an app with no console, started by a double-click) the browser opens at the app."""
     import signal
 
     from evolvekit.app import scheduler, service
@@ -839,6 +857,10 @@ def _serve_service(home: Path, port: int, clock: tuple[datetime | None, float]) 
         logger.info("library home  : %s", server.home.root)
         if clock[0] is not None:
             logger.info("%s", scheduler.clock_of(home).words())
+        if browser:
+            from evolvekit.dashboard import open_in_browser
+
+            open_in_browser(server.url_with_token)
         try:  # systemd's or launchd's stop ends it as `app stop` does
             signal.signal(signal.SIGTERM, lambda *_: server.request_shutdown())
         except (ValueError, OSError, AttributeError):
@@ -1342,13 +1364,12 @@ def _study_open(args: argparse.Namespace) -> int:
     from evolvekit.app import detach
     from evolvekit.app.running import read_running
     from evolvekit.dashboard import open_in_browser
-
     home = _home(args)
     home.study_root(args.slug)  # no app is started for a study that is not there
     running = read_running(home.root)
     if running is None:
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
-        argv = [detach.python_for_runs(), "-m", "evolvekit", "app", "--home", str(home.root), "--service"]
+        argv = [*resources.app_argv(), "--home", str(home.root), "--service"]
         try:
             detach.spawn_detached(argv, cwd=home.root, env=env, log=home.root / APP_START_LOG)
         except (detach.DetachError, subprocess.TimeoutExpired):

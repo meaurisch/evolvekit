@@ -169,8 +169,7 @@ def test_every_route_the_old_page_used_is_still_reachable():
     """Everything the app could do stays reachable: each API route has a caller in the page."""
     from evolvekit.app import api
 
-    unused = {"/api/harnesses/{}",  # read by tests and tools, never by the page (as before the redesign)
-              "/api/shutdown"}  # `evolvekit app stop`'s, never the page's
+    unused = {"/api/harnesses/{}"}  # read by tests and tools, never by the page (as before the redesign)
     for method, pattern, _ in api.ROUTES:
         literal = re.sub(r"\(\?P<\w+>\[\^/\]\+\)", "{}", pattern.pattern)
         if literal in unused:
@@ -374,6 +373,8 @@ def test_a_code_study_speaks_of_code_not_settings():
     assert 'what: "settings"' not in COMPARE_PAGE and "s.what" in COMPARE_PAGE, "two runs compared: each in its own words"
     details = _page_function(STUDY_PAGE, "details")
     assert "r.how_it_ran" in details, "how much of the plan ran, where the page says how the run went"
+    assert "Math.max(0, c.tried - 1)" in details and "plus " in details, "the starting point is no combination tried"
+    assert 'whatOf() === "code" ? "today’s code"' in details and "today’s settings" in details
 
 
 def test_no_difference_in_any_run_shows_its_line_and_no_band():
@@ -1044,3 +1045,83 @@ def test_a_scheduled_continue_never_enables_its_button_again_before_the_redraw()
     acts = STUDY_PAGE[STUDY_PAGE.index('"continue": function'):]
     assert acts.startswith('"continue": function () { continueRun(false); }'), "no promise: the act wrapper never enables it"
     assert '"continue-now": function () { continueRun(true); }' in STUDY_PAGE
+
+SETTINGS = (STATIC / "js" / "pages" / "settings.js").read_text(encoding="utf-8")
+
+
+def test_settings_offers_stop_the_app():
+    assert '"Stop the app"' in SETTINGS and "/api/shutdown" in SETTINGS
+    assert "Studies that are running carry on." in SETTINGS
+    assert "stoppedWords(st.saved.frozen)" in SETTINGS
+
+
+def test_the_stop_notice_speaks_of_how_the_app_was_started():
+    """The final review, minor 6 and Important 2: an installer user has no `evolvekit` command, a pip
+    user no evolvekit-app.exe; and extracting over a folder whose files a running study holds fails."""
+    out = _node(_page_function(SETTINGS, "stoppedWords"),
+                "process.stdout.write(JSON.stringify([stoppedWords(true), stoppedWords(false)]));")
+    assert out == ["The app has stopped. Studies that are running carry on. To open it again, double-click "
+                   "evolvekit-app.exe. To update the app, extract the new version over its folder only when no "
+                   "study is running (Home shows them); while one runs, extract it into a new folder and start "
+                   "it from there.",
+                   "The app has stopped. Studies that are running carry on. To open it again, run evolvekit app."]
+
+
+# -- persona p5, round 1 (J1, J2, J3, J4, J6, J7) ------------------------------------
+
+SETUP_PAGE = (STATIC / "js" / "pages" / "setup.js").read_text(encoding="utf-8")
+START_PAGE = (STATIC / "js" / "pages" / "start.js").read_text(encoding="utf-8")
+
+
+def test_a_search_that_did_not_run_says_so_on_home_and_offers_continue():
+    out = _node("""process.stdout.write(JSON.stringify(EK.cardOf({slug: "t", name: "T", kind: "finished", decision: "skipped",
+        not_run: true, can_continue: true, continue_h: 0.167, line: "finished · the search did not run",
+        verdict: {says: "the search did not run", decision: "skipped",
+                  line: "The search did not run: there was not enough time left for its first round.",
+                  advice: "Keep today's settings for now: nothing was searched yet. Continue the run to give the search its time."}})));""")
+    assert out["kicker"] == "The search did not run" and out["head"].startswith("The search did not run: ")
+    assert out["actions"] == [{"text": "Continue for 10 min more", "act": "continue-run", "arg": "t", "kind": "primary"}]
+    act = HOME_PAGE[HOME_PAGE.index('"continue-run": function'):]
+    assert 'EK.post(EK.studyPath(s.slug, "/continue"), { run: s.run })' in act[:800], "the Study page's request (M4)"
+    words = _node("""process.stdout.write(JSON.stringify([EK.answerWords({decision: "skipped", not_run: true}).head,
+        EK.answerWords({decision: "skipped"}).head]));""")
+    assert words == ["The search did not run", "Nothing beat the starting point"]
+    strip = _strip_branches(STUDY_PAGE)
+    assert 'd === "skipped" && f.not_run' in strip and '"The search did not run"' in strip
+    table = _page_function(STUDY_PAGE, "changedTable")
+    assert '"Nothing: the search did not run."' in table, "never 'the starting point stayed the best' for it"
+    code = _page_function(STUDY_PAGE, "codeChange")
+    assert code.index("(r.final || {}).not_run") < code.index("today’s code stayed the best"), "a code study too (I1)"
+
+
+def test_a_continuation_says_how_much_more_and_a_restart_says_restart():
+    out = _node("""function head(s) { return EK.cardOf(Object.assign({slug: "t", name: "T", kind: "running", phase: "search",
+        continued: true, rounds: {done: 0, planned: 4}}, s)).head; }
+      process.stdout.write(JSON.stringify([head({added_h: 0.167}), head({restarted: true}), head({})]));""")
+    assert out == ["Continued: 10 min more", "Continued after a restart", "Continued"]
+
+
+def test_the_install_confirms_by_name_and_the_box_takes_a_zip():
+    assert 'named + " installed"' in HOME_PAGE and '"Or a harness folder or zip on this computer"' in HOME_PAGE
+
+
+def test_home_says_loading_not_no_studies_until_its_first_answer():
+    render = _page_function(HOME_PAGE, "render")
+    assert "Loading…" in render and "(remembered.studies || []).length" in render
+
+
+def test_a_blocked_plans_fixes_are_buttons_and_its_reason_is_said_once():
+    block = _page_function(SETUP_PAGE, "planBlock")
+    assert '"way-fix"' in block and "p.blocked_reason" in block and "barText: p.blocked" not in block
+    assert '"way-fix": function' in SETUP_PAGE and "time_per_case_s: f.seconds" in SETUP_PAGE
+
+
+def test_the_finder_names_another_version_and_never_says_not_found_for_it():
+    block = _page_function(START_PAGE, "appBlock")
+    assert '"Another version of " + title + " found"' in block and '"Point to the Python that has it."' in block
+
+
+def test_the_settings_legend_says_the_goals_direction_and_not_checked():
+    assert "The band: values in tries over 1 % better" not in STUDY_PAGE
+    assert '"values in tries over 1 % " + (g.direction === "higher" ? "higher" : "lower")' in STUDY_PAGE
+    assert '" (not checked)"' in STUDY_PAGE

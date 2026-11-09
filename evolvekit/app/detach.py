@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from evolvekit import resources
+
 __all__ = ["DetachError", "no_window_flags", "python_for_runs", "spawn_detached"]
 
 _DETACHED = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
@@ -47,15 +49,11 @@ def no_window_flags() -> int:
 
 
 def python_for_runs() -> str:
-    """The interpreter runs and launchers are started with: `sys.executable`, or `python.exe`
-    beside it when this process is `pythonw.exe` (the service started at logon, D16) -- a run's
-    output goes to its log, and pythonw has no standard streams to give it."""
-    exe = Path(sys.executable)
-    if exe.name.lower() == "pythonw.exe":
-        console = exe.with_name("python.exe")
-        if console.is_file():
-            return str(console)
-    return sys.executable
+    """The interpreter runs and launchers are started with: evolvekit's Python
+    (`resources.python_argv`), always a console one -- `python.exe`, never `pythonw.exe` (D16);
+    installed, `evolvekit-cli.exe`, never the windowless `evolvekit-app.exe` -- because a run's
+    output goes to its log, and a windowless process has no standard streams to give it."""
+    return resources.python_argv()[0]
 
 
 class DetachError(OSError):
@@ -87,7 +85,7 @@ def spawn_detached(argv: list[str], *, cwd: Path | None = None, env: dict | None
     if log:
         _private_file(Path(log))
     # No console window for the launcher either: the service that starts it has none to share.
-    done = subprocess.run([python_for_runs(), "-c", _LAUNCHER, json.dumps(list(argv)), str(cwd) if cwd else "",
+    done = subprocess.run([*resources.python_code_argv(_LAUNCHER), json.dumps(list(argv)), str(cwd) if cwd else "",
                            str(log) if log else ""],
                           env=env, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S,
                           creationflags=no_window_flags())

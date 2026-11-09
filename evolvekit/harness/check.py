@@ -34,12 +34,12 @@ import random
 import shutil
 import sqlite3
 import subprocess
-import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from evolvekit import resources
 from evolvekit.harness import HarnessError
 from evolvekit.app.detach import no_window_flags
 from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
@@ -84,7 +84,7 @@ class _Runner:
         if harness.application.kind == "python":
             self.base = [app, runner]
         else:
-            self.base = [sys.executable, runner, "--app", app]
+            self.base = [*resources.python_script_argv(runner), "--app", app]
 
     def run(self, *args: str, timeout: float = SOLVE_TIMEOUT_S) -> subprocess.CompletedProcess:
         try:
@@ -225,7 +225,7 @@ def _sample_cases(harness: Harness, samples: int) -> list[Path]:
 def _interpreter(harness: Harness, app: str) -> str:
     """What `{python}` stands for in `code.build`: the application's Python (`--app`)
     for a python harness, as a study's `problem.tree.python` is; evolvekit's otherwise."""
-    return app if harness.application.kind == "python" else sys.executable
+    return app if harness.application.kind == "python" else resources.python_argv()[0]
 
 
 def _build_argv(harness: Harness, app: str, folder: Path) -> list[str]:
@@ -520,7 +520,10 @@ def check_harness(folder: str | Path, app: str | None = None, *, samples: int = 
     if app is None:
         if harness.application.kind == "program":
             return checks + [_fail("probe", "a program harness is checked against its program", "give --app PATH")]
-        app = sys.executable
+        if resources.is_frozen():  # the app's bundled Python is not one an application is installed in
+            return checks + [_fail("probe", "a python harness is checked against the application's Python",
+                                   "give --app <the application's Python>")]
+        app = resources.python_argv()[0]
     if Path(app).exists():
         app = str(Path(app).resolve())  # the runner works in a scratch folder: a relative path would not reach it
     probe = probe_application(harness, app)

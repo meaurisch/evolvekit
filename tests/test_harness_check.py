@@ -139,3 +139,14 @@ def test_a_manifest_mistake_stops_the_check_at_once(tmp_path):
     checks = check_harness(broken, str(SOLVER))
     assert len(checks) == 1 and checks[0].id == "manifest"
     assert "no such column: lenght" in checks[0].message and exit_code(checks) == 2
+
+
+def test_a_python_harness_frozen_needs_its_app(tmp_path, monkeypatch):
+    from test_resources import fake_bundle
+
+    toy = write_toy_harness(tmp_path / "toy")                      # a python harness
+    fake_bundle(monkeypatch, tmp_path / "evolvekit app")
+    checks = check_harness(toy)
+    assert checks[-1].id == "probe" and not checks[-1].ok
+    assert checks[-1].message == "a python harness is checked against the application's Python"
+    assert checks[-1].fix == "give --app <the application's Python>"

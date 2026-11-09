@@ -134,6 +134,8 @@
     // A study with a schedule ends on its windows (the plan's `window` line), never "done around 17:34"
     // from now (persona p4, H1).
     if (study().schedule) return { kicker: "Time", value: value, sub: st.plan && st.plan.window ? EK.capital(st.plan.window.line) + "." : "", act: "time" };
+    // Below the harness's own time per case: said where it is chosen (persona p5, K2).
+    if (st.plan && st.plan.time_note) return { kicker: "Time", value: value, sub: st.plan.time_note, act: "time" };
     var done = hours ? new Date(Date.now() + hours * 3600 * 1000) : null;
     var tomorrow = done && done.toDateString() !== new Date().toDateString();
     return { kicker: "Time", value: value, sub: done ? "Done around " + done.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) + (tomorrow ? " tomorrow." : ".") : "", act: "time" };
@@ -190,9 +192,17 @@
     if (!st.plan) return html`${EK.notice("warning", st.planError || "No plan yet.")}`;
     var p = st.plan, tunables = p.tunables || 0;
     if (p.blocked) {
-      return html`${EK.planBar({ state: "impossible", head: "This plan cannot work", barText: p.blocked, left: p.blocked, aria: "The plan does not fit: " + p.blocked })}
-        ${(p.ways_out || []).length ? html`<ul class="type-small">${p.ways_out.map(function (w) { return html`<li>${w}</li>`; })}</ul>` : ""}
-        <div class="actions">${EK.button("Change the time", { kind: "secondary", act: "time" })}</div>`;
+      // The reason once, under the bar; the ways a button can take as buttons that set the value (persona p5,
+      // J4); the others (which cases to learn from or hold back: a choice) as text.
+      var reason = p.blocked_reason || p.blocked, wayFixes = p.way_fixes || [];
+      var buttons = wayFixes.map(function (f, i) { return EK.button(f.label, { kind: i === 0 ? "primary" : "secondary", act: "way-fix", arg: i }); });
+      var fixable = { time_per_case: /^Give each case /, hours: /^Allow at least / };
+      var rest = (p.ways_out || []).filter(function (w) {
+        return !wayFixes.some(function (f) { return fixable[f.kind] && fixable[f.kind].test(w); });
+      });
+      return html`${EK.planBar({ state: "impossible", head: "This plan cannot work", barText: "Fewer than 3 rounds", left: reason, aria: "The plan does not fit: " + reason })}
+        ${rest.length ? html`<ul class="type-small">${rest.map(function (w) { return html`<li>${w}</li>`; })}</ul>` : ""}
+        <div class="actions">${buttons}${EK.button("Change the time", { kind: buttons.length ? "quiet" : "secondary", act: "time" })}</div>`;
     }
     var thin = !!p.warning;
     var searchH = (p.search_s || 0) / 3600, checkH = (p.final_check_s || 0) / 3600;
@@ -215,7 +225,7 @@
     // The time the plan counts for each change the AI writes (0 without AI), and what to hear before
     // the start besides the plan: too few held-back cases for a firm answer. Neither stops the start.
     var ai = p.ai_change_s > 0 ? html`<p class="type-small ink-2">The plan counts about ${Math.round(p.ai_change_s)} s for each change the AI writes.</p>` : "";
-    var notes = (p.notes || []).map(function (note) { return EK.notice("info", note); });
+    var notes = (p.time_note ? [p.time_note] : []).concat(p.notes || []).map(function (note) { return EK.notice("info", note); });
     return html`${bar}${wholeWindow()}${fixes.length ? html`<div class="actions">${fixes}</div>${details}` : ""}
       ${ai}${p.estimated ? html`<p class="type-small ink-2">An estimate until the test run has timed a case.</p>` : ""}${notes}`;
   }
@@ -319,6 +329,14 @@
         } else {
           save({ budget: Object.assign({}, study().budget, { hours: f.hours }) }, main).then(function () { EK.toast("done", "Allowed " + EK.hours(f.hours)); });
         }
+      },
+      "way-fix": function (el) {
+        // A blocked plan's way out (persona p5, J4): the value set, the plan worked out again and drawn.
+        var f = ((st.plan || {}).way_fixes || [])[Number(el.getAttribute("data-arg"))];
+        if (!f) return;
+        var change = f.kind === "time_per_case" ? { limits: Object.assign({}, study().limits, { time_per_case_s: f.seconds }) }
+          : { budget: Object.assign({}, study().budget, { hours: f.hours }) };
+        return save(change, main).then(function () { EK.toast("done", f.kind === "time_per_case" ? "Each case gets " + f.seconds + " s" : "Allowed " + EK.hours(f.hours)); });
       },
       "whole-window": function () {
         var offer = st.plan && st.plan.whole_window;

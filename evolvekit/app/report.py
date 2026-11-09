@@ -203,7 +203,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         out.append("Nothing changed.")
 
     learned, held = verdict.get("learned_from") or {}, verdict.get("held_back") or {}
-    ran = [f"Cases learned from: {learned['cases']}" + (f" ({_change(learned['pct'], direction)} on them)" if learned.get("pct") is not None else "")
+    ran = [f"Cases learned from: {learned['cases']}" + (f" ({_change(learned['pct'], direction)} on the cases the search learned from, not checked)"
+                                                         if learned.get("pct") is not None else "")
            ] if learned.get("cases") is not None else []
     tried = verdict.get("combinations")
     if isinstance(tried, int) and tried >= 1:
@@ -221,6 +222,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         ran = [f"{count} branch{'es were' if count != 1 else ' was'} compared; the more are compared, "
                "the likelier one looks ahead by chance."]
         rounds = tried = None
+    if verdict.get("time_note"):
+        ran.append(str(verdict["time_note"]).rstrip("."))  # a time below the harness's own (persona p5, K2)
     if (verdict.get("spent") or {}).get("line"):
         ran.append(verdict["spent"]["line"])  # what the AI spent: a fact, in the verdict's own words
     for label, value in (("Rounds", rounds), ("Combinations tried", tried),

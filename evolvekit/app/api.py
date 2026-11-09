@@ -7,13 +7,17 @@ page uses nothing but this, so a server could take the app's place later.
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import subprocess
-import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 
+from evolvekit import resources
 from evolvekit.app import AppError, assistant, compare, jobs, scheduler, tries, work
+from evolvekit.app import verdict as verdict_doc
 from evolvekit.app.detach import no_window_flags
 from evolvekit.app.detect import detect as detect_applications
 from evolvekit.app.server import FileResponse, Request, route
@@ -162,7 +166,9 @@ def _templates(harness: Harness) -> list[dict[str, Any]]:
 
 
 def get_settings(req: Request) -> dict[str, Any]:
-    return {**req.home.settings(), "keys": req.home.keys(), "home": str(req.home.root)}
+    """The settings, which keys are set (never their values), the home, and `frozen`: the app is the
+    installed one (`evolvekit-app.exe`), not a pip install (`evolvekit app`)."""
+    return {**req.home.settings(), "keys": req.home.keys(), "home": str(req.home.root), "frozen": resources.is_frozen()}
 
 
 def check_assistant(req: Request) -> dict[str, Any]:
@@ -176,18 +182,61 @@ def put_settings(req: Request) -> dict[str, Any]:
 
 def install(req: Request) -> dict[str, Any]:
     """A harness from the .zip in the body -- or, as JSON `{path}`, from a
-    .zip on this computer."""
+    .zip or a harness folder on this computer (the box Home's drawer labels
+    "a harness folder or zip on this computer")."""
     had = {(e.harness.id, e.harness.version): e.built_in for e in req.home.harness_entries() if e.harness is not None}
     if (req.headers.get("Content-Type") or "").startswith("application/json"):
         raw = str(req.json().get("path") or "").strip().strip('"')
         path = Path(raw).expanduser()
-        if not raw or not path.is_absolute() or not path.is_file():
-            raise AppError("give the full path of the harness's .zip file, such as C:\\Users\\you\\Downloads\\pyvrp-1.0.0.zip")
-        harness = req.home.install(path.read_bytes(), path.name)
+        if raw and path.is_absolute() and path.is_dir():
+            harness = req.home.install(_zipped_folder(path), path.name + ".zip")
+        elif not raw or not path.is_absolute() or not path.is_file():
+            raise AppError("give the full path of a harness folder or its .zip file, such as "
+                           "C:\\Users\\you\\Downloads\\pyvrp-1.0.0.zip")
+        else:
+            harness = req.home.install(path.read_bytes(), path.name)
     else:
         harness = req.home.install(req.body, req.query.get("name") or "harness.zip")
     before = had.get((harness.id, harness.version))
     return {**describe_harness(harness), "already": None if before is None else "built in" if before else "installed"}
+
+
+FOLDER_ZIP_MAX = 100 * 2 ** 20
+"""The most a harness folder pasted into Home's box may hold (its environments, caches and git left out)."""
+_FOLDER_SKIP = ("__pycache__", ".git")
+
+
+def _zipped_folder(folder: Path) -> bytes:
+    """A harness folder as the .zip `install` takes: its files under the
+    folder's name. Refused before anything of it is read when it has no
+    `harness.yaml` (a pasted `C:\\Users\\me` is not zipped whole), and above
+    FOLDER_ZIP_MAX; a Python environment (`.venv*`), Python's caches and
+    `.git` are left out (persona p5 fix round 1, M6). The install checks the
+    rest, as for any zip."""
+    if not (folder / "harness.yaml").is_file():
+        raise AppError(f"{folder} has no harness.yaml, so it is not a harness folder; give the harness's own "
+                       "folder, or its .zip file")
+    files, size = [], 0
+    for top, dirs, names in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if d not in _FOLDER_SKIP and not d.startswith(".venv"))
+        for name in sorted(names):
+            file = Path(top) / name
+            if file.suffix == ".pyc" or not file.is_file():
+                continue
+            size += file.stat().st_size
+            if size > FOLDER_ZIP_MAX:
+                raise AppError(f"{folder} holds more than {_bytes_words(FOLDER_ZIP_MAX)}; a harness is much smaller "
+                               "(its Python environment is not part of it)")
+            files.append(file)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for file in files:
+            bundle.write(file, (Path(folder.name) / file.relative_to(folder)).as_posix())
+    return buffer.getvalue()
+
+
+def _bytes_words(count: int) -> str:
+    return f"{count // 2 ** 20} MB" if count >= 2 ** 20 else f"{count} B"
 
 
 def harness(req: Request) -> dict[str, Any]:
@@ -335,7 +384,7 @@ def pick_file(req: Request) -> dict[str, Any]:
     kind = "folder" if body.get("kind") == "folder" else "file"
     title = str(body.get("title") or ("Choose a folder" if kind == "folder" else "Choose a file"))[:120]
     try:
-        done = subprocess.run([sys.executable, "-c", _PICK, title, kind], capture_output=True, text=True,
+        done = subprocess.run([*resources.python_code_argv(_PICK), title, kind], capture_output=True, text=True,
                               timeout=PICK_TIMEOUT_S, encoding="utf-8", errors="replace",
                               creationflags=no_window_flags())
     except subprocess.TimeoutExpired:
@@ -461,7 +510,8 @@ def plan(req: Request) -> dict[str, Any]:
         if hours == chosen.hours:  # the line spreads the study's own hours: the offer's done time is the line's
             whole = _whole_window(study, pinned, timing, models, now=now, speed=clock.speed)
     return {"summary": chosen.summary(when=window["line"] if window else None), "estimated": estimated,
-            "warning": warning, "fixes": fixes, "tunables": tunables, **chosen.to_json(),
+            "time_note": verdict_doc.time_note(study.limits.time_per_case_s, pinned), "warning": warning,
+            "fixes": fixes, "tunables": tunables, **chosen.to_json(),
             **({"window": window} if window else {}), **({"whole_window": whole} if whole else {})}
 
 

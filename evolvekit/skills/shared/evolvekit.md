@@ -63,8 +63,8 @@ Every command starts with `evolvekit`; `python -m evolvekit` is the same when `e
 | `evolvekit study wait SLUG [--timeout S] [--json]` | wait until the run has ended; on a scheduled study, until the campaign has its answer | 0 done, 1 stopped or failed (a campaign: paused, or ended without a finished run), 4 timeout |
 | `evolvekit study verdict SLUG [--run ID] [--json]` | the final check's answer: the verdict and what to do about it | |
 | `evolvekit study report SLUG [--run ID] [--markdown \| --json]` | the report of a run: the verdict document, or `--markdown` for people | |
-| `evolvekit study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`; prints its path | 0 written; 2 no `--diff`, a settings study, a run that has not ended, or the starting point stayed the best |
-| `evolvekit study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints the verdict's line (after a final check on fewer than 3 held-back cases, a `note:` line under it, which `pr.md` carries too) and what it will do -- the branch `evolvekit/<slug>-<run>` with the best's change, the push, the PR with `gh` (the report as its body) -- and does it only with `--yes`; ask the engineer first. The commit is the engineer's own (their git identity and hooks); `--base` is the branch the PR goes into (default: the repository's default) | 0 printed or done; 1 the branch exists, a hook of the repository refused the commit, or the push or `gh` failed (with `--json`, `{"ok": false, "error", "state"}`); 2 a settings study, a run that has not ended, the starting point stayed the best, or the change does not apply on `HEAD` |
+| `evolvekit study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`; prints its path | 0 written; 2 no `--diff`, a settings study, a run that has not ended, or the starting point stayed the best or the search did not run |
+| `evolvekit study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints the verdict's line (after a final check on fewer than 3 held-back cases, a `note:` line under it, which `pr.md` carries too) and what it will do -- the branch `evolvekit/<slug>-<run>` with the best's change, the push, the PR with `gh` (the report as its body) -- and does it only with `--yes`; ask the engineer first. The commit is the engineer's own (their git identity and hooks); `--base` is the branch the PR goes into (default: the repository's default) | 0 printed or done; 1 the branch exists, a hook of the repository refused the commit, or the push or `gh` failed (with `--json`, `{"ok": false, "error", "state"}`); 2 a settings study, a run that has not ended, the starting point stayed the best or the search did not run, or the change does not apply on `HEAD` |
 | `evolvekit study open SLUG [--no-browser]` | print the study's address in the app (starting the app if none runs) and open it | |
 | `evolvekit app --service [--home DIR]` | the app with no browser or console, logging to `<home>/app.log` (private, no key in it); it keeps the windows of scheduled studies. A second app on the same home opens the first | |
 | `evolvekit app stop [--home DIR]` | stop the app of this home cleanly | 0 stopped, 1 not stopped within 10 s |
@@ -87,6 +87,7 @@ Exit codes: 0 success; 1 a problem the message names; 2 a configuration or valid
 | `phase` | `queued`, `starting`, `search`, `check`, `done`, `stopped` or `failed` |
 | `decision` | the answer, one of the values below |
 | `reason` | with `skipped` and `none`: the sentence the run recorded |
+| `not_run` | `true` with `skipped` when the search stopped before its first round ("The search did not run: there was not enough time left for its first round."): nothing was searched or compared, so say that, never that nothing better was found; the app's *Continue* gives the search its time on the same run, or `study start` makes a new run |
 | `line` | the one sentence the app shows as the verdict |
 | `advice` | the one sentence after it, what to do |
 | `measure` | the deciding measure: its label, unit and direction |
@@ -118,7 +119,7 @@ The `decision` values:
 | `single` | only one held-back case, too few to decide |
 | `pending` | no final check yet |
 | `stopped` | the final check was stopped |
-| `skipped` | the final check was skipped (such as no held-back cases); see `reason` |
+| `skipped` | the final check was skipped (such as no held-back cases, or a search that did not run: `not_run`); see `reason` |
 
 `line` and `advice` are the only sentences an agent repeats. `how_it_ran`, when there is one, claims nothing:
 pass it on when the plan's rounds did not all run. `why_keep` claims no gain either: it says why there is none, and

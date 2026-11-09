@@ -76,6 +76,26 @@ def test_a_plan_with_fewer_than_three_rounds_is_blocked_with_three_ways_out():
     assert len(plan.ways_out) == 3 and plan.summary() == plan.blocked
 
 
+def test_a_blocked_plans_time_fixes_are_buttons_with_their_values():
+    # Persona p5, J4: "Give each case at most 19 s" was text to retype under Time; now it is a button that sets
+    # the value, and the reason sentence is said once (`blocked_reason`, the ways after it).
+    plan = _plan(training=10, time_limit_s=20, hours=0.1)
+    assert plan.blocked
+    fixes = {fix["kind"]: fix for fix in plan.way_fixes}
+    seconds = fixes["time_per_case"]["seconds"]
+    assert f"Give each case at most {seconds:g} s." in plan.ways_out
+    assert fixes["time_per_case"]["label"] == f"Give each case {seconds:g} s"
+    minutes = round(fixes["hours"]["hours"] * 60)
+    assert plan.ways_out[-1] == f"Allow at least {minutes} minutes in total."
+    assert fixes["hours"]["label"] == f"Allow {minutes} minutes"
+    assert not _plan(training=10, time_limit_s=20, hours=fixes["hours"]["hours"]).blocked, "the button's value works"
+    data = plan.to_json()
+    assert data["blocked_reason"] == "With these choices the search gets fewer than 3 rounds, too few to learn anything."
+    assert data["way_fixes"] == [dict(f) for f in plan.way_fixes]
+    assert not any(fix["label"].startswith("Let the search") for fix in data["way_fixes"]), "which cases is a choice"
+    assert _plan().to_json()["blocked_reason"] == "" and _plan().way_fixes == ()
+
+
 def test_the_last_way_out_is_said_in_minutes_below_an_hour_and_a_half():
     short = _plan(training=10, time_limit_s=20, hours=0.1)
     assert short.blocked and short.ways_out[-1].endswith("minutes in total.")

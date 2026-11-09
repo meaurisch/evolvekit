@@ -7,8 +7,15 @@ Two checks enforce it:
 
 * **Before each generation**, the run does not start one that would not
   finish in time. How long one takes is projected from the longest of the
-  last two; with only the seed done, from the seed's duration times the
-  number of children -- an upper bound when a cheaper stage screens first.
+  last two; with only the seed done, from the seed's own stages: each stage's
+  wave of runs (the seed's time in it over its waves on the stage's workers)
+  times the waves the children make there -- all of them on the first stage,
+  at most `promote.top_k_per_generation` after a stage that promotes so few
+  -- plus the AI's time per child (`ai_seconds`). That is what the plan
+  counts a round as (`harness/plan.py`): the seed times the number of
+  children, the bound a run without the seed's stages still uses, counts
+  every child on every case one after another, and refused the first round
+  of a 10-minute screening study whose round took 101 s (persona p5, J1).
 * **During a generation**, a watcher thread looks every second. When the
   limit is reached, the run's stop event is set: evaluations in flight are
   stopped and counted as *abandoned* -- not failed, nothing went wrong -- and
@@ -32,7 +39,36 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-__all__ = ["STOP_REQUEST", "WATCH_INTERVAL_S", "AnyEvent", "RunStop", "active_seconds"]
+__all__ = ["AGENT_CHANGE_S", "AI_CHANGE_S", "STOP_REQUEST", "WATCH_INTERVAL_S", "AnyEvent", "RunStop",
+           "active_seconds", "ai_seconds"]
+
+AI_CHANGE_S = 10.0
+"""The seconds assumed for one AI change written as one reply (`diff`,
+`rewrite`, `crossover`): by the plan for every round, and by the run for its
+first round, before any round measured it. Persona round 2's run (claude-cli,
+2026-11-08): 14 diff replies took 4.7 to 12.8 s, 8.1 s on average."""
+AGENT_CHANGE_S = 30.0
+"""The seconds assumed for one change by the coding agent (`agent_patch`).
+The same run: 10 calls took 16.5 to 24.7 s, 18.9 s on average -- on one file
+of 124 lines. The agent reads, edits and re-reads files over several turns,
+so its time grows with the source and the brief: that run is its floor, and
+the figure is its slowest call and a fifth more."""
+_MODEL_FREE = frozenset({"param_lhs", "param_local", "param_cross", "param_tpe"})
+"""`config.MODEL_FREE_OPERATORS`, here without importing the config."""
+
+
+def ai_seconds(operators: Mapping[str, float] | None) -> tuple[float, float]:
+    """`(per child, per AI change)`: the seconds the AI takes for one child of a
+    round on average, over every operator's share, and for one change it
+    writes. (0, 0) for a search that calls no model."""
+    shares = {name: float(share) for name, share in (operators or {}).items() if float(share) > 0}
+    total = sum(shares.values())
+    ai = {name: share for name, share in shares.items() if name not in _MODEL_FREE}
+    if not total or not ai:
+        return 0.0, 0.0
+    seconds = sum(share * (AGENT_CHANGE_S if name == "agent_patch" else AI_CHANGE_S) for name, share in ai.items())
+    return seconds / total, seconds / sum(ai.values())
+
 
 STOP_REQUEST = "stop-request"
 """The file in a run directory that asks the run to stop."""
@@ -154,9 +190,12 @@ class RunStop:
             )
         return self.reason if self.event.is_set() else None
 
-    def before_generation(self, projected_s: float | None) -> str | None:
+    def before_generation(self, projected_s: float | None, *, first: bool = False) -> str | None:
         """Why not to start another generation, or `None`. `projected_s` is how
-        long one may take; one that would end past the limit is not started."""
+        long one may take; one that would end past the limit is not started.
+        `first`: no round has run yet, so the figure is a projection from the
+        starting point, and the reason says so ("its first round would take
+        about 0.03 h"), never "a round has taken" (persona p5, M1)."""
         reason = self.poll()
         if reason is not None:
             return reason
@@ -164,6 +203,11 @@ class RunStop:
             return None
         elapsed = self.elapsed_s()
         if elapsed + projected_s > self.max_s:
+            if first:
+                return (
+                    f"time limit: its first round would not finish within {_hours(self.max_hours)} "
+                    f"({elapsed / 3600:.2f} h used; its first round would take about {projected_s / 3600:.2f} h)"
+                )
             return (
                 f"time limit: another round would not finish within {_hours(self.max_hours)} "
                 f"({elapsed / 3600:.2f} h used; a round has taken up to {projected_s / 3600:.2f} h)"

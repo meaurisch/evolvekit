@@ -36,6 +36,7 @@ starts climbing again.
 python tasks.py test          # the offline tests except the slow ones
 python tasks.py lint          # ruff, mistake-only rules (F, E9)
 python tasks.py check         # lint, then every test; the CI gate
+python tasks.py dist          # Windows: the app's zip and pyvrp-1.0.0.zip beside it (packaging/README.md)
 
 python -m evolvekit init my-problem/                     # scaffold a config
 python -m evolvekit preflight --config examples/binpacking/evolvekit.yaml
@@ -1079,8 +1080,11 @@ last). It is enforced twice:
 
 - **Before each generation**, one that would not finish in time is not started: "time limit:
   another round would not finish within 2 h". How long one takes is projected from the longest of
-  the last two; with only the seed done, from the seed's duration times the number of children --
-  an upper bound when a cheaper stage screens first.
+  the last two; with only the seed done, from the seed's own stages, as the plan counts a round:
+  each stage's waves of runs on its workers, every child on the first stage and at most
+  `top_k_per_generation` after a stage that promotes so few, plus the AI's time per child. Then the
+  reason says it is a projection: "time limit: its first round would not finish within 0.124 h
+  (0.01 h used; its first round would take about 0.12 h)".
 - **During a generation**, a watcher looks every second. When the limit is reached, evaluations in
   flight are stopped and counted as *abandoned* -- not failed: nothing went wrong -- and none is
   started. The generation is not recorded (its children stay in `pending.json`), and the run ends
@@ -1672,7 +1676,7 @@ Every command:
 | `study wait SLUG [--timeout S] [--json]` | returns when the run has ended: exit 0 with the verdict when it is done, 1 when it stopped or failed, 4 on timeout; starts a queued run. On a scheduled study, when the campaign has its answer: 0 with the verdict, 1 when it paused or ended without a finished run |
 | `study verdict SLUG [--run ID] [--json]` | the verdict and what to do about it; `--json` the verdict document |
 | `study report SLUG [--run ID] [--markdown \| --json]` | the report: Markdown for people, else the verdict document |
-| `study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`, and its path; exit 2 for a settings study, or when the starting point stayed the best |
+| `study export SLUG --diff [--run ID] [--json]` | a code study: the best combination's change as `runs/<id>/best.patch`, and its path; exit 2 for a settings study, or when the starting point stayed the best or the search did not run |
 | `study pr SLUG [--run ID] [--base BRANCH] [--draft] [--yes] [--json]` | a code study: prints what it will do; with `--yes` makes the branch, pushes it and opens the PR. Exit 0 printed or done, 1 failed while doing it, 2 refused |
 | `study open SLUG [--no-browser]` | prints the study's address in the app, starting the app (`app --service`) when none runs, and opens it |
 | `app [--home DIR] [--port N] [--no-browser]` | the app in the browser ([The app](#the-app)); a second `app` on the same library opens the first |
@@ -1923,7 +1927,7 @@ change that does not apply on `HEAD` is refused with the path of
 `best.patch`. `study pr` does not refuse a verdict that says to keep today's
 code: it prints that line first, so read it before `--yes`. It refuses, exit
 2, a settings study (`this study changed settings, not code; the settings
-file is at …`), a run whose starting point stayed the best, and a run that
+file is at …`), a run whose starting point stayed the best or whose search did not run, and a run that
 has not ended; exit 1 is a failure while doing it (the branch exists, a hook
 refused the commit, the push or `gh` failed), with what was made so far.
 
@@ -2256,6 +2260,82 @@ in plain words, with the settings file and a report to hand on. Studies keep
 running when the app is closed. It shows the studies made on the command line
 too, and `study open SLUG` takes you to one. [docs/app.md](docs/app.md) is its
 manual.
+
+### For planners: the installer
+
+On Windows the app also comes as one zip that needs nothing else installed:
+no Python, no command line. Nobody publishes it for you: whoever builds
+evolvekit for your team makes it with `python tasks.py dist` and hands it on.
+
+- **Get it:** `evolvekit-app-<version>-win64.zip`, from whoever builds
+  evolvekit for your team. Right-click it → *Extract All*, into a folder of
+  your own: Downloads, Desktop or Documents are fine. Nothing is ever written
+  into the app's folder; running it from a network drive or a read-only
+  folder is untried. Never extract it into `C:\Users\<you>\evolvekit`: that
+  folder is your library (below), not a place for the app.
+- **Start it:** *Extract All* makes a folder named after the zip, and the
+  app is one folder further in: the exe is
+  `<zip name>\evolvekit-app\evolvekit-app.exe`, for example
+  `Downloads\evolvekit-app-0.3.0-win64\evolvekit-app\evolvekit-app.exe`:
+
+  ```text
+  evolvekit-app-0.3.0-win64\      the folder Extract All makes
+    evolvekit-app\                the app's folder
+      evolvekit-app.exe           double-click this
+      evolvekit-cli.exe           the command line (below)
+      _internal\                  the app's own files
+  ```
+
+  Double-click `evolvekit-app.exe` there. The exe is not signed, so Windows SmartScreen may say
+  *Windows protected your PC*: choose *More info*, then *Run anyway* — only
+  for a zip you got from your team. An antivirus may scan it for a few
+  seconds the first time. If Windows or your antivirus blocks it with no
+  *Run anyway* (a managed computer's app control, or an antivirus that
+  quarantines the exe), ask your IT team.
+- **Use it:** the browser opens at the app. The app has no window of its own:
+  it runs until you stop it with *Stop the app* at the end of Settings, and
+  runs that are going carry on when it stops. Double-clicking the exe again
+  opens the app that is running. If no browser opens, open a terminal in a
+  folder of yours (in File Explorer, right-click inside Documents → *Open in
+  Terminal*) and run the exe by its full path,
+  `"<the app's folder>\evolvekit-cli.exe" --no-browser`: it prints the
+  address to open. What the app says, errors included, goes to `app.log` in
+  your library (no key in it): send that file when the app misbehaves.
+- **Your library** is `C:\Users\<you>\evolvekit` (or `EVOLVEKIT_HOME`): your
+  studies, harnesses and settings, never the app's folder.
+- **PyVRP** comes as its own zip, `pyvrp-1.0.0.zip`, which
+  `python tasks.py dist` writes beside the app's zip: whoever gives you the
+  app gives you that too. Drop it on Home, or use *Add a harness or zip*
+  and paste the path of the zip (or of a harness folder) into its box: the
+  app says *PyVRP 1.0.0 installed*. The application is still your own: for
+  PyVRP, the Python that has PyVRP installed — Set up lists the ones it
+  finds, or paste its path; a Python with another PyVRP is named with its
+  version and path, so you know which one not to use. The two
+  harnesses built in need no Python at all: demo-tour's solver is in the
+  app's folder at `_internal\examples\cli-solver\solver.py`, prompt-tune's
+  pipeline at `_internal\examples\prompt-pipeline\pipeline.py`.
+- **The command line:** every `evolvekit …` command in this README works as
+  `"<the app's folder>\evolvekit-cli.exe" …`. Work from a folder of your own
+  and run `evolvekit-cli.exe` by its full path: from the app's own folder, a
+  command that would write there (`init`, `run`, `skill install`, …) refuses
+  and says so, and so does every command whose library would be inside the
+  app's folder. Nothing of yours belongs in it, so an update can replace it
+  whole.
+- **Updating:** a study that is running holds the app folder's files, so
+  never extract over a folder whose files are in use. When Home shows no
+  study running, stop the app (Settings → *Stop the app*) and extract the new
+  zip over the old folder. While a study runs, extract the new zip into a new
+  folder and start the app from there; if you made the desktop shortcut or
+  the logon task, make them again with the new folder's exe
+  (`"<the new folder>\evolvekit-cli.exe" app --shortcut`, and
+  `… app install-startup`), since they still name the old one, before you
+  delete the old folder. If Windows says a file is in use, choose *Cancel*, never
+  *Skip*: skipping leaves a mix of two versions. Studies, harnesses and
+  settings stay in your library either way. **Removing:** delete the folder — first run
+  `evolvekit-cli.exe app uninstall-startup` if you made it start at logon.
+
+On macOS and Linux there is no installer: `pipx install evolvekit`, then
+`evolvekit app`.
 
 ## Adding a problem
 

@@ -113,6 +113,14 @@ class _Run:
         self.best = self.rows.get(self.best_id) if self.best_id else None
         self.block = str((self.best or {}).get("block") or "")
         self.stayed = self.best is None or self.best.get("operator") == "human-seed" or not self.block.strip()
+        # A search that stopped before its first round kept nothing as best: it says so (persona p5, M3).
+        self.not_run = str(final.get("skipped") or "") if final.get("not_run") else ""
+
+    def nothing(self, what: str) -> str:
+        """Why there is no change `what` ("to export", "to open a PR for"), in the run's own words."""
+        if self.not_run:
+            return f"{self.not_run}; there is no change {what}"
+        return f"the starting point stayed the best: there is no change {what}"
 
     def _settings_file(self) -> str:
         from evolvekit.harness.execute import DOWNLOADS, export_path
@@ -158,8 +166,8 @@ def export_diff(root: Path, run: str | None) -> Path:
     """The best combination's change as `runs/<id>/best.patch` (LF, paths from the
     repository's top, as `git apply` takes it there)."""
     found = _Run(root, run)
-    if found.stayed:
-        raise HarnessError("the starting point stayed the best: there is no change to export")
+    if found.stayed or found.not_run:
+        raise HarnessError(found.nothing("to export"))
     return _write_patch(found)
 
 
@@ -218,8 +226,8 @@ def plan_pr(root: Path, run: str | None, *, base: str | None = None, draft: bool
     from evolvekit.harness.plan import check_notes
 
     found = _Run(root, run)
-    if found.stayed:
-        raise HarnessError("the starting point stayed the best: there is no change to open a PR for")
+    if found.stayed or found.not_run:
+        raise HarnessError(found.nothing("to open a PR for"))
     spec = found.tree_spec()
     try:
         repo = tree.Repo(spec["repo"])

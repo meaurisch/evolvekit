@@ -314,3 +314,21 @@ def test_pr_refuses_settings_study(tmp_path, capsys):
     assert err.startswith("this study changed settings, not code; the settings file is at ")
     assert main(["study", "export", root.name, "--diff", "--home", str(home.root)]) == 2
     assert capsys.readouterr().err.startswith("this study changed settings, not code; the settings file is at ")
+
+
+def test_export_and_pr_say_the_search_did_not_run(tmp_path, capsys):
+    # Persona p5 fix round 1, M3: never "the starting point stayed the best" for a search that did not run.
+    home, slug, _ = finished_code_run(tmp_path)
+    job_path = home / "studies" / slug / "runs" / "r1" / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["search"] = {**job.get("search", {}), "generations": 0, "best_id": "seed"}
+    job["final"] = {"skipped": "the search did not run: there was not enough time left for its first round",
+                    "not_run": True}
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    assert main(["study", "export", slug, "--diff", "--home", str(home)]) == 2
+    err = capsys.readouterr().err
+    assert ("the search did not run: there was not enough time left for its first round; there is no change "
+            "to export") in err and "stayed the best" not in err
+    assert main(["study", "pr", slug, "--home", str(home)]) == 2
+    err = capsys.readouterr().err
+    assert "the search did not run: " in err and "no change to open a PR for" in err and "stayed the best" not in err

@@ -38,6 +38,8 @@ from datetime import datetime, timedelta
 from typing import Any, Mapping
 
 from evolvekit.cpus import plan_workers
+# The AI's time per change is the engine's too: the run's first round is projected with it (`stopping`).
+from evolvekit.stopping import AGENT_CHANGE_S, AI_CHANGE_S, ai_seconds
 
 __all__ = ["Plan", "make_plan", "ai_seconds", "plan_notes", "AI_CHANGE_S", "AGENT_CHANGE_S", "CHECK_SEEDS",
            "CHECK_SHARE", "DEFAULT_CHECK_SEEDS", "THIN_CHECK_CASES"]
@@ -54,37 +56,14 @@ CHECK_SHARE = 0.15
 MIN_ROUNDS, GOOD_ROUNDS = 3, 6
 CHILDREN = range(4, 13)
 
-AI_CHANGE_S = 10.0
-"""The seconds the plan assumes for one AI change written as one reply (`diff`,
-`rewrite`, `crossover`). Persona round 2's run (claude-cli, 2026-11-08): 14
-diff replies took 4.7 to 12.8 s, 8.1 s on average."""
-AGENT_CHANGE_S = 30.0
-"""The seconds the plan assumes for one change by the coding agent
-(`agent_patch`). The same run: 10 calls took 16.5 to 24.7 s, 18.9 s on
-average -- on one file of 124 lines. The agent reads, edits and re-reads
-files over several turns, so its time grows with the source and the brief:
-that run is its floor, and the figure is its slowest call and a fifth more."""
-_MODEL_FREE = frozenset({"param_lhs", "param_local", "param_cross", "param_tpe"})
-"""`config.MODEL_FREE_OPERATORS`, here without importing the config."""
+BLOCKED_REASON = "With these choices the search gets fewer than 3 rounds, too few to learn anything."
+"""The first sentence of a blocked plan; its ways out follow it (`Plan.blocked`)."""
 
 THIN_CHECK_CASES = 3
 """Below this many held-back cases a "use" is unlikely even for a real gain:
 examples/cli-solver/README.md, step 4 -- with only two held-back cases, "not
 distinguishable" is the likely outcome even for a real gain; "Hold back more
 instances than that for a claim"."""
-
-
-def ai_seconds(operators: Mapping[str, float] | None) -> tuple[float, float]:
-    """`(per child, per AI change)`: the seconds the AI takes for one child of a
-    round on average, over every operator's share, and for one change it
-    writes. (0, 0) for a search that calls no model."""
-    shares = {name: float(share) for name, share in (operators or {}).items() if float(share) > 0}
-    total = sum(shares.values())
-    ai = {name: share for name, share in shares.items() if name not in _MODEL_FREE}
-    if not total or not ai:
-        return 0.0, 0.0
-    seconds = sum(share * (AGENT_CHANGE_S if name == "agent_patch" else AI_CHANGE_S) for name, share in ai.items())
-    return seconds / total, seconds / sum(ai.values())
 
 
 def plan_notes(test_cases: int) -> list[str]:
@@ -131,6 +110,11 @@ class Plan:
     blocked: str = ""
     """Why the study cannot start as it stands, with the ways out; empty when it can."""
     ways_out: tuple[str, ...] = ()
+    way_fixes: tuple[dict[str, Any], ...] = ()
+    """The ways out a button can take, each `{"kind", "label", ...}`: `time_per_case`
+    with its `seconds` ("Give each case 19 s"), `hours` with its `hours` ("Allow 30
+    minutes"). The ways about which cases to learn from or hold back are not here:
+    which cases is the person's choice."""
     adjusted: tuple[str, ...] = ()
     """The numbers an expert set by hand under "Adjust"."""
     ai_change_s: float = 0.0
@@ -189,7 +173,9 @@ class Plan:
             "screen_time_limit_s": self.screen_time_limit_s, "run_s": self.run_s,
             "final_check_s": self.final_check_s, "search_s": self.search_s, "max_hours": self.max_hours,
             "check_seeds": self.check_seeds, "hours": self.hours, "test_cases": self.test_cases,
-            "blocked": self.blocked, "ways_out": list(self.ways_out), "adjusted": list(self.adjusted),
+            "blocked": self.blocked, "blocked_reason": BLOCKED_REASON if self.blocked else "",
+            "ways_out": list(self.ways_out), "way_fixes": [dict(fix) for fix in self.way_fixes],
+            "adjusted": list(self.adjusted),
             "ai_change_s": self.ai_change_s, "notes": self.notes,
         }
 
@@ -304,14 +290,13 @@ def make_plan(
                 break
         if chosen:
             break
-    blocked, ways_out = "", ()
+    blocked, ways_out, way_fixes = "", (), ()
     if chosen is None:
         chosen = (min(CHILDREN), 3, _layout(shape, min(CHILDREN), 3, screening))
-        ways_out = _ways_out(shape, screening)
-        blocked = (
-            "With these choices the search gets fewer than 3 rounds, too few to learn anything. "
-            + " ".join(ways_out)
-        )
+        ways = _ways(shape, screening)
+        ways_out = tuple(text for text, _ in ways)
+        way_fixes = tuple(fix for _, fix in ways if fix is not None)
+        blocked = BLOCKED_REASON + " " + " ".join(ways_out)
     children, check_seeds, layout = chosen
     adjusted = []
     if "children" in overrides:
@@ -326,12 +311,12 @@ def make_plan(
         rounds = max(1, int(overrides["rounds"]))
         generations = rounds + 2
         adjusted.append("rounds")
-        blocked, ways_out = "", ()  # an expert who sets the rounds has decided
+        blocked, ways_out, way_fixes = "", (), ()  # an expert who sets the rounds has decided
     elif "generations" in overrides:
         generations = max(1, int(overrides["generations"]))
         rounds = generations
         adjusted.append("generations")
-        blocked, ways_out = "", ()
+        blocked, ways_out, way_fixes = "", (), ()
     if "workers" in overrides:
         adjusted.append("workers")
     plan = Plan(
@@ -341,6 +326,7 @@ def make_plan(
         run_s=shape.run_s(), screen_run_s=layout["screen_run"], final_check_s=layout["final"],
         search_s=max(0.0, layout["search"]), seed_round_s=layout["seed"], round_s=layout["round"],
         check_seeds=check_seeds, hours=shape.hours, test_cases=m, blocked=blocked, ways_out=ways_out,
+        way_fixes=way_fixes,
         adjusted=tuple(adjusted), ai_change_s=ai_seconds(operators)[1], ai_child_s=shape.ai_s,
     )
     if "workers" in overrides:
@@ -349,20 +335,22 @@ def make_plan(
     return plan
 
 
-def _ways_out(shape: _Shape, screening: bool) -> tuple[str, ...]:
-    """Three concrete ways to at least 3 rounds, each changing one thing."""
-    ways = []
+def _ways(shape: _Shape, screening: bool) -> list[tuple[str, dict[str, Any] | None]]:
+    """Three concrete ways to at least 3 rounds, each changing one thing: its
+    sentence (`Plan.ways_out`) and the fix a button makes of it
+    (`Plan.way_fixes`), or None."""
+    ways: list[tuple[str, dict[str, Any] | None]] = []
     for n in range(shape.n - 1, 0, -1):
         trial = replace(shape, n=n, workers=max(1, min(shape.workers, n * shape.r)))
         if _layout(trial, min(CHILDREN), 3, screening and n >= 6)["rounds"] >= MIN_ROUNDS:
-            ways.append(f"Let the search learn from at most {n} case{'s' if n != 1 else ''}.")
+            ways.append((f"Let the search learn from at most {n} case{'s' if n != 1 else ''}.", None))
             break
     else:
         # No number of training cases helps: the final check alone is too
         # long. Fewer held-back cases shorten it.
         for m in range(shape.m - 1, -1, -1):
             if _layout(replace(shape, m=m), min(CHILDREN), 3, screening)["rounds"] >= MIN_ROUNDS:
-                ways.append(f"Hold back at most {m} case{'s' if m != 1 else ''} for the final check.")
+                ways.append((f"Hold back at most {m} case{'s' if m != 1 else ''} for the final check.", None))
                 break
     if shape.accepts_time_limit:
         limit = shape.time_limit_s
@@ -370,11 +358,12 @@ def _ways_out(shape: _Shape, screening: bool) -> tuple[str, ...]:
             limit = max(1.0, math.floor(limit * 0.8))
             trial = replace(shape, time_limit_s=limit)
             if _layout(trial, min(CHILDREN), 3, screening and limit >= 10)["rounds"] >= MIN_ROUNDS:
-                ways.append(f"Give each case at most {limit:g} s.")
+                ways.append((f"Give each case at most {limit:g} s.",
+                             {"kind": "time_per_case", "seconds": limit, "label": f"Give each case {limit:g} s"}))
                 break
     layout = _layout(shape, min(CHILDREN), 3, screening)
     hours = (MIN_ROUNDS * layout["round"] + layout["seed"] + layout["final"]) / 0.95 / 3600.0
     quarters = math.ceil(hours * 4) / 4
-    ways.append(f"Allow at least {round(quarters * 60)} minutes in total." if quarters < 1.5
-                else f"Allow at least {quarters:g} hours in total.")
-    return tuple(ways)
+    amount = f"{round(quarters * 60)} minutes" if quarters < 1.5 else f"{quarters:g} hours"
+    ways.append((f"Allow at least {amount} in total.", {"kind": "hours", "hours": quarters, "label": f"Allow {amount}"}))
+    return ways

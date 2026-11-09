@@ -53,6 +53,7 @@
     if (d === "keep") return { head: EK.keepWords(s), sub: (mean != null ? EK.better(mean) + on + ", but not sure enough" : "Not proven on new cases") };
     if (d === "worse") return { head: EK.better(mean) + on, sub: EK.keepWords(s) + "." };
     if (d === "single") return { head: (mean != null ? EK.better(mean) : "A number") + on + " on one case", sub: "One case gives no range, so no answer." };
+    if (d === "skipped" && s.not_run) return { head: "The search did not run", sub: (s.verdict && s.verdict.line) || "Continue it to give the search its time." };
     if (d === "skipped") return { head: "Nothing beat the starting point", sub: EK.keepWords(s) + "." };
     return { head: "No answer", sub: s.line || "" };
   };
@@ -120,8 +121,10 @@
         c.sub = "Checking on held-back cases" + (s.finish_at ? " · done around " + s.finish_at : "");
       } else if (s.continued) {
         c.kicker = "Searching again" + (round ? " · " + round : "");
-        c.head = "Continued after a restart";
-        c.sub = "Nothing lost" + (s.finish_at ? " · done around " + s.finish_at : "");
+        // More time asked for, or a restart after a stop or a crash: never one said for the other (persona p5, J6).
+        var more = s.added_h ? "Continued: " + EK.hours(s.added_h) + " more" : null;
+        c.head = more || (s.restarted ? "Continued after a restart" : "Continued");
+        c.sub = (more ? "The search goes on from where it was" : "Nothing lost") + (s.finish_at ? " · done around " + s.finish_at : "");
       } else {
         c.kicker = s.phase === "starting" ? "Starting" : "Running" + (round ? " · " + round : "");
         // The best so far in `study status`'s words (the server's `best_says`), on the cases it learned from.
@@ -139,6 +142,16 @@
       if (v.why_keep) c.why = v.why_keep;
       c.sub = v.advice || "";
       if (s.ci95 && s.mean != null) c.range = [s.mean, s.ci95[0], s.ci95[1]];
+      // Stopped before its first round (persona p5, J1): the way on is Continue, from the card itself, as the
+      // Study page's (fix round 1, M4); a study with a schedule keeps the time for its next window.
+      if (s.not_run) {
+        c.kickerTone = "warning";
+        if (s.can_continue) {
+          var more = EK.hours(s.continue_h || 1);
+          c.actions = [{ text: s.scheduled ? "Search " + more + " more in the next window" : "Continue for " + more + " more",
+            act: "continue-run", arg: s.slug, kind: "primary" }];
+        }
+      }
     } else if (s.kind === "campaign") {
       // Between windows (D20): the campaign's own words; no claim, the run is not checked yet.
       var camp = s.campaign || {};

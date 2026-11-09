@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import random
 import shlex
@@ -68,7 +69,7 @@ from evolvekit.search.operators import (
 from evolvekit.search.params import has_params
 from evolvekit.search.scratchpad import Scratchpad
 from evolvekit.search.tuning import Observation
-from evolvekit.stopping import RunStop, active_seconds
+from evolvekit.stopping import RunStop, active_seconds, ai_seconds
 
 __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
 
@@ -180,6 +181,10 @@ class Driver:
         self._durations: dict[int, float] = {}
         """How long each generation took, by generation, all sessions included:
         what the time limit projects the next one from."""
+        self._seed_stages: dict[str, float] = {}
+        """How long the seed took in each command stage (`stage_finished`), all
+        sessions included: what the time limit projects the first round from."""
+        self._generation_now: int | None = None
         self.cascade = Cascade(
             config,
             work_dir=self.ledger.run_dir / "work",
@@ -253,6 +258,10 @@ class Driver:
 
     def _on_evaluation(self, type: str, **fields: object) -> None:
         self.events.emit(type, **fields)
+        duration = fields.get("duration_s")
+        if (type == "stage_finished" and self._generation_now == 0 and not fields.get("private")
+                and isinstance(duration, (int, float)) and not isinstance(duration, bool)):
+            self._seed_stages[str(fields.get("stage"))] = float(duration)
         if type == "eval_started":
             self.heartbeat.update(
                 phase="evaluating",
@@ -581,6 +590,7 @@ class Driver:
             self._check_same_problem()
             recorded = read_events(self.ledger.run_dir)
             self._durations = _generation_durations(recorded)
+            self._seed_stages = _seed_stage_durations(recorded)
             # The time limit is the run's: earlier sessions' hours count.
             self.run_stop.start(used_s=active_seconds(recorded))
             self.heartbeat.start(phase="starting")
@@ -740,7 +750,8 @@ class Driver:
                     "the final stage per calendar day"
                 )
                 break
-            halt = self.run_stop.before_generation(self._projected_s())
+            halt = self.run_stop.before_generation(
+                self._projected_s(), first=not any(g >= 1 for g in self._durations))
             if halt is not None:
                 summary.stop_reason = halt
                 break
@@ -975,6 +986,7 @@ class Driver:
     # -- generation internals -------------------------------------------
 
     def _generation_started(self, generation: int, *, children: int) -> float:
+        self._generation_now = generation
         self.events.emit(
             "generation_started", generation=generation, children_planned=children
         )
@@ -1039,14 +1051,44 @@ class Driver:
 
     def _projected_s(self) -> float | None:
         """How long the next generation may take, for `budget.max_hours`: the
-        longest of the last two. With only the seed done, the seed's duration
-        times the breadth -- an upper bound when a cheaper stage screens
-        first, since then most children never run the expensive one."""
+        longest of the last two. With only the seed done, from the seed's
+        stages (`_first_round_s`); without them, the seed's duration times the
+        breadth -- an upper bound, far above a round when a cheaper stage
+        screens first, since then most children never run the expensive one."""
         done = sorted(generation for generation in self._durations if generation >= 1)
         if done:
             return max(self._durations[generation] for generation in done[-2:])
         seed = self._durations.get(0)
-        return None if seed is None else seed * self.children_per_generation
+        if seed is None:
+            return None
+        first = self._first_round_s(seed)
+        return seed * self.children_per_generation if first is None else first
+
+    def _first_round_s(self, seed_s: float) -> float | None:
+        """The first round as the plan counts one (`harness/plan.py`), from what
+        the seed took: in each command stage, one wave of runs is the seed's time
+        there over its waves (its runs on the stage's workers), and the children
+        make `ceil(candidates * runs / workers)` waves -- every child on the
+        first stage, at most `top_k_per_generation` after a stage promoting only
+        so many. The rest of the seed's time (static checks, a build, the
+        bookkeeping) is paid once per child, and so is the AI's time
+        (`ai_seconds`). `None` when the seed's stages are not on record (a run
+        directory from before they were read)."""
+        stages = [stage for stage in self.config.evaluate.stages if stage.kind == "command"]
+        if not stages or any(stage.id not in self._seed_stages for stage in stages):
+            return None
+        children = self.children_per_generation
+        total, reaching = 0.0, children
+        for stage in stages:
+            runs = max(1, len(stage.instances)) * max(1, stage.seeds)
+            workers = max(1, stage.workers)
+            wave = self._seed_stages[stage.id] / math.ceil(runs / workers)
+            total += math.ceil(reaching * runs / workers) * wave
+            promote = stage.promote
+            if promote.top_k_per_generation is not None and promote.archive_percentile is None:
+                reaching = min(reaching, promote.top_k_per_generation)
+        rest = max(0.0, seed_s - sum(self._seed_stages[stage.id] for stage in stages))
+        return total + children * (rest + ai_seconds(self.config.search.operators)[0])
 
     def _plan_operators(self, generation: int, plateau: bool) -> list[str]:
         """One operator name per child. The big step, when due, takes slot 0."""
@@ -1746,6 +1788,24 @@ def _generation_durations(events: Sequence[dict]) -> dict[int, float]:
         if event.get("type") == "generation_finished" and isinstance(event.get("generation"), int) \
                 and isinstance(value, (int, float)) and not isinstance(value, bool):
             durations[event["generation"]] = float(value)
+    return durations
+
+
+def _seed_stage_durations(events: Sequence[dict]) -> dict[str, float]:
+    """`stage -> duration_s` of the seed (generation 0) from the `stage_finished`
+    events between its `generation_started` and the next generation's; the last
+    one counts when the seed was evaluated twice. The final check's private
+    stages are not the search's."""
+    durations: dict[str, float] = {}
+    generation = None
+    for event in events:
+        kind = event.get("type")
+        if kind == "generation_started":
+            generation = event.get("generation")
+        elif kind == "stage_finished" and generation == 0 and not event.get("private"):
+            value = event.get("duration_s")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                durations[str(event.get("stage"))] = float(value)
     return durations
 
 
