@@ -253,7 +253,7 @@ def _confirm_recording(calls: list[int], settled_at: int = 6):
         assert len(instances) == 3 and label == "final"
         calls.append(len(seeds))
         summary = verdict_summary([-0.09, 0.115, -0.004] if len(seeds) < settled_at else [0.013, 0.006, 0.019],
-                                  prior_scale=None, direction="minimize")
+                                  direction="minimize")
         return SimpleNamespace(per_candidate={"c1": {"summary": summary}})
     return fake_confirm
 
@@ -271,20 +271,32 @@ def test_the_check_says_how_often_the_answer_was_read(tmp_path):
     job = Job(tmp_path, run_id="r", study="s", plan={})
     _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lines.append,
                   stop=threading.Event(), time_left_s=lambda: 1e9, confirm=counting)
-    assert lines[-1] == "final check: the answer was read 4 times"
+    assert lines[-2:] == ["final check: added 9 runs per held-back case and read the answer again",
+                          "final check: the answer was read 2 times"]
 
 
-def test_the_check_adds_runs_while_the_answer_is_open_and_time_remains(tmp_path):
+def test_the_check_adds_every_run_it_can_at_once_and_reads_the_answer_once_more(tmp_path):
+    """Decision 12: no peeking. Look 1 after the planned runs; while open, every run the cap
+    and the time allow is added at once, and look 2 is the answer, whatever it says."""
     calls: list[int] = []
-    clock = iter([400.0, 300.0, 200.0, 100.0, 10.0, 10.0])
+    study = _three_held_back(tmp_path)
     job = Job(tmp_path, run_id="r", study="s", plan={})
-    comparison, seeds = _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lambda _m: None,
-                                      stop=threading.Event(), time_left_s=lambda: next(clock),
+    # A run per case costs ceil(2 * 3 / 1) * 20 s = 120 s: 400 s pays for three more.
+    comparison, seeds = _extend_check(study, _plan_with(), None, tmp_path, job, lambda _m: None,
+                                      stop=threading.Event(), time_left_s=lambda: 400.0,
                                       confirm=_confirm_recording(calls))
-    assert calls == [3, 4, 5, 6], "open at 3, 4 and 5 runs per case; settled at 6"
+    assert calls == [3, 6], "open at 3 runs per case; all three more added, then read once"
     assert seeds == 6 and job.state["check"] == {"seeds": 6}
     assert read_job(tmp_path)["check"] == {"seeds": 6}
     assert comparison.per_candidate["c1"]["summary"]["n"] == 3
+    calls.clear()
+    _, seeds = _extend_check(study, _plan_with(), None, tmp_path, job, lambda _m: None,
+                             stop=threading.Event(), time_left_s=lambda: 1e9, confirm=_confirm_recording(calls, 99))
+    assert calls == [3, 12] and seeds == 12, "still open at look 2: it stops anyway"
+    calls.clear()
+    _extend_check(study, _plan_with(), None, tmp_path, job, lambda _m: None,
+                  stop=threading.Event(), time_left_s=lambda: 1e9, confirm=_confirm_recording(calls, 3))
+    assert calls == [3], "settled at look 1: nothing is added"
 
 
 def test_the_check_stops_adding_runs_when_time_the_seeds_or_a_stop_say_so(tmp_path):
@@ -306,6 +318,6 @@ def test_the_check_stops_adding_runs_when_time_the_seeds_or_a_stop_say_so(tmp_pa
     stopped = threading.Event()
     stopped.set()
     assert run(_plan_with(), time_left=lambda: 1e9, stop=stopped) == ([3], 3, 3)
-    # Four workers make a round cheaper: ceil(6 / 4) * 20 = 40 s, so 100 s pays for one more, 30 s for none.
-    clock = iter([100.0, 30.0])
-    assert run(_plan_with(workers=4), time_left=lambda: next(clock))[0] == [3, 4]
+    # Four workers make a round cheaper: ceil(6 / 4) * 20 = 40 s, so 100 s pays for two more, 30 s for none.
+    assert run(_plan_with(workers=4), time_left=lambda: 100.0)[0] == [3, 5]
+    assert run(_plan_with(workers=4), time_left=lambda: 30.0)[0] == [3]

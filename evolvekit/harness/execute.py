@@ -1020,31 +1020,57 @@ def _extend_check(
     study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,
     stop: threading.Event, time_left_s: Callable[[], float], confirm: Callable[..., Any] = confirm, up: str = UP,
 ) -> tuple[Any, int]:
-    """The final check with `plan.check_seeds` runs per case, then one more
-    run per case at a time while the answer is still open (`keep`), seeds
-    remain, the time left pays for another and nothing asked for a stop.
-    `confirm` keeps the runs it did, so every call names the whole seed list
-    and only the new seed is run. Returns the last comparison and its runs
-    per case; `job.json` says how many it is on (`check.seeds`). `up` is the
-    way from the run's folder to the study's (`GROUP_UP` for a group's folder)."""
+    """The final check with `plan.check_seeds` runs per case, its answer read
+    once (look 1); while that answer is still open (`keep`), seeds remain,
+    the time left pays for at least one more run per case and nothing asked
+    for a stop, every run the seeds and the time allow is added at once and
+    the answer is read once more (look 2) -- the answer, whatever it says.
+    Never a look in between: stopping the moment an answer looks good would
+    say "use" for a change that is no better far more often than the rule
+    promises (decision 12). `confirm` keeps the runs it did, so the second
+    call names the whole seed list and only the new seeds are run. Returns
+    the last comparison and its runs per case; `job.json` says how many it is
+    on (`check.seeds`). `up` is the way from the run's folder to the study's
+    (`GROUP_UP` for a group's folder)."""
     m = len(study.test)
     seed_cost_s = math.ceil(2 * m / max(1, plan.workers)) * float(plan.run_s)
     instances = [f"{up}/{case}" for case in study.test]
     seeds = max(1, min(int(plan.check_seeds), len(CHECK_SEEDS)))
-    while True:
-        job.update(check={"seeds": seeds})
-        comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:seeds]), instances=instances, label="final",
+
+    def look(count: int) -> tuple[Any, dict[str, Any]]:
+        job.update(check={"seeds": count})
+        comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:count]), instances=instances, label="final",
                              log=log, stop=stop)
         (_cid, result), = comparison.per_candidate.items()
-        # A change every run of which gave exactly today's result: more runs cannot open the answer.
-        if (_decision(result) != "keep" or result.get("identical") or seeds >= len(CHECK_SEEDS)
-                or time_left_s() < seed_cost_s or stop.is_set()):
-            looks = getattr(comparison, "looks", None)
-            if isinstance(looks, int):
-                log(f"final check: the answer was read {looks} time{'s' if looks != 1 else ''}")
-            return comparison, seeds
-        seeds += 1
-        log(f"final check: the answer is still open, adding a run per case ({seeds} so far)")
+        return comparison, result
+
+    comparison, result = look(seeds)
+    added = _runs_to_add(result, seeds, seed_cost_s, time_left_s, stop)
+    if added:
+        seeds += added
+        log(f"final check: added {added} run{'s' if added != 1 else ''} per held-back case and read the answer again")
+        comparison, result = look(seeds)
+    looks = getattr(comparison, "looks", None)
+    if isinstance(looks, int):
+        log(f"final check: the answer was read {looks} time{'s' if looks != 1 else ''}")
+    return comparison, seeds
+
+
+def _runs_to_add(result: dict[str, Any], seeds: int, seed_cost_s: float, time_left_s: Callable[[], float],
+                 stop: threading.Event) -> int:
+    """How many runs per case the extension adds after look 1: 0 unless the
+    answer is still open (`keep`) and nothing asked for a stop; else as many
+    as the seeds left and the time left pay for. A change every run of which
+    gave exactly today's result is never extended: more runs cannot open it.
+    (The seam for A1.3: whether more runs can help at all belongs here.)"""
+    if _decision(result) != "keep" or result.get("identical") or stop.is_set():
+        return 0
+    left = len(CHECK_SEEDS) - seeds
+    if left <= 0:
+        return 0
+    if seed_cost_s <= 0:
+        return left
+    return max(0, min(left, int(time_left_s() // seed_cost_s)))
 
 
 def _time_left(job: Job, plan: Plan) -> Callable[[], float]:
