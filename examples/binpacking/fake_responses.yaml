@@ -41,7 +41,7 @@
 # the verdict: the child is flagged `near` and evaluated anyway, because a
 # filter that can refuse twelve of twelve samples is worse than one that
 # occasionally pays for a cousin.
-- when: "change the decision rule, not the constants"
+- when: "previous answer was closest to"
   response: |
     ```python
     def priority(item, bins):
