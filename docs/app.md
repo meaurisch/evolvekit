@@ -361,10 +361,12 @@ sentence under it are the verdict's own `line` and `advice`, word for word,
 as `evolvekit study verdict` prints them: the page never composes its own.
 While the final check runs there is no verdict yet, so the strip says *No
 answer yet*. The app decides by one fixed rule, stated under the answer:
-*use it at 9 in 10 or better, worst within 1 %* — the chance of a gain at
-least 9 in 10 and the worst plausible case within 1 % of today. Every
-estimate shows its likely range as a band through *today*, with both ends
-marked, *worst* and *best*, and the dashed 1 % limit.
+*Use when the chance of a gain is at least 19 in 20.* The chance shown is
+the chance the rule reads, so a *use* never shows a loss as its worst case.
+Every estimate shows its likely range (95 %) as a band through *today*, with
+both ends marked, the *low end* and the *high end*. A study whose final check
+was written before this rule keeps the rule it was decided by (*use it at 9 in
+10 or better, worst within 1 %*), with its own words and its own decision.
 
 While a round's changes are being written by the AI the strip says so —
 *Writing changes: 7 of 12.* — until that round's runs begin; a study without
@@ -381,10 +383,17 @@ its facts.
   on 3 held-back cases, a chance of about 19 in 20; …*, then *Use the new
   settings: they are probably better on cases the search never saw.*;
   *Save settings file* and *Copy* a summary.
-- **Keep**: *Not proven on 3 held-back cases: …* (*chance under 9 in 10*,
-  or a worst case beyond 1 %), then *Keep today's settings … for now: the
-  gain is not proven.*; *Check with more runs* keeps the runs it did and
-  adds others. When every held-back case improved but the range still allows
+- **Keep**: *Not proven on 3 held-back cases: …* (*a chance under 19 in 20*),
+  then *Keep today's settings … for now: the gain is not proven.*; *Check
+  with more runs* (twice the runs per case, said on the button) keeps the runs it did and adds others. It is offered
+  only after a single read of the answer: the final check reads its answer
+  after its first runs and, while the answer is keep and more runs can help,
+  adds all its extra runs at once and reads it once more, so an answer has
+  had at most two reads and the app offers no third. When only more
+  held-back cases could firm the answer (`limited_by: "cases"`), the check
+  adds no runs, the page says more runs would not change it (*the answer is
+  set by the held-back cases, not by the runs: hold back more cases for a
+  firmer answer*) and offers no *Check with more runs*. When every held-back case improved but the range still allows
   a loss, the verdict's `why_keep` stands between the line and the advice:
   *Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases
   the range is too wide to rule out a loss: hold back more cases for a firmer
@@ -442,7 +451,13 @@ the run's own verdict line and advice (*Per kind of case: not every group is
 shown to beat today's settings (large: keep).*); under it, **Per kind of
 case** lists each group — its verdict mark, its name, its cases to learn
 from and held back, and its own verdict line, word for word — and then
-*Which cases get which settings*, the sentences of `rule.md`. Over the three
+*Which cases get which settings*, the sentences of `rule.md`. A kind whose
+answer is *use* by its own chance reads *Its answer is read once every kind of
+case is checked.* until all are done; the kinds are then judged together, and
+one that fails says *Not proven on 3 held-back cases with 3 kinds of case
+compared*. A kind with fewer than two held-back cases was joined to the
+nearest kind before the run, and `rule.md` names its tag with the kind that
+took it (*tagged large or small*). Over the three
 views, one chip per group picks which group's tries, cases and settings they
 show (`?group=` on the status, tries and results; while the run goes, the
 group it is on, marked *running*, else the first); *Settings to use* or
@@ -546,7 +561,10 @@ held-back case's change (the mean of the paired runs, *4.1 % lower* or *the
 same*; none for a branch at the starting commit) and its likely range,
 and the rule each was judged by. The headline is the run's own verdict: the
 branch with the largest gain among those that pass the rule, named as one of
-the branches compared, or *None of the 2 branches is shown to beat the
+the branches compared, with *Chosen among k branches: the true gain is likely
+smaller than shown.* when two or more branches could pass (a branch that
+passes on its own but not once the branches are compared is *keep*: *Not
+proven on 4 held-back cases with 3 branches compared*), or *None of the 2 branches is shown to beat the
 starting point.*, and today's code stays.
 
 ## The assistant
@@ -620,7 +638,7 @@ everything it does.
 | *… is thin* under the plan | take one of the fixes it offers, or accept that the search may miss the best |
 | *fewer than 3 rounds* | press one of the plan's buttons (*Give each case 19 s*, *Allow 30 minutes*): each sets its value and works the plan out again; or take the other way out it names |
 | *The search did not run: …* | the time or a limit ended the run before its first round, so nothing was searched or compared: *Continue for …* gives the search its time |
-| *Not proven on the held-back cases* | keep what you use now, or press *Check again*; for a firmer answer, a new study that holds back more cases |
+| *Not proven on the held-back cases* | keep what you use now, or press *Check with more runs* (offered once; not when the cases set the answer); for a firmer answer, a new study that holds back more cases |
 | *Keep today's settings* and you have time | *Continue for another …*: the search goes on from its best, and the check runs again |
 | *the starting point breaks a guardrail* | the guardrail is stricter than today's plans: loosen it, or give the application more time per case |
 | *It failed* after a restart of the computer | *Continue where it stopped*: the run goes on from its last round |

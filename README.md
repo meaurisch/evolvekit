@@ -38,7 +38,7 @@ evolvekit searches for settings (and data changes, and code changes) that
 make that number better. When the search ends, the best combination runs on
 **cases the search never saw**, and you get one plain answer:
 
-> **Use it: 1.40 % better.** Chance about 19 in 20 · at worst 0.54 % worse.
+> **Use it: 1.40 % better.** Chance about 19 in 20 · at least 0.54 % better.
 >
 > *or* **Keep today's settings.** Not shown to beat them.
 
