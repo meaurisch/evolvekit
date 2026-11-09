@@ -35,11 +35,14 @@ structure, a different hash, and a full evaluation nobody wanted to buy. So a
 
 Two methods, chosen by `search.novelty.near.method`:
 
-* `local` (default, and always available) -- cosine similarity over the
-  multiset of node-type n-grams of the **canonicalised** AST. Node *types*
-  only: `Constant` is `Constant` whatever number it holds, so a block that
-  differs from an earlier one in nothing but its constants scores exactly 1.0.
-  Costs nothing and calls nothing.
+* `local` (default, and always available) -- cosine over the 3-grams the
+  change **added and removed** against its parent (the delta multiset,
+  sign-tagged), node types of the **canonicalised** AST; the parent is never a
+  match, except that a change that moved constants only is near its parent at
+  1.0. A change that moved no node type but more than constants (`max` ->
+  `min`) has an empty delta and is near nothing. The starting point indexes its
+  full, untagged vector, which no child's delta can match. Costs nothing and
+  calls nothing.
 * `embedding` -- cosine over vectors from `Provider.embed`, for the case where
   a semantic judgement beats a syntactic one. Costs one embedding call per
   child, recorded in the ledger like any other spend.
@@ -75,6 +78,7 @@ __all__ = [
     "node_ngrams",
     "cosine",
     "local_similarity",
+    "delta_grams",
     "NearBackend",
     "LocalNearIndex",
     "EmbeddingNearIndex",
@@ -334,19 +338,69 @@ def local_similarity(block_a: str, block_b: str, n: int = NGRAM_SIZE) -> float:
     return cosine(node_ngrams(block_a, n), node_ngrams(block_b, n))
 
 
+def delta_grams(
+    block: str, parent_block: str | None, n: int = NGRAM_SIZE
+) -> dict[tuple[str, ...], int]:
+    """The n-grams a change added (`"+"`) and removed (`"-"`) against its parent.
+
+    With no parent -- the starting point, or a parent that will not parse --
+    the block's full, untagged vector. The tags keep a delta from ever matching
+    a full vector. Empty when the change moved no node types at all, and when
+    the block itself will not parse.
+    """
+    grams = node_ngrams(block, n)
+    parent = node_ngrams(parent_block, n) if parent_block is not None else {}
+    if not parent or not grams:
+        return grams
+    c, p = Counter(grams), Counter(parent)
+    return {("+", *g): k for g, k in (c - p).items()} | {("-", *g): k for g, k in (p - c).items()}
+
+
+class _BlankConstants(ast.NodeTransformer):
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        node.value = None
+        node.kind = None
+        return node
+
+
+def _blanked_dump(block: str) -> str | None:
+    """The canonical dump with every `Constant` value blanked; `None` when the
+    block will not parse."""
+    try:
+        tree = ast.parse(block)
+    except (SyntaxError, ValueError):
+        return None
+    protected = _protected_names(tree)
+    canonical = _Canonicaliser(protected, _bound_names(tree, protected)).visit(tree)
+    return ast.dump(_BlankConstants().visit(canonical), include_attributes=False)
+
+
+def _constants_only(block: str, parent_block: str) -> bool:
+    """Whether `block` is `parent_block` with nothing but constant values moved."""
+    mine = _blanked_dump(block)
+    return mine is not None and mine == _blanked_dump(parent_block)
+
+
 class NearBackend(Protocol):
-    """Anything that can answer "what have I seen that is closest to this?"."""
+    """Anything that can answer "what have I seen that is closest to this?".
+
+    `parent_block` is the block the candidate was bred from (`None` for the
+    starting point); `parent_id` is never returned as a match, except by the
+    local method for a change that moved constants only.
+    """
 
     method: str
 
-    def add(self, candidate_id: str, block: str) -> None: ...
+    def add(self, candidate_id: str, block: str, parent_block: str | None = None) -> None: ...
 
-    def closest(self, block: str) -> tuple[str | None, float]: ...
+    def closest(
+        self, block: str, parent_block: str | None = None, parent_id: str | None = None
+    ) -> tuple[str | None, float]: ...
 
 
 @dataclass
 class LocalNearIndex:
-    """Node-type n-gram cosine against everything the run has kept.
+    """Cosine over each kept candidate's change (`delta_grams`) against its parent.
 
     Linear in the number of archived candidates and microseconds per
     comparison; at the 10^2-10^3 candidate scale this project targets, that is
@@ -357,17 +411,26 @@ class LocalNearIndex:
     n: int = NGRAM_SIZE
     vectors: dict[str, dict[tuple[str, ...], int]] = field(default_factory=dict)
 
-    def add(self, candidate_id: str, block: str) -> None:
-        grams = node_ngrams(block, self.n)
+    def add(self, candidate_id: str, block: str, parent_block: str | None = None) -> None:
+        grams = delta_grams(block, parent_block, self.n)
         if grams:
             self.vectors.setdefault(candidate_id, grams)
 
-    def closest(self, block: str) -> tuple[str | None, float]:
-        grams = node_ngrams(block, self.n)
+    def closest(
+        self, block: str, parent_block: str | None = None, parent_id: str | None = None
+    ) -> tuple[str | None, float]:
+        grams = delta_grams(block, parent_block, self.n)
         if not grams:
+            # No node type moved. Constants only: near its parent, so the
+            # "change the rule, not the constants" hint is true. Anything else
+            # (a `max` -> `min` swap) has an empty change vector: near nothing.
+            if parent_block is not None and _constants_only(block, parent_block):
+                return parent_id, 1.0
             return None, 0.0
         best_id, best = None, 0.0
         for candidate_id, other in self.vectors.items():
+            if candidate_id == parent_id:
+                continue
             score = cosine(grams, other)
             if score > best:
                 best_id, best = candidate_id, score
@@ -410,16 +473,23 @@ class EmbeddingNearIndex:
             self.on_call(embedding_tokens(self.provider, [block]), 1)
         return vector
 
-    def add(self, candidate_id: str, block: str) -> None:
+    def add(self, candidate_id: str, block: str, parent_block: str | None = None) -> None:
+        """`parent_block` is accepted for the protocol; a whole block is embedded."""
         if candidate_id not in self.vectors:
             self.vectors[candidate_id] = self._embed(block)
 
-    def closest(self, block: str) -> tuple[str | None, float]:
-        if not self.vectors:
+    def closest(
+        self, block: str, parent_block: str | None = None, parent_id: str | None = None
+    ) -> tuple[str | None, float]:
+        """The parent is never a match: a child is close to where it came from
+        by construction."""
+        if not any(candidate_id != parent_id for candidate_id in self.vectors):
             return None, 0.0
         vector = self._embed(block)
         best_id, best = None, 0.0
         for candidate_id, other in self.vectors.items():
+            if candidate_id == parent_id:
+                continue
             score = _cosine_dense(vector, other)
             if score > best:
                 best_id, best = candidate_id, score
@@ -529,22 +599,24 @@ class NoveltyIndex:
         # A diff may hold bytes that are not UTF-8, kept as lone surrogates.
         return hashlib.sha256(self.key(block).encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
 
-    def add(self, candidate_id: str, block: str) -> str:
+    def add(self, candidate_id: str, block: str, parent_block: str | None = None) -> str:
         digest = self._digest(block)
         self.by_hash.setdefault(digest, candidate_id)
         if self.near is not None:
-            self.near.add(candidate_id, block)
+            self.near.add(candidate_id, block, parent_block=parent_block)
         return digest
 
     def lookup(self, block: str) -> str | None:
         return self.by_hash.get(self._digest(block))
 
-    def closest(self, block: str) -> tuple[str | None, float]:
+    def closest(
+        self, block: str, parent_block: str | None = None, parent_id: str | None = None
+    ) -> tuple[str | None, float]:
         """The nearest thing the run has kept, and how near. `(None, 0.0)` when
         the gate is off or nothing has been indexed yet."""
         if self.near is None:
             return None, 0.0
-        return self.near.closest(block)
+        return self.near.closest(block, parent_block=parent_block, parent_id=parent_id)
 
     def check(
         self,
@@ -570,7 +642,7 @@ class NoveltyIndex:
             return NoveltyVerdict("duplicate", twin)
         if not near:
             return NoveltyVerdict()
-        twin_id, similarity = self.closest(block)
+        twin_id, similarity = self.closest(block, parent_block, parent_id)
         if twin_id is not None and similarity >= self.threshold:
             return NoveltyVerdict("near", twin_id, similarity)
         return NoveltyVerdict()

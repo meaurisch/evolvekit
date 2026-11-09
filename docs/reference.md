@@ -814,7 +814,7 @@ search:
 
 | Method | How | Cost |
 |---|---|---|
-| `local` (default) | cosine over the multiset of node-type 3-grams of the **canonicalised** AST — the same canonicaliser the exact hash uses. Node *types* only, so a block that differs from an earlier one in nothing but its constants scores exactly **1.00**. | nothing: no call, no key, no dependency |
+| `local` (default) | cosine over the 3-grams the change added and removed (child versus parent, node types of the canonicalised AST). Adding a branch to a long block is not a near twin of that block; making the same change another child already made to the same parent is. A change that moved nothing but constants is near its parent at **1.00**. A change that moved no node type but swapped a name (`max` for `min`) is near nothing. | nothing: no call, no key, no dependency |
 | `embedding` | cosine over vectors from `Provider.embed`, for when a semantic judgement beats a syntactic one | one embedding call per new block, billed |
 | `off` | — | the Phase B behaviour |
 

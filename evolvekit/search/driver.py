@@ -561,7 +561,7 @@ class Driver:
             self.by_id[candidate.id] = candidate
             if not candidate.rejected:
                 self._embed_context = (candidate.id, int(candidate.generation))
-                self.novelty.add(candidate.id, candidate.block)
+                self.novelty.add(candidate.id, candidate.block, parent_block=self._parent_block(candidate))
             # Signatures come back even for a rejected twin: it is the *first*
             # id per signature that matters, and dropping it would let the same
             # behaviour be paid for again after a resume.
@@ -1247,6 +1247,13 @@ class Driver:
             parts.append(f"gap {candidate.generalization_gap:+.4g}")
         return ", ".join(parts)
 
+    def _parent_block(self, candidate: Candidate) -> str | None:
+        """The block `candidate` was bred from; `None` for the starting point
+        or a parent this run does not hold (the near gate then indexes the
+        candidate's whole block)."""
+        parent = self.by_id.get(candidate.parent_id or "")
+        return parent.block if parent is not None else None
+
     def _summary_of(self, candidate: Candidate) -> str:
         parent = self.by_id.get(candidate.parent_id or "")
         return delta_summary(
@@ -1760,7 +1767,7 @@ class Driver:
             # Placement first: the cell coordinate belongs in the ledger row.
             self.grid.add(candidate)
             if not candidate.rejected:
-                self.novelty.add(candidate.id, candidate.block)
+                self.novelty.add(candidate.id, candidate.block, parent_block=self._parent_block(candidate))
             self._record(candidate)
         return False
 
