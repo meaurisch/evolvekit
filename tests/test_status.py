@@ -394,7 +394,9 @@ def test_the_live_verdict_and_the_final_check_agree_when_no_run_failed(tmp_path)
     """D3: `status` judged t >= 2 over every (instance, seed) run; `confirm`
     judged a 95 % interval over per-instance means. Same runs, same answer now.
     Only for a run directory with no failed pairs: `confirm` counts a pair one
-    side failed as that side's loss, and `status` does not impute failures."""
+    side failed as that side's loss, and `status` does not impute failures.
+    The live verdict is the frequentist interval; the final check's decision
+    is the posterior's, and its frequentist block is the same test."""
     from evolvekit.confirm import confirm
     from tests.test_confirm import _write_config, _write_run
 
@@ -403,7 +405,7 @@ def test_the_live_verdict_and_the_final_check_agree_when_no_run_failed(tmp_path)
     # Seed 1002 is the one the solver fails on (medium, x != 0): left out, so no pair failed.
     comparison = confirm(load_config(config_path), run_dir, seeds=[1001, 1003], label="same", log=lambda m: None)
     assert all(r["ok"] for r in comparison.runs), "the agreement is claimed for runs without failures"
-    summary = comparison.per_candidate["g003-c0012"]["summary"]
+    summary = comparison.per_candidate["g003-c0012"]["summary"]["frequentist"]
 
     run = RunDir(run_dir)
     stages = [STAGES[0], {**STAGES[1], "instances": ["small", "medium", "large"]}]

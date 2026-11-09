@@ -8,10 +8,15 @@ needs no server and starts no process -- and returns a document with the keys
 `held_back`, the statistics (`mean_pct`, `ci95_pct`, `worst_pct`, `chance`,
 `chance_words`; absent while there is no answer: `pending`, `stopped`,
 `skipped`), `levels` (goals in order of importance), `learned_from`, `rule`,
-`by_case`, `changed`, `files` and how it ran. In `by_case`, `start` and `best`
-are a held-back case's means over the final check's runs and `change_pct` is
-the paired mean of the runs' changes (the statistic of `mean_pct`), so the two
-need not agree with each other. `combinations` counts every combination the
+`by_case`, `changed`, `files` and how it ran. The statistics are the final
+check's `confirm.verdict_summary`, the one place that decides: `chance` is
+the posterior probability of a gain, P(gain > 0); `mean_pct` the posterior
+mean; `ci95_pct` a 95 % credible interval; and `worst_pct` the 5 % quantile,
+the one-sided bound the rule reads -- so "use" holds exactly when the chance
+is at least 19 in 20 and the worst case shown is within 1 %. In `by_case`,
+`start` and `best` are a held-back case's means over the final check's runs
+and `change_pct` is the case's measured gain (its log gain over the runs, in
+percent), so the two need not agree with each other. `combinations` counts every combination the
 search measured, the starting point among them: a plan of 2 combinations a
 round for 2 rounds gives 5. `planned` holds the plan's `rounds` and
 `combinations`; `time_note`, only when the time per case is below the harness's own (the settings may not hold
@@ -57,7 +62,7 @@ from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identica
 __all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "why_keep"]
 
-SCHEMA = 1
+SCHEMA = 2
 """Bumped when a key of the document changes meaning."""
 DECISIONS = ("use", "keep", "worse", "none", "single", "pending", "stopped", "skipped")
 """What a run's final check came to: `use`, `keep`, `worse` by the rule;
@@ -108,7 +113,9 @@ def _span(low: float, high: float) -> str:
 def _chance_words(p: float | None) -> str:
     """A chance of a gain in twentieths: "about 19 in 20", never sounding
     certain: "better than 19 in 20" above it, "less than 1 in 20" below 1 in 20,
-    and "almost certain" from 0.995; nothing for no chance."""
+    and "almost certain" from 0.995; nothing for no chance. A chance just
+    under the rule's 19 in 20 says so ("under 19 in 20"), never rounding up
+    to read like a pass."""
     if p is None:
         return ""
     if p >= 0.995:
@@ -116,18 +123,19 @@ def _chance_words(p: float | None) -> str:
     if p < 0.05:
         return "less than 1 in 20"
     if p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
-        # 0.897 would round to "about 18 in 20", which reads like the rule's
-        # 9 in 10 when the rule said no: say which side of it the chance is.
-        return f"under {round(USE_CHANCE * 10)} in 10"
+        # 0.947 would round to "about 19 in 20", which reads like the rule's
+        # 19 in 20 when the rule said no: say which side of it the chance is.
+        return f"under {round(USE_CHANCE * 20)} in 20"
     if round(p * 20) >= 20:
         return "better than 19 in 20"
     return f"about {round(p * 20)} in 20"
 
 
 def _chance_of(summary: dict[str, Any]) -> float | None:
-    """The chance of a gain as the comparison says it -- or, for a comparison
-    written before it said so, from its mean and spread as `paired_summary`
-    finds it. None without two cases, or without a spread to go by."""
+    """The chance of a gain as the comparison says it (`verdict_summary`'s
+    posterior) -- or, for a comparison written before it said so, from its
+    mean and spread as `paired_summary` found it then. None without two
+    cases, or without a spread to go by."""
     if summary.get("chance") is not None:
         return float(summary["chance"])
     n, mean, sd = int(summary.get("n") or 0), summary.get("mean"), summary.get("sd")

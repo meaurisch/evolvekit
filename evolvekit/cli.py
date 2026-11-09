@@ -969,9 +969,9 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
 
 
 def cmd_confirm(args: argparse.Namespace) -> int:
-    """Exit 0 when every candidate's 95 % interval lies above zero, 1 otherwise
-    -- so a script can gate on "the improvement is real"."""
-    from evolvekit.confirm import confirm, render_markdown
+    """Exit 0 when the rule says use for every candidate (`confirm.decision_of`),
+    1 otherwise -- so a script can gate on "the improvement is real"."""
+    from evolvekit.confirm import confirm, decision_of, render_markdown
 
     try:
         seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
@@ -985,12 +985,9 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     )
     print(render_markdown(comparison))
     print(f"written to {Path(args.run_dir) / 'confirm' / args.label}")
-    # With evaluate.score.levels the claim is the lexicographic one: better,
-    # and clear, on the first level that is not equal.
-    confirmed = all(
-        result["levels"]["confirmed"] if "levels" in result else (result["summary"].get("ci95") or [0.0])[0] > 0
-        for result in comparison.per_candidate.values()
-    )
+    # The verdict's own rule; with evaluate.score.levels the claim is the
+    # lexicographic one: better, and clear, on the first level that is not equal.
+    confirmed = all(decision_of(result) == "use" for result in comparison.per_candidate.values())
     return 0 if confirmed else 1
 
 

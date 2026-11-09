@@ -1022,8 +1022,9 @@ class _Run:
             "n": summary["n"],
             "unit": "percent of the baseline (from log ratios), per instance",
             "mean_gain": mean,
-            "sd_gain": summary["sd"],
             "ci95": [low, high],
+            # The spread is on the log scale: kept there, never beside the percent figures.
+            "log": {"mean_gain": summary["mean"], "sd_gain": summary["sd"], "ci95": summary["ci95"]},
         }
 
     def progress(self) -> dict[str, Any]:

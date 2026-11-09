@@ -62,7 +62,7 @@
   EK.rangeCaption = function (s) {
     var ci = s.ci95;
     if (!ci) return "One case: a number, no range";
-    if (s.decision === "keep" && s.chance != null && s.chance < 0.9) return "Chance under 9 in 10 · at worst " + EK.better(ci[0]) + " · at best " + EK.better(ci[1]);
+    if (s.decision === "keep" && s.chance != null && s.chance < 0.95) return "Chance under 19 in 20 · at worst " + EK.better(ci[0]) + " · at best " + EK.better(ci[1]);
     var range = EK.rangeWords(ci[0], ci[1]);
     return s.chance != null ? EK.capital(EK.chanceWords(s.chance)) + " · " + range.charAt(0).toLowerCase() + range.slice(1) : range;
   };

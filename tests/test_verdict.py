@@ -61,7 +61,7 @@ def use_run(tmp_path):
 def test_verdict_keys_and_schema(use_run):
     root, run = use_run
     v = build_verdict(root, run)
-    assert v["schema"] == 1 and v["decision"] in DECISIONS
+    assert v["schema"] == 2 and v["decision"] in DECISIONS
     assert set(v) >= {"study", "run", "phase", "line", "advice", "measure", "held_back", "rule", "by_case", "changed", "files"}
     assert v["study"] == root.name and v["run"] == run and v["phase"] == "done" and v["decision"] == "use"
     assert v["measure"]["kpi"] == "tour_length" and v["measure"]["direction"] == "lower"
@@ -244,7 +244,7 @@ def test_verdict_files_list_existing_downloads(use_run):
     assert build_verdict(root, run)["files"] == [f"runs/{run}/downloads/settings.json"], "relative to the study folder"
 
 
-@pytest.mark.parametrize("p,words", [(0.996, "almost certain"), (0.95, "about 19 in 20"), (0.897, "under 9 in 10"),
+@pytest.mark.parametrize("p,words", [(0.996, "almost certain"), (0.95, "about 19 in 20"), (0.897, "about 18 in 20"), (0.947, "under 19 in 20"),
                                      (0.5, "about 10 in 20"), (0.04, "less than 1 in 20"), (None, ""),
                                      (0.98, "better than 19 in 20"), (0.96, "about 19 in 20"), (0.03, "less than 1 in 20")])
 def test_chance_words_table(p, words):

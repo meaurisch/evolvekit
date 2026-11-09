@@ -8,17 +8,22 @@ run is no denominator; per case, the gain is averaged over the seeds
 interval (Student's t) and an exact Wilcoxon signed-rank test. A percentage
 shown to a person is of the starting point's value, from the log quantity
 (`pct_from_log`), and a margin in percent has its log threshold (`margin_log`).
+The final check decides on the posterior of the mean gain instead
+(`posterior_mean_t`, read by `confirm.verdict_summary`); `paired_summary`
+stays beside it as the frequentist test, for engineers.
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+from functools import lru_cache
 from statistics import fmean, stdev
 from typing import Any, Hashable, Mapping, Sequence
 
 __all__ = [
     "t_cdf", "wilcoxon_signed_rank", "paired_summary", "per_instance_means",
-    "log_gain", "pct_from_log", "margin_log",
+    "log_gain", "pct_from_log", "margin_log", "Posterior", "posterior_mean_t", "PRIOR_EFFECT_SCALE",
 ]
 
 # Two-sided 95 % critical values of Student's t, by degrees of freedom.
@@ -187,6 +192,99 @@ def per_instance_means(gains: Mapping[Hashable, float]) -> list[float]:
         group = key[0] if isinstance(key, tuple) else (key,)
         groups.setdefault(group, []).append(gain)
     return [fmean(values) for values in groups.values()]
+
+
+PRIOR_EFFECT_SCALE = math.log(1.5)
+"""The prior's sd of the true mean gain, on the log scale: a 50 % change is
+a large effect, whatever the run-to-run noise (`posterior_mean_t`)."""
+
+_KAPPA0_FLOOR = 1e-6
+"""The smallest prior weight on the mean: the prior never weighs exactly nothing."""
+
+
+@dataclass(frozen=True)
+class Posterior:
+    """The posterior of the true mean gain: Student's t with `df` degrees of
+    freedom, location `mu` and scale `scale` (log units), from `n` cases and
+    a prior of scale `prior_scale`. `scale == 0` only when there was no spread
+    at all, neither in the cases nor in the prior: the mean is then known."""
+
+    n: int
+    mu: float
+    scale: float
+    df: int
+    prior_scale: float
+
+    def p_above(self, x: float) -> float:
+        """The probability that the true mean gain is above `x`."""
+        if self.scale == 0:
+            return 1.0 if self.mu > x else 0.0 if self.mu < x else 0.5
+        return 1.0 - t_cdf((x - self.mu) / self.scale, self.df)
+
+    def quantile_low(self, tail: float) -> float:
+        """The value the true mean gain is above with probability `1 - tail`;
+        `tail` is 0.025 or 0.05 (the t quantiles `stats` tabulates)."""
+        if self.scale == 0:
+            return self.mu
+        if tail == 0.025:
+            return self.mu - _t95(self.df) * self.scale
+        if tail == 0.05:
+            return self.mu - _t90(self.df) * self.scale
+        raise ValueError(f"tail must be 0.025 or 0.05, got {tail}")
+
+    def interval95(self) -> tuple[float, float]:
+        """The central 95 % credible interval of the true mean gain."""
+        half = _t95(self.df) * self.scale
+        return self.mu - half, self.mu + half
+
+
+@lru_cache(maxsize=None)
+def _t90(df: int) -> float:
+    """The one-sided 95 % (two-sided 90 %) quantile of Student's t with `df`
+    degrees of freedom, by bisection on `t_cdf` (no table to trust)."""
+    low, high = 0.0, 10.0
+    while t_cdf(high, df) < 0.95:
+        high *= 2.0
+    for _ in range(60):
+        mid = (low + high) / 2.0
+        if t_cdf(mid, df) < 0.95:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2.0
+
+
+def posterior_mean_t(d: Sequence[float], prior_scale: float) -> Posterior:
+    """The Normal-inverse-gamma update of the per-case gains `d` (log units).
+
+    The prior: mu | sigma^2 ~ N(0, sigma^2 / kappa0), sigma^2 ~ Scaled-Inv-chi^2(1,
+    sigma0^2) with sigma0 = `prior_scale` (the run-to-run spread) and kappa0 =
+    sigma0^2 / tau0^2, tau0 = log 1.5 (`PRIOR_EFFECT_SCALE`), floored at 1e-6: the
+    prior on the mean has a sd of about tau0 whatever the noise, so the
+    chance grows with the evidence and is never capped by the prior. Then
+
+        kappa_n = kappa0 + n;  mu_n = n * dbar / kappa_n;  nu_n = 1 + n
+        nu_n * sigma_n^2 = sigma0^2 + S + kappa0 * n / kappa_n * dbar^2
+        mu | d ~ Student-t(nu_n, mu_n, sigma_n / sqrt(kappa_n))
+
+    with S the sum of squared deviations from dbar. With no spread at all
+    (sigma0 = 0 and S = 0) the mean is known: scale 0, never a division by 0."""
+    n = len(d)
+    if n == 0:
+        raise ValueError("posterior_mean_t: no gains to update on")
+    if prior_scale < 0 or not math.isfinite(prior_scale):
+        raise ValueError(f"posterior_mean_t: the prior scale must be a finite number >= 0, got {prior_scale}")
+    dbar = fmean(d)
+    spread = sum((x - dbar) ** 2 for x in d)
+    sigma0_2 = prior_scale * prior_scale
+    kappa0 = max(sigma0_2 / (PRIOR_EFFECT_SCALE * PRIOR_EFFECT_SCALE), _KAPPA0_FLOOR)
+    kappa_n = kappa0 + n
+    mu = n * dbar / kappa_n
+    nu = 1 + n
+    if sigma0_2 == 0 and spread == 0:
+        return Posterior(n=n, mu=mu, scale=0.0, df=nu, prior_scale=prior_scale)
+    sigma_n2 = (sigma0_2 + spread + kappa0 * n / kappa_n * dbar * dbar) / nu
+    return Posterior(n=n, mu=mu, scale=math.sqrt(sigma_n2 / kappa_n), df=nu, prior_scale=prior_scale)
 
 
 def _sign(direction: str) -> float:

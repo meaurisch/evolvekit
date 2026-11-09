@@ -175,11 +175,11 @@
     var toward = direction === "higher" ? "higher" : "lower", away = toward === "higher" ? "lower" : "higher";
     return Math.abs(v).toFixed(1) + " % " + (v > 0 ? toward : away);
   };
-  /** The chance of a gain in words; under the rule's 9 in 10 it never rounds up to read like a pass. */
+  /** The chance of a gain in words; under the rule's 19 in 20 it never rounds up to read like a pass. */
   EK.chanceWords = function (p) {
     if (p == null || !isFinite(p)) return "";
     if (p >= 0.995) return "almost certain";
-    if (p < 0.9 && Math.round(p * 20) >= 18) return "chance under 9 in 10";
+    if (p < 0.95 && Math.round(p * 20) >= 19) return "chance under 19 in 20";
     if (p < 0.05) return "chance less than 1 in 20";
     if (Math.round(p * 20) >= 20) return "chance better than 19 in 20";
     return "chance about " + Math.round(p * 20) + " in 20";

@@ -39,7 +39,7 @@ import yaml
 from evolvekit import resources
 from evolvekit.config import load_config
 from evolvekit.app.detach import no_window_flags
-from evolvekit.confirm import ConfirmStopped, confirm, decide
+from evolvekit.confirm import ConfirmStopped, confirm, decision_of
 from evolvekit.evaluate.process import read_tail, run_bounded
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import (
@@ -1012,16 +1012,8 @@ def _read_plan(run_dir: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _decision(result: dict[str, Any]) -> str:
-    """What one candidate's comparison says: by the levels when the study
-    scores by levels, else by `decide` on the paired summary. A candidate
-    whose every run gave exactly the starting point's result is `keep`: its
-    change was not exercised, so there is nothing to decide on."""
-    if result.get("identical"):
-        return "keep"
-    if "levels" in result:
-        return "use" if result["levels"]["confirmed"] else "keep"
-    return decide(result["summary"])
+_decision = decision_of
+"""What one candidate's comparison says (`confirm.decision_of`); the name stays for its importers."""
 
 
 def _extend_check(
@@ -1047,6 +1039,9 @@ def _extend_check(
         # A change every run of which gave exactly today's result: more runs cannot open the answer.
         if (_decision(result) != "keep" or result.get("identical") or seeds >= len(CHECK_SEEDS)
                 or time_left_s() < seed_cost_s or stop.is_set()):
+            looks = getattr(comparison, "looks", None)
+            if isinstance(looks, int):
+                log(f"final check: the answer was read {looks} time{'s' if looks != 1 else ''}")
             return comparison, seeds
         seeds += 1
         log(f"final check: the answer is still open, adding a run per case ({seeds} so far)")

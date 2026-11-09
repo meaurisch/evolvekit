@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evolvekit.confirm import paired_summary
+from evolvekit.confirm import verdict_summary
 from evolvekit.harness.execute import (
     Job, _extend_check, continue_study, final_check, preview, read_job, read_preview, resume_study, run_study, run_test,
 )
@@ -252,9 +252,26 @@ def _confirm_recording(calls: list[int], settled_at: int = 6):
         assert list(seeds) == list(CHECK_SEEDS[:len(seeds)]), "every call names the whole seed list, so runs are kept"
         assert len(instances) == 3 and label == "final"
         calls.append(len(seeds))
-        summary = paired_summary([-9.0, 11.5, -0.4] if len(seeds) < settled_at else [1.3, 0.6, 1.9])
+        summary = verdict_summary([-0.09, 0.115, -0.004] if len(seeds) < settled_at else [0.013, 0.006, 0.019],
+                                  prior_scale=None, direction="minimize")
         return SimpleNamespace(per_candidate={"c1": {"summary": summary}})
     return fake_confirm
+
+
+def test_the_check_says_how_often_the_answer_was_read(tmp_path):
+    lines: list[str] = []
+    calls: list[int] = []
+    fake = _confirm_recording(calls)
+
+    def counting(*args, **kwargs):
+        comparison = fake(*args, **kwargs)
+        comparison.looks = len(calls)
+        return comparison
+
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lines.append,
+                  stop=threading.Event(), time_left_s=lambda: 1e9, confirm=counting)
+    assert lines[-1] == "final check: the answer was read 4 times"
 
 
 def test_the_check_adds_runs_while_the_answer_is_open_and_time_remains(tmp_path):

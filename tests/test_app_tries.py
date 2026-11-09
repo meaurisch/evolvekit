@@ -121,7 +121,13 @@ def test_the_final_check_as_far_as_it_got(tmp_path):
     c = digest(run)["check"]
     assert c["pairs"] == 3 and c["cases"] == 3 and c["runs_per_case"] == 2
     assert c["per_case"] == {"x": pytest.approx(2.0), "y": pytest.approx(3.0), "z": pytest.approx(1.0)}
-    assert c["mean"] == pytest.approx(2.0) and c["ci95"][0] < 2.0 < c["ci95"][1]
+    assert c["mean"] == pytest.approx(2.0, abs=0.01) and c["ci95"][0] < 2.0 < c["ci95"][1]
+    from evolvekit.confirm import verdict_summary
+    from evolvekit.stats import log_gain
+
+    own = verdict_summary([log_gain(b, n, "minimize") for b, n in ((100, 98), (200, 194), (300, 297))],
+                          prior_scale=None, direction="minimize")
+    assert (c["mean"], c["ci95"], c["chance"], c["worst"]) == (own["mean"], own["ci95"], own["chance"], own["worst"]),         "the verdict's own quantity: log gains through verdict_summary, not a mean of percentages"
 
 
 def test_a_run_with_nothing_yet_is_empty_not_an_error(tmp_path):

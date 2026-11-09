@@ -52,7 +52,7 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     assert use["line"] == ("Probably better: 1.3 % lower real cost on 3 held-back cases, a chance of about 19 in 20; "
                            "at worst 0.3 % worse than your starting point (PyVRP's own defaults).")
     assert use["advice"] == "Use the new settings: they are probably better on cases the search never saw."
-    assert use["rule"].startswith("The app says use it when")
+    assert use["rule"].startswith("Use when the chance of a gain")
     assert use["chance"] == pytest.approx(0.961, abs=0.001) and use["worst_pct"] == pytest.approx(-0.35, abs=0.01)
     sure = words_for([5.0, 5.2, 4.8])
     assert sure["line"] == ("Probably better: 5.0 % lower real cost on 3 held-back cases, almost certain; "
@@ -68,8 +68,8 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     assert words_for([3.0, 3.1, 2.9, -1.4])["decision"] == "keep", "the chance is high, the worst case beyond 1 %"
     assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "less than 1 in 20" and jobs._chance_words(0.98) == "better than 19 in 20"
     assert jobs._chance_words(0.5) == "about 10 in 20" and jobs._chance_words(None) == ""
-    assert jobs._chance_words(0.897) == "under 9 in 10", "a keep never reads like the rule's 9 in 10"
-    assert jobs._chance_words(0.9) == "about 18 in 20" and jobs._chance_words(0.947) == "about 19 in 20"
+    assert jobs._chance_words(0.947) == "under 19 in 20", "a keep never reads like the rule's 19 in 20"
+    assert jobs._chance_words(0.9) == "about 18 in 20" and jobs._chance_words(0.897) == "about 18 in 20"
     decided = words_for([-9.0, 11.5, -0.4], decision="use")
     assert decided["decision"] == "use" and decided["state"] == "confirmed", "the run's own decision, when it has one"
 
@@ -166,7 +166,7 @@ def test_a_summary_to_paste():
     assert jobs._summary_text(data).splitlines() == [
         "PyVRP: tune solver settings (PyVRP), run 20260927-005503",
         "Answer: Keep today's settings for now: the gain is not proven.",
-        "The app says use it when the chance of a gain is at least 9 in 10 and the worst plausible case is within 1 % of today.",
+        "Use when the chance of a gain is at least 19 in 20 and the chance of losing more than 1 % is under 1 in 20.",
         "Set-up: 20 s per case, 30 min in total; the search learned from 2 cases and was checked on 1 held-back case."
         " Compared with PyVRP's own defaults.",
         "Search: " + data["headline"],
