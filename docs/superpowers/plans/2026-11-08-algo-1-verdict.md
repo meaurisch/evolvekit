@@ -1026,6 +1026,24 @@ re-derive the formula; these are the re-derivations.
     rate; if a setting still fails, stop with the rates. The log and the Study page say "added N
     runs per held-back case and read the answer again". Cost if wrong: an extension that would
     have been clear after two runs spends its whole allowance — time, not correctness.
+13. **After A1.2's review: the rule is said as it works, and a comparison is read at most
+    twice.** (a) x_m < 0 in both directions, so P(gain > x_m) ≥ P(gain > 0): with both
+    thresholds at 0.95 the margin leg can never bind and "use" is exactly "chance of a gain
+    ≥ 19 in 20" (worst, the 5 % quantile, is then ≥ 0). So the decision is `chance ≥ 0.95 → use`,
+    `chance ≤ 0.10 → worse`, else `keep`; `RULE_WORDS` = "Use when the chance of a gain is at
+    least 19 in 20."; Holm has one leg, `1 − P(gain > 0)` at 0.05 (supersedes decision 8's second
+    leg); the interval strip loses its dashed "1 % limit"; `chance_margin` (the chance of losing
+    more than 1 %) stays in `comparison.json` for engineers, labelled. (b) The app offers "check
+    again with 2× runs" only when the comparison was read once (no extension ran); after an
+    extension the answer has had its two reads and the page says so. Campaign rechecks and
+    `continue_study` ask a new question (later data, another candidate) and are outside the
+    measured rate; the docs say the measured false-"use" rate covers one check with its
+    extension, or one check and one recheck. The null test adds a time-capped setting (look 1,
+    extension to 4 runs, look 2, no recheck) to its three settings. (c) The page never calls the
+    interval's 2.5 % end "worst": the strip marker, its aria text, the keep caption and the keep
+    sentence name it as the range's end, and "at worst" is always `worst`. (d) Old comparison
+    files keep their pre-A1 words ("about 19 in 20" etc.): the "under 19 in 20" wording applies
+    only to summaries that carry the A1 posterior.
 
 ## Open questions for the builder check
 
