@@ -54,7 +54,7 @@ from evolvekit.stats import paired_summary, per_instance_means
 
 __all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
 
-SCHEMA = 1
+SCHEMA = 2
 
 HOST_LOAD_MIN_RUN_S = 5.0
 """Evaluator runs shorter than this are not judged for host load: over a
@@ -973,7 +973,7 @@ class _Run:
         return {
             "verdict": verdict,
             "why": (
-                f"paired over {summary['n']} shared seed(s): mean gain {summary['mean']:.6g}, "
+                f"paired over {summary['n']} case(s): mean gain {summary['mean']:.6g}, "
                 f"95 % interval {low:.6g} to {high:.6g}" + (_noise_note(clear, worse))
                 + ". These are the seeds the search selected on, so even a clear "
                 "result is optimistic until it is confirmed on seeds it never saw"

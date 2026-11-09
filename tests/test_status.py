@@ -9,7 +9,9 @@ without a word) are exactly the ones a finished test run is never in.
 from __future__ import annotations
 
 import json
+import math
 import os
+import statistics
 import subprocess
 import sys
 from dataclasses import replace
@@ -310,6 +312,35 @@ def test_a_gain_that_holds_on_every_shared_seed_is_clear(tmp_path):
     assert improvement["verdict"] == "clear" and improvement["n"] == 3
     assert improvement["ci95"][0] > 0
     assert "never saw" in improvement["why"], "selection bias has to be named"
+    assert "3 case(s)" in improvement["why"] and "seed(s)" not in improvement["why"], "n counts cases"
+
+
+def test_the_schema_is_2_since_the_live_verdict_counts_cases_not_runs():
+    """A0 (D3) dropped `progress.improvement.t` and made `n` count cases: a
+    key that changed meaning or disappeared bumps the schema."""
+    assert SCHEMA == 2
+
+
+def test_the_live_verdict_calls_pure_noise_clear_about_2_5_percent_of_the_time():
+    """Design §10: the live verdict's error rate, simulated. Null gains over 3
+    instances x 2 seeds, judged as `status` judges them (per-instance means,
+    then the 95 % interval): "clear" is the one-sided 2.5 % tail. The old rule,
+    t >= 2 over every run, called the same noise clear far more often (D3)."""
+    import random
+
+    from evolvekit.stats import paired_summary, per_instance_means
+
+    rng, trials, clear, old_clear = random.Random(0), 20_000, 0, 0
+    for _ in range(trials):
+        gains = {(i, s): rng.gauss(0.0, 1.0) for i in range(3) for s in range(2)}
+        if paired_summary(per_instance_means(gains))["ci95"][0] > 0:
+            clear += 1
+        runs = list(gains.values())
+        mean, sd = sum(runs) / len(runs), statistics.stdev(runs)
+        if mean / (sd / math.sqrt(len(runs))) >= 2:
+            old_clear += 1
+    assert 0.015 <= clear / trials <= 0.035
+    assert old_clear / trials > 0.04, "the old rule over-called noise"
 
 
 def test_a_gain_smaller_than_the_seed_to_seed_swing_is_within_noise(tmp_path):
