@@ -494,7 +494,7 @@ function renderHeader(doc) {
   document.title = (STATE_WORD[health.state] || "run") + " · " + (pct((doc.progress || {}).improvement?.pct) || "") + " · evolvekit";
 }
 function renderNav(doc) {
-  const failures = (doc.failures || []).length, unfinished = (doc.candidates || []).filter((c) => !c.rejected && !c.competes).length;
+  const failures = (doc.failures || []).length, unfinished = (doc.candidates || []).filter((c) => !c.rejected && !c.competes && !c.veto).length;
   const link = (id, label, count, bad) => h("a", { href: "#" + id }, label, count != null ? h("span", { class: "count" + (bad && count ? " bad" : "") }, count) : null);
   $("nav").replaceChildren(link("health", "Health"), link("progress", "Progress"), link("best", "Best configuration"), link("parameters", "Parameters"),
     link("instances", "Per instance"), link("failures", "What went wrong", failures, true), link("candidates", "Candidates", (doc.candidates || []).length), link("archive", "Archive"), link("log", "Console"));
@@ -597,7 +597,7 @@ function drawProgress(doc, width) {
   const minimize = dir === "minimize";
   const pts = cands.filter((c) => c.competes && isNum(c.objective));
   if (!pts.length) return h("div", { class: "empty" }, "No fully evaluated candidate yet. The first point appears when the seed has been through the final stage.");
-  const out = cands.filter((c) => !c.rejected && !c.competes);           // failed, not promoted, skipped
+  const out = cands.filter((c) => !c.rejected && !c.competes);           // failed, not promoted, skipped, kept out by the hold-out
   const base = pr.baseline?.objective, series = (pr.series || []).filter((p) => isNum(p.best_objective));
   const W = Math.max(300, width), narrow = W < 560, H = Math.round(Math.min(380, Math.max(250, W * 0.42)));
   const m = { l: narrow ? 50 : 62, r: narrow ? 14 : 96, t: 22, b: out.length ? 62 : 38 };
@@ -683,13 +683,14 @@ function drawProgress(doc, width) {
   if (out.length) {
     const byGen = {}; for (const c of out) (byGen[c.generation] ||= []).push(c);
     const roomy = (W - m.l - m.r) / lastGen >= 26;
-    svg.append(s("text", { x: m.l - 8, y: H - 10, "text-anchor": "end" }, narrow ? "unfin." : "unfinished"));
+    svg.append(s("text", { x: m.l - 8, y: H - 10, "text-anchor": "end" }, narrow ? "unrnk." : "not ranked"));
     for (const [g, list] of Object.entries(byGen)) {
-      const failed = list.filter(isFailure).length, colour = failed ? "var(--critical)" : "var(--ink-3)";
+      const failed = list.filter((c) => !c.veto && isFailure(c)).length, colour = failed ? "var(--critical)" : "var(--ink-3)";
+      const mark = failed ? "✕" : list.every((c) => c.veto) ? "!" : "○";
       const node = s("g", { class: "hit" }, s("rect", { x: X(+g) - 13, y: H - 24, width: 26, height: 20, fill: "transparent" }),
-        roomy ? s("text", { x: X(+g), y: H - 10, "text-anchor": "middle", fill: colour, style: "font-weight:600" }, (failed ? "✕" : "○") + list.length)
+        roomy ? s("text", { x: X(+g), y: H - 10, "text-anchor": "middle", fill: colour, style: "font-weight:600" }, mark + list.length)
               : s("circle", { cx: X(+g), cy: H - 14, r: 2.5, fill: colour }));
-      node.addEventListener("pointermove", (e) => showTip(e, h("b", null, "generation " + g + ": " + list.length + " unfinished"), ...list.map((c) => h("div", { class: "m" }, c.id + " — " + (isFailure(c) ? c.reason : c.gated ? "broke a gate: " + c.gated : c.raced_out ? c.raced_out : "not promoted past " + (c.deepest_stage || "?"))))));
+      node.addEventListener("pointermove", (e) => showTip(e, h("b", null, "generation " + g + ": " + list.length + " not ranked"), ...list.map((c) => h("div", { class: "m" }, c.id + " — " + (c.veto ? "kept out by the hold-out: " + c.veto : isFailure(c) ? c.reason : c.gated ? "broke a gate: " + c.gated : c.raced_out ? c.raced_out : "not promoted past " + (c.deepest_stage || "?"))))));
       node.addEventListener("pointerleave", hideTip);
       svg.append(node);
     }
@@ -697,7 +698,8 @@ function drawProgress(doc, width) {
   return svg;
 }
 /* An unfinished candidate either failed (crash, timeout, unusable output, a cap)
-   or simply was not promoted to the next stage. Only the first is a problem. */
+   or simply was not promoted to the next stage. Only the first is a problem.
+   A candidate kept out by the hold-out finished; it is shown apart (`c.veto`). */
 function isFailure(c) { return !!c.reason; }
 function improvement(base, value, dir) { if (!isNum(base) || !isNum(value) || base === 0) return null; return 100 * (dir === "minimize" ? base - value : value - base) / Math.abs(base); }
 /* Does the cheap stage predict the expensive one? One line per pair of stages, and the points behind it. */
@@ -765,7 +767,7 @@ function renderProgress(doc) {
     h("span", null, h("i", { style: { width: "9px", height: "9px", borderRadius: "50%", background: "var(--ink-3)" } }), "fully evaluated candidate" + (pr.spread?.available === false ? "" : ", ± 1 sd across " + (pr.spread?.across || "seeds"))),
     h("span", null, h("i", { style: { width: "11px", height: "11px", borderRadius: "50%", background: "var(--accent)" } }), "current best"),
     h("span", null, h("i", { style: { width: "18px", height: "1px", background: "var(--ink-3)" } }), "baseline (the seed)"),
-    h("span", null, "✕ failed · ○ not promoted: counted per generation, never plotted"));
+    h("span", null, "✕ failed · ○ not promoted · ! kept out by the hold-out: counted per generation, never plotted"));
   queueMicrotask(() => { const c = $("progress-chart"); if (c) c.replaceChildren(drawProgress(doc, c.clientWidth)); });
   const redraw = () => { ui.signatures.progress = null; render(); };
   const controls = h("span", { style: { display: "inline-flex", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end" } },
@@ -935,12 +937,12 @@ function renderFailures(doc) {
 function status(c) {
   if (c.is_best) return ["star", "best"]; if (c.is_seed) return ["ok", "baseline"];
   if (c.rejected) return ["dim", c.novelty ? c.novelty.replace("_", "-") : "rejected"];
-  if (!c.competes) return isFailure(c) ? ["bad", "failed"] : c.gated ? ["dim", "broke a gate"] : c.raced_out ? ["dim", "raced out"] : ["dim", "not promoted"];
+  if (!c.competes) return c.veto ? ["dim", "kept out by the hold-out"] : isFailure(c) ? ["bad", "failed"] : c.gated ? ["dim", "broke a gate"] : c.raced_out ? ["dim", "raced out"] : ["dim", "not promoted"];
   return ["ok", "ranked"];
 }
 function renderCandidates(doc) {
   const all = doc.candidates || [], base = doc.progress?.baseline?.objective, dir = doc.objective?.direction;
-  const filters = { all: () => true, ranked: (c) => c.competes && !c.rejected, unfinished: (c) => !c.competes && !c.rejected, rejected: (c) => c.rejected };
+  const filters = { all: () => true, ranked: (c) => c.competes && !c.rejected, unfinished: (c) => !c.competes && !c.rejected && !c.veto, kept: (c) => !!c.veto && !c.rejected, rejected: (c) => c.rejected };
   const rows = all.filter(filters[ui.filter]).map((c) => ({ ...c, delta: c.competes ? improvement(base, c.objective, dir) : null }));
   const { key, dir: d } = ui.sort;
   rows.sort((a, b) => { const x = a[key], y = b[key]; if (x == null && y == null) return 0; if (x == null) return 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * d; });
@@ -948,7 +950,7 @@ function renderCandidates(doc) {
     h("button", { type: "button", onclick: () => { ui.sort = { key: k, dir: ui.sort.key === k ? -ui.sort.dir : 1 }; ui.signatures.candidates = null; render(); } }, label + (ui.sort.key === k ? (ui.sort.dir > 0 ? " ▲" : " ▼") : "")));
   const count = (f) => all.filter(filters[f]).length;
   return [cardHead("candidates", "Candidates", `${all.length} so far`,
-      seg([["all", `All ${count("all")}`], ["ranked", `Ranked ${count("ranked")}`], ["unfinished", `Unfinished ${count("unfinished")}`], ["rejected", `Rejected ${count("rejected")}`]], ui.filter, (val) => { ui.filter = val; ui.signatures.candidates = null; render(); })),
+      seg([["all", `All ${count("all")}`], ["ranked", `Ranked ${count("ranked")}`], ["unfinished", `Unfinished ${count("unfinished")}`], ["kept", `Kept out by the hold-out ${count("kept")}`], ["rejected", `Rejected ${count("rejected")}`]], ui.filter, (val) => { ui.filter = val; ui.signatures.candidates = null; render(); })),
     h("div", { class: "scroll", style: { maxHeight: "460px", overflowY: "auto" } }, h("table", null,
       h("thead", null, h("tr", null, th("id", "candidate"), th("generation", "gen", "num"), th("operator", "operator"), th("objective", doc.objective?.name || "objective", "num"),
         h("th", { class: "num" }, "± sd (n)"), th("delta", "vs baseline", "num"), th("deepest_stage", "stage"), th("evaluation_s", "eval time", "num"), h("th", null, "status"))),
@@ -1034,7 +1036,7 @@ async function openCandidate(id) {
   $("drawer-body").replaceChildren(
     h("dl", { class: "kv" }, h("dt", null, "generation"), h("dd", null, d.generation + " · " + d.operator + (d.model && d.model !== "none" ? " · " + d.model : "")),
       h("dt", null, "parent"), h("dd", null, d.parent_id ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); openCandidate(d.parent_id); } }, d.parent_id) : "– (the seed)"),
-      h("dt", null, ob.name || "objective"), h("dd", null, num((d.kpis || {})[ob.name]), d.competes ? "  ·  " + pct(improvement(base, (d.kpis || {})[ob.name], ob.direction)) + " vs baseline" : h("span", { class: "note" }, "  · not ranked: " + (d.reject_reason || (d.last_failure || "").split("\n")[0] || (d.gated ? "broke a gate: " + d.gated : "") || "did not reach the final stage"))),
+      h("dt", null, ob.name || "objective"), h("dd", null, num((d.kpis || {})[ob.name]), d.competes ? "  ·  " + pct(improvement(base, (d.kpis || {})[ob.name], ob.direction)) + " vs baseline" : h("span", { class: "note" }, "  · not ranked: " + (d.reject_reason || (d.last_failure || "").split("\n")[0] || (d.veto ? "kept out by the hold-out: " + d.veto : "") || (d.gated ? "broke a gate: " + d.gated : "") || "did not reach the final stage"))),
       h("dt", null, "stages"), h("dd", null, (d.stages_reached || []).join(" → ") || "none"),
       isNum(d.private_score) ? [h("dt", null, "hold-out"), h("dd", null, `public ${num(d.public_score)} · private ${num(d.private_score)}`)] : null),
     d.parameters?.length ? h("div", null, h("h3", null, "Parameters against the default"), paramTable(d.parameters, "this candidate")) : null,

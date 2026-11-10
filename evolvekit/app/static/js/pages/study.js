@@ -222,7 +222,7 @@
       Object.assign(x, { kicker: (isBakeoff() ? "Comparing branches" : "Final check") + (ch && ch.planned ? " · " + ch.pairs + " of " + ch.planned + " runs" : ""), head: "No answer yet",
         sub: isBakeoff() ? "Running the starting point and " + branchCount() + " on " + EK.plural(heldCount(), "held-back case") + "."
           : "Adding runs on " + EK.plural(heldCount(), "held-back case") + " while time remains.", right: ch && ch.mean != null ? "both" : "timeline",
-        range: ch && ch.mean != null ? [ch.mean, ch.ci95 && ch.ci95[0], ch.ci95 && ch.ci95[1]] : null, caption: "So far, on held-back cases",
+        range: ch && ch.mean != null ? EK.shownRange(ch) || [ch.mean, null, null] : null, caption: "So far, on held-back cases",
         acts: [{ text: "Stop the check", kind: "quiet", act: "stop" }] });
     } else if (s.phase === "failed") {
       Object.assign(x, { mark: "error", kickerTone: "critical", kicker: "Stopped by an error",
@@ -245,19 +245,22 @@
     } else if (d === "use") {
       Object.assign(x, { tone: "accent", mark: "use", kickerTone: "", kicker: "Use it · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
         sub: verdictSub(f), right: "range",
-        range: [f.mean, f.ci95 && f.ci95[0], f.ci95 && f.ci95[1]], caption: "Likely range, on the final check", rule: true,
+        range: EK.shownRange(f) || [f.mean, null, null],
+        // The chance in figures and the 90 % range, whose low end is the sentence's "at least" (decision 15);
+        // a run written before A1 keeps its own caption.
+        caption: f.range90 ? EK.rangeCaption({ decision: "use", chance: f.chance, range90: f.range90, posterior: f.posterior }) : "Likely range, on the final check", rule: true,
         acts: [hasExport("settings_json") ? { text: "Save settings file", act: "save-settings" } : null, { text: "Copy", kind: "secondary", act: "copy-summary", label: "Copy a summary" }].filter(Boolean) });
     } else if (d === "keep") {
       // "No difference in any run" (`state: same`): the verdict's line, and no band, range or chance.
       var same = f.state === "same";
       Object.assign(x, { mark: "keep", kickerTone: "", kicker: "Keep · final check on " + EK.plural(f.n || heldCount(), "held-back case"), head: verdictHead(f),
         sub: verdictSub(f), right: "range",
-        range: !same && f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null,
-        caption: same ? "" : isBakeoff() && !f.ci95 ? "Each branch’s answer is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95 }), rule: true,
+        range: !same ? EK.shownRange(f) : null,
+        caption: same ? "" : isBakeoff() && !f.ci95 ? "Each branch’s answer is on the page that shows them side by side" : EK.rangeCaption({ decision: "keep", chance: f.chance, ci95: f.ci95, range90: f.range90, posterior: f.posterior, failed_more: f.failed_more }), rule: true,
         acts: [f.recheck ? { text: "Check with more runs", kind: "secondary", act: "recheck" } : null].filter(Boolean) });
     } else if (d === "worse") {
       Object.assign(x, { mark: "worse", kickerTone: "", kicker: "Worse · final check on " + EK.plural(f.n || heldCount(), "case"), head: verdictHead(f),
-        sub: verdictSub(f), right: "range", range: f.ci95 ? [f.mean, f.ci95[0], f.ci95[1]] : null, caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95 }), rule: true,
+        sub: verdictSub(f), right: "range", range: EK.shownRange(f), caption: EK.rangeCaption({ decision: "worse", chance: f.chance, ci95: f.ci95, range90: f.range90, posterior: f.posterior }), rule: true,
         acts: [{ text: "Start a new study", kind: "secondary", act: "next" }] });
     } else if (d === "single") {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Final check done · 1 held-back case", head: verdictHead(f),
@@ -276,7 +279,7 @@
     } else if (d === "stopped") {
       Object.assign(x, { kickerTone: "", kicker: "Final check stopped" + (ch && ch.planned ? " · " + ch.pairs + " of " + ch.planned + " runs" : ""), head: verdictHead(f),
         sub: verdictSub(f), right: ch && ch.mean != null ? "both" : "timeline",
-        range: ch && ch.mean != null ? [ch.mean, ch.ci95 && ch.ci95[0], ch.ci95 && ch.ci95[1]] : null, caption: "So far, on the final check",
+        range: ch && ch.mean != null ? EK.shownRange(ch) || [ch.mean, null, null] : null, caption: "So far, on the final check",
         acts: [{ text: "Continue the check", act: "check" }] });
     } else {
       Object.assign(x, { mark: "none", kickerTone: "", kicker: "Finished", head: verdictHead(f), sub: verdictSub(f), acts: [] });
@@ -340,10 +343,10 @@
     if (x.stoppedAt) tl.stoppedAt = (tl.done || 0) + 1;
     var w = phone ? Math.max(280, window.innerWidth - 64) : 440;
     var vis = x.right === "timeline" ? EK.runTimeline(Object.assign({ width: w }, tl))
-      : x.right === "both" ? html`${EK.runTimeline(Object.assign({ width: w }, tl))}<div style="height:8px"></div>${EK.intervalStrip(x.range[0], x.range[1], x.range[2], { width: w })}`
-      : x.range ? EK.intervalStrip(x.range[0], x.range[1], x.range[2], { width: w, onAccent: acc }) : "";
+      : x.right === "both" ? html`${EK.runTimeline(Object.assign({ width: w }, tl))}<div style="height:8px"></div>${EK.rangeStrip(x.range, { width: w })}`
+      : x.range ? EK.rangeStrip(x.range, { width: w, onAccent: acc }) : "";
     var acts = x.acts.map(function (a) { return EK.button(a.text, Object.assign({ kind: "primary", onAccent: acc }, a)); });
-    var rule = x.rule ? html`<p class="type-small strip-rule${acc ? "" : " ink-2"}">The rule: use it at 9 in 10 or better, worst within 1 %. ${EK.link("Why", { act: "why", cls: acc ? "on-accent-link" : "" })}</p>` : "";
+    var rule = x.rule ? html`<p class="type-small strip-rule${acc ? "" : " ink-2"}">${st.results && st.results.final && st.results.final.posterior === false ? "The rule: use it at a 90 % chance or better, worst within 1 %." : "The rule: use it at a 95 % chance or better."} ${EK.link("Why", { act: "why", cls: acc ? "on-accent-link" : "" })}</p>` : "";
     var facts = liveFacts(st.status).concat(runFacts());
     var factLine = facts.length ? html`<div class="strip-facts${acc ? "" : " ink-2"}">${facts.map(function (f) { return html`<span>${f}</span>`; })}</div>` : "";
     return html`<section class="status-strip${acc ? " is-accent" : ""}" aria-label="Status" aria-live="polite" aria-atomic="true">
@@ -795,6 +798,7 @@
       // How much of the plan ran, when less did: the verdict document's own sentence.
       if (r.how_it_ran) parts.push(html`<p class="type-small">${r.how_it_ran}</p>`);
       if (r.final && r.final.next) parts.push(html`<p class="type-small ink-2">${r.final.next}</p>`);
+      if (r.final && r.final.read_twice) parts.push(html`<p class="type-small ink-2">${r.final.read_twice}</p>`);
       if (r.final && r.final.recheck) parts.push(html`<div class="actions">${EK.button(r.final.recheck.label, { kind: r.final.recheck.over ? "quiet" : "secondary", act: "recheck" })}</div><p class="type-small ink-2">${r.final.recheck.why}</p>`);
       var dir = (goalOf() || {}).direction, measure = (goalOf() || {}).label || "the measure";
       var table = function (title, rows, change) {
@@ -1013,7 +1017,7 @@
         }).catch(EK.fail);
       },
       why: function () {
-        EK.openDrawer({ title: "The rule", body: html`<p class="type-body">${(st.results && st.results.final && st.results.final.rule) || "The app says use it when the chance of a gain is at least 9 in 10 and the worst plausible case is within 1 % of today."}</p>
+        EK.openDrawer({ title: "The rule", body: html`<p class="type-body">${(st.results && st.results.final && st.results.final.rule) || "Use when the chance of a gain is at least 95 %."}</p>
           <p class="type-small ink-2">The final check runs the best combination and today’s ${whatOf()} on the held-back cases, which the search never saw.</p>` });
       },
       busy: function () {

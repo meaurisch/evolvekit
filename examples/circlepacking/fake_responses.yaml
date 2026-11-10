@@ -39,8 +39,8 @@
     - Equal radii are not the target. The best packings found have circles of
       several sizes.
 
-# The scheduled big step: the same idea, run for longer.
-- when: "scheduled big step"
+# The big step (scheduled or on a plateau): the same idea, run for longer.
+- when: "This is a big step."
   response: |
     ```python
     def construct_packing():

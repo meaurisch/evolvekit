@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evolvekit.app.verdict import number_text
+from evolvekit.app.verdict import RANGE_NAME, number_text
 
 
 def _number(value: Any) -> str:
@@ -44,7 +44,7 @@ def _change(pct: Any, direction: str) -> str:
 
 
 def _between(low: float, high: float, direction: str) -> str:
-    """A 95 % range in the words of the goal's direction; a bound that rounds to zero has no sign."""
+    """A range in the words of the goal's direction; a bound that rounds to zero has no sign."""
     toward, away = _lower(direction)
     if low > 0:
         return f"between {number_text(low)} % and {number_text(high)} % {toward}"
@@ -129,10 +129,14 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
     for note in notes:
         out += ["", f"Note: {note}"]
     facts = []
-    if verdict.get("ci95_pct"):
-        low, high = verdict["ci95_pct"]
+    # The range a person is shown: the 90 % range, whose low end is the verdict's "at least" / "at worst"
+    # (decision 15); a comparison written before A1 has only its 95 % interval, and keeps it.
+    shown, range_name = ((verdict["range90_pct"], RANGE_NAME) if verdict.get("range90_pct") else
+                         (verdict.get("ci95_pct"), "95 % interval"))
+    if shown:
+        low, high = shown
         facts.append(f"Change in {measure.get('label') or 'the measure'} on the held-back cases: "
-                     f"{_change(verdict.get('mean_pct'), direction)}, {_between(low, high, direction)} (95 % interval).")
+                     f"{_change(verdict.get('mean_pct'), direction)}, {_between(low, high, direction)} ({range_name}).")
     if verdict.get("chance_words"):
         facts.append(f"Chance of a gain: {verdict['chance_words']}.")
     reason = verdict.get("reason") or ""

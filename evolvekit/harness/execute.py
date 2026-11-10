@@ -39,7 +39,7 @@ import yaml
 from evolvekit import resources
 from evolvekit.config import load_config
 from evolvekit.app.detach import no_window_flags
-from evolvekit.confirm import ConfirmStopped, confirm, decide
+from evolvekit.confirm import LIMITED_BY_CASES, ConfirmStopped, confirm, decision_of, runs_can_help
 from evolvekit.evaluate.process import read_tail, run_bounded
 from evolvekit.harness import HarnessError
 from evolvekit.harness.compile import (
@@ -516,6 +516,7 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
             log(f"per kind of case: groups.json is missing or out of date, so the cases are grouped now: "
                 f"solving {len(cases)} case(s) for their features")
         doc = kinds.compute(root, features=not tagged)
+    doc = kinds.merge_small_groups(doc)  # a group needs two held-back cases to be checked; the study's own file stays as computed
     order = list(doc["groups"])
     log(f"per kind of case: {len(order)} group{'s' if len(order) != 1 else ''} by {doc.get('method')}: "
         + ", ".join(order))
@@ -583,6 +584,11 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
         job.finish("failed", error=f"{type(exc).__name__}: {exc}")
         raise
     try:
+        apply_group_holm(run_dir)  # the answers are final only after this: if it fails, the run did not finish
+    except Exception as exc:  # noqa: BLE001 - job.json must say how the job ended
+        job.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    try:
         from evolvekit.app.verdict import build_verdict
 
         kinds.cache_stump(run_dir / kinds.GROUPS)  # the rule's split, once: every verdict reads it from here
@@ -591,6 +597,46 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
         log(f"per kind of case: settings_by_group.json and rule.md could not be written: {exc}")
     job.finish("done")
     return job.state
+
+
+def apply_group_holm(run_dir: str | Path) -> None:
+    """The groups of a per-group run are a choice among several kinds of case:
+    once every group is `done`, each group's final comparison pays for the
+    others (`confirm.apply_holm`, "kinds of case"; one group changes nothing).
+    Each group's `confirm/final/comparison.json` is written back with its
+    `holm`, and its `job.json` `final.decision` / `final.confirmed` follow
+    `decision_of`. A group with no final comparison is not in the family; a
+    run with a group not yet done is left as it is."""
+    from evolvekit.confirm import apply_holm, comparison_of, render_markdown
+
+    folders = group_dirs(run_dir)
+    jobs = {name: read_job(folder) or {} for name, folder in folders.items()}
+    if not folders or any(job.get("phase") != "done" for job in jobs.values()):
+        return
+    comparisons: dict[str, dict[str, Any]] = {}
+    results: dict[str, dict[str, Any]] = {}
+    for name, folder in folders.items():
+        final = jobs[name].get("final") or {}
+        cid = final.get("candidate")
+        if not cid or not final.get("comparison"):
+            continue
+        try:
+            loaded = json.loads((folder / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        result = ((loaded.get("per_candidate") or {}).get(cid)) if isinstance(loaded, dict) else None
+        if isinstance(result, dict):
+            comparisons[name], results[name] = loaded, result
+    apply_holm(results, what="kinds of case")
+    for name, loaded in comparisons.items():
+        folder = folders[name]
+        _atomic_write(folder / "confirm" / "final" / "comparison.json", json.dumps(loaded, indent=2) + "\n")
+        markdown = folder / "confirm" / "final" / "comparison.md"
+        if markdown.is_file():  # the engineers' page says what the Holm step did, as the json does
+            _atomic_write(markdown, render_markdown(comparison_of(loaded)))
+        decision = decision_of(results[name])
+        final = {**jobs[name]["final"], "decision": decision, "confirmed": decision == "use"}
+        _atomic_write(folder / JOB, json.dumps({**jobs[name], "final": final}, indent=2) + "\n")
 
 
 SETTINGS_BY_GROUP = "settings_by_group.json"
@@ -682,7 +728,9 @@ def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
     row per branch (its own change, `tree.diff_between`, and its commit).
     `job.final.candidate` is the branch with the largest mean among those whose
     own decision is `use`, else the largest mean (decision 32); `final.decisions`
-    holds every branch's. A run whose check was stopped is checked again on the
+    holds every branch's. The branches are a choice among several, so with two
+    or more each keeps `use` only when Holm over the branches passes too
+    (`confirm.apply_holm`). A run whose check was stopped is checked again on the
     same rows (the runs already done are kept); `seeds` asks for that many runs
     per case. Returns the final `job.json`."""
     from evolvekit import tree
@@ -753,7 +801,7 @@ def run_bakeoff(root: str | Path, run_id: str, *, seeds: int | None = None,
         try:
             comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:checks]),
                                  candidates=",".join(ids), instances=[f"{UP}/{case}" for case in study.test],
-                                 label="final", log=log, stop=stop.event)
+                                 label="final", family=True, log=log, stop=stop.event)
         except ConfirmStopped:
             job.finish("stopped", search=_no_search(None), final={"stopped": True})
             return job.state
@@ -1012,44 +1060,76 @@ def _read_plan(run_dir: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _decision(result: dict[str, Any]) -> str:
-    """What one candidate's comparison says: by the levels when the study
-    scores by levels, else by `decide` on the paired summary. A candidate
-    whose every run gave exactly the starting point's result is `keep`: its
-    change was not exercised, so there is nothing to decide on."""
-    if result.get("identical"):
-        return "keep"
-    if "levels" in result:
-        return "use" if result["levels"]["confirmed"] else "keep"
-    return decide(result["summary"])
+_decision = decision_of
+"""What one candidate's comparison says (`confirm.decision_of`); the name stays for its importers."""
 
 
 def _extend_check(
     study: Study, plan: Plan, config: Any, run_dir: Path, job: Job, log: Callable[[str], None], *,
     stop: threading.Event, time_left_s: Callable[[], float], confirm: Callable[..., Any] = confirm, up: str = UP,
+    extend: bool = True,
 ) -> tuple[Any, int]:
-    """The final check with `plan.check_seeds` runs per case, then one more
-    run per case at a time while the answer is still open (`keep`), seeds
-    remain, the time left pays for another and nothing asked for a stop.
-    `confirm` keeps the runs it did, so every call names the whole seed list
-    and only the new seed is run. Returns the last comparison and its runs
-    per case; `job.json` says how many it is on (`check.seeds`). `up` is the
-    way from the run's folder to the study's (`GROUP_UP` for a group's folder)."""
+    """The final check with `plan.check_seeds` runs per case, its answer read
+    once (look 1); while that answer is still open (`keep`), seeds remain,
+    the time left pays for at least one more run per case and nothing asked
+    for a stop, and more runs could still help (`confirm.runs_can_help`: the
+    runs' own noise is a real share of what keeps it open; else the log says
+    the cases set the answer and `check.limited_by` is "cases"), every run
+    the seeds and the time allow is added at once and
+    the answer is read once more (look 2) -- the answer, whatever it says.
+    Never a look in between: stopping the moment an answer looks good would
+    say "use" for a change that is no better far more often than the rule
+    promises (decision 12). `confirm` keeps the runs it did, so the second
+    call names the whole seed list and only the new seeds are run. Returns
+    the last comparison and its runs per case; `job.json` says how many it is
+    on (`check.seeds`). `up` is the way from the run's folder to the study's
+    (`GROUP_UP` for a group's folder). `extend=False` (a check of an explicit
+    number of runs) is never extended."""
     m = len(study.test)
     seed_cost_s = math.ceil(2 * m / max(1, plan.workers)) * float(plan.run_s)
     instances = [f"{up}/{case}" for case in study.test]
     seeds = max(1, min(int(plan.check_seeds), len(CHECK_SEEDS)))
-    while True:
-        job.update(check={"seeds": seeds})
-        comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:seeds]), instances=instances, label="final",
+
+    def look(count: int) -> tuple[Any, dict[str, Any]]:
+        job.update(check={"seeds": count})
+        comparison = confirm(config, run_dir, seeds=list(CHECK_SEEDS[:count]), instances=instances, label="final",
                              log=log, stop=stop)
         (_cid, result), = comparison.per_candidate.items()
-        # A change every run of which gave exactly today's result: more runs cannot open the answer.
-        if (_decision(result) != "keep" or result.get("identical") or seeds >= len(CHECK_SEEDS)
-                or time_left_s() < seed_cost_s or stop.is_set()):
-            return comparison, seeds
-        seeds += 1
-        log(f"final check: the answer is still open, adding a run per case ({seeds} so far)")
+        return comparison, result
+
+    comparison, result = look(seeds)
+    if extend and _decision(result) == "keep" and not result.get("identical") and not runs_can_help(result):
+        # The runs' noise is a small part of what keeps the answer open (A1.3): only more
+        # held-back cases could firm it up, so no run is added.
+        log("final check: " + LIMITED_BY_CASES)
+        job.update(check={"seeds": seeds, "limited_by": "cases"})
+        extend = False
+    added = _runs_to_add(result, seeds, seed_cost_s, time_left_s, stop) if extend else 0
+    if added:
+        seeds += added
+        log(f"final check: added {added} run{'s' if added != 1 else ''} per held-back case and read the answer again")
+        comparison, result = look(seeds)
+    looks = getattr(comparison, "looks", None)
+    if isinstance(looks, int):
+        log(f"final check: the answer was read {looks} time{'s' if looks != 1 else ''}")
+    return comparison, seeds
+
+
+def _runs_to_add(result: dict[str, Any], seeds: int, seed_cost_s: float, time_left_s: Callable[[], float],
+                 stop: threading.Event) -> int:
+    """How many runs per case the extension adds after look 1: 0 unless the
+    answer is still open (`keep`) and nothing asked for a stop; else as many
+    as the seeds left and the time left pay for. A change every run of which
+    gave exactly today's result is never extended: more runs cannot open it.
+    (Whether the runs can help at all is `_extend_check`'s, before this.)"""
+    if _decision(result) != "keep" or result.get("identical") or stop.is_set():
+        return 0
+    left = len(CHECK_SEEDS) - seeds
+    if left <= 0:
+        return 0
+    if seed_cost_s <= 0:
+        return left
+    return max(0, min(left, int(time_left_s() // seed_cost_s)))
 
 
 def _time_left(job: Job, plan: Plan) -> Callable[[], float]:
@@ -1182,7 +1262,7 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     try:
         comparison, seeds = _extend_check(
             study, plan, config, run_dir, job, log, stop=stop.event,
-            time_left_s=_time_left(job, plan) if extend else (lambda: 0.0), up=up,
+            time_left_s=_time_left(job, plan) if extend else (lambda: 0.0), up=up, extend=extend,
         )
     except ConfirmStopped:
         job.finish("stopped", final={"stopped": True})

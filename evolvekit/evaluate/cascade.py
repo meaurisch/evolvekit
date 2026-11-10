@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 from statistics import fmean, quantiles
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
@@ -38,6 +38,7 @@ from evolvekit.evaluate.stages import (
     run_tree_static_stage,
 )
 from evolvekit.evaluate.types import EvalResult, StageOutcome
+from evolvekit.leaderboard import veto_reason
 from evolvekit.ledger import _atomic_write
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
@@ -48,8 +49,24 @@ __all__ = [
     "select_promoted",
     "archive_threshold",
     "finished_final_stage",
+    "holdout_veto",
     "race_warnings",
 ]
+
+
+def holdout_veto(config: Config, private_score: float | None, seed_private: float | None) -> str | None:
+    """Why a candidate's hold-out keeps it from competing, or `None`.
+
+    With `evaluate.holdout_veto` on, a candidate whose private score is below
+    the seed's private score does not compete. The rule is the literal
+    comparison, with no allowance for noise. Without a seed hold-out to
+    compare with (the seed's own hold-out run failed, or there is none),
+    nobody is vetoed."""
+    if not config.evaluate.holdout_veto or private_score is None or seed_private is None:
+        return None
+    if private_score < seed_private:
+        return veto_reason(seed_private)
+    return None
 
 
 def finished_final_stage(
@@ -60,6 +77,7 @@ def finished_final_stage(
     stages_reached: Sequence[str],
     private_score: float | None,
     gated: str | None = None,
+    seed_private: float | None = None,
 ) -> bool:
     """Whether a candidate's score may be compared with anybody else's.
 
@@ -79,6 +97,9 @@ def finished_final_stage(
     * a **hold-out run that failed**, which would otherwise keep its public
       score with no discount -- the one thing the hold-out is there to prevent.
 
+    And one case that finished: a hold-out **below the seed's**
+    (`seed_private`), when `evaluate.holdout_veto` is on; see `holdout_veto`.
+
     Takes plain values rather than an `EvalResult` so that a `runs.jsonl` row
     written before the `competes` field existed can be judged by the same rule.
     """
@@ -90,7 +111,7 @@ def finished_final_stage(
     held_out = final.private_inputs or final.private_instances
     if final.kind == "command" and held_out and private_score is None:
         return False
-    return True
+    return holdout_veto(config, private_score, seed_private) is None
 
 
 def race_warnings(config: Config) -> list[str]:
@@ -205,6 +226,12 @@ class Cascade:
         }
         """Per stage, what `evaluate.score.levels` are measured from: the
         seed's values (`evaluate/levels.py`). On disk for the same reason."""
+        self.seed_private: float | None = None
+        """The seed's private score: what `evaluate.holdout_veto` compares every
+        hold-out with. Set whenever a seed is evaluated (the last one wins: an
+        aborted seed is evaluated again), `None` when its hold-out did not
+        score; a resumed run rebuilds it from `runs.jsonl`
+        (`leaderboard.seed_private`)."""
         self._trees: dict[str, Tree] = {}
         """Per candidate, its worktree (`problem.tree`): made by `_materialise`."""
         self._tree_errors: dict[str, str] = {}
@@ -296,8 +323,16 @@ class Cascade:
             scored = [(cid, results[cid].score) for cid in survivors]
             alive = select_promoted(scored, stage.promote, prior)
 
+        for cid, candidate in by_id.items():
+            # The last seed evaluated is the reference, as `leaderboard.seed_private`
+            # reads it back on a resume: one whose hold-out failed leaves none.
+            if candidate.operator == SEED_OPERATOR and not results[cid].abandoned:
+                self.seed_private = results[cid].private_score
+
         for result in results.values():
-            result.competes = not result.abandoned and finished_final_stage(
+            # `finished_final_stage(..., seed_private=...)` in two halves, so
+            # that a vetoed candidate's row can say why it does not compete.
+            finished = not result.abandoned and finished_final_stage(
                 self.config,
                 rejected=result.rejected,
                 last_failure=result.last_failure,
@@ -305,6 +340,8 @@ class Cascade:
                 private_score=result.private_score,
                 gated=result.gated,
             )
+            result.veto = holdout_veto(self.config, result.private_score, self.seed_private) if finished else None
+            result.competes = finished and result.veto is None
         return results
 
     def _stopping(self) -> bool:
@@ -312,15 +349,21 @@ class Cascade:
 
     # -- levels ----------------------------------------------------------
 
-    def _level_score(self, key: str, values: dict[str, float]) -> float:
+    def _level_score(
+        self, key: str, values: dict[str, float], vectors: Mapping[str, Sequence[float]] | None = None
+    ) -> float:
         """`evaluate.score.levels` as one score, measured from the anchor of
         stage `key`. The first candidate through a stage anchors it -- in a
         run that is the seed, which therefore scores exactly 0 -- and the
-        anchor is kept on disk so that a resumed run measures from it too."""
+        anchor is kept on disk so that a resumed run measures from it too.
+        `vectors` is the stage's `vector_kpis`: on a stage that runs per
+        instance, the last level is scaled by the seed's range over them."""
         levels = self.config.evaluate.score.levels
         anchor = self.anchors.get(key)
         if anchor is None:
-            anchor = self.anchors[key] = make_anchor(levels, values)
+            last = levels[-1].kpi
+            spread = (vectors or {}).get(per_instance_key(last))
+            anchor = self.anchors[key] = make_anchor(levels, values, {last: spread} if spread else None)
             # Atomically: half a file reads back as "no anchor", and a resumed
             # run would quietly anchor at its first child instead of the seed.
             _atomic_write(
@@ -752,7 +795,7 @@ class Cascade:
             # No objective KPI here; a static pass or a build carries no score of its own.
             return
         if self.config.evaluate.score.levels:
-            score, penalty_total, terms = self._level_score(stage.id, result.kpis), 0.0, {}
+            score, penalty_total, terms = self._level_score(stage.id, result.kpis, outcome.vector_kpis), 0.0, {}
         else:
             score, penalty_total, terms = compute_score(
                 result.kpis, self.config.evaluate.score, self.config.evaluate.penalties
@@ -774,7 +817,9 @@ class Cascade:
         results: dict[str, EvalResult],
         survivors: Sequence[str],
     ) -> None:
-        """Score the hold-out and record the gap. Never feeds the search signal."""
+        """Scores the hold-out, records the gap, and with `holdout_veto` keeps a
+        candidate below the seed's hold-out from competing. With a non-zero
+        `holdout_penalty` it also enters the ranking score."""
         if stage.kind != "command" or not (stage.private_inputs or stage.private_instances):
             return
         if not survivors:
@@ -826,13 +871,29 @@ class Cascade:
                     result.feedback.get(stage.id, ""),
                     f"hold-out set: {outcome.text_feedback}",
                 )
-            merged = dict(result.kpis)
-            merged.update(outcome.kpis)
-            if self.config.evaluate.score.levels:
-                private_score = self._level_score(f"{stage.id}/private", merged)
+            # The hold-out's own measures only: a number the hold-out run did not
+            # report is not filled in from the public run, it would be a score
+            # about two different sets of cases. A penalty it did not report
+            # counts as 0, as on the public run.
+            score_cfg = self.config.evaluate.score
+            needed = [level.kpi for level in score_cfg.levels] if score_cfg.levels else list(score_cfg.weights)
+            missing = sorted(k for k in needed if k not in outcome.kpis)
+            # With `levels` this cannot fire today: every level's measure is in
+            # `required_kpis`, so a hold-out run without one has already failed
+            # above. Kept for the weights, whose secondary measures are not
+            # required, and in case that list ever changes.
+            if missing:
+                failed += 1
+                result.last_failure = (
+                    f"stage {stage.id}: the hold-out run did not report {', '.join(missing)}; "
+                    "a hold-out score is computed from the hold-out run's own KPIs"
+                )
+                continue
+            if score_cfg.levels:
+                private_score = self._level_score(f"{stage.id}/private", outcome.kpis, outcome.vector_kpis)
             else:
                 private_score, _, _ = compute_score(
-                    merged, self.config.evaluate.score, self.config.evaluate.penalties
+                    outcome.kpis, score_cfg, self.config.evaluate.penalties
                 )
             result.private_score = private_score
             if result.public_score is not None:

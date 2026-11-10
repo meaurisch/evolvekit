@@ -41,7 +41,7 @@
 # the verdict: the child is flagged `near` and evaluated anyway, because a
 # filter that can refuse twelve of twelve samples is worse than one that
 # occasionally pays for a cousin.
-- when: "change the decision rule, not the constants"
+- when: "previous answer was closest to"
   response: |
     ```python
     def priority(item, bins):
@@ -83,8 +83,8 @@
         return scores
     ```
 
-# The scheduled big step: a different principle, not a tweak.
-- when: "scheduled big step"
+# The big step (scheduled or on a plateau): a different principle, not a tweak.
+- when: "This is a big step."
   response: |
     ```python
     def priority(item, bins):

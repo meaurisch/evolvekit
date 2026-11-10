@@ -61,7 +61,7 @@ def use_run(tmp_path):
 def test_verdict_keys_and_schema(use_run):
     root, run = use_run
     v = build_verdict(root, run)
-    assert v["schema"] == 1 and v["decision"] in DECISIONS
+    assert v["schema"] == 2 and v["decision"] in DECISIONS
     assert set(v) >= {"study", "run", "phase", "line", "advice", "measure", "held_back", "rule", "by_case", "changed", "files"}
     assert v["study"] == root.name and v["run"] == run and v["phase"] == "done" and v["decision"] == "use"
     assert v["measure"]["kpi"] == "tour_length" and v["measure"]["direction"] == "lower"
@@ -224,6 +224,56 @@ def test_verdict_levels_mark_the_deciding_level(use_run):
     assert jobs.results(root, run, document_of)["final"]["line"] == v["line"]
 
 
+def _level_two_decides(root: Path, run: str, decision: str) -> dict:
+    """Level 1 equal, level 2 decides `decision`: the rows as `_analyse_levels` writes them (A1.5)."""
+    path = root / "runs" / run / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    row = {"direction": "minimize", "unit": "percent", "n": 3, "wins": 2, "losses": 1, "tolerance": None}
+    second = ({"mean_difference": 6.0, "ci95": [2.0, 10.0], "worst": 3.1, "chance": 0.99, "state": "better"}
+              if decision == "use" else
+              {"mean_difference": -6.0, "ci95": [-10.0, -2.0], "worst": -9.0, "chance": 0.01, "state": "worse"})
+    comparison["per_candidate"]["c1"]["levels"] = {
+        "levels": [{**row, "level": 1, "kpi": "tour_length", "mean_difference": 0.1, "ci95": [-0.4, 0.6],
+                    "worst": -0.3, "chance": 0.55, "state": "equal", "clear": False, "tolerance": 0.01},
+                   {**row, "level": 2, "kpi": "longest_leg", "clear": True, **second}],
+        "deciding": 2, "read_on": 2, "decision": decision, "confirmed": decision == "use",
+        "verdict": f"equal on level 1 (tour_length within 1 %), {second['state']} on level 2 (longest_leg): clear"}
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+    return comparison["per_candidate"]["c1"]["levels"]["levels"][1]
+
+
+@pytest.mark.parametrize("decision", ["use", "worse"])
+def test_the_numbers_on_the_page_are_the_deciding_levels(run_of, decision):
+    """A1.5 fix round 1, I1/I3: level 1 equal, level 2 decides: the page's chance, range and
+    "at worst" are level 2's, never level 1's, and say which level they are."""
+    root, run = run_of(decision)
+    second = _level_two_decides(root, run, decision)
+    v = build_verdict(root, run)
+    assert v["decision"] == decision and v["measure"]["kpi"] == "longest_leg"
+    assert v["chance"] == second["chance"] and v["ci95_pct"] == second["ci95"] and v["worst_pct"] == second["worst"]
+    assert v["mean_pct"] == second["mean_difference"]
+    assert v["numbers_from"] == {"level": 2, "kpi": "longest_leg", "unit": "percent", "deciding": True}
+    assert v["chance_words"] == _chance_words(second["chance"])
+    assert v["line"].startswith("Probably better" if decision == "use" else "Worse")
+    deciding = [level for level in v["levels"] if level["deciding"]]
+    assert len(deciding) == 1 and deciding[0]["worst_pct"] == second["worst"], "the 5 % quantile, not the range's end"
+    assert deciding[0]["chance"] == second["chance"]
+    assert jobs.results(root, run, document_of)["final"]["line"] == v["line"]
+
+
+@pytest.mark.parametrize("decision", ["use", "worse"])
+def test_the_home_card_of_goals_in_order_draws_the_deciding_levels_range(run_of, decision):
+    """I3: the card's mean, range and chance (words.js draws the range from them) are the level the
+    answer is read on, as the verdict document's, never the first measure's summary."""
+    root, run = run_of(decision)
+    second = _level_two_decides(root, run, decision)
+    v = build_verdict(root, run)
+    card = jobs.run_line(root, None, root / "runs" / run)
+    assert card["ci95"] == second["ci95"] == v["ci95_pct"]
+    assert card["mean"] == second["mean_difference"] == v["mean_pct"]
+    assert card["chance"] == second["chance"] == v["chance"] and card["n"] == second["n"]
+
+
 def test_verdict_never_contains_nan(use_run):
     root, run = use_run
     path = root / "runs" / run / "confirm" / "final" / "comparison.json"
@@ -244,9 +294,9 @@ def test_verdict_files_list_existing_downloads(use_run):
     assert build_verdict(root, run)["files"] == [f"runs/{run}/downloads/settings.json"], "relative to the study folder"
 
 
-@pytest.mark.parametrize("p,words", [(0.996, "almost certain"), (0.95, "about 19 in 20"), (0.897, "under 9 in 10"),
-                                     (0.5, "about 10 in 20"), (0.04, "less than 1 in 20"), (None, ""),
-                                     (0.98, "better than 19 in 20"), (0.96, "about 19 in 20"), (0.03, "less than 1 in 20")])
+@pytest.mark.parametrize("p,words", [(0.996, "almost certain"), (0.95, "about 95 %"), (0.897, "about 90 %"), (0.947, "under 95 %"),
+                                     (0.5, "about 50 %"), (0.04, "about 4 %"), (None, ""),
+                                     (0.98, "about 98 %"), (0.96, "about 96 %"), (0.003, "less than 1 %")])
 def test_chance_words_table(p, words):
     assert _chance_words(p) == words
 
@@ -323,9 +373,9 @@ def test_the_no_difference_line_names_what_may_not_reach_the_program():
 
 
 @pytest.mark.parametrize("low,high,words", [
-    (-0.0, 0.0, "somewhere between 0.0 % worse and 0.0 % better"),
-    (-0.04, 0.03, "somewhere between 0.0 % worse and 0.0 % better"),
-    (0.0, -0.0, "somewhere between 0.0 % worse and 0.0 % better"),
+    (-0.0, 0.0, "about the same"),
+    (-0.04, 0.03, "about the same"),
+    (0.0, -0.0, "about the same"),
     (-1.26, 2.0, "somewhere between 1.3 % worse and 2.0 % better"),
     (-3.0, -0.04, "likely between 0.0 % and 3.0 % worse"),
 ])
@@ -812,3 +862,108 @@ def test_a_time_below_the_harness_own_is_said_in_the_report_and_the_plan(use_run
     study.limits.time_per_case_s = 5
     save_study(study, root)
     assert "time_note" not in build_verdict(root, run), "above the harness's own time: nothing to say"
+
+
+def test_a_check_limited_by_its_cases_says_so_in_place_of_more_runs(run_of):
+    root, run = run_of("keep")
+    job_path = root / "runs" / run / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["check"] = {"seeds": 3, "limited_by": "cases"}
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    v = build_verdict(root, run)
+    assert v["limited_by"] == "cases"
+    assert v["why_keep"] == ("The answer is set by the held-back cases, not by the runs: hold back more cases "
+                             "for a firmer answer.")
+    assert jobs.results(root, run, document_of)["final"]["line"] == v["line"]
+
+
+def test_the_app_says_why_a_candidate_that_failed_runs_is_not_use():
+    """Decision 14a in the app's line: keep, and the runs it failed that the starting point finished."""
+    from evolvekit.app.verdict import _final_words
+    from test_confirm import _crashing
+
+    comparison = _crashing().to_json()
+    words = _final_words({"final": {"candidate": "c", "comparison": "x"}}, comparison,
+                         {"kpi": "cost", "says": "cost", "direction": "lower"}, "settings")
+    assert words["decision"] == "keep" and words["state"] == "unclear"
+    assert words["line"].startswith("Not proven on 4 held-back cases: it failed 4 runs the starting point finished; ")
+    assert words["failed_more"] == 4, "the page's caption reads it (R6)"
+
+
+def test_a_keep_just_above_five_percent_never_reads_like_worse():
+    """Decision 14b: worse is at 5 %, so a keep's chance just above it says which side it is on."""
+    assert _chance_words(0.052) == "over 5 %" and _chance_words(0.05) == "about 5 %"
+    assert _chance_words(0.04) == "about 4 %" and _chance_words(0.08) == "about 8 %"
+
+
+def _a1_run(tmp_path: Path) -> tuple[Path, dict]:
+    """A finished use run whose final check carries A1's posterior (`verdict_summary`)."""
+    from evolvekit.confirm import verdict_summary
+
+    root, _ = study_with_runs(tmp_path)
+    summary = verdict_summary([0.05, 0.08, 0.06, 0.045, 0.07], direction="minimize")
+    finished_run(root / "runs" / RUN, decision="use", summary=summary)
+    return root, summary
+
+
+def test_the_verdict_document_carries_the_90_range_its_low_end_worst(tmp_path):
+    """Decision 15: `range90_pct` is the range a person is shown, its low end `worst_pct`; `ci95_pct`
+    stays for engineers. The page's `final` and the Home card read the 90 % range."""
+    root, summary = _a1_run(tmp_path)
+    v = build_verdict(root, RUN)
+    assert v["range90_pct"] == summary["range90"] and v["range90_pct"][0] == v["worst_pct"]
+    assert v["ci95_pct"] == summary["ci95"] and v["ci95_pct"] != v["range90_pct"]
+    assert "its 90 % range is" in v["line"] and "95 %" not in v["line"]
+    assert jobs.results(root, RUN, document_of)["final"]["range90"] == v["range90_pct"]
+    card = jobs.run_line(root, None, root / "runs" / RUN)
+    assert card["range90"] == v["range90_pct"] and card["ci95"] == v["ci95_pct"]
+
+
+def test_a_verdict_written_before_a1_has_no_90_range(use_run):
+    """Decision 15: a pre-A1 check keeps its own 95 % range; there is no 90 % range to show."""
+    root, _ = use_run
+    v = build_verdict(root, RUN)
+    assert v["ci95_pct"] and v.get("range90_pct") is None
+    assert jobs.run_line(root, None, root / "runs" / RUN)["range90"] is None
+
+
+def test_the_90_range_is_rebuilt_from_the_posterior_when_the_key_is_missing(tmp_path):
+    """Dropping `range90` from an A1 summary gives the same range back, its low end the summary's `worst`."""
+    from evolvekit.app.verdict import range90_of
+
+    _, summary = _a1_run(tmp_path)
+    rebuilt = range90_of({k: v for k, v in summary.items() if k != "range90"})
+    assert rebuilt == pytest.approx(summary["range90"]) and rebuilt[0] == pytest.approx(summary["worst"])
+
+
+def test_posterior_interval90_is_symmetric_about_its_mean_and_its_low_end_is_the_5_percent_quantile():
+    from evolvekit.stats import Posterior
+
+    post = Posterior(n=5, mu=0.06, scale=0.01, df=4)
+    low, high = post.interval90()
+    assert low == post.quantile_low(0.05) and low < post.mu < high
+    assert high - post.mu == pytest.approx(post.mu - low)
+    assert post.p_above(low) == pytest.approx(0.95)
+
+
+def test_an_end_that_rounds_to_zero_reads_about_the_same_never_0_0_worse():
+    from evolvekit.app.verdict import _span
+
+    assert _span(-0.02, 3.0) == "somewhere between about the same and 3.0 % better"
+    assert _span(-2.0, 0.03) == "somewhere between 2.0 % worse and about the same"
+    assert "0.0" not in _span(-0.04, 0.04)
+    assert _span(-1.0, 2.0) == "somewhere between 1.0 % worse and 2.0 % better"
+
+
+def test_a_keep_line_gives_the_middle_figure_in_the_use_lines_words(tmp_path):
+    """A1's keep line leads with the posterior mean as the use line says it, then its chance and 90 % range."""
+    from evolvekit.confirm import verdict_summary
+
+    root, _ = study_with_runs(tmp_path)
+    summary = verdict_summary([0.05, -0.02, 0.06, -0.03, 0.04], direction="minimize")
+    finished_run(root / "runs" / RUN, decision="keep", summary=summary)
+    line = build_verdict(root, RUN)["line"]
+    middle = line.split("held-back cases: ", 1)[1].split(",", 1)[0]
+    assert middle.endswith(("lower cost", "lower", "higher", "worse")) or " % " in middle, line
+    assert f"{abs(summary['mean']):.1f} %" in middle, line
+    assert "a chance of" in line and "its 90 % range is" in line and line.endswith(".")

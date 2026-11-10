@@ -399,6 +399,17 @@ def test_cascade_scores_a_clean_candidate(tmp_path):
     assert result.stages_reached == ["static", "proxy"]
 
 
+def test_a_stage_without_a_hold_out_is_never_vetoed(tmp_path):
+    config = _cascade_config(tmp_path, _echo_script(tmp_path))
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.seed_private = 100.0  # would veto anything, were there a hold-out
+    result = cascade.evaluate_generation(
+        [_candidate("a", '# KPIS {"excess": 4.0}\ndef priority(item, bins):\n    return []\n')]
+    )["a"]
+    # `proxy` is the final stage here and has no hold-out: it competes, unvetoed.
+    assert result.competes is True and result.veto is None
+
+
 def test_cascade_penalises_rather_than_voids(tmp_path):
     config = _cascade_config(
         tmp_path,

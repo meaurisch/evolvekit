@@ -570,3 +570,20 @@ def test_a_long_stage_says_how_far_it_is_and_how_long_the_rest_will_take(tmp_pat
     assert "stage      : full -- 3 of 6 run(s) done for 2 candidates, 2 at a time, about 4 min left" in render_text(
         build_status(tmp_path, now=NOW)
     )
+
+
+def test_a_kpi_with_no_coefficient_on_any_instance_has_none():
+    """Every instance's seeds varied around a mean of zero: no ratio anywhere, so None, not 0."""
+    from types import SimpleNamespace
+
+    from evolvekit.evaluate.fanout import _combine
+    from evolvekit.evaluate.types import StageOutcome
+
+    done = {
+        (index, seed): StageOutcome(stage_id="full", ok=True, kpis={"centred": float(seed) - 1.0, "v": 1.0})
+        for index in range(2)
+        for seed in (0, 2)
+    }
+    outcome = _combine(SimpleNamespace(id="full"), ["a", "b"], done, [0, 2], private=False)
+    assert outcome.kpi_cv["centred"] is None
+    assert outcome.kpi_cv["v"] == 0.0

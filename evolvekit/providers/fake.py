@@ -10,7 +10,7 @@ Configured from YAML under `models.<role>.options`:
 A scripted entry is either a plain string, taken from the queue in order, or a
 mapping with a `when` substring matched against the prompt:
 
-    - when: "scheduled big step"
+    - when: "This is a big step."
       response: |
         ```python
         ...

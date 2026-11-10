@@ -1079,10 +1079,17 @@ class EvaluateConfig:
     gates: tuple[GateConfig, ...] = ()
     """KPI conditions a candidate has to meet to compete: see `GateConfig`."""
     failure_score: float = -1000.0
-    holdout_penalty: float = 1.0
+    holdout_penalty: float = 0.0
     """How hard a private hold-out that does worse than the public set is
     punished in the *ranking* score. The raw public and private scores are
-    always kept; only the quantity the search ranks by is discounted."""
+    always kept; only the quantity the search ranks by is discounted. At the
+    default 0 the ranking score is the public score: a non-zero value makes the
+    hold-out a fitness term, which the search then selects on until it is no
+    longer held out."""
+    holdout_veto: bool = True
+    """Whether a candidate whose private score is below the seed's private
+    score is kept from competing (`cascade.holdout_veto`). The comparison is
+    the literal `private < seed's private`, with no allowance for noise."""
     signature_digits: int = DEFAULT_SIGNATURE_DIGITS
     signature_digits_stochastic: int = DEFAULT_SIGNATURE_DIGITS_STOCHASTIC
     """Used in place of `signature_digits` on a stage with `seeds: N > 1`.
@@ -1130,6 +1137,7 @@ class EvaluateConfig:
                 "penalties",
                 "failure_score",
                 "holdout_penalty",
+                "holdout_veto",
                 "signature_digits",
                 "signature_digits_stochastic",
                 "signature_ignore",
@@ -1148,7 +1156,7 @@ class EvaluateConfig:
             )
         )
         holdout_penalty = _as_float(
-            data.get("holdout_penalty", 1.0), "evaluate.holdout_penalty"
+            data.get("holdout_penalty", 0.0), "evaluate.holdout_penalty"
         )
         if holdout_penalty < 0:
             raise ConfigError(
@@ -1213,6 +1221,7 @@ class EvaluateConfig:
                 data.get("failure_score", -1000.0), "evaluate.failure_score"
             ),
             holdout_penalty=holdout_penalty,
+            holdout_veto=_as_flag(data.get("holdout_veto", True), "evaluate.holdout_veto"),
             cache=_as_flag(data.get("cache", True), "evaluate.cache"),
             signature_digits=_as_int(
                 data.get("signature_digits", DEFAULT_SIGNATURE_DIGITS),
@@ -1684,7 +1693,6 @@ class SearchConfig:
     children_per_generation: int = 4
     generations: int = 10
     big_step_every: int = 5
-    parent_top_k: int = 5
     seed: int = 0
     operators: dict[str, float] = field(
         default_factory=lambda: {"diff": 0.6, "rewrite": 0.4}
@@ -1731,7 +1739,6 @@ class SearchConfig:
             "children_per_generation",
             "generations",
             "big_step_every",
-            "parent_top_k",
             "seed",
             "operators",
             "archive",
@@ -1742,6 +1749,11 @@ class SearchConfig:
             "novelty",
             "adaptive_children",
         }
+        if "parent_top_k" in data:
+            raise ConfigError(
+                "search.parent_top_k: removed -- it never did anything; "
+                "the elites a parent is drawn from are search.archive.top_k"
+            )
         _reject_unknown(data, known, "search")
         ops_raw = _as_mapping(data.get("operators"), "search.operators")
         operators = {
@@ -1773,9 +1785,6 @@ class SearchConfig:
             ),
             big_step_every=_as_int(
                 data.get("big_step_every", 5), "search.big_step_every", minimum=0
-            ),
-            parent_top_k=_as_int(
-                data.get("parent_top_k", 5), "search.parent_top_k", minimum=1
             ),
             seed=_as_int(data.get("seed", 0), "search.seed"),
             operators=operators,

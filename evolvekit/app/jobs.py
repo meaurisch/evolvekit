@@ -36,7 +36,7 @@ from evolvekit.app import verdict as verdict_doc
 from evolvekit.app.verdict import (  # noqa: F401 - the words live in verdict.py; callers read them here too
     _better_word, _chance_of, _chance_words, _decision_of, _final_words, _pct,
 )
-from evolvekit.confirm import BASELINE
+from evolvekit.confirm import BASELINE, read_on_row
 from evolvekit.evaluate.process import scrubbed_environment
 from evolvekit.events import HEARTBEAT_INTERVAL_S, read_events, read_heartbeat
 from evolvekit.harness import HarnessError
@@ -761,6 +761,10 @@ def resume_final_check(home: Any, root: Path, run: str, seeds: int | None = None
         raise AppError("the run held no cases back, so there is no final check", 409)
     if seeds is not None and not 1 <= int(seeds) <= len(CHECK_SEEDS):
         raise AppError(f"the final check takes 1 to {len(CHECK_SEEDS)} runs per case", 400)
+    if (job.get("final") or {}).get("decision") and _read_twice(_read(run_dir / "confirm" / "final" / "comparison.json")):
+        # An answer read twice (the check, then its extension or a recheck): a third read is outside
+        # the false-"use" rate the rule was measured at (decision 13b).
+        raise AppError(READ_TWICE, 409)
     with _launch_guard:
         _one_at_a_time(home)
         # A check only runs the application: nothing in it has a use for a key.
@@ -1095,11 +1099,16 @@ def _status_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], documen
     # starting point alone.
     current = done_rounds + 1 if isinstance(done_rounds, int) else (0 if stage else None)
     if job.get("phase") == "check":
-        # The check adds a run per case at a time while the answer is open
-        # (`execute._extend_check`); `check.seeds` says how many it is on.
+        # While the answer is open after the planned runs, the check adds every run the seeds
+        # and the time allow at once and reads it again (`execute._extend_check`); `check.seeds`
+        # says how many it is on.
         on = int((job.get("check") or {}).get("seeds") or plan.get("check_seeds") or DEFAULT_CHECK_SEEDS)
-        now_line = (f"The final check: {_runs_word(on)} per case so far on the held-back cases; "
-                    "it adds runs while time remains and the answer is open.")
+        if (job.get("check") or {}).get("limited_by") == "cases":
+            now_line = (f"The final check: {_runs_word(on)} per case on the held-back cases; more runs would "
+                        "not change the answer: it is set by the held-back cases.")
+        else:
+            now_line = (f"The final check: {_runs_word(on)} per case so far on the held-back cases; "
+                        "it adds runs while time remains and the answer is open.")
     elif stage and isinstance(current, int):
         # The cases of the stage that is running: a quick look runs on a few of the study's cases.
         per_combination = int(stage.get("runs_planned") or 0) // max(1, int(stage.get("candidates") or 1))
@@ -1274,11 +1283,16 @@ def _runs_word(count: int) -> str:
 
 
 def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, Any] | None,
-             used_s: float | None = None) -> dict[str, Any] | None:
+             used_s: float | None = None, *, limited: bool = False) -> dict[str, Any] | None:
     """A final check with twice the runs per case, where that could still
     settle an open answer. The runs done are kept, so it only adds runs; what
-    it adds is said against the study's total time."""
-    if comparison is None or final.get("state") not in ("unclear", "worse"):
+    it adds is said against the study's total time. Offered only while the
+    answer was read once: after an extension it has had its two reads
+    (decision 13b), and a third would say "use" more often than the rule
+    promises (`READ_TWICE` says so on the page). Never to a check `limited` by
+    its cases (A1.3): more runs would not change it, and the page says to hold
+    back more cases."""
+    if limited or comparison is None or final.get("state") not in ("unclear", "worse") or _read_twice(comparison):
         return None
     have = len(comparison.get("seeds") or [])
     want = min(2 * have, len(CHECK_SEEDS))
@@ -1297,6 +1311,18 @@ def _recheck(final: dict[str, Any], plan: dict[str, Any], comparison: dict[str, 
             "why": (time + " " if time else "") + "More runs per case make each case's number steadier, and the runs "
                    "already done are kept. The range can still widen: with a few cases, it is mostly how much they differ "
                    "that sets it."}
+
+
+READ_TWICE = ("This answer has had its two reads: the final check added runs while it was open and read it "
+              "again. Checking once more would make a lucky \"use\" likelier; for a firmer answer, bring more "
+              "cases and start a new study from this result that holds more of them back.")
+"""What the page says where a recheck would be offered, after an extension."""
+
+
+def _read_twice(comparison: dict[str, Any] | None) -> bool:
+    """Whether the comparison's answer was read twice already (`looks`; 1 for one written before it said so)."""
+    looks = (comparison or {}).get("looks", 1)
+    return isinstance(looks, int) and looks >= 2
 
 
 def _today(root: Path, harness: Harness, change: Any) -> list[float]:
@@ -1426,6 +1452,9 @@ PER_GROUP_DOWNLOADS = (
     {"name": "rule", "label": f"Which cases get which settings ({RULE_MD})"},
 )
 """The two files of a finished per-group run, beside its group's own downloads."""
+HELD_FIGURES = ("mean", "ci95", "range90", "worst_pct", "chance", "chance_words", "chance_margin", "why_keep", "levels",
+                "read_twice", "next")
+"""What a group's `final` drops while the verdict holds its "use" (`results`): its figures and their words."""
 
 
 def results(root: Path, run: str, document_of: DocumentOf, group: str | None = None) -> dict[str, Any]:
@@ -1445,6 +1474,14 @@ def results(root: Path, run: str, document_of: DocumentOf, group: str | None = N
     data = _results_at(root, run, picked[1], phase(picked[1]), document_of)
     document = verdict_doc.build_verdict(root, run)
     data["phase"] = job.get("phase")
+    own = (document.get("groups") or {}).get(picked[0]) or {}
+    if own.get("decision") == "pending" and data["final"].get("decision") == "use":
+        # Held until every kind of case is read (Holm): the page says the document's words, and no figure.
+        data["final"] = {
+            **{k: v for k, v in data["final"].items() if k not in HELD_FIGURES},
+            "decision": "pending", "state": "missing", "confirmed": False,
+            "line": own.get("line") or "", "advice": own.get("advice") or "",
+        }
     data["final"]["recheck"] = None  # a per-group run is not checked again (D37)
     data["can_continue"] = False
     if job.get("phase") == "done":
@@ -1505,8 +1542,12 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     facts = verdict_doc._run_facts(run_dir, job)
     started, used_s = facts["started"], facts["used_s"]
     final = _final_words(job, comparison, goal, what, baseline)
-    final["recheck"] = (_recheck(final, plan, comparison, used_s)
+    final["recheck"] = (_recheck(final, plan, comparison, used_s,
+                                limited=(job.get("check") or {}).get("limited_by") == "cases")
                         if job.get("phase") == "done" and not job.get("bakeoff") else None)
+    if (job.get("phase") == "done" and not job.get("bakeoff") and final.get("state") in ("unclear", "worse")
+            and _read_twice(comparison)):
+        final["read_twice"] = READ_TWICE
     if final.get("state") in ("unclear", "worse", "single"):
         final["next"] = ("For a firmer answer: bring more cases (other days or weeks) and start a new study from "
                          "this result that holds more of them back.")
@@ -1564,7 +1605,8 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     by_case["held"] = [{**row, "change_pct": paired.get(row["case"], row["change_pct"])} for row in by_case["held"]]
     if "decision" in final:
         final["decision"] = verdict["decision"]
-    for key, name in (("mean", "mean_pct"), ("ci95", "ci95_pct"), ("worst_pct", "worst_pct"), ("chance", "chance"),
+    for key, name in (("mean", "mean_pct"), ("ci95", "ci95_pct"), ("range90", "range90_pct"), ("worst_pct", "worst_pct"),
+                      ("chance", "chance"),
                       ("chance_words", "chance_words")):
         if key in final and name in verdict:
             final[key] = verdict[name]
@@ -2078,7 +2120,8 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
     (done, planned), `what` (settings, data or both), and by state
     `finish_at`, `left_s`, `hours`, `continued`, `best_pct`, `check`,
     `waiting_for`; for a finished run its `decision` (use, keep, worse,
-    single, skipped) with `mean`, `ci95`, `chance` and `n` held-back cases,
+    single, skipped) with `mean`, `ci95`, `range90` (the range a person is
+    shown; None for a comparison written before A1), `chance` and `n` held-back cases,
     and `same` (no figures: "finished · no difference in any run") when every
     run gave exactly the starting point's result -- for a bake-off, every
     branch's; `branch`, what `study pr` made for it (`branch_of`); `check_stopped` for a final check
@@ -2176,9 +2219,23 @@ def _run_line(root: Path, study: Study | None, run_dir: Path, document_of: Docum
         decision = _decision_of(final, summary) if summary else ("use" if final.get("confirmed") else "keep")
         facts.update({"decision": decision, "mean": mean if isinstance(mean, (int, float)) else None,
                       "ci95": summary.get("ci95"), "chance": _chance_of(summary) if summary else None,
+                      # The range a person is shown (decision 15); None for a comparison written before A1.
+                      "range90": verdict_doc.range90_of(summary, str((comparison or {}).get("direction") or "minimize")),
                       "n": int(summary.get("n") or 0)})
+        row = read_on_row(own["levels"]) if isinstance(own.get("levels"), dict) else None
+        if row is not None:
+            # Goals in order of importance: the figures are the level the answer is read on, as the
+            # verdict document's (`numbers_from`); in a goal's own units there is no percent to draw.
+            percent = row.get("unit") == "percent"
+            mean = row.get("mean_difference") if percent else None
+            facts.update({"mean": mean if isinstance(mean, (int, float)) else None,
+                          "ci95": list(row["ci95"]) if percent and row.get("ci95") else None,
+                          "range90": list(row["range90"]) if percent and row.get("range90") else None,
+                          "chance": row.get("chance"), "n": int(row.get("n") or 0)})
+            if row.get("kpi") != goal.get("kpi"):
+                mean = None  # "N % lower <the goal>" would name another measure than the one read
         if same:
-            facts.update({"decision": "keep", "mean": None, "ci95": None, "chance": None, "same": True})
+            facts.update({"decision": "keep", "mean": None, "ci95": None, "range90": None, "chance": None, "same": True})
             card = {"kind": "finished", "tone": "warn", "run": run_dir.name, "line": "finished · no difference in any run",
                     **facts}
         elif decision == "use":
@@ -2235,8 +2292,8 @@ def _per_group_line(root: Path, study: Study | None, run_dir: Path, document_of:
         pinned, goal = study, {"says": "the goal", "direction": "lower"}
     card = {"kind": "finished", "run": run_dir.name, "line": line, "phase": state, "what": _kind_of(pinned),
             "goal": {"says": goal.get("says"), "label": goal.get("label"), "direction": goal.get("direction")},
-            "rounds": {"done": 0, "planned": 0}, "decision": decision, "mean": None, "ci95": None, "chance": None,
-            "n": int((document.get("held_back") or {}).get("cases") or 0), "group": words, "per_group": True}
+            "rounds": {"done": 0, "planned": 0}, "decision": decision, "mean": None, "ci95": None, "range90": None,
+            "chance": None, "n": int((document.get("held_back") or {}).get("cases") or 0), "group": words, "per_group": True}
     if tone:
         card["tone"] = tone
     return _with_verdict(root, run_dir, document_of, card)

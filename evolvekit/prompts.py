@@ -27,6 +27,7 @@ __all__ = [
     "user_prompt",
     "Inspiration",
     "OPERATOR_INSTRUCTIONS",
+    "big_step_reason",
     "FAILURE_LIMIT",
     "FEEDBACK_LIMIT",
     "FEEDBACK_LINES",
@@ -105,7 +106,7 @@ OPERATOR_INSTRUCTIONS = {
         "the part you believe is limiting the score."
     ),
     "big_step": (
-        "This is a scheduled big step: the search has plateaued. Propose a "
+        "This is a big step. Propose a "
         "structurally different heuristic rather than a tweak of the parent. "
         "Reason about why the parent's scoring rule mis-ranks its options, then "
         "write a rule based on a different principle."
@@ -117,6 +118,14 @@ OPERATOR_INSTRUCTIONS = {
         "combination, not either parent restated."
     ),
 }
+
+
+def big_step_reason(*, scheduled: bool, every: int, stagnant: int) -> str:
+    """Why this big step is being taken: the trigger that fired. The schedule
+    wins when both hold, since the step would have come anyway."""
+    if scheduled:
+        return f"This big step is scheduled: one every {every} generation(s)."
+    return f"This big step is due because the search has not improved for {stagnant} generation(s)."
 
 
 def _bullet_section(title: str, items: "tuple[str, ...] | list[str]") -> str:

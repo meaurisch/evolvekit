@@ -632,3 +632,23 @@ def test_a_broken_harness_exits_2_whatever_the_console_can_print(tmp_path, minim
     assert done.returncode == 2, (out, done.stderr.decode("cp1252", errors="replace"))
     assert "failure : exit code 1" in out and "cost " in out and "nowhere" in out
     assert "verdict : failures" in out
+
+
+def _noisy_note(example_config_path, kpi_cv: dict) -> str:
+    from evolvekit.preflight import PreflightReport, StageReport, _check_budget
+
+    report = PreflightReport(stages=[StageReport(stage_id="full", kind="command", ok=True, duration_s=1.0,
+                                                 timeout=60.0, runs=2, kpi_cv=kpi_cv)], _final_id="full")
+    _check_budget(load_config(example_config_path), report)
+    return next(n for n in report.notes if "ran 2 seed(s)" in n)
+
+
+def test_a_measure_with_no_coefficient_is_n_a_in_the_noise_note(example_config_path):
+    note = _noisy_note(example_config_path, {"centred": None})
+    assert "0.00%" not in note, "no ratio is not no spread"
+    assert "`centred`: n/a" in note
+
+
+def test_the_noise_note_skips_a_missing_coefficient_beside_a_real_one(example_config_path):
+    note = _noisy_note(example_config_path, {"centred": None, "cost": 0.05})
+    assert "varied by 5.00%" in note and "`centred`: n/a" in note

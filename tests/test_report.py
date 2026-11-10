@@ -213,3 +213,19 @@ def test_the_markdown_reports_search_figure_is_not_checked(keep_run):
     assert text.index("## Verdict") < text.index("## How it ran")
     learned = next(line for line in text.splitlines() if line.startswith("- Cases learned from:"))
     assert learned.endswith("on the cases the search learned from, not checked)"), learned
+
+
+def test_the_report_shows_the_90_range_whose_low_end_is_at_least(tmp_path, use_run):
+    """Decision 15: the report's range is the 90 % range, named so, its low end the line's "at least";
+    a check written before A1 keeps its 95 % interval."""
+    from test_verdict import _a1_run
+
+    root, summary = _a1_run(tmp_path / "a1")
+    v = build_verdict(root, RUN)
+    text = _text(root)
+    low, high = v["range90_pct"]
+    assert f"between {low:.1f} % and {high:.1f} % lower (90 % range)." in text
+    assert f"at least {low:.1f} % better" in v["line"] and v["line"] in text
+    assert "95 % interval" not in text and "95 % range" not in text, "the rule says 95 %; no range does"
+    legacy, _ = use_run
+    assert "(95 % interval)." in _text(legacy)

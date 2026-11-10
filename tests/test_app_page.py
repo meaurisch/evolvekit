@@ -1125,3 +1125,74 @@ def test_the_settings_legend_says_the_goals_direction_and_not_checked():
     assert "The band: values in tries over 1 % better" not in STUDY_PAGE
     assert '"values in tries over 1 % " + (g.direction === "higher" ? "higher" : "lower")' in STUDY_PAGE
     assert '" (not checked)"' in STUDY_PAGE
+
+
+def test_the_pages_chance_words_never_read_like_worse_on_a_keep():
+    """Decision 14b in the page's own words: worse is at 5 %, so 0.052 says "over 5 %"."""
+    out = _node("""process.stdout.write(JSON.stringify([EK.chanceWords(0.052), EK.chanceWords(0.05),
+        EK.chanceWords(0.04), EK.chanceWords(0.052, false), EK.chanceWords(0.947), EK.chanceWords(0.003)]));""")
+    assert out == ["chance over 5 %", "chance about 5 %", "chance about 4 %", "chance about 5 %", "chance under 95 %",
+                   "chance less than 1 %"]
+
+
+def test_a_keep_that_failed_more_runs_never_captions_its_chance_as_almost_certain():
+    """R6: a keep demoted for failing more runs than the starting point, with a chance of 0.95 or
+    more, says the chance does not decide because it failed runs, not "Almost certain"."""
+    out = _node("""process.stdout.write(JSON.stringify([
+        EK.rangeCaption({ decision: "keep", chance: 0.99, ci95: [1, 3], posterior: true, failed_more: 4 }),
+        EK.rangeCaption({ decision: "keep", chance: 0.99, ci95: [1, 3], posterior: true, failed_more: 1 }),
+        EK.rangeCaption({ decision: "keep", chance: 0.5, ci95: [-1, 3], posterior: true })]));""")
+    assert out[0].startswith("The chance does not decide: it failed 4 runs the starting point finished · ")
+    assert out[1].startswith("The chance does not decide: it failed 1 run the starting point finished · ")
+    assert "Almost certain" not in out[0] + out[1]
+    assert out[2].startswith("Chance under 95 % · ")
+    assert "failed_more: f.failed_more" in STUDY_PAGE
+
+
+def test_the_pages_range_is_the_90_range_and_its_low_end_is_the_sentences_at_least():
+    """Decision 15 (persona round 1): the sentence's "at least" and the bar's low end are one number,
+    to one decimal, and the bar is captioned "90 % range" -- on the use, keep and worse strips, in the
+    strip's aria text and on the Home card. A use's caption gives its chance in figures."""
+    from evolvekit.app.jobs import _final_words
+    from evolvekit.confirm import verdict_summary
+
+    summary = verdict_summary([0.05, 0.08, 0.06, 0.045, 0.07], direction="minimize")
+    comparison = {"seeds": [1, 2, 3], "instances": list("abcde"), "per_candidate": {"c1": {"summary": summary}}}
+    line = _final_words({"final": {"candidate": "c1"}}, comparison, {"says": "cost", "direction": "lower"}, "settings")["line"]
+    at_least = re.search(r"at least (\d+\.\d) % better", line).group(1)
+    shown = json.dumps(summary["range90"])
+    out = _node(f"""var r = {shown};
+      var f = {{ decision: "use", chance: 0.98, mean: 6.0, range90: r, ci95: [3.0, 9.0], posterior: true }};
+      process.stdout.write(JSON.stringify({{
+        use: EK.rangeCaption(f), sure: EK.rangeCaption(Object.assign({{}}, f, {{ chance: 0.999 }})),
+        keep: EK.rangeCaption({{ decision: "keep", chance: 0.5, range90: [-8.04, 11.5], ci95: [-10.8, 13.1], posterior: true }}),
+        aria: String(EK.rangeStrip(EK.shownRange(f))),
+        card: EK.cardOf({{ kind: "finished", slug: "s", decision: "use", mean: 6.0, range90: r, ci95: [3.0, 9.0],
+                           verdict: {{ says: "use", line: "", advice: "" }} }}).range }}));""")
+    assert f"90 % range from {at_least} % better to " in out["use"], (line, out["use"])
+    assert out["use"].startswith("Chance about 98 % · ")
+    assert out["sure"].startswith("Almost certain: a chance over 99 % · 90 % range from ")
+    assert out["keep"] == "Chance under 95 % · 90 % range from 8.0 % worse to 11.5 % better", "one decimal, as the sentence"
+    assert f"90 % range from {at_least} % better" in out["aria"] and "95 %" not in out["aria"]
+    assert out["card"] == [6.0, *summary["range90"], "90 % range", 1], "the card draws the 90 % range, not ci95"
+    assert 'f.range90 ? EK.rangeCaption({ decision: "use"' in STUDY_PAGE and STUDY_PAGE.count('"Likely range') == 1, \
+        "a use's caption names the 90 % range; only a run written before A1 keeps its old caption"
+    assert "range90: f.range90" in STUDY_PAGE and "EK.shownRange(f)" in STUDY_PAGE
+
+
+def test_a_range_written_before_a1_keeps_its_own_name_and_digits():
+    """Decision 15: a comparison written before A1 has only `ci95`: its 95 % range, in its own two decimals."""
+    out = _node("""process.stdout.write(JSON.stringify({
+        keep: EK.rangeCaption({ decision: "keep", chance: 0.5, ci95: [-1.234, 3.456], posterior: false }),
+        shown: EK.shownRange({ mean: 1, ci95: [-1.234, 3.456] }), none: EK.shownRange({ mean: 1 })}));""")
+    assert out["keep"] == "Chance under 90 % · 95 % range from 1.23 % worse to 3.46 % better"
+    assert out["shown"] == [1, -1.234, 3.456, "95 % range", 2] and out["none"] is None
+
+
+def test_the_tries_legend_says_one_case_not_1_cases():
+    """Persona round 2: "full look, 1 cases"."""
+    plots = (STATIC / "js" / "plots.js").read_text(encoding="utf-8")
+    legend = plots[plots.index("EK.triesLegend = function"):]
+    legend = legend[:legend.index("};")]
+    assert '(d.cases.length === 1 ? " case" : " cases")' in legend
+    assert '(d.quick_cases === 1 ? " case" : " cases")' in legend

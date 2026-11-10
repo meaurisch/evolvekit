@@ -5,13 +5,23 @@ words the Study page shows, with the numbers behind them.
 the study folder, the run's `job.json` and its `confirm/final/` files -- it
 needs no server and starts no process -- and returns a document with the keys
 `schema`, `study`, `run`, `phase`, `decision`, `line`, `advice`, `measure`,
-`held_back`, the statistics (`mean_pct`, `ci95_pct`, `worst_pct`, `chance`,
-`chance_words`; absent while there is no answer: `pending`, `stopped`,
+`held_back`, the statistics (`mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct`,
+`chance`, `chance_words`; absent while there is no answer: `pending`, `stopped`,
 `skipped`), `levels` (goals in order of importance), `learned_from`, `rule`,
-`by_case`, `changed`, `files` and how it ran. In `by_case`, `start` and `best`
-are a held-back case's means over the final check's runs and `change_pct` is
-the paired mean of the runs' changes (the statistic of `mean_pct`), so the two
-need not agree with each other. `combinations` counts every combination the
+`by_case`, `changed`, `files` and how it ran. The statistics are the final
+check's `confirm.verdict_summary`, the one place that decides: `chance` is
+the posterior probability of a gain, P(gain > 0); `mean_pct` the posterior
+mean; `ci95_pct` a 95 % credible interval, for engineers; `range90_pct` the
+90 % range a person is shown (the 5 % and 95 % quantiles; None for a
+comparison written before A1, which shows its 95 % interval); and `worst_pct`
+the 5 % quantile, the one-sided bound the rule reads and the 90 % range's low
+end, the same number -- so "use" holds exactly when the chance
+of a gain is at least 95 % (and then the worst case shown is no loss). A
+comparison written before A1 keeps the rule, the words and the `rule`
+sentence it was decided by (`posterior: false`). In `by_case`,
+`start` and `best` are a held-back case's means over the final check's runs
+and `change_pct` is the case's measured gain (its log gain over the runs, in
+percent), so the two need not agree with each other. `combinations` counts every combination the
 search measured, the starting point among them: a plan of 2 combinations a
 round for 2 rounds gives 5. `planned` holds the plan's `rounds` and
 `combinations`; `time_note`, only when the time per case is below the harness's own (the settings may not hold
@@ -19,7 +29,9 @@ at a longer limit); `how_it_ran`, only when fewer rounds ran than planned (or al
 of them, but some combinations repeated one already tried) or its AI budget
 was used up, says so in a sentence (`how_it_ran`). `why_keep`, only on a
 `keep` whose held-back cases all moved the goal's way while its range still
-allows a loss, says in one sentence why it is still keep (`why_keep`). `spent`, on a run
+allows a loss, says in one sentence why it is still keep (`why_keep`; when the check found
+that only more held-back cases could firm the answer, `limited_by: "cases"` and that sentence is
+its fallback). `spent`, on a run
 with AI, is what its AI spent (`ai_spent`): `{usd, cap_usd, line}`, or
 `{requests, line}` for a provider that counts requests. The page
 (`jobs.results`), the command line and the report all render from it, so they
@@ -30,18 +42,21 @@ A change every paired run of which gave exactly the starting point's result
 at all: no range or chance can say anything about a change no run exercised.
 
 A bake-off's document (a run of `study bakeoff`) also holds `candidates`:
-`[{"ref", "commit", "decision", "line", "mean_pct", "ci95_pct", "worst_pct",
+`[{"ref", "commit", "decision", "line", "mean_pct", "ci95_pct", "range90_pct", "worst_pct",
 "chance", "by_case"}]`, one per branch in the order given, each against the
 starting point by the same rule (numbers absent while there is no answer, and
 for a branch that changed no run, which has `same: true` instead); `by_case`
 is that branch's held-back rows, in the keys of the run's own `by_case`. Its own
 `decision` and `line` are the chosen branch's -- the largest mean among those
-whose decision is `use` -- said as one of N, or `keep` with "None of the N
+whose decision is `use` -- said as one of N (with N of 2 or more it adds that
+the branch was chosen among N: it passed the stricter check for choosing among N, but its figures are its own, and picking the best of N tends to overstate them;
+a branch whose own chance passes the rule but not Holm's over the branches is
+`keep`, its line says so), or `keep` with "None of the N
 branches is shown to beat the starting point." and then no figures, held-back
 rows or changes of its own: no unnamed branch speaks for the run. The key
 exists only on bake-off runs.
 
-The words themselves -- the chance in twentieths, the decision of a run made
+The words themselves -- the chance in whole percent, the decision of a run made
 before runs decided, and the sentences of the final check -- live here too.
 """
 
@@ -52,19 +67,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evolvekit.confirm import BASELINE, RULE_WORDS, USE_CHANCE, decide, identical_runs, t_cdf
+from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, LIMITED_BY_CASES, RULE_WORDS, USE_CHANCE, WORSE_CHANCE,
+                               decide, decision_of, failed_more, failed_words, identical_runs, is_posterior,
+                               read_on_row, t_cdf)
+from evolvekit.stats import Posterior, pct_from_log
 
-__all__ = ["DECISIONS", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
-           "number_text", "why_keep"]
+__all__ = ["DECISIONS", "RANGE_NAME", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
+           "number_text", "range90_of", "why_keep"]
 
-SCHEMA = 1
+SCHEMA = 2
 """Bumped when a key of the document changes meaning."""
 DECISIONS = ("use", "keep", "worse", "none", "single", "pending", "stopped", "skipped")
 """What a run's final check came to: `use`, `keep`, `worse` by the rule;
 `none` when nothing beat the starting point; `single` with one held-back
 case; `pending` before there is a final check; `stopped` when the check was
 stopped; `skipped` for every other skip (no cases held back)."""
-NUMBERS = ("mean_pct", "ci95_pct", "worst_pct", "chance", "chance_words")
+NUMBERS = ("mean_pct", "ci95_pct", "range90_pct", "worst_pct", "chance", "chance_words")
 """The statistics of the document: absent while there is no answer."""
 _NO_ANSWER = ("pending", "stopped", "skipped")
 _STAYED_BEST = "starting point stayed the best"
@@ -102,32 +120,46 @@ def _span(low: float, high: float) -> str:
         return f"likely between {number_text(low)} % and {number_text(high)} % better"
     if high < 0:
         return f"likely between {number_text(-high)} % and {number_text(-low)} % worse"
-    return f"somewhere between {number_text(-low)} % worse and {number_text(high)} % better"
+    # An end that rounds to 0.0 is "about the same", as the bar's text says, never "0.0 % worse".
+    low_text = "about the same" if number_text(-low) in ("0.0", "0") else f"{number_text(-low)} % worse"
+    high_text = "about the same" if number_text(high) in ("0.0", "0") else f"{number_text(high)} % better"
+    if low_text == high_text:
+        return "about the same"
+    return f"somewhere between {low_text} and {high_text}"
 
 
-def _chance_words(p: float | None) -> str:
-    """A chance of a gain in twentieths: "about 19 in 20", never sounding
-    certain: "better than 19 in 20" above it, "less than 1 in 20" below 1 in 20,
-    and "almost certain" from 0.995; nothing for no chance."""
+_LEGACY_USE_CHANCE = 0.9
+"""The threshold the chance words of a comparison written before A1 guard."""
+
+
+def _chance_words(p: float | None, posterior: bool = True) -> str:
+    """A chance of a gain in whole percent: "about 96 %", "almost certain"
+    from 0.995 and "less than 1 %" under 0.005; nothing for no chance. A
+    chance just under the rule's 95 % says so ("under 95 %"), never rounding
+    up to read like a pass, and one just over worse's 5 % says so ("over 5 %").
+    A comparison written before A1 (`posterior=False`) guards its own 90 %
+    ("under 90 %")."""
     if p is None:
         return ""
     if p >= 0.995:
         return "almost certain"
-    if p < 0.05:
-        return "less than 1 in 20"
-    if p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
-        # 0.897 would round to "about 18 in 20", which reads like the rule's
-        # 9 in 10 when the rule said no: say which side of it the chance is.
-        return f"under {round(USE_CHANCE * 10)} in 10"
-    if round(p * 20) >= 20:
-        return "better than 19 in 20"
-    return f"about {round(p * 20)} in 20"
+    pct, rule = round(p * 100), USE_CHANCE if posterior else _LEGACY_USE_CHANCE
+    if p < rule and pct >= round(rule * 100):
+        # 0.947 would round to "about 95 %", which reads like the rule's 95 % when the rule said no.
+        return f"under {round(rule * 100)} %"
+    if posterior and p > WORSE_CHANCE and pct <= round(WORSE_CHANCE * 100):
+        # 0.052 would round to "about 5 %", which reads like worse's 5 % when the rule said keep.
+        return f"over {round(WORSE_CHANCE * 100)} %"
+    if pct < 1:
+        return "less than 1 %"
+    return f"about {pct} %"
 
 
 def _chance_of(summary: dict[str, Any]) -> float | None:
-    """The chance of a gain as the comparison says it -- or, for a comparison
-    written before it said so, from its mean and spread as `paired_summary`
-    finds it. None without two cases, or without a spread to go by."""
+    """The chance of a gain as the comparison says it (`verdict_summary`'s
+    posterior) -- or, for a comparison written before it said so, from its
+    mean and spread as `paired_summary` found it then. None without two
+    cases, or without a spread to go by."""
     if summary.get("chance") is not None:
         return float(summary["chance"])
     n, mean, sd = int(summary.get("n") or 0), summary.get("mean"), summary.get("sd")
@@ -169,6 +201,30 @@ def _identical(comparison: dict[str, Any], runs: list[dict[str, Any]]) -> None:
         if isinstance(result, dict) and "identical" not in result:
             result["identical"] = identical_runs(runs, cid, kpis, list(comparison.get("instances") or []),
                                                  list(comparison.get("seeds") or []))
+
+
+RANGE_NAME = "90 % range"
+"""What the page, the report and the assistant call the range a person is
+shown: the posterior's 5 % and 95 % quantiles, whose low end is "at least" /
+"at worst" (decision 15). A comparison written before A1 keeps its 95 % range."""
+
+
+def range90_of(summary: dict[str, Any], direction: str = "minimize") -> list[float] | None:
+    """The 90 % range of a summary that carries A1's posterior, in percent:
+    `verdict_summary`'s `range90`, or from its `posterior` (location, scale,
+    degrees of freedom) when it was written before the key; its low end is the
+    summary's `worst`. None for a comparison written before A1 and without two
+    cases."""
+    if summary.get("range90"):
+        return [float(v) for v in summary["range90"]]
+    post = summary.get("posterior")
+    if not isinstance(post, dict) or int(summary.get("n") or 0) < 2:
+        return None
+    try:
+        low, high = Posterior(int(summary["n"]), float(post["mu"]), float(post["scale"]), int(post["df"])).interval90()
+    except (KeyError, TypeError, ValueError):
+        return None
+    return [pct_from_log(low, direction), pct_from_log(high, direction)]
 
 
 def _decision_of(final: dict[str, Any], summary: dict[str, Any]) -> str:
@@ -228,22 +284,56 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     better = _better_word(goal["direction"])
     worse = "higher" if better == "lower" else "lower"
     cases = f"{n} held-back case{'s' if n != 1 else ''}"
-    base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "decision": decision, "chance": chance,
-            "chance_words": _chance_words(chance), "worst_pct": worst, "rule": RULE_WORDS}
+    posterior = is_posterior(summary)
+    # The range a person is shown (decision 15): A1's 90 % range, whose low end is `worst`; a comparison
+    # written before A1 has only its 95 % interval, and keeps it.
+    shown = range90_of(summary, str(comparison.get("direction") or "minimize")) if posterior else None
+    base = {"n": n, "seeds": seeds, "mean": mean, "ci95": ci, "range90": shown, "decision": decision, "chance": chance,
+            "chance_words": _chance_words(chance, posterior), "worst_pct": worst,
+            "rule": RULE_WORDS if posterior or not summary else LEGACY_RULE_WORDS,
+            "posterior": posterior,
+            # The runs it failed that the starting point finished, when more than the other way round
+            # (decision 14a, A1's rule only): the page's caption says its chance does not decide (R6).
+            "failed_more": failed_more(result) if posterior else None}
     use_advice = f"Use {new}: {they} probably better on cases the search never saw."
     if result.get("identical"):
         # Every paired run gave exactly today's result: no range or chance can say anything about a
         # change that was never exercised, so the line gives none.
-        return {**base, "mean": None, "ci95": None, "chance": None, "chance_words": "", "worst_pct": None,
+        return {**base, "mean": None, "ci95": None, "range90": None, "chance": None, "chance_words": "", "worst_pct": None,
                 "decision": "keep", "state": "same", "line": no_difference_line(what),
                 "advice": f"{keep} for now: nothing in these runs tells the change from today's."}
     if "levels" in result:
         levels = result["levels"]
-        decision = final.get("decision") or ("use" if levels.get("confirmed") else "keep")
+        decision = final.get("decision") or decision_of(result)
         base["decision"] = decision
+        row = read_on_row(levels)
+        if row is not None:
+            # The numbers are those of the level the descent stopped on -- the one the decision is
+            # read on -- never the first level's when another decided; `numbers_from` says which.
+            percent = row.get("unit") == "percent"
+            row_chance = row.get("chance")
+            base.update({
+                "n": int(row.get("n") or 0),
+                "mean": _number(row.get("mean_difference")) if percent else None,
+                "ci95": list(row["ci95"]) if percent and row.get("ci95") else None,
+                "range90": list(row["range90"]) if percent and row.get("range90") else None,
+                "worst_pct": _number(row.get("worst")) if percent else None,
+                "chance": row_chance, "chance_words": _chance_words(row_chance, True),
+                "numbers_from": {"level": row.get("level"), "kpi": row.get("kpi"), "unit": row.get("unit"),
+                                 "deciding": levels.get("deciding") == row.get("level")},
+            })
+        held = result.get("holm") or {}
+        if held.get("passed") is False and held.get("own") == "use":
+            return {**base, "state": "unclear", "levels": levels.get("levels"),
+                    "line": f"Not proven on {cases} with {held['k']} {held['what']} compared: {levels.get('verdict')}.",
+                    "advice": f"{keep} for now: the gain is not proven among {held['k']} {held['what']} compared."}
         if decision == "use":
             return {**base, "state": "confirmed", "levels": levels.get("levels"),
                     "line": f"Probably better on {cases}: {levels.get('verdict')}.", "advice": use_advice}
+        if decision == "worse":
+            return {**base, "state": "worse", "levels": levels.get("levels"),
+                    "line": f"Worse on {cases}: {levels.get('verdict')}.",
+                    "advice": f"{keep}: {new} did worse on cases the search never saw."}
         return {**base, "state": "unclear", "levels": levels.get("levels"),
                 "line": f"Not proven on {cases}: {levels.get('verdict')}.",
                 "advice": f"{keep} for now: the gain is not proven."}
@@ -259,7 +349,10 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                 "advice": f"{keep}: one held-back case is too few cases to tell{on_it}; "
                           "a study that holds back three or more can."}
     low, high = ci
-    words = _chance_words(chance)
+    if shown:
+        # A1's words read the 90 % range, whose low end is "at least" / "at worst" to the digit (decision 15).
+        low, high = shown
+    words = _chance_words(chance, posterior)
     sure = words == "almost certain"
     of_gain = "" if not words else "a gain almost certain" if sure else f"a chance of {words} of a gain"
     if decision == "use":
@@ -267,16 +360,45 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
         edge = (f"at least {_pct(worst)} better than {start}" if worst is not None and worst >= 0.05
                 else f"at worst about the same as {start}" if worst is not None and worst > -0.05
                 else f"at worst {_pct(worst)} worse than {start}")
-        how_sure = "" if not words else ", almost certain" if sure else f", a chance of {words}"
+        if not shown:  # a comparison written before A1: its words as they were
+            how_sure = "" if not words else ", almost certain" if sure else f", a chance of {words}"
+            return {**base, "state": "confirmed",
+                    "line": f"Probably better: {_pct(mean)} {better} {goal['says']} on {cases}{how_sure}; {edge}.",
+                    "advice": use_advice}
+        # The chance in figures even when almost certain; "at least" is the average over the held-back
+        # cases, so one case below it is no broken promise; the range's low end is the same number.
+        how_sure = "" if not words else (", a chance of over 99 % (almost certain)" if sure
+                                         else f", a chance of {words}")
         return {**base, "state": "confirmed",
-                "line": f"Probably better: {_pct(mean)} {better} {goal['says']} on {cases}{how_sure}; {edge}.",
+                "line": f"Probably better: {_pct(mean)} {better} {goal['says']}{how_sure}; "
+                        f"{edge} on average over {cases}; its {RANGE_NAME} is {_span(low, high)}.",
                 "advice": use_advice}
+    named = f"its {RANGE_NAME} is " if shown else ""
+    # The keep line gives the middle figure the use line gives, in the same words (A1's lines only).
+    middle = f"{_pct(mean)} {word} {goal['says']}" if shown else ""
+    lead = ", ".join(x for x in (middle, of_gain) if x)
     if decision == "worse":
         return {**base, "state": "worse",
                 "line": f"Worse on {cases}: {_pct(mean)} {worse} {goal['says']}{', ' + of_gain if of_gain else ''} "
-                        f"({_span(low, high)}).",
+                        f"({named}{_span(low, high)}).",
                 "advice": f"{keep}: {new} did worse on cases the search never saw."}
-    parts = ([of_gain] if of_gain else []) + [f"at worst {_pct(worst)} worse ({_span(low, high)})"]
+    held = result.get("holm") or {}
+    if held.get("passed") is False and held.get("own") == "use":
+        # Its own chance passes the rule, but chosen among its rivals it does not (Holm): the line says why.
+        parts = ([lead] if lead else []) + [f"{named or 'its 95 % range is '}{_span(low, high)}"]
+        return {**base, "state": "unclear",
+                "line": f"Not proven on {cases} with {held['k']} {held['what']} compared: {'; '.join(parts)}.",
+                "advice": f"{keep} for now: the gain is not proven among {held['k']} {held['what']} compared."}
+    if posterior:
+        # "At worst" is the 5 % quantile the rule reads, and the 90 % range's low end: the same number.
+        edge = (f"at worst {_pct(worst)} worse" if worst < -0.05 else "at worst about the same"
+                if worst <= 0.05 else f"at least {_pct(worst)} better")
+        parts = ([lead] if lead else []) + [f"{edge}; {named or 'its 95 % range is '}{_span(low, high)}"]
+    else:  # a comparison written before A1, whose worst case was the range's low end: its words as they were
+        parts = ([of_gain] if of_gain else []) + [f"at worst {_pct(worst)} worse ({_span(low, high)})"]
+    more = failed_more(result)
+    if more is not None:  # never "use" when it failed more runs than the starting point (decision 14a): say so first
+        parts = [failed_words(more), *parts]
     return {**base, "state": "unclear", "line": f"Not proven on {cases}: {'; '.join(parts)}.",
             "advice": f"{keep} for now: the gain is not proven."}
 
@@ -433,19 +555,24 @@ def _level_direction(row: dict[str, Any]) -> str:
 
 
 def _levels(study: Any, harness: Any, levels: dict[str, Any]) -> list[dict[str, Any]]:
-    """One entry per goal level, in order of importance, `deciding` on the one that decided."""
+    """One entry per goal level, in order of importance, `deciding` on the one that decided and
+    `read_on` on the one the descent stopped on (the deciding one, else where it could go no
+    further): the page's figures are that level's."""
     deciding = levels.get("deciding")
     entries = []
     for index, row in enumerate(levels.get("levels") or [], start=1):
         percent = row.get("unit") == "percent"
         ci = row.get("ci95") if percent else None
+        shown = row.get("range90") if percent else None
         entries.append({
             **_measure_of(study, harness, str(row.get("kpi") or ""), _level_direction(row)),
             "mean_pct": _number(row.get("mean_difference")) if percent else None,
-            "ci95_pct": list(ci) if ci else None, "worst_pct": _number(ci[0]) if ci else None,
-            "chance": None, "chance_words": "",
+            "ci95_pct": list(ci) if ci else None, "range90_pct": list(shown) if shown else None,
+            "worst_pct": _number(row.get("worst")) if percent else None,
+            "chance": row.get("chance"), "chance_words": _chance_words(row.get("chance"), True),
             "state": row.get("state"), "compared_in": row.get("unit"), "difference": _number(row.get("mean_difference")),
             "deciding": deciding == row.get("level", index),
+            "read_on": levels.get("read_on", deciding) == row.get("level", index),
         })
     return entries
 
@@ -495,11 +622,12 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                   if job.get("bakeoff") else None)
     named = True
     if candidates:
-        decision, named = _bakeoff_headline(document, job, candidates, jobs._what(study))
+        decision, named = _bakeoff_headline(document, job, candidates, jobs._what(study), comparison)
     candidate = final.get("candidate") or next(iter((comparison or {}).get("per_candidate") or {}), None)
     result = ((comparison or {}).get("per_candidate") or {}).get(candidate) or {}
     levels = _levels(study, harness, result["levels"]) if isinstance(result.get("levels"), dict) else []
-    deciding = next((level for level in levels if level["deciding"]), levels[0] if levels else None)
+    deciding = next((level for level in levels if level["deciding"]),
+                    next((level for level in levels if level["read_on"]), levels[0] if levels else None))
     document["measure"] = ({k: deciding[k] for k in ("kpi", "label", "unit", "direction")} if deciding else
                            _measure_of(study, harness, goal["kpi"], goal["direction"]))
     seeds = len((comparison or {}).get("seeds") or []) or final.get("seeds") or None
@@ -507,20 +635,29 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
     # A change every run of which gave exactly today's result has no figures: no range, no chance.
     same = words.get("state") == "same"
     if decision not in _NO_ANSWER and named and not same:
-        document.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"), "worst_pct": words.get("worst_pct"),
-                         "chance": words.get("chance"), "chance_words": words.get("chance_words", "")})
+        document.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"), "range90_pct": words.get("range90"),
+                         "worst_pct": words.get("worst_pct"), "chance": words.get("chance"),
+                         "chance_words": words.get("chance_words", "")})
+        if words.get("numbers_from"):
+            # With levels the figures are those of the level the descent stopped on: which one, said here.
+            document["numbers_from"] = words["numbers_from"]
     if levels and named and not same:
         document["levels"] = levels
     # A bake-off with no branch shown ahead names no branch: no figure of an unnamed one here either.
     # A search that did not run learned nothing: no figure, not even "the same" (persona p5, J1).
     document["learned_from"] = {"cases": len(study.training),
                                 "pct": learned_pct if named and not words.get("not_run") else None}
-    document["rule"] = RULE_WORDS
+    document["rule"] = words.get("rule") or RULE_WORDS
     document["by_case"] = _held_rows(result, held)
-    # Not with goals in order of importance: the range and the rows are the first measure's, while
-    # another level may be what kept it (fix round 1, I1).
+    # Not with goals in order of importance: the range is the level the answer is read on, but the
+    # held-back rows are the first measure's, so "every case improved" would not be the level read.
     why = (why_keep(document["decision"], words, document["by_case"], goal["direction"])
            if named and not candidates and not levels and "levels" not in result else "")
+    if (job.get("check") or {}).get("limited_by") == "cases":
+        # The check found that only more held-back cases could firm the answer (A1.3).
+        document["limited_by"] = "cases"
+        if not why and decision == "keep":
+            why = LIMITED_BY_CASES[0].upper() + LIMITED_BY_CASES[1:] + "."
     if why:
         document["why_keep"] = why
     document["changed"] = [{"name": c["name"], "label": c["label"], "from": c["old_text"], "to": c["new_text"]}
@@ -571,7 +708,7 @@ def why_keep(decision: str, words: dict[str, Any], rows: list[dict[str, Any]], d
     answer." -- up to three cases' figures, else "Every one of the N held-back cases". Never on use,
     worse or same, nor with goals in order of importance (`levels`), and never a gain: it says why there
     is none. Empty otherwise."""
-    ci = words.get("ci95")
+    ci = words.get("range90") or words.get("ci95")  # the range the page shows (decision 15)
     if decision != "keep" or words.get("state") != "unclear" or not ci or not ci[0] < 0 or words.get("levels"):
         return ""
     if len(rows) < 2 or any(row.get("outcome") != "better" for row in rows):
@@ -734,7 +871,7 @@ def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: di
         elif words.get("state") == "same":
             row["same"] = True  # every run gave exactly today's result: no figures
         elif decision not in _NO_ANSWER:
-            row.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"),
+            row.update({"mean_pct": words.get("mean"), "ci95_pct": words.get("ci95"), "range90_pct": words.get("range90"),
                         "worst_pct": words.get("worst_pct"), "chance": words.get("chance")})
         if not row.get("today") and goal.get("kpi") and cid:
             result = ((comparison or {}).get("per_candidate") or {}).get(cid) or {}
@@ -745,7 +882,8 @@ def _candidates(job: dict[str, Any], comparison: dict[str, Any] | None, goal: di
 
 
 def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
-                      candidates: list[dict[str, Any]], what: str = "code change") -> tuple[str, bool]:
+                      candidates: list[dict[str, Any]], what: str = "code change",
+                      comparison: dict[str, Any] | None = None) -> tuple[str, bool]:
     """Decision 32: a bake-off's own decision and line are those of the branch
     it chose (the largest mean among those whose own decision is `use`), said
     as one of N ("Of 2 branches, <ref>: ..."; "<ref>: ..." for one branch);
@@ -766,6 +904,12 @@ def _bakeoff_headline(document: dict[str, Any], job: dict[str, Any],
 
     if chosen is not None and chosen["decision"] in ("use", "single"):
         document["decision"], document["line"] = chosen["decision"], named(chosen)
+        # The family Holm paid for (identical branches and the starting point are not in it), not the count.
+        paid = (((comparison or {}).get("per_candidate") or {}).get(chosen_id) or {}).get("holm") or {}
+        if chosen["decision"] == "use" and int(paid.get("k") or 0) >= 2:
+            document["line"] += (f" Chosen among {paid['k']} branches: it passed the stricter check for choosing among "
+                                 f"{paid['k']}, but the figures are this branch's own, and picking the best of "
+                                 f"{paid['k']} tends to overstate them.")
         if chosen["decision"] == "use":
             document["advice"] = f"Use the code of {chosen['ref']}: it is probably better on cases no branch was made for."
         return str(document["decision"]), True
@@ -884,9 +1028,14 @@ def _verdict_at(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[s
 # a run per kind of case
 # ---------------------------------------------------------------------------
 
-PER_GROUP_RULE = (RULE_WORDS + " Per kind of case, each group's settings are used only when every group checked on "
-                  "two or more held-back cases says use.")
+PER_GROUP_RULE = (RULE_WORDS + " Per kind of case, each group's settings are used only when its own answer says use; with several "
+                  "groups, each needs the stricter chances that comparing several asks for.")
 """The top-level rule of a per-group run (design §6.4), after each group's own."""
+GROUP_USE_WAITS = "Its answer is read once every kind of case is checked."
+GROUP_USE_UNREAD = "Its answer was not read: the run ended before every kind of case was checked."
+"""A held group's line once its run stopped or failed: it waits for nothing any more."""
+PER_GROUP_ALL_HELD = "Per kind of case: not every kind of case is read yet."
+"""The run's line when every group without an answer is held (`per_group_decision`'s `held`): none is unfinished."""
 PER_GROUP_WORDS = {
     "use": ("Per kind of case: each group checked on two or more held-back cases is probably better.",
             "Use each group's settings: settings_by_group.json has them, rule.md says which cases get which."),
@@ -913,10 +1062,13 @@ def _group_held(doc: dict[str, Any]) -> int:
     return int((doc.get("held_back") or {}).get("cases") or 0)
 
 
-def per_group_decision(order: list[str], docs: dict[str, dict[str, Any]], phase: Any = None) -> tuple[str, str, str]:
+def per_group_decision(order: list[str], docs: dict[str, dict[str, Any]], phase: Any = None,
+                       held: Any = ()) -> tuple[str, str, str]:
     """`(decision, line, advice)` of a per-group run from its groups' own
     documents (`docs`, in the run's `order`): a group with no answer yet
-    (`pending`, `stopped`) says the run has none; else `use` only when every
+    (`pending`, `stopped`) says the run has none, naming the first such group
+    that is not `held` (when every one is held, none is unfinished:
+    `PER_GROUP_ALL_HELD`); else `use` only when every
     group checked on two or more held-back cases says `use` (and there is
     one); `single` when no group has two; else `keep`, naming the first group
     that does not say `use`. The verdict is the only claim: these words say
@@ -924,9 +1076,12 @@ def per_group_decision(order: list[str], docs: dict[str, dict[str, Any]], phase:
     if not order:  # no group began: the run has no answer, whatever groups.json says
         decision = "stopped" if phase in ("stopped", "failed") else "pending"
         return (decision, *PER_GROUP_NONE_BEGUN[decision])
-    waiting = next((name for name in order if docs[name].get("decision") in ("pending", "stopped")), None)
+    waits = [name for name in order if docs[name].get("decision") in ("pending", "stopped")]
+    waiting = next((name for name in waits if name not in held), waits[0] if waits else None)  # `held`: read later
     if waiting is not None:
         decision = "stopped" if phase == "stopped" else str(docs[waiting]["decision"])
+        if all(name in held for name in waits):  # every one waits for the others: none is unfinished
+            return decision, PER_GROUP_ALL_HELD, PER_GROUP_WORDS[decision][1]
         name, said = waiting, decision
     else:
         checked = [name for name in order if _group_held(docs[name]) >= 2]
@@ -980,7 +1135,16 @@ def _per_group_verdict(root: Path, run_dir: Path, study: Any, harness: Any, job:
             own["line"] = "Its final check is going." if state.get("phase") == "check" else "Its search is going."
             own["advice"] = ""
         docs[name] = own
-    decision, line, advice = per_group_decision(order, docs, job.get("phase"))
+    held = set()
+    if job.get("phase") != "done" and len(order) > 1:
+        # With several kinds of case every "use" is read together, once all are checked (Holm): until then no
+        # group says better, the verdict is the only claim.
+        for name, d in docs.items():
+            if d.get("decision") == "use":
+                held.add(name)
+                ended = job.get("phase") in ("stopped", "failed")
+                d["decision"], d["line"], d["advice"] = "pending", GROUP_USE_UNREAD if ended else GROUP_USE_WAITS, ""
+    decision, line, advice = per_group_decision(order, docs, job.get("phase"), held)
     runs_per_case = {(d.get("held_back") or {}).get("runs_per_case") for d in docs.values()} - {None}
     document: dict[str, Any] = {
         "schema": SCHEMA, "study": root.name, "run": run, "phase": job.get("phase"), "decision": decision,

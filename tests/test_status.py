@@ -9,7 +9,9 @@ without a word) are exactly the ones a finished test run is never in.
 from __future__ import annotations
 
 import json
+import math
 import os
+import statistics
 import subprocess
 import sys
 from dataclasses import replace
@@ -308,8 +310,37 @@ def test_a_gain_that_holds_on_every_shared_seed_is_clear(tmp_path):
     assert progress["best"]["n"] == 3 and progress["best"]["sd"] is not None
     improvement = progress["improvement"]
     assert improvement["verdict"] == "clear" and improvement["n"] == 3
-    assert improvement["t"] > 2
+    assert improvement["ci95"][0] > 0
     assert "never saw" in improvement["why"], "selection bias has to be named"
+    assert "3 case(s)" in improvement["why"] and "seed(s)" not in improvement["why"], "n counts cases"
+
+
+def test_the_schema_is_2_since_the_live_verdict_counts_cases_not_runs():
+    """A0 (D3) dropped `progress.improvement.t` and made `n` count cases: a
+    key that changed meaning or disappeared bumps the schema."""
+    assert SCHEMA == 2
+
+
+def test_the_live_verdict_calls_pure_noise_clear_about_2_5_percent_of_the_time():
+    """Design §10: the live verdict's error rate, simulated. Null gains over 3
+    instances x 2 seeds, judged as `status` judges them (per-instance means,
+    then the 95 % interval): "clear" is the one-sided 2.5 % tail. The old rule,
+    t >= 2 over every run, called the same noise clear far more often (D3)."""
+    import random
+
+    from evolvekit.stats import paired_summary, per_instance_means
+
+    rng, trials, clear, old_clear = random.Random(0), 20_000, 0, 0
+    for _ in range(trials):
+        gains = {(i, s): rng.gauss(0.0, 1.0) for i in range(3) for s in range(2)}
+        if paired_summary(per_instance_means(gains))["ci95"][0] > 0:
+            clear += 1
+        runs = list(gains.values())
+        mean, sd = sum(runs) / len(runs), statistics.stdev(runs)
+        if mean / (sd / math.sqrt(len(runs))) >= 2:
+            old_clear += 1
+    assert 0.015 <= clear / trials <= 0.035
+    assert old_clear / trials > 0.04, "the old rule over-called noise"
 
 
 def test_a_gain_smaller_than_the_seed_to_seed_swing_is_within_noise(tmp_path):
@@ -351,12 +382,80 @@ def test_gains_that_do_not_vary_are_judged_in_the_direction_of_their_mean(tmp_pa
         run.evaluation("g001-c0002", 500 - seed, best, seed=seed)
     improvement = build_status(tmp_path, now=NOW)["progress"]["improvement"]
     assert improvement["verdict"] == "worse"
-    assert "t = -inf" in improvement["why"] and "within noise" not in improvement["why"]
+    assert improvement["ci95"] == [pytest.approx(-1.0), pytest.approx(-1.0)] and "within noise" not in improvement["why"]
 
 
 def test_gains_that_do_not_vary_and_help_are_clear(tmp_path):
     improvement = _two_candidates(tmp_path, [200.0, 210.0, 190.0], [199.0, 209.0, 189.0])["improvement"]
-    assert improvement["verdict"] == "clear" and "t = inf" in improvement["why"]
+    assert improvement["verdict"] == "clear" and improvement["ci95"][0] == pytest.approx(1.0)
+
+
+def test_the_live_verdict_and_the_final_check_agree_when_no_run_failed(tmp_path):
+    """D3: `status` judged t >= 2 over every (instance, seed) run; `confirm`
+    judged a 95 % interval over per-instance means. Same runs, same answer now.
+    Only for a run directory with no failed pairs: `confirm` counts a pair one
+    side failed as that side's loss, and `status` does not impute failures.
+    The live verdict is the frequentist interval; the final check's decision
+    is the posterior's, and its frequentist block is the same test."""
+    from evolvekit.confirm import confirm
+    from tests.test_confirm import _write_config, _write_run
+
+    config_path = _write_config(tmp_path, seeds=2)
+    run_dir = _write_run(tmp_path, config_path, {"g003-c0012": {"params": {"x": -0.05}, "score": -95.0}})
+    # Seed 1002 is the one the solver fails on (medium, x != 0): left out, so no pair failed.
+    comparison = confirm(load_config(config_path), run_dir, seeds=[1001, 1003], label="same", log=lambda m: None)
+    assert all(r["ok"] for r in comparison.runs), "the agreement is claimed for runs without failures"
+    summary = comparison.per_candidate["g003-c0012"]["summary"]["frequentist"]
+
+    run = RunDir(run_dir)
+    stages = [STAGES[0], {**STAGES[1], "instances": ["small", "medium", "large"]}]
+    run.event("run_started", 1000, objective="cost", direction="minimize", stages=stages,
+              first_generation=1, generations_planned=5, budget={}, stop={})
+    names = {"baseline": "g000-c0001", "g003-c0012": "g003-c0012"}
+    for r in comparison.runs:
+        run.event("eval_finished", 900, candidate_id=names[r["configuration"]], stage="full", seed=r["seed"],
+                  private=False, instance=r["instance"], ok=r["ok"], duration_s=1.0, kpis=r["kpis"])
+    improvement = build_status(run_dir, now=NOW)["progress"]["improvement"]
+
+    assert improvement["n"] == summary["n"] == 3
+    assert improvement["mean_gain"] == pytest.approx(summary["mean"])
+    assert improvement["ci95"] == pytest.approx(summary["ci95"])
+    expected = "clear" if summary["ci95"][0] > 0 else "worse" if summary["ci95"][1] < 0 else "within noise"
+    assert improvement["verdict"] == expected == "clear"
+    assert "never saw" in improvement["why"], "the selection caveat stays"
+
+
+def test_the_live_verdict_per_instance_averages_log_ratios(tmp_path):
+    """S4 in status too: halving on one instance and doubling on another is no gain."""
+    run = RunDir(tmp_path)
+    stages = [STAGES[0], {**STAGES[1], "instances": ["a", "b"]}]
+    run.event("run_started", 1000, objective="cost", direction="minimize", stages=stages,
+              first_generation=1, generations_planned=5, budget={}, stop={})
+    run.row("g000-c0001", 0, 100.0)
+    run.row("g001-c0002", 1, 90.0, parent_id="g000-c0001")
+    for seed in range(2):
+        for instance, mine in (("a", 50.0), ("b", 200.0)):
+            for cid, cost in (("g000-c0001", 100.0), ("g001-c0002", mine)):
+                run.event("eval_finished", 900, candidate_id=cid, stage="full", seed=seed, private=False,
+                          instance=instance, ok=True, duration_s=1.0, kpis={"cost": cost})
+    improvement = build_status(tmp_path, now=NOW)["progress"]["improvement"]
+    assert improvement["n"] == 2 and improvement["mean_gain"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_one_instance_run_many_times_is_one_case_not_many(tmp_path):
+    run = RunDir(tmp_path)
+    stages = [STAGES[0], {**STAGES[1], "instances": ["a"]}]
+    run.event("run_started", 1000, objective="cost", direction="minimize", stages=stages,
+              first_generation=1, generations_planned=5, budget={}, stop={})
+    run.row("g000-c0001", 0, 100.0)
+    run.row("g001-c0002", 1, 90.0, parent_id="g000-c0001")
+    for seed in range(3):
+        for cid, cost in (("g000-c0001", 100.0 + seed), ("g001-c0002", 90.0 + seed)):
+            run.event("eval_finished", 900, candidate_id=cid, stage="full", seed=seed, private=False,
+                      instance="a", ok=True, duration_s=1.0, kpis={"cost": cost})
+    improvement = build_status(tmp_path, now=NOW)["progress"]["improvement"]
+    assert improvement["verdict"] == "unknown" and improvement["n"] == 1
+    assert "one instance run many times is one case" in improvement["why"]
 
 
 # -- what is the best, and how does it differ? ------------------------------
@@ -374,6 +473,33 @@ def _sweep(tmp_path):
         run.row(f"g001-c{i:04d}", 1, cost, parent_id="g000-c0001",
                 block=PARAM_BLOCK.format(alpha=alpha, steps=steps))
     return build_status(tmp_path, now=NOW)
+
+
+def test_a_vetoed_candidate_is_never_the_best(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(1000)
+    run.row("g000-c0001", 0, 200.0)
+    run.row("g001-c0002", 1, 150.0, parent_id="g000-c0001", competes=False,
+            veto="holdout below the seed's -195")
+    run.row("g001-c0003", 1, 190.0, parent_id="g000-c0001")
+    assert build_status(tmp_path, now=NOW)["progress"]["best"]["id"] == "g001-c0003"
+
+
+def test_a_row_written_before_the_veto_is_judged_by_it(tmp_path):
+    """`competes: true` was stored, but its hold-out is below the seed's: the
+    resumed search keeps it out, so status must not name it either."""
+    run = RunDir(tmp_path)
+    run.started(1000)
+    run.row("g000-c0001", 0, 200.0, private_score=-200.0)
+    run.row("g001-c0002", 1, 150.0, parent_id="g000-c0001", private_score=-210.0)
+    run.row("g001-c0003", 1, 190.0, parent_id="g000-c0001", private_score=-195.0)
+    document = build_status(tmp_path, now=NOW)
+    assert document["progress"]["best"]["id"] == "g001-c0003"
+    kept = next(c for c in document["candidates"] if c["id"] == "g001-c0002")
+    assert kept["competes"] is False and kept["veto"] == "holdout below the seed's -200"
+    # What the dashboard's "Unfinished" and "Kept out by the hold-out" filters split on.
+    others = [c for c in document["candidates"] if c["id"] != "g001-c0002"]
+    assert all(c["veto"] is None for c in others)
 
 
 def test_the_best_candidate_comes_with_its_diff_and_its_parameters(tmp_path):

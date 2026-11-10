@@ -166,8 +166,8 @@
   EK.triesLegend = function (d, o) {
     var quick = d.quick_cases && d.quick_cases < d.cases.length && d.combinations.some(function (c) { return !c.full && !c.base; });
     // The line is each case's change averaged: not the strip's best so far (the plain averages), so said.
-    var it = [["line", "best so far, each case’s change averaged"], ["full", "full look, " + d.cases.length + " cases"]];
-    if (quick) it.push(["quick", "quick look, " + d.quick_cases + " cases"]);
+    var it = [["line", "best so far, each case’s change averaged"], ["full", "full look, " + d.cases.length + (d.cases.length === 1 ? " case" : " cases")]];
+    if (quick) it.push(["quick", "quick look, " + d.quick_cases + (d.quick_cases === 1 ? " case" : " cases")]);
     it.push(["x", "did not finish"]);
     if (!d.done) it.push(["ring", "running"]);
     if (o && o.family) it.push(["fam", "its family: the combinations it came from"]);

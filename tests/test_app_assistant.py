@@ -600,3 +600,10 @@ def test_the_context_carries_a_schedule_with_its_last_day(tmp_path):
     sent = assistant.context(root, load_study(root), load_harness(root / "harness"))
     so_far = json.loads(sent.split("## The study so far\n")[1].split("\n\n## ")[0])
     assert so_far["schedule"]["until"] == "2026-12-31"
+
+
+def test_the_assistant_reads_the_lower_bound_as_the_5_percent_bound_not_a_worst_case():
+    """M4: `worst_pct` is the 5 % quantile the rule reads, not the worst that can happen."""
+    words = assistant._run_words({}, {"final": {"line": "Not proven.", "worst_pct": -1.5}, "goal": {}})
+    check = words["results"]["final check"]
+    assert check["at worst (5 % bound) %"] == -1.5 and "worst case %" not in check

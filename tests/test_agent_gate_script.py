@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOLVER = ROOT / "examples" / "cli-solver" / "solver.py"
 SAMPLES = sorted(p.name for p in (ROOT / "harnesses" / "demo-tour" / "samples").glob("*.json"))
 URL = "http://127.0.0.1:8780/?token=abc123#/study/gate"
-LINE = ("Probably better: 1.3 % lower tour length on 2 held-back cases, a chance of about 19 in 20; "
+LINE = ("Probably better: 1.3 % lower tour length on 2 held-back cases, a chance of about 96 %; "
         "at worst 0.3 % worse than your starting point.")
 ADVICE = "Use the new settings: they are probably better on cases the search never saw."
 TOOLS = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep", "Skill"]

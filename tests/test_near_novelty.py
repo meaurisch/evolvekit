@@ -35,6 +35,7 @@ from evolvekit.search.novelty import (
     NoveltyIndex,
     build_near_backend,
     cosine,
+    delta_grams,
     local_similarity,
     node_ngrams,
     node_type_sequence,
@@ -134,7 +135,7 @@ def _index(**kwargs) -> NoveltyIndex:
 
 def test_a_near_duplicate_is_flagged_but_not_rejected():
     index = _index()
-    index.add("g001-c0002", BONUS_20)
+    index.add("g001-c0002", BONUS_20, parent_block=BEST_FIT)
     verdict = index.check(BONUS_18, BEST_FIT, "g000-c0001")
     assert verdict.kind == "near"
     assert verdict.near and not verdict.rejects and not verdict.novel
@@ -158,17 +159,29 @@ def test_a_no_op_is_still_a_no_op_when_the_gate_is_on():
 
 def test_the_near_retry_hint_asks_for_a_new_rule_not_new_constants():
     index = _index()
-    index.add("g001-c0002", BONUS_20)
+    index.add("g001-c0002", BONUS_20, parent_block=BEST_FIT)
     verdict = index.check(BONUS_18, BEST_FIT, "g000-c0001")
     hint = verdict.retry_hint
     assert "closest to g001-c0002" in hint
     assert "similarity 1.00" in hint
-    assert "change the decision rule, not the constants" in hint
+    # The twin is another candidate that made the same change, not the parent:
+    # "not the constants" would be false here.
+    assert "g001-c0002 already made this change -- try a different one" in hint
+    assert "not the constants" not in hint
+
+
+def test_the_near_retry_hint_of_a_constants_only_change_asks_for_a_new_rule():
+    index = _index()
+    index.add("g000-c0001", BONUS_20)
+    verdict = index.check(BONUS_18, BONUS_20, "g000-c0001")
+    assert verdict.twin_id == "g000-c0001"
+    assert "change the decision rule, not the constants" in verdict.retry_hint
+    assert "already made this change" not in verdict.retry_hint
 
 
 def test_near_false_skips_the_gate_entirely():
     index = _index()
-    index.add("g001-c0002", BONUS_20)
+    index.add("g001-c0002", BONUS_20, parent_block=BEST_FIT)
     assert index.check(BONUS_18, BEST_FIT, "g000-c0001", near=False).novel
 
 
@@ -177,6 +190,123 @@ def test_a_gate_that_is_off_never_reports_a_near_duplicate():
     index.add("g001-c0002", BONUS_20)
     assert index.closest(BONUS_18) == (None, 0.0)
     assert index.check(BONUS_18, BEST_FIT, "g000-c0001").novel
+
+
+# -- the change, not the block (D5) -----------------------------------------
+
+
+PARENT_30 = '''\
+def priority(item, bins):
+    """Best fit with a residual bonus, a fullness tie-break and a cap."""
+    scores = []
+    capacity = 150.0
+    for index, b in enumerate(bins):
+        residual = b - item
+        if residual < 0:
+            scores.append(-1e9)
+            continue
+        fullness = 1.0 - b / capacity
+        score = -residual
+        score += 20.0 * math.exp(-((residual - 30.0) ** 2) / 128.0)
+        score += 0.5 * fullness
+        if residual == 0:
+            score += 1000.0
+        elif residual < 5:
+            score -= 50.0
+        score -= 0.001 * index
+        if score > 1e6:
+            score = 1e6
+        scores.append(score)
+    best = max(scores) if scores else 0.0
+    for index in range(len(scores)):
+        if scores[index] == best:
+            scores[index] += 0.1
+            break
+    total = sum(scores)
+    if total == 0:
+        return scores
+    return scores
+'''
+
+_ANCHOR = "        score -= 0.001 * index\n"
+BRANCHED = PARENT_30.replace(
+    _ANCHOR, _ANCHOR + "        if item > 0.5 * capacity and residual < 20:\n            score += 40.0 * (20 - residual)\n"
+)
+BRANCHED_AGAIN = PARENT_30.replace(
+    _ANCHOR, _ANCHOR + "        if item > 0.4 * capacity and residual < 25:\n            score += 30.0 * (25 - residual)\n"
+)
+BRANCHED_TWICE = BRANCHED.replace(
+    _ANCHOR, _ANCHOR + "        if item > 0.3 * capacity and residual < 10:\n            score += 10.0 * (10 - residual)\n"
+)
+MIN_NOT_MAX = PARENT_30.replace("best = max(scores)", "best = min(scores)")
+
+
+def test_adding_a_branch_to_a_thirty_line_parent_is_not_near():
+    assert local_similarity(BRANCHED, PARENT_30) > 0.97, "the premise: the whole-block cosine called this a twin"
+    index = _index()
+    index.add("g000-c0001", PARENT_30)
+    assert index.check(BRANCHED, PARENT_30, "g000-c0001").novel
+
+
+def test_the_same_change_to_the_same_parent_is_near():
+    index = _index()
+    index.add("g000-c0001", PARENT_30)
+    index.add("g001-c0002", BRANCHED, parent_block=PARENT_30)
+    verdict = index.check(BRANCHED_AGAIN, PARENT_30, "g000-c0001")
+    assert verdict.near and verdict.twin_id == "g001-c0002"
+    assert verdict.similarity >= 0.97
+
+
+def test_the_parent_is_never_its_childs_near_twin():
+    index = LocalNearIndex()
+    index.add("p", PARENT_30)
+    index.add("c", BRANCHED, parent_block=PARENT_30)
+    # c's grandchild repeats c's kind of change on c: c's own delta would match it.
+    twin, _ = index.closest(BRANCHED_TWICE, parent_block=BRANCHED, parent_id="c")
+    assert twin is None
+
+
+def test_a_constants_only_change_is_near_its_parent():
+    index = _index()
+    index.add("g000-c0001", BONUS_20)
+    verdict = index.check(BONUS_18, BONUS_20, "g000-c0001")
+    assert verdict.near and verdict.twin_id == "g000-c0001"
+    assert verdict.similarity == pytest.approx(1.0)
+
+
+def test_a_constants_only_change_with_no_parent_id_is_near_nothing():
+    index = LocalNearIndex()
+    index.add("g000-c0001", BONUS_20)
+    assert index.closest(BONUS_18, parent_block=BONUS_20) == (None, 0.0)
+
+
+def test_swapping_max_for_min_is_not_near_anything():
+    """Same node types, so the delta is empty; but the rule changed, not a constant."""
+    assert delta_grams(MIN_NOT_MAX, PARENT_30) == {}
+    index = _index()
+    index.add("g000-c0001", PARENT_30)
+    index.add("g001-c0002", BRANCHED, parent_block=PARENT_30)
+    assert index.closest(MIN_NOT_MAX, PARENT_30, "g000-c0001") == (None, 0.0)
+    assert index.check(MIN_NOT_MAX, PARENT_30, "g000-c0001").novel
+
+
+def test_a_parent_that_will_not_parse_does_not_break_the_gate():
+    index = _index()
+    index.add("g000-c0001", PARENT_30)
+    index.add("g001-c0002", BRANCHED, parent_block="def broken(:::")
+    # Everything the child has is what it added: tagged "+", so it can never
+    # match the starting point's untagged full vector (D5 again).
+    delta = delta_grams(BRANCHED_AGAIN, "def broken(:::")
+    assert delta and all(gram[0] == "+" for gram in delta)
+    twin, _ = index.closest(PARENT_30.replace("30.0", "31.0"), "def broken(:::", "g000-c0009")
+    assert twin != "g000-c0001", "a whole block is never compared with the starting point's"
+
+
+def test_a_delta_is_sign_tagged_and_a_seed_keeps_its_full_vector():
+    assert delta_grams(PARENT_30, None) == node_ngrams(PARENT_30)
+    delta = delta_grams(BRANCHED, PARENT_30)
+    assert delta and all(gram[0] in ("+", "-") for gram in delta)
+    assert any(gram[0] == "+" for gram in delta)
 
 
 # -- the embedding method --------------------------------------------------
@@ -214,6 +344,16 @@ def test_the_embedding_index_finds_the_identical_block_before_any_other():
     index.add("b", FIRST_FIT)
     twin, score = index.closest(FIRST_FIT)
     assert twin == "b" and score == pytest.approx(1.0)
+
+
+def test_the_embedding_index_never_returns_the_parent():
+    provider = FakeProvider(["x"])
+    index = EmbeddingNearIndex(provider=provider, model="fake-embed")
+    index.add("p", BEST_FIT)
+    index.add("c", FIRST_FIT, parent_block=BEST_FIT)
+    twin, score = index.closest(FIRST_FIT, parent_block=BEST_FIT, parent_id="c")
+    assert twin == "p" and score < 1.0
+    assert index.closest(BEST_FIT, parent_block=None, parent_id="p")[0] == "c"
 
 
 def test_an_empty_embedding_index_costs_nothing():
@@ -437,7 +577,7 @@ def priority(item, bins):
     return scores
 '''
 
-RETRY_KEY = "change the decision rule, not the constants"
+RETRY_KEY = "Your previous answer was closest to"
 
 
 def _driver(
@@ -538,6 +678,18 @@ def test_the_near_verdict_reaches_runs_jsonl(stubborn_run):
     assert row["rejected"] is False
     assert row["near_twin_id"]
     assert row["similarity"] >= 0.99
+
+
+def test_a_resume_rebuilds_the_near_index_the_way_the_live_run_built_it(stubborn_run):
+    driver, _provider, _summary = stubborn_run
+    resumed = Driver(
+        driver.config,
+        run_dir=driver.ledger.run_dir,
+        providers={"small": FakeProvider(["x"]), "strong": FakeProvider(["x"])},
+    )
+    resumed.resume()
+    assert resumed.novelty.near.vectors == driver.novelty.near.vectors
+    assert any(gram[0] in ("+", "-") for vector in driver.novelty.near.vectors.values() for gram in vector)
 
 
 def test_a_genuinely_new_retry_clears_the_near_flag(tmp_path):

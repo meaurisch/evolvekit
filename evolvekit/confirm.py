@@ -15,11 +15,14 @@ instance and every given seed -- under the stage's own `workers`, `pin_cpus`,
 (instance, seed) are queued next to each other, so that whatever the machine
 does over the hours (a laptop throttles) happens to all of them alike.
 
-The unit of the statistics is the instance. Per instance, the relative
-difference to the baseline is averaged over the seeds; over instances that
-gives a mean with a 95 % confidence interval (paired, Student's t) and an exact
-Wilcoxon signed-rank test. A confidence interval that includes zero is reported
-as what it is.
+The unit of the statistics is the instance. Per instance, the log ratio to the
+baseline -- `log base - log mine` when lower is better, the other way round
+when higher is -- is averaged over the seeds; over instances that gives a mean
+with a 95 % confidence interval (paired, Student's t) and an exact Wilcoxon
+signed-rank test. Every percentage is of the baseline's value, from the log
+quantity, so halving and doubling are one step either way and the noisy
+baseline run is no denominator. A confidence interval that includes zero is
+reported as what it is.
 
 Two searches of one problem -- another operator mix, a model among the
 operators, last month's run -- are compared the same way: `ID@OTHER_RUN_DIR`
@@ -41,11 +44,12 @@ from __future__ import annotations
 import json
 import math
 import re
+import statistics
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from statistics import fmean, stdev
-from typing import TYPE_CHECKING, Any, Callable, Sequence
+from statistics import fmean
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from evolvekit.candidate import SEED_OPERATOR, Candidate, splice_block
 from evolvekit.config import Config, ConfigError, StageConfig
@@ -56,210 +60,334 @@ from evolvekit.events import EventLog, Heartbeat
 from evolvekit.leaderboard import rank
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import run_lock
+from evolvekit.stats import _betainc, _t95, paired_summary, t_cdf, wilcoxon_signed_rank  # noqa: F401  (re-exported: importers below)
+from evolvekit.stats import holm, log_gain, margin_log, pct_from_log, posterior_mean_t
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
     from evolvekit.tree import Tree
 
 __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
-    "t_cdf", "decide", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT", "WORSE_CHANCE", "RULE_WORDS",
+    "t_cdf", "decide", "decision_of", "verdict_summary", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT",
+    "WORSE_CHANCE", "RULE_WORDS", "LEGACY_RULE_WORDS", "is_posterior", "apply_holm", "comparison_of",
+    "read_on_row", "runs_can_help",
 ]
 
 BASELINE = "baseline"
 
-USE_CHANCE = 0.9
-"""`decide` says "use" from this chance of a gain on."""
+USE_CHANCE = 0.95
+"""`decide` says "use" from this posterior chance of a gain on."""
 
 USE_MARGIN_PCT = 1.0
-"""... and only when the worst plausible case is within this many % of today."""
+"""The margin of `chance_margin` (the chance of losing no more than this many %),
+kept in `comparison.json` for engineers, and of the rule a comparison written
+before A1 was decided by. It does not decide: with x_m < 0, P(gain > x_m) is at
+least P(gain > 0), so a chance of a gain of 95 % already passes it."""
 
-WORSE_CHANCE = 0.1
-"""`decide` says "worse" up to this chance of a gain."""
+WORSE_CHANCE = 0.05
+"""`decide` says "worse" up to this chance of a gain, 5 %: P(gain < 0) >= 0.95,
+as strict as "use" (decision 14b)."""
 
-RULE_WORDS = (
-    "The app says use it when the chance of a gain is at least 9 in 10 "
-    "and the worst plausible case is within 1 % of today."
-)
+_LEGACY_WORSE_CHANCE = 0.1
+"""The "worse" of a comparison written before A1: a chance of a gain of 0.10 or less."""
+
+OBJECTIVE_ALONE = "the objective alone, for engineers: it does not decide"
+"""With goals in order of importance, the label of the objective's own summary and its decision."""
+
+_LEGACY_USE_CHANCE = 0.9
+"""The rule a comparison written before the posterior was decided by: "use"
+from a one-sided t chance of 0.9 with the 95 % lower bound within 1 %."""
+
+RULE_WORDS = "Use when the chance of a gain is at least 95 %."
 """The rule in one sentence, as the page states it."""
 
-
-# --------------------------------------------------------------------------
-# statistics: small, exact, standard library
-# --------------------------------------------------------------------------
-
-# Two-sided 95 % critical values of Student's t, by degrees of freedom.
-_T95 = (
-    12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
-    2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086,
-    2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042,
+LEGACY_RULE_WORDS = (
+    "The app says use it when the chance of a gain is at least 90 % "
+    "and the worst plausible case is within 1 % of today."
 )
+"""The rule a comparison written before A1 was decided by, as the page stated it then."""
 
-
-_Z975 = 1.959963984540054
-"""The normal quantile the t quantile falls towards as the samples grow."""
-
-
-def _t95(df: int) -> float:
-    """The two-sided 95 % critical value of Student's t with `df` degrees of
-    freedom. The table up to 30; beyond it the Cornish-Fisher expansion around
-    the normal quantile, which is within 0.0005 of the exact value from 30 on.
-    1.96 is the limit, not the value: at 31 it is 2.040, and an interval on
-    32 instances drawn with 1.96 is about 4 % narrower than it should be."""
-    if df < 1:
-        raise ValueError(f"degrees of freedom must be >= 1, got {df}")
-    if df <= len(_T95):
-        return _T95[df - 1]
-    z = _Z975
-    return (
-        z
-        + (z**3 + z) / (4 * df)
-        + (5 * z**5 + 16 * z**3 + 3 * z) / (96 * df**2)
-        + (3 * z**7 + 19 * z**5 + 17 * z**3 - 15 * z) / (384 * df**3)
-        + (79 * z**9 + 776 * z**7 + 1482 * z**5 - 1920 * z**3 - 945 * z) / (92160 * df**4)
-    )
-
-
-def _betacf(a: float, b: float, x: float) -> float:
-    """The continued fraction of the incomplete beta function at `x`, by the
-    modified Lentz method (Numerical Recipes `betacf`): 200 iterations at
-    most, stopped when a step changes the value by less than 1e-12."""
-    tiny = 1e-300
-    qab, qap, qam = a + b, a + 1.0, a - 1.0
-    c, d = 1.0, 1.0 - qab * x / qap
-    d = 1.0 / (d if abs(d) >= tiny else tiny)
-    h = d
-    for m in range(1, 201):
-        m2 = 2 * m
-        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
-        d = 1.0 + aa * d
-        d = 1.0 / (d if abs(d) >= tiny else tiny)
-        c = 1.0 + aa / c
-        c = c if abs(c) >= tiny else tiny
-        h *= d * c
-        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
-        d = 1.0 + aa * d
-        d = 1.0 / (d if abs(d) >= tiny else tiny)
-        c = 1.0 + aa / c
-        c = c if abs(c) >= tiny else tiny
-        step = d * c
-        h *= step
-        if abs(step - 1.0) < 1e-12:
-            break
-    return h
-
-
-def _betainc(a: float, b: float, x: float) -> float:
-    """The regularised incomplete beta function I_x(a, b), in [0, 1]. The
-    continued fraction converges fast for x below (a + 1) / (a + b + 2); past
-    it, the symmetry I_x(a, b) = 1 - I_{1-x}(b, a) brings it back."""
-    if x <= 0.0:
-        return 0.0
-    if x >= 1.0:
-        return 1.0
-    front = math.exp(
-        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
-    )
-    if x < (a + 1.0) / (a + b + 2.0):
-        return front * _betacf(a, b, x) / a
-    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
-
-
-def t_cdf(x: float, df: int) -> float:
-    """The probability that Student's t with `df` degrees of freedom is below
-    `x`: through I_z(df/2, 1/2) with z = df / (df + x²), no table and no
-    SciPy. It is what turns a mean and its spread into the chance that the
-    true mean gain is above zero."""
-    if df < 1:
-        raise ValueError(f"degrees of freedom must be >= 1, got {df}")
-    z = df / (df + x * x)
-    tail = 0.5 * _betainc(df / 2.0, 0.5, z)
-    return 1.0 - tail if x >= 0 else tail
-
-
-def wilcoxon_signed_rank(differences: Sequence[float]) -> dict[str, Any]:
-    """The exact two-sided Wilcoxon signed-rank test of "the median difference
-    is zero". Zeros are dropped, ties share their mean rank; the null
-    distribution is enumerated, so there is no normal approximation to distrust
-    at n = 10."""
-    values = [d for d in differences if d != 0]
-    n = len(values)
-    if n == 0:
-        return {"n": 0, "w_plus": 0.0, "p": None}
-    order = sorted(range(n), key=lambda i: abs(values[i]))
-    ranks2 = [0] * n  # twice the rank, so that a shared mean rank stays an integer
-    i = 0
-    while i < n:
-        j = i
-        while j + 1 < n and abs(values[order[j + 1]]) == abs(values[order[i]]):
-            j += 1
-        for k in range(i, j + 1):
-            ranks2[order[k]] = (i + 1) + (j + 1)
-        i = j + 1
-    w_plus2 = sum(r for r, v in zip(ranks2, values) if v > 0)
-    total2 = sum(ranks2)
-    counts = {0: 1}  # how many sign assignments give each (doubled) rank sum
-    for r in ranks2:
-        step: dict[int, int] = {}
-        for s, c in counts.items():
-            step[s] = step.get(s, 0) + c
-            step[s + r] = step.get(s + r, 0) + c
-        counts = step
-    extreme = min(w_plus2, total2 - w_plus2)
-    tail = sum(c for s, c in counts.items() if s <= extreme)
-    p = min(1.0, 2.0 * tail / (2 ** n))
-    return {"n": n, "w_plus": w_plus2 / 2.0, "p": p}
-
-
-def paired_summary(differences: Sequence[float]) -> dict[str, Any]:
-    """Mean, 95 % confidence interval and Wilcoxon test of per-instance
-    differences -- and, from two instances on, `chance`, the probability that
-    the true mean difference is above zero (one-sided, Student's t), and
-    `worst`, the lower end of the interval: the worst plausible case."""
-    n = len(differences)
-    if n == 0:
-        return {"n": 0, "mean": None, "ci95": None, "sd": None, "chance": None, "worst": None,
-                "wilcoxon": wilcoxon_signed_rank([]), "wins": 0, "losses": 0, "verdict": "nothing to compare"}
-    mean = fmean(differences)
-    wins, losses = sum(1 for d in differences if d > 0), sum(1 for d in differences if d < 0)
-    if n < 2:
-        return {"n": n, "mean": mean, "ci95": None, "sd": None, "chance": None, "worst": None,
-                "wilcoxon": wilcoxon_signed_rank(differences), "wins": wins, "losses": losses,
-                "verdict": "one instance: no interval can be given"}
-    sd = stdev(differences)
-    half = _t95(n - 1) * sd / math.sqrt(n)
-    low, high = mean - half, mean + half
-    if sd > 0:
-        chance = t_cdf(mean / (sd / math.sqrt(n)), n - 1)
-    else:  # every instance moved by the same amount: there is nothing to be unsure about
-        chance = 1.0 if mean > 0 else 0.0 if mean < 0 else 0.5
-    if low > 0:
-        verdict = "better than the baseline: the 95 % interval lies above zero"
-    elif high < 0:
-        verdict = "WORSE than the baseline: the 95 % interval lies below zero"
-    else:
-        verdict = "not distinguishable from the baseline: the 95 % interval includes zero"
-    return {"n": n, "mean": mean, "sd": sd, "ci95": [low, high], "chance": chance, "worst": low,
-            "wilcoxon": wilcoxon_signed_rank(differences), "wins": wins, "losses": losses, "verdict": verdict}
+PRIOR = "reference"
+"""The posterior's prior, as `comparison.json` names it: p(mu, sigma^2) ~ 1 / sigma^2."""
+FREQUENTIST_LABEL = "frequentist 95 % confidence interval and Wilcoxon test, for engineers"
+CHANCE_MARGIN_LABEL = "the chance of losing no more than 1 %, for engineers: it does not decide"
 
 
 def decide(summary: dict[str, Any]) -> str:
-    """One fixed rule on a `paired_summary`, for a planner who has to choose:
-    "use" when the chance of a gain is at least `USE_CHANCE` and the worst
-    plausible case is within `USE_MARGIN_PCT` of today; "worse" when the
-    chance is `WORSE_CHANCE` or less; "keep" (today's settings) in between.
-    "single" with one instance, where no range can be given, and "none" with
-    nothing to compare. `RULE_WORDS` says the same in a sentence."""
+    """One fixed rule on a `verdict_summary`, for a planner who has to choose:
+    "use" when the posterior chance of a gain is at least `USE_CHANCE`;
+    "worse" when the chance of a gain is `WORSE_CHANCE` or less; "keep"
+    (today's settings) in between. "single" with one instance, where no
+    chance can be given, and "none" with nothing to compare. `RULE_WORDS`
+    says the same in a sentence.
+
+    A summary without `posterior` was written before A1: it is decided by
+    the rule it was decided by then (a chance of 0.9 and the 95 % lower bound
+    within 1 %), so a stored comparison keeps its answer."""
     n = int(summary.get("n") or 0)
     if n == 0:
         return "none"
     if n == 1:
         return "single"
-    chance, worst = float(summary["chance"]), float(summary["worst"])
+    chance = float(summary["chance"])
+    if not is_posterior(summary):
+        if chance <= _LEGACY_WORSE_CHANCE:
+            return "worse"
+        return "use" if chance >= _LEGACY_USE_CHANCE and float(summary["worst"]) >= -USE_MARGIN_PCT else "keep"
     if chance <= WORSE_CHANCE:
         return "worse"
-    if chance >= USE_CHANCE and worst >= -USE_MARGIN_PCT:
+    if chance >= USE_CHANCE and failed_more(summary.get("failed") or {}) is None:
         return "use"
     return "keep"
+
+
+def failed_more(counts: Mapping[str, Any]) -> int | None:
+    """The runs a candidate failed that the starting point finished, when
+    there are more of them than the other way round (pairs only the
+    candidate failed > pairs only the starting point failed), else None.
+    Such a candidate is never "use" (decision 14a): a crash costs at most its
+    best finished gain, so a program that crashes on a third of its runs
+    could otherwise pass. `counts` is a result or a summary's `failed`:
+    `candidate_failed_pairs` and `baseline_failed_pairs`."""
+    mine, theirs = int(counts.get("candidate_failed_pairs") or 0), int(counts.get("baseline_failed_pairs") or 0)
+    return mine if mine > theirs else None
+
+
+def failed_words(runs: int) -> str:
+    """Why a candidate that failed more than the starting point is not "use", in its sentence."""
+    return f"it failed {runs} run{'s' if runs != 1 else ''} the starting point finished"
+
+
+def is_posterior(summary: dict[str, Any]) -> bool:
+    """Whether a summary carries A1's posterior (`verdict_summary`), not a
+    comparison written before it: the words of the chance follow the rule
+    it was decided by."""
+    return isinstance(summary.get("posterior"), dict)
+
+
+def _chance2(p: float) -> float:
+    """A chance to two places, never on the far side of a threshold of the
+    rule: rounded, then held on its own side of `USE_CHANCE` and
+    `WORSE_CHANCE` (a keep never prints 0.95 nor 0.05), of 1 and of 0 (a
+    chance below 1 never prints 1.00, above 0 never 0.00)."""
+    shown = round(p, 2)
+    if p < USE_CHANCE <= shown:
+        shown = USE_CHANCE - 0.01
+    if p > WORSE_CHANCE >= shown:
+        shown = WORSE_CHANCE + 0.01
+    if p < 1.0 <= shown:
+        shown = 0.99
+    if p > 0.0 >= shown:
+        shown = 0.01
+    return round(shown, 2)
+
+
+def decision_of(result: dict[str, Any]) -> str:
+    """What one candidate's comparison says: `keep` when every run gave
+    exactly the starting point's result (its change was not exercised, so
+    there is nothing to decide on); by the levels when the study scores by
+    levels (their `decision`; a result written before it had only
+    `confirmed`); else `decide` on its `verdict_summary`. A "use" is kept
+    when it failed more runs than the starting point (`failed_more`) only by a
+    comparison written before A1 (no posterior), which keeps its answer."""
+    if result.get("identical"):
+        return "keep"
+    if "levels" in result:
+        levels = result["levels"]
+        decision = levels.get("decision") or ("use" if levels["confirmed"] else "keep")
+    else:
+        decision = decide(result["summary"])
+    legacy = "summary" in result and not is_posterior(result["summary"] or {})  # written before A1: its rule
+    if decision == "use" and not legacy and failed_more(result) is not None:
+        return "keep"  # it failed more runs than the starting point did (decision 14a)
+    if decision == "use" and (result.get("holm") or {}).get("passed") is False:
+        return "keep"  # its own chance passes the rule; chosen among its rivals, it does not
+    return decision
+
+
+HOLM_ALPHA = 1.0 - USE_CHANCE
+"""Holm's level over the candidates or branches of a family: one minus the chance "use" needs."""
+BEFORE_HOLM = "its own answer, before the choice among several (Holm): the result's decision decides"
+"""A family member's `summary.decision_label`: the result's `decision` is the answer after Holm."""
+
+
+def apply_holm(results: Mapping[str, dict[str, Any]], *, what: str) -> None:
+    """Pay for a choice among several: each result of the family that is
+    `use` by its own summary keeps it only when Holm's step-down over the
+    family passes on p = 1 - P(gain > 0) at `HOLM_ALPHA` (decision 13: one
+    leg, the rule's own chance). The family is the results that are not
+    `identical` and carry A1's posterior over two instances or more, or --
+    a study scored by levels -- a levels `decision`: its p is one minus the
+    deciding level's chance when that decision is `use`, else 1 (it has no
+    "use" to keep). With fewer than two members there is no choice and
+    nothing changes. Each member gets `result["holm"] = {"k", "what",
+    "own", "passed"}` (`own` is its decision before Holm); `decision_of`
+    reads it, and `result["decision"]` is what it reads after Holm, every
+    result's (R3). In a family, a summary not under levels labels its own
+    `decision` as the answer before Holm (`BEFORE_HOLM`). `what` is
+    "branches", "candidates" or "kinds of case"."""
+    family: dict[str, tuple[float, str]] = {}
+    for cid, r in results.items():
+        if r.get("identical"):
+            continue
+        levels = r.get("levels")
+        if isinstance(levels, dict):
+            if levels.get("decision") is None:
+                continue  # a levels result written before A1.5
+            row = read_on_row(levels)
+            use = levels["decision"] == "use" and row is not None and row.get("chance") is not None
+            family[cid] = (1.0 - float(row["chance"]) if use else 1.0, str(levels["decision"]))
+        elif ((r.get("summary") or {}).get("n", 0) >= 2 and is_posterior(r["summary"])
+              and r["summary"].get("chance") is not None):
+            family[cid] = (1.0 - float(r["summary"]["chance"]), decide(r["summary"]))
+    if len(family) < 2:
+        for r in results.values():
+            r.pop("holm", None)
+    else:
+        passed = holm({cid: p for cid, (p, _own) in family.items()}, HOLM_ALPHA)
+        for cid, (_p, own) in family.items():
+            results[cid]["holm"] = {"k": len(family), "what": what, "own": own, "passed": passed[cid]}
+    for r in results.values():
+        summary = r.get("summary")
+        if isinstance(summary, dict) and "levels" not in r:
+            if "holm" in r:
+                summary["decision_label"] = BEFORE_HOLM
+            elif summary.get("decision_label") == BEFORE_HOLM:
+                summary.pop("decision_label")
+        if isinstance(summary, dict) or isinstance(r.get("levels"), dict):
+            r["decision"] = decision_of(r)  # the answer after Holm; the summary's is before it
+
+
+def read_on_row(levels: dict[str, Any]) -> dict[str, Any] | None:
+    """The row of the level a levels result's descent stopped on
+    (`_analyse_levels`' `read_on`), or None for a result written before it."""
+    at, rows = levels.get("read_on"), levels.get("levels") or []
+    return rows[at - 1] if isinstance(at, int) and 1 <= at <= len(rows) else None
+
+
+CASES_LIMIT_SHARE = 0.25
+LIMITED_BY_CASES = ("the answer is set by the held-back cases, not by the runs: "
+                    "hold back more cases for a firmer answer")
+
+
+def within_share(per_instance: Sequence[dict[str, Any]]) -> float | None:
+    """The share of the spread of the mean gain that more runs could shrink.
+
+    `E[var(d_i)] = tau^2 + mean(sigma_i^2 / n_i)`: the cases' own spread plus
+    the runs' noise left in each case's mean. `within` is that second part
+    (the run-to-run variance pooled over the cases that have one, divided by
+    the gains each case used, averaged over all cases), `between` the
+    method-of-moments tau^2, and the share is `within / (within + between)`:
+    only `within` falls with more runs. None when it cannot be told (fewer
+    than two cases with a gain, or no case with a run-to-run variance);
+    0.0 when nothing varies at all (more runs add nothing)."""
+    rows = [r for r in per_instance if r.get("log_gain") is not None]
+    gains = [r["log_gain"] for r in rows]
+    spread = [(max(1, int(r.get("pairs") or 1)) - 1, r["seed_var"]) for r in rows if r.get("seed_var") is not None]
+    if len(gains) < 2 or not spread or sum(df for df, _ in spread) <= 0:
+        return None
+    # The run-to-run variance pooled over the cases that have one (a case with a single
+    # gain has none, but its mean is as noisy as the rest): each case's mean carries it / n_i.
+    pooled = sum(df * v for df, v in spread) / sum(df for df, _ in spread)
+    within = pooled * fmean(1 / max(1, int(r.get("pairs") or 1)) for r in rows)
+    between = max(0.0, statistics.variance(gains) - within)
+    if within + between <= 0:
+        return 0.0
+    return within / (within + between)
+
+
+def runs_can_help(result: dict[str, Any]) -> bool:
+    """Whether more runs per case could still open the answer: unless the
+    cases' own spread is most of it (`within_share` under `CASES_LIMIT_SHARE`),
+    in which case only more held-back cases could. With levels, the gains
+    are those of the level the descent stopped on, not the objective's."""
+    rows = result.get("per_instance") or []
+    row = read_on_row(result["levels"]) if isinstance(result.get("levels"), dict) else None
+    if row is not None and row.get("per_case") is not None:
+        # Scored by levels: the level the descent stopped on is the one more runs would have to open.
+        rows = [{"log_gain": c["gain"], "pairs": c["pairs"], "seed_var": c["seed_var"]} for c in row["per_case"]]
+    share = within_share(rows)
+    return share is None or share >= CASES_LIMIT_SHARE
+
+
+def _run_noise_of(seed_row: dict[str, Any], objective: str) -> float | None:
+    """The starting point's run-to-run noise of the objective, for engineers:
+    its coefficient of variation when the search measured one (to first
+    order, the sd of the log objective), else None. It is recorded, not a
+    prior: the posterior's spread is the cases' own (`posterior_mean_t`)."""
+    cv = (seed_row.get("kpi_cv") or {}).get(objective) if isinstance(seed_row.get("kpi_cv"), dict) else None
+    if isinstance(cv, (int, float)) and math.isfinite(cv) and cv > 0:
+        return float(cv)
+    return None
+
+
+def verdict_summary(d: Sequence[float], *, direction: str,
+                    failed: Mapping[str, int] | None = None) -> dict[str, Any]:
+    """The one place that decides: per-case log gains `d` to the numbers a
+    person is shown and the decision they are read by.
+
+    The posterior of the true mean gain under the reference prior
+    (`stats.posterior_mean_t`: Student's t with n - 1 degrees of freedom
+    around the cases' mean, scale s / sqrt(n)). `mean` is its mean (the
+    cases' mean), `ci95` its 95 % credible interval (for engineers),
+    `range90` its 90 % credible interval (the 5 % and 95 % quantiles: the
+    range a person is shown), `chance` P(gain > 0), `chance_margin` P(gain >
+    the 1 % margin) and `worst` the 5 % quantile, the one-sided bound the rule
+    reads and `range90`'s low end -- all in percent of the starting
+    point's value (`pct_from_log`); `log` and `posterior` keep the log-scale
+    numbers. The frequentist interval and Wilcoxon test are under
+    `frequentist`, for engineers. `decision` is `decide` of this summary and
+    `verdict` says it in a sentence. `failed` (`candidate_failed_pairs`,
+    `baseline_failed_pairs`) is kept as the summary's `failed`: a candidate
+    that failed more runs than the starting point is never "use"
+    (`failed_more`), and the sentence says so."""
+    d = [float(x) for x in d]
+    n = len(d)
+    wins, losses = sum(1 for x in d if x > 0), sum(1 for x in d if x < 0)
+    if n == 0:
+        out: dict[str, Any] = {"n": 0, "mean": None, "ci95": None, "range90": None, "chance": None, "chance_margin": None,
+                               "worst": None, "wins": 0, "losses": 0, "verdict": "nothing to compare"}
+        out["decision"] = decide(out)
+        return out
+    if n == 1:
+        out = {"n": 1, "mean": pct_from_log(d[0], direction), "ci95": None, "range90": None, "chance": None,
+               "chance_margin": None,
+               "worst": None, "wins": wins, "losses": losses, "log": {"mean": d[0], "sd": None, "ci95": None},
+               "verdict": "one instance: no chance can be given"}
+        out["decision"] = decide(out)
+        return out
+    post = posterior_mean_t(d)
+    low, high = post.interval95()
+    worst_log, high90 = post.interval90()
+    chance = post.p_above(0.0)
+    chance_margin = post.p_above(margin_log(USE_MARGIN_PCT, direction))
+    out = {
+        "n": n,
+        "mean": pct_from_log(post.mu, direction),
+        "ci95": [pct_from_log(low, direction), pct_from_log(high, direction)],
+        "chance": chance,
+        "chance_margin": chance_margin,
+        "chance_margin_label": CHANCE_MARGIN_LABEL,
+        "worst": pct_from_log(worst_log, direction),
+        # The range a person is shown: its low end is `worst`, the same number (decision 15).
+        "range90": [pct_from_log(worst_log, direction), pct_from_log(high90, direction)],
+        "wins": wins, "losses": losses,
+        "log": {"mean": post.mu, "sd": statistics.stdev(d), "ci95": [low, high], "range90": [worst_log, high90],
+                "worst": worst_log},
+        "prior": PRIOR,
+        "posterior": {"mu": post.mu, "scale": post.scale, "df": post.df},
+        "frequentist": {**_pct_summary(paired_summary(d), direction), "label": FREQUENTIST_LABEL},
+    }
+    if failed:
+        out["failed"] = dict(failed)
+    decision = decide(out)
+    said = f"a chance of a gain of {_chance2(chance):.2f}"
+    more = failed_more(failed or {})
+    if more is not None:
+        said += f"; {failed_words(more)}"
+    verdict = {"use": "probably better", "worse": "probably WORSE"}.get(decision, "not proven") + f": {said}"
+    out["decision"], out["verdict"] = decision, verdict + " (reference prior)"
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -285,12 +413,23 @@ class Comparison:
     levels: list[dict[str, Any]] = field(default_factory=list)
     """`evaluate.score.levels`, described: the comparison is then made level
     by level as well (`_analyse_levels`). Empty for a single objective."""
+    run_noise: float | None = None
+    """The starting point's run-to-run noise of the objective (`_run_noise_of`), for engineers."""
+    prior: str = PRIOR
+    """The posterior's prior, by name."""
+    looks: int = 1
+    """How many times this comparison's answer has been read (written): a
+    check extended or run again under one label reads it again; one whose
+    runs all came from the cache measured nothing new and is not another read,
+    and another baseline or other candidates under the label start at 1
+    (`_looks_before`)."""
 
     def to_json(self) -> dict[str, Any]:
         return {
             "label": self.label, "objective": self.objective, "direction": self.direction,
             "stage": self.stage, "seeds": self.seeds, "instances": self.instances,
             "baseline_id": self.baseline_id, "candidates": self.candidates,
+            "prior": self.prior, "run_noise": self.run_noise, "looks": self.looks,
             "levels": self.levels, "per_candidate": self.per_candidate,
         }
 
@@ -359,6 +498,26 @@ def _select(rows: list[dict[str, Any]], wanted: str) -> list[dict[str, Any]]:
     return [_find(rows, spec.strip(), "--candidates") for spec in wanted.split(",") if spec.strip()]
 
 
+def _looks_before(out_dir: Path, *, baseline_id: str, candidates: Sequence[str]) -> int:
+    """How many times this comparison was read before under its label: its
+    `comparison.json`'s `looks` (1 for one written before it said so), 0
+    with no file -- and 0 when that file compared other configurations
+    (another `baseline_id` or other `candidates`: a run continued and checked
+    again under `final` compares its new best, whose answer was never read).
+    A stopped comparison writes nothing, so it is no look."""
+    path = out_dir / "comparison.json"
+    if not path.is_file():
+        return 0
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        looks = stored.get("looks", 1)
+    except (OSError, ValueError, AttributeError):
+        return 1
+    if stored.get("baseline_id") != baseline_id or list(stored.get("candidates") or []) != list(candidates):
+        return 0
+    return int(looks) if isinstance(looks, int) and looks >= 1 else 1
+
+
 class ConfirmStopped(RuntimeError):
     """The comparison was stopped before it finished (`stop` was set). Its
     finished runs are cached: running the same confirmation again resumes it."""
@@ -373,6 +532,7 @@ def confirm(
     instances: Sequence[str] | None = None,
     label: str = "confirm",
     against: str | None = None,
+    family: bool = False,
     log: Callable[[str], None] = print,
     stop: threading.Event | None = None,
 ) -> Comparison:
@@ -380,7 +540,10 @@ def confirm(
 
     `stop`, once set, stops the runs in flight and starts no other, and the
     comparison ends with `ConfirmStopped` instead of a verdict on half the
-    pairs."""
+    pairs.
+
+    `family`: the candidates are a choice among several (a bake-off), so each
+    pays for it (`apply_holm`); `candidates="top:N"` with N > 1 always is."""
     run_dir = Path(run_dir)
     rows = list(read_jsonl(run_dir / "runs.jsonl"))
     if against is not None:
@@ -414,6 +577,8 @@ def confirm(
         stage = _with_instances(config, stage, instances)
 
     chosen = _select(rows, candidates)
+    top = candidates.startswith("top:")
+    family = family or (top and len(chosen) > 1)
     _disambiguate([seed_row, *chosen])
     names = [str(r["id"]) for r in chosen]
     twice = sorted({n for n in names if names.count(n) > 1})
@@ -431,7 +596,10 @@ def confirm(
         stage=stage.id, seeds=list(seeds), instances=list(stage.instance_names()),
         baseline_id=str(seed_row["id"]), candidates=[str(r["id"]) for r in chosen],
         levels=[level.describe() for level in config.evaluate.score.levels],
+        run_noise=_run_noise_of(seed_row, config.evaluate.score.objective),
     )
+    comparison.looks = _looks_before(out_dir, baseline_id=comparison.baseline_id,
+                                     candidates=comparison.candidates) + 1
 
     def observer_for(name: str) -> Callable[..., None]:
         def observe(type: str, **fields: Any) -> None:
@@ -463,7 +631,8 @@ def confirm(
                                 **on_tree(config.problem, tree_made)))
                 made.append(tree_made)
             _compare(config, comparison, stage, jobs, made, work=work, seeds=seeds, label=label, log=log,
-                     events=events, heartbeat=heartbeat, stop=stop)
+                     events=events, heartbeat=heartbeat, stop=stop,
+                     family=("candidates" if top else "branches") if family else None)
         finally:
             if config.problem.tree is not None:
                 _put_trees_back(config, work, log)
@@ -473,9 +642,10 @@ def confirm(
 def _compare(
     config: Config, comparison: Comparison, stage: StageConfig, jobs: list[Job], made: list[Tree | None], *,
     work: Path, seeds: Sequence[int], label: str, log: Callable[[str], None], events: EventLog,
-    heartbeat: Heartbeat, stop: threading.Event | None,
+    heartbeat: Heartbeat, stop: threading.Event | None, family: str | None = None,
 ) -> None:
-    """Every configuration's runs, then the statistics and the files."""
+    """Every configuration's runs, then the statistics and the files.
+    `family` names what the candidates are a choice among (`apply_holm`)."""
     out_dir = work.parent
     planned = len(jobs) * len(stage.instances) * len(seeds)
     log(
@@ -540,7 +710,11 @@ def _compare(
         heartbeat.stop(phase="interrupted" if interrupted else "crashed")
         raise
 
+    if comparison.looks > 1 and comparison.runs and all(r.get("cached") for r in comparison.runs):
+        comparison.looks -= 1  # every run came from the cache: nothing new was measured, so no new read
     _analyse(comparison)
+    if family:
+        apply_holm(comparison.per_candidate, what=family)
     (out_dir / "results.json").write_text(json.dumps(comparison.runs, indent=1), encoding="utf-8")
     (out_dir / "comparison.json").write_text(json.dumps(comparison.to_json(), indent=1), encoding="utf-8")
     (out_dir / "comparison.md").write_text(render_markdown(comparison), encoding="utf-8", newline="\n")
@@ -615,7 +789,7 @@ def _materialise(
 
 
 _PAIR_COUNTS = ("finished_pairs", "candidate_failed_pairs", "baseline_failed_pairs", "both_failed_pairs",
-                "zero_baseline_pairs")
+                "nonpositive_pairs")
 
 
 def identical_runs(runs: Sequence[dict[str, Any]], candidate: str, kpis: Sequence[str],
@@ -644,20 +818,44 @@ def identical_runs(runs: Sequence[dict[str, Any]], candidate: str, kpis: Sequenc
     return True
 
 
+_SMALLEST_FAILURE_LOG = math.log(1.01)
+"""What a failure counts as when nothing in the comparison measured any gain: 1 %."""
+
+
 def _analyse(comparison: Comparison) -> None:
-    """Per candidate: the per-instance improvements and their summary.
+    """Per candidate: the per-instance gains and their summary.
+
+    The gain of a pair is the log ratio `s * (log base - log mine)`, s = +1
+    to minimise and -1 to maximise; per instance its mean over the seeds
+    (`log_gain`, with `seed_var` the variance of the gains it is the mean of
+    and `pairs` their count), shown as `improvement_pct`, in percent of the
+    baseline's value. The summary is `verdict_summary` of the instances' log
+    gains -- the posterior, the decision and its sentence -- with its mean,
+    interval and worst case in percent too (`log` keeps them on the log
+    scale) and the frequentist interval under `frequentist`.
 
     A failed run is part of the result, not a gap in it. When only one side of
     an (instance, seed) pair failed or timed out, that side lost the pair: it
-    is counted as a difference as large as the largest one measured anywhere
-    in this comparison -- a loss when the candidate failed, a win when the
-    baseline did -- so a configuration that fails often cannot be judged on its
-    lucky runs, and a failure never weighs less than a real result. A pair in
-    which both failed, or whose baseline is 0 (a percentage of it is no
-    number), says nothing about either and is left out. Every kind is counted,
-    and the summary over finished pairs alone is kept beside the result.
+    is counted as a log gain as large as the largest one measured on this
+    candidate's own finished pairs -- a loss when the candidate failed, a win
+    when the baseline did -- so a configuration that fails often cannot be
+    judged on its lucky runs, and a failure never weighs less than a real
+    result. When the candidate's finished pairs barely differ from the
+    baseline (its own largest is below `log(1.01)`) and it failed a pair the
+    baseline finished, a one-sided pair is sized by the largest gain of any
+    candidate's finished pairs in this comparison, and by at least `log(1.01)`
+    (1 %): a crash is never a loss of 0 %. A pair only the baseline failed is
+    then a win of the same size, so failures that strike both programs alike
+    (timeouts, a flaky machine) cancel out. When the candidate failed no pair
+    the baseline finished nothing is floored: a pair only the baseline failed
+    keeps the candidate's own largest, so a change that does nothing gains
+    nothing from the baseline's crashes alone. A pair in
+    which both failed, or with a value of 0 or below on either side (a log
+    ratio of it is no number), says nothing about either and is left out.
+    Every kind is counted, and the summary over finished pairs alone is kept
+    beside the result.
     """
-    objective, sign = comparison.objective, (1.0 if comparison.direction == "minimize" else -1.0)
+    objective, direction = comparison.objective, comparison.direction
     table: dict[str, dict[tuple[str, int], float]] = {}
     for run in comparison.runs:
         if run["ok"] and objective in run["kpis"]:  # a retry that went through replaces the failure before it
@@ -665,24 +863,35 @@ def _analyse(comparison: Comparison) -> None:
     base = table.get(BASELINE, {})
     kpis = list(dict.fromkeys([objective, *(str(level["kpi"]) for level in comparison.levels)]))
 
-    def gain(key: tuple[str, int], mine: dict[tuple[str, int], float]) -> float:
-        return 100.0 * sign * (base[key] - mine[key]) / abs(base[key])
+    def largest_of(cid: str) -> float | None:
+        mine = table.get(cid, {})
+        measured = [log_gain(base[k], mine[k], direction) for k in base.keys() & mine.keys()]
+        return max((abs(g) for g in measured if g is not None), default=None)
 
+    anywhere = max((g for g in map(largest_of, comparison.candidates) if g is not None), default=0.0)
     for cid in comparison.candidates:
         mine = table.get(cid, {})
-        measured = [gain(k, mine) for k in base.keys() & mine.keys() if base[k] != 0]
-        largest = max((abs(g) for g in measured), default=None)
+        largest = largest_of(cid)  # the size of a loss (the candidate failed) and, the same, of a win (the baseline did)
+        planned_keys = [(instance, s) for instance in comparison.instances for s in comparison.seeds]
+        if (largest is not None and largest < _SMALLEST_FAILURE_LOG
+                and any(k in base and k not in mine for k in planned_keys)):
+            # Its finished pairs barely differ from the baseline, and a pair the baseline finished and it did
+            # not: its crash still counts as a real loss, at least 1 % (decision 14a). A crash of the baseline
+            # is then a win of the same size, so failures that strike both alike cancel out (round 4). With no
+            # crash of its own nothing is floored, and the baseline's crashes win only its own largest (R1).
+            largest = max(largest, anywhere, _SMALLEST_FAILURE_LOG)
         per_instance, finished_only = [], []
         for instance in comparison.instances:
             counts = dict.fromkeys(_PAIR_COUNTS, 0)
             gains, finished, pairs = [], [], []
             for key in [(instance, s) for s in comparison.seeds]:
                 if key in base and key in mine:
-                    if base[key] == 0:
-                        counts["zero_baseline_pairs"] += 1
+                    gain = log_gain(base[key], mine[key], direction)
+                    if gain is None:
+                        counts["nonpositive_pairs"] += 1
                         continue
                     counts["finished_pairs"] += 1
-                    finished.append(gain(key, mine))
+                    finished.append(gain)
                     pairs.append((base[key], mine[key]))
                 elif key in base:
                     counts["candidate_failed_pairs"] += 1
@@ -700,25 +909,33 @@ def _analyse(comparison: Comparison) -> None:
             )
             if finished:
                 finished_only.append(fmean(finished))
+            mean = fmean(gains) if gains else None
             per_instance.append({
                 "instance": instance, "pairs": len(gains),
                 "baseline": fmean(b for b, _ in pairs) if pairs else None,
                 "candidate": fmean(c for _, c in pairs) if pairs else None,
-                "improvement_pct": fmean(gains) if gains else None,
+                "log_gain": mean,
+                "seed_var": statistics.variance(gains) if len(gains) >= 2 else None,
+                "improvement_pct": pct_from_log(mean, direction) if mean is not None else None,
                 "pair_wins": sum(1 for g in gains if g > 0),
                 **counts,
             })
-        differences = [r["improvement_pct"] for r in per_instance if r["improvement_pct"] is not None]
+        log_gains = [r["log_gain"] for r in per_instance if r["log_gain"] is not None]
         failed = sum(1 for r in comparison.runs if r["configuration"] in (cid, BASELINE) and not r["ok"])
         planned = len(comparison.instances) * len(comparison.seeds)
         totals = {name: sum(r[name] for r in per_instance) for name in (*_PAIR_COUNTS, "failed_pairs")}
-        summary = paired_summary(differences)
-        summary["verdict"] += _counted_as(totals, largest)
+        one_sided = {key: totals[key] for key in ("candidate_failed_pairs", "baseline_failed_pairs")}
+        summary = verdict_summary(log_gains, direction=direction, failed=one_sided)
+        summary["verdict"] += _counted_as(totals, largest, direction)
+        if comparison.levels:
+            summary["decision_label"] = OBJECTIVE_ALONE  # the levels decide (`_analyse_levels`)
         comparison.per_candidate[cid] = {
             "per_instance": per_instance,
+            "log_gains": log_gains,
             "summary": summary,
-            "finished_only": paired_summary(finished_only),
-            "failure_counted_as_pct": largest,
+            "finished_only": verdict_summary(finished_only, direction=direction),
+            "failure_counted_as_log": largest,
+            "failure_counted_as_pct": _failure_sizes(largest, direction),
             "pairs": sum(r["pairs"] for r in per_instance),
             "pairs_planned": planned,
             "failed_runs": failed,
@@ -727,34 +944,85 @@ def _analyse(comparison: Comparison) -> None:
             "identical": identical_runs(comparison.runs, cid, kpis, comparison.instances, comparison.seeds),
         }
         if comparison.levels:
-            comparison.per_candidate[cid]["levels"] = _analyse_levels(comparison, cid)
+            levels = comparison.per_candidate[cid]["levels"] = _analyse_levels(comparison, cid)
+            more = failed_more(one_sided)
+            if more is not None:  # never "use" when it failed more runs than the starting point (decision 14a)
+                levels["verdict"] += f"; {failed_words(more)}"
+                if levels["decision"] == "use":
+                    levels["decision"], levels["confirmed"] = "keep", False
+
+
+def _failure_sizes(largest: float | None, direction: str) -> dict[str, float] | None:
+    """The imputed pairs in percent, as the comparison used them: a pair only
+    the candidate failed counts as `-largest`, a loss of `-pct_from_log(-largest)`;
+    one only the baseline failed as `+largest`, a win of `pct_from_log(largest)`.
+    Both are the same log size: the candidate's own largest gain, or, when it
+    failed a pair beside finished pairs that barely differ, that floored at
+    1 %. In percent the two differ (twice the cost is 100 % more, half of it
+    50 % less)."""
+    if largest is None:
+        return None
+    return {"loss": -pct_from_log(-largest, direction), "win": pct_from_log(largest, direction)}
+
+
+def _pct_summary(summary: dict[str, Any], direction: str) -> dict[str, Any]:
+    """A `paired_summary` of log gains, its `mean`, `ci95` and `worst` in
+    percent of the baseline's value (`pct_from_log`); `chance` is the same on
+    either scale. `log` keeps the mean, sd and interval as they were: the sd
+    is only there, so no reader puts a log sd beside a percent mean."""
+    out = dict(summary)
+    out["log"] = {"mean": summary["mean"], "sd": out.pop("sd"), "ci95": summary["ci95"]}
+
+    def pct(value: float | None) -> float | None:
+        return None if value is None else pct_from_log(value, direction)
+
+    out["mean"], out["worst"] = pct(summary["mean"]), pct(summary["worst"])
+    out["ci95"] = None if summary["ci95"] is None else [pct(v) for v in summary["ci95"]]
+    return out
 
 
 def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
     """`evaluate.score.levels`, compared level by level, and a lexicographic verdict.
 
-    Per level, the paired difference per (instance, seed), signed so that
-    positive is better, averaged over the seeds of an instance; over
-    instances a mean with a 95 % interval. The difference is in percent of the
-    baseline's value on the same instance and seed, as for the objective --
-    instances of different size then count alike -- unless some baseline
-    value is 0: a level is often a count (late tasks, missed tasks) and a
-    percentage of 0 is no number, so such a level is compared in the KPI's own
-    units, and says so (`unit`). A pair only one side finished counts against
-    the side that failed, as large as the largest difference measured on that
-    level. A relative tolerance is a fraction of the baseline's value; an
-    absolute one is in the KPI's units (in percent of the baseline's mean when
-    the level is compared in percent).
+    Per level, the paired gain per (instance, seed), positive when better,
+    averaged over the seeds of an instance; over instances the posterior of
+    its mean (`verdict_summary`: a mean, a 95 % interval and the chance of a
+    gain). The gain is the log ratio of the baseline's and the candidate's
+    value, as for the objective -- instances of different size then count
+    alike -- shown in percent of the baseline's value, unless some value is 0
+    or below: a level is often a count (late tasks, missed tasks) and a ratio
+    of 0 is no number, so such a level is compared as a plain difference in
+    the KPI's own units, and says so (`unit`). A pair only one side finished
+    counts against the side that failed, as large as the largest gain
+    measured on that level. A relative tolerance is a fraction of the
+    baseline's value (0 when that is 0); an absolute one is in the KPI's units. On a level
+    compared in percent an absolute tolerance is taken as that percent of
+    the baseline's mean (`100 * t / |mean|`) -- an approximation: the
+    interval is per-case log ratios shown in percent, and a case far from
+    the mean has its own percent for the same absolute difference.
 
-    A level is *equal* when its mean difference is within its tolerance; the
-    first level that is not equal decides, and the result is `confirmed` only
-    when that level is better and its interval lies above zero. The last
-    level has no tolerance: whatever the levels above leave equal, it decides.
+    Every level but the last has a tolerance `w`, and its 95 % interval
+    `[lo, hi]` judges it (two one-sided tests, 1 in 40 per side): *equal*
+    when `-w <= lo` and `hi <= w`, *better* when `lo > w`, *worse* when
+    `hi < -w`, and *undecided* otherwise -- with fewer than two instances
+    too, which have no interval. The first level that is not equal decides;
+    an undecided one decides `keep`. The last level has no tolerance: its
+    state is the sign of its mean. A level that decides `better` or `worse`
+    is read by the rule that decides without levels (`decide` on its
+    posterior), so "use" means the same with and without them: `decision`
+    is `use`, `worse` or `keep`, `confirmed` is `decision == "use"`, and a
+    level's `clear` says that the rule spoke on it; when the rule does not
+    speak on the last level, the verdict says it "is not proven either way".
+    `read_on` is the level the descent stopped on -- the deciding one, else
+    the one that could not be compared, else the last -- whose numbers
+    (`worst` the 5 % quantile, `chance`) the page shows and whose per-case
+    gains (`per_case`) say whether more runs could help (`runs_can_help`).
     """
     rows: list[dict[str, Any]] = []
     parts: list[str] = []
     deciding: int | None = None
-    confirmed = False
+    stopped: int | None = None  # a level that could not be compared at all
+    decision = "keep"
     judging = True  # until a level decides, or cannot be compared at all
     for index, level in enumerate(comparison.levels):
         kpi, last = str(level["kpi"]), index == len(comparison.levels) - 1
@@ -766,14 +1034,18 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
         base, mine = table.get(BASELINE, {}), table.get(cid, {})
         shared = base.keys() & mine.keys()
         baseline_mean = fmean(base.values()) if base else None
-        unit = "percent" if shared and baseline_mean and all(base[k] != 0 for k in shared) else "absolute"
+        unit = ("percent" if shared and baseline_mean and all(base[k] > 0 and mine[k] > 0 for k in shared)
+                else "absolute")
+        direction = "maximize" if sign > 0 else "minimize"
 
         def difference(key: tuple[str, int]) -> float:
-            gain = sign * (mine[key] - base[key])
-            return 100.0 * gain / abs(base[key]) if unit == "percent" else gain
+            if unit == "percent":
+                return log_gain(base[key], mine[key], direction)  # type: ignore[return-value]  # both > 0
+            return sign * (mine[key] - base[key])
 
         largest = max((abs(difference(k)) for k in shared), default=None)
-        per_instance = []
+        per_instance: list[float] = []
+        per_case: list[dict[str, Any]] = []
         for instance in comparison.instances:
             differences = []
             for key in [(instance, seed) for seed in comparison.seeds]:
@@ -785,92 +1057,157 @@ def _analyse_levels(comparison: Comparison, cid: str) -> dict[str, Any]:
                     differences.append(largest)
             if differences:
                 per_instance.append(fmean(differences))
-        summary = paired_summary(per_instance)
+                per_case.append({"instance": instance, "gain": per_instance[-1], "pairs": len(differences),
+                                 "seed_var": statistics.variance(differences) if len(differences) >= 2 else None})
+        summary = _level_summary(per_instance, unit, direction)
         tolerance = level.get("tolerance")
         tolerance_abs = within = None
         if not last and tolerance is not None:
             relative = bool(level.get("relative"))
-            tolerance_abs = float(tolerance) * abs(baseline_mean) if relative and baseline_mean else float(tolerance)
+            # A fraction of a baseline of 0 is 0: only exactly equal is equal (R4).
+            tolerance_abs = float(tolerance) * abs(baseline_mean or 0.0) if relative else float(tolerance)
             if unit == "percent":
                 within = 100.0 * float(tolerance) if relative else 100.0 * float(tolerance) / abs(baseline_mean)
             else:
                 within = tolerance_abs
-        mean, interval = summary["mean"], summary.get("ci95")
+        mean, interval = summary["mean"], summary["ci95"]
         if mean is None:
             state = "unknown"
-        elif within is not None and abs(mean) <= within:
-            state = "equal"
+        elif within is not None:
+            # Two one-sided tests on the 95 % interval, 2.5 % each side.
+            if interval is None:
+                state = "undecided"
+            elif interval[0] >= -within and interval[1] <= within:
+                state = "equal"
+            elif interval[0] > within:
+                state = "better"
+            elif interval[1] < -within:
+                state = "worse"
+            else:
+                state = "undecided"
         else:
             state = "better" if mean > 0 else "worse" if mean < 0 else "equal"
-        clear = bool(interval) and ((state == "better" and interval[0] > 0) or (state == "worse" and interval[1] < 0))
+        # The rule that decides without levels, on this level's posterior: "use" or "worse" when it speaks.
+        spoke = {"better": "use", "worse": "worse"}.get(state) == summary["decision"]
+        clear = spoke if last else state in ("better", "worse")
         rows.append({
             "level": index + 1, "kpi": kpi, "direction": level.get("direction"), "unit": unit,
             "tolerance": tolerance, "relative": bool(level.get("relative")), "tolerance_abs": tolerance_abs,
             "tolerance_in_unit": within, "baseline_mean": baseline_mean, "mean_difference": mean,
-            "ci95": interval, "n": summary["n"], "wins": summary["wins"], "losses": summary["losses"],
-            "state": state, "clear": clear,
+            "ci95": interval, "range90": summary["range90"], "worst": summary["worst"], "chance": summary["chance"],
+            "n": summary["n"],
+            "wins": summary["wins"], "losses": summary["losses"], "state": state, "clear": clear,
+            "per_case": per_case,
         })
         if not judging:
             continue  # below the deciding level: reported, not judged
+        within_words = (f"{100 * float(tolerance):g} %" if level.get("relative") else f"{float(tolerance):g}"
+                        ) if tolerance is not None else ""
         if state == "equal" and not last:
-            within = f"{100 * float(tolerance):g} %" if level.get("relative") else f"{float(tolerance):g}"
-            parts.append(f"equal on level {index + 1} ({kpi} within {within})")
+            parts.append(f"equal on level {index + 1} ({kpi} within {within_words})")
         elif state in ("better", "worse"):
             deciding, judging = index + 1, False
-            confirmed = state == "better" and clear
-            parts.append(
-                f"{state} on level {index + 1} ({kpi}): "
-                + ("clear" if clear else "not distinguishable from the baseline")
-            )
+            decision = summary["decision"] if spoke else "keep"
+            parts.append(f"{state} on level {index + 1} ({kpi}): clear" if clear
+                         else f"level {index + 1} ({kpi}) is not proven either way")
+        elif state == "undecided":
+            deciding, judging = index + 1, False
+            parts.append(f"level {index + 1} ({kpi}) is not yet decided within {within_words}")
         elif state == "equal":
             parts.append(f"equal on level {index + 1} ({kpi})")
         else:
-            judging = False
+            judging, stopped = False, index + 1
             parts.append(f"level {index + 1} ({kpi}): no pair of runs to compare")
-    return {"levels": rows, "deciding": deciding, "verdict": ", ".join(parts), "confirmed": confirmed}
+    return {"levels": rows, "deciding": deciding, "read_on": deciding or stopped or (len(rows) or None),
+            "verdict": ", ".join(parts), "decision": decision, "confirmed": decision == "use"}
 
 
-def _counted_as(totals: dict[str, int], largest: float | None) -> str:
-    """What the verdict has to say about pairs that did not simply finish."""
+def _level_summary(gains: Sequence[float], unit: str, direction: str) -> dict[str, Any]:
+    """One level's per-instance gains to its mean, 95 % interval, chance of
+    a gain and `decide`'s decision. In percent: `verdict_summary` of the log
+    gains, as for the objective. In the KPI's own units: the same posterior
+    (`posterior_mean_t`) on the plain differences."""
+    if unit == "percent":
+        s = verdict_summary(gains, direction=direction)
+        return {key: s[key] for key in ("n", "mean", "ci95", "range90", "worst", "chance", "wins", "losses", "decision")}
+    n = len(gains)
+    out: dict[str, Any] = {"n": n, "mean": fmean(gains) if gains else None, "ci95": None, "range90": None, "worst": None,
+                           "chance": None, "wins": sum(1 for g in gains if g > 0),
+                           "losses": sum(1 for g in gains if g < 0)}
+    if n >= 2:
+        post = posterior_mean_t(gains)
+        out.update(mean=post.mu, ci95=list(post.interval95()), range90=list(post.interval90()), worst=post.quantile_low(0.05),
+                   chance=post.p_above(0.0), posterior={"mu": post.mu, "scale": post.scale, "df": post.df})
+    out["decision"] = decide(out)
+    out.pop("posterior", None)
+    return out
+
+
+def _counted_as(totals: dict[str, int], largest: float | None, direction: str) -> str:
+    """What the verdict has to say about pairs that did not simply finish.
+    `largest` is the log size of a loss and of a win (`_failure_sizes`);
+    each imputed pair is said in the percent it was counted as."""
     notes = []
-    size = f"{largest:.3g} %" if largest is not None else None
-    for key, side, what in (("candidate_failed_pairs", "the candidate", "a loss"),
-                            ("baseline_failed_pairs", "the baseline", "a win")):
-        if totals[key] and size is not None:
-            notes.append(f"{totals[key]} pair(s) in which only {side} failed counted as {what} of {size}")
+    sizes = _failure_sizes(largest, direction)
+    for key, side, what, size in (("candidate_failed_pairs", "the candidate", "a loss", "loss"),
+                                  ("baseline_failed_pairs", "the baseline", "a win", "win")):
+        if totals[key] and sizes is not None:
+            notes.append(f"{totals[key]} pair(s) in which only {side} failed counted as {what} of {sizes[size]:.3g} %")
         elif totals[key]:
             notes.append(f"{totals[key]} pair(s) in which only {side} failed are not in this interval "
                          "(no finished pair to size them by)")
     if totals["both_failed_pairs"]:
         notes.append(f"{totals['both_failed_pairs']} pair(s) in which both failed are not in this interval")
-    if totals["zero_baseline_pairs"]:
-        notes.append(f"{totals['zero_baseline_pairs']} pair(s) had a baseline of 0 and are not in this interval")
+    if totals["nonpositive_pairs"]:
+        notes.append(f"{totals['nonpositive_pairs']} pair(s) had a value of 0 or below and are not in this comparison")
     return "".join(f"; {note}" for note in notes)
 
 
+def comparison_of(data: dict[str, Any]) -> Comparison:
+    """A `Comparison` from its `to_json` (a `comparison.json` read back), so its
+    `comparison.md` can be written again after `apply_holm` changed a result."""
+    names = {f.name for f in fields(Comparison)}
+    return Comparison(**{key: value for key, value in data.items() if key in names})
+
+
 def render_markdown(comparison: Comparison) -> str:
+    """`comparison.md`. A comparison written before A1 (no candidate's summary
+    carries the posterior, `is_posterior`) keeps the page it had: the rule it
+    was decided by (`LEGACY_RULE_WORDS`), its interval and its Wilcoxon test."""
+    summaries = [r.get("summary") or {} for r in comparison.per_candidate.values()]
+    legacy = bool(summaries) and not any(is_posterior(s) for s in summaries)
     lines = [
         f"# Confirmation `{comparison.label}`",
         "",
         f"Stage `{comparison.stage}`, objective `{comparison.objective}` ({comparison.direction}), "
         f"seeds {comparison.seeds}, {len(comparison.instances)} instance(s). Baseline: `{comparison.baseline_id}`. "
-        "Improvement is in percent of the baseline's value on the same instance and seed, averaged over "
-        "the seeds of an instance; positive is better.",
+        "Improvement is the log ratio of the baseline's and the candidate's value on the same instance and "
+        "seed, averaged over the seeds of an instance, and shown in percent of the baseline; positive is better. "
+        f"The rule: {LEGACY_RULE_WORDS if legacy else RULE_WORDS} The answer was read {comparison.looks} time(s).",
         "",
     ]
     for cid, result in comparison.per_candidate.items():
         s = result["summary"]
         lines += [f"## `{cid}` against the baseline", ""]
+        holm_info = result.get("holm")
+        if holm_info:
+            # Kinds of case are judged together, each its own answer, not chosen among.
+            together = (f"Judged with the {holm_info['k']} {holm_info['what']} together"
+                        if holm_info["what"] == "kinds of case" else f"Chosen among {holm_info['k']} {holm_info['what']}")
+            lines += [f"{together} (Holm): "
+                      f"{'passes' if holm_info['passed'] else 'does not pass'} the rule's chance at its stricter level.", ""]
         if result.get("levels"):
-            lines += _levels_markdown(result["levels"])
+            lines += _levels_markdown(result["levels"], LEGACY_RULE_WORDS if legacy else RULE_WORDS,
+                                      verdict=_levels_verdict(result))
+        sizes = result.get("failure_counted_as_pct")
         counted = (
             f"{result['pairs']} of {result['pairs_planned']} (instance, seed) pairs are in the comparison, "
             f"{result.get('finished_pairs', 0)} of them finished by both. A pair only one side finished counts "
             "against the side that failed, as large as the largest difference measured"
-            + (f" ({result['failure_counted_as_pct']:.3g} %)" if result.get("failure_counted_as_pct") is not None else "")
+            + (f" (a loss of {sizes['loss']:.3g} %, a win of {sizes['win']:.3g} %)" if isinstance(sizes, dict) else "")
             + f": only the candidate failed {result.get('candidate_failed_pairs', 0)}, only the baseline "
             f"{result.get('baseline_failed_pairs', 0)}; left out: both failed {result.get('both_failed_pairs', 0)}, "
-            f"baseline of 0 {result.get('zero_baseline_pairs', 0)}. {result['failed_runs']} run(s) failed."
+            f"a value of 0 or below {result.get('nonpositive_pairs', 0)}. {result['failed_runs']} run(s) failed."
         )
         only = result.get("finished_only") or {}
         if only.get("mean") is not None and result.get("failed_pairs"):
@@ -886,34 +1223,96 @@ def render_markdown(comparison: Comparison) -> str:
             lines += ["**Every run gave exactly the baseline's result**, on every instance and seed: the "
                       "candidate's change may not be exercised by these runs, so the interval below says "
                       "nothing about it.", ""]
-        interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]" if s.get("ci95") else "n/a"
-        p = s["wilcoxon"]["p"]
-        verdict = s["verdict"].capitalize()
+        held = result.get("holm") or {}
+        said = s["verdict"]
+        if held.get("passed") is False and held.get("own") == "use":
+            said = f"not proven among {held['k']} {held['what']} (Holm)"  # its own chance passes; chosen among rivals it does not
+        verdict = said[:1].upper() + said[1:]
+        if not is_posterior(s) and s.get("chance") is not None:
+            # A summary written before A1: its head as it was then (a t interval and a Wilcoxon test).
+            interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]" if s.get("ci95") else "n/a"
+            p = (s.get("wilcoxon") or {}).get("p")
+            head = (f"**Mean improvement {s['mean']:+.3f} %**, 95 % CI {interval} over {s['n']} instance(s); "
+                    f"{s['wins']} better, {s['losses']} worse; Wilcoxon signed-rank p = "
+                    + ("n/a" if p is None else f"{p:.4f}") + f". **{verdict}.**")
+            lines += [head, "", counted, "", "| instance | baseline | candidate | improvement | pairs won | dropped |",
+                      "|---|--:|--:|--:|--:|--:|", *_instance_rows(result["per_instance"])]
+            continue
+        if s.get("chance") is not None and s.get("ci95"):
+            interval = f"[{s['ci95'][0]:+.3f}, {s['ci95'][1]:+.3f}]"
+            head = (
+                f"**Mean improvement {s['mean']:+.3f} %** (the paired mean, the posterior's), "
+                f"95 % credible interval {interval} over {s['n']} instance(s); "
+                f"{s['wins']} better, {s['losses']} worse; chance of a gain {_chance2(s['chance']):.2f}, "
+                f"of losing more than {USE_MARGIN_PCT:g} % {1 - s['chance_margin']:.2f} (for engineers: it does "
+                f"not decide); prior {s.get('prior', PRIOR)}. **{verdict}.**"
+            )
+        else:
+            head = f"**Mean improvement {s['mean']:+.3f} %** over {s['n']} instance(s). **{verdict}.**"
+        if isinstance(result.get("levels"), dict):
+            # Goals in order of importance decide: their answer is the bold one, the objective's is the engineers'.
+            answer = _LEVELS_ANSWER.get(decision_of(result), "Not proven")
+            head = (f"**{answer}: {_levels_verdict(result)}.**\n\n"
+                    f"{OBJECTIVE_ALONE[:1].upper() + OBJECTIVE_ALONE[1:]}: "
+                    + head.replace("**", "").replace(f" {verdict}.", "").replace("Mean improvement", "mean improvement", 1))
+        head_lines = [head, ""]
+        f = s.get("frequentist") or (s if "wilcoxon" in s else None)  # a summary written before the posterior
+        if f is not None and f.get("mean") is not None:
+            f_interval = f"[{f['ci95'][0]:+.3f}, {f['ci95'][1]:+.3f}]" if f.get("ci95") else "n/a"
+            p = (f.get("wilcoxon") or {}).get("p")
+            head_lines += [
+                f"Frequentist, for engineers: mean {f['mean']:+.3f} %, 95 % CI {f_interval}, Wilcoxon signed-rank "
+                "p = " + ("n/a" if p is None else f"{p:.4f}") + ".",
+                "",
+            ]
         lines += [
-            f"**Mean improvement {s['mean']:+.3f} %**, 95 % CI {interval} over {s['n']} instance(s); "
-            f"{s['wins']} better, {s['losses']} worse; Wilcoxon signed-rank p = "
-            + ("n/a" if p is None else f"{p:.4f}") + f". **{verdict}.**",
-            "",
+            *head_lines,
             counted,
             "",
             "| instance | baseline | candidate | improvement | pairs won | dropped |",
             "|---|--:|--:|--:|--:|--:|",
         ]
-        for row in result["per_instance"]:
-            dropped = _dropped(row)
-            if row["improvement_pct"] is None:
-                lines.append(f"| {row['instance']} | – | – | – | 0 of 0 | {dropped} |")
-            else:
-                lines.append(
-                    f"| {row['instance']} | {row['baseline']:.6g} | {row['candidate']:.6g} | "
-                    f"{row['improvement_pct']:+.3f} % | {row['pair_wins']} of {row['pairs']} | {dropped} |"
-                )
-        lines.append("")
+        lines += _instance_rows(result["per_instance"])
     return "\n".join(lines)
 
 
-def _levels_markdown(levels: dict[str, Any]) -> list[str]:
-    """The lexicographic verdict and one row per level (`_analyse_levels`)."""
+_LEVELS_ANSWER = {"use": "Probably better", "worse": "Probably WORSE", "keep": "Not proven"}
+"""The bold answer of a comparison by goals in order of importance, before its levels' verdict."""
+
+
+def _instance_rows(per_instance: Sequence[dict[str, Any]]) -> list[str]:
+    """The per-instance table's rows, and the blank line after it."""
+    lines = []
+    for row in per_instance:
+        dropped = _dropped(row)
+        if row["improvement_pct"] is None:
+            lines.append(f"| {row['instance']} | – | – | – | 0 of 0 | {dropped} |")
+        else:
+            lines.append(
+                f"| {row['instance']} | {row['baseline']:.6g} | {row['candidate']:.6g} | "
+                f"{row['improvement_pct']:+.3f} % | {row['pair_wins']} of {row['pairs']} | {dropped} |"
+            )
+    lines.append("")
+    return lines
+
+
+def _levels_verdict(result: dict[str, Any]) -> str:
+    """A levels result's verdict, and why it is not the levels' answer when `decision_of` says
+    otherwise (R2): every run gave the starting point's result, or Holm held it back."""
+    levels, said = result["levels"], str(result["levels"]["verdict"])
+    if decision_of(result) == levels.get("decision"):
+        return said
+    held = result.get("holm") or {}
+    if result.get("identical"):
+        return f"{said}; every run gave the starting point's result"
+    if held.get("passed") is False:
+        return f"{said}; not proven among {held['k']} {held['what']} (Holm)"
+    return said
+
+
+def _levels_markdown(levels: dict[str, Any], rule: str = RULE_WORDS, *, verdict: str | None = None) -> list[str]:
+    """The lexicographic verdict (`verdict`, else the levels' own) and one row per level
+    (`_analyse_levels`); `rule` is the rule the comparison was decided by, in words."""
 
     def number(value: Any, unit: str, signed: bool = False) -> str:
         if value is None:
@@ -921,16 +1320,19 @@ def _levels_markdown(levels: dict[str, Any]) -> list[str]:
         text = f"{value:+.4g}" if signed else f"{value:.4g}"
         return text + " %" if unit == "percent" else text
 
-    verdict = levels["verdict"]
+    verdict = verdict or levels["verdict"]
     lines = [
         "### Level by level",
         "",
-        f"**{verdict[:1].upper() + verdict[1:]}.** The first level that is not equal within its "
-        "tolerance decides; it is confirmed only when that level is better and its 95 % interval "
-        "lies above zero.",
+        f"**{verdict[:1].upper() + verdict[1:]}.** A level is equal when its 95 % interval lies within "
+        "its tolerance, better or worse when the interval lies wholly beyond it, and not yet decided "
+        "otherwise; the first level that is not equal decides, and an undecided one keeps today's. "
+        "The last level has no tolerance: the sign of its mean says better or worse. The level that "
+        f"decides is read by the rule: {rule}",
         "",
-        "Differences are per instance, averaged over the seeds, positive is better: in percent of "
-        "the baseline's value, or in the KPI's own units where some baseline value is 0.",
+        "Differences are per instance, averaged over the seeds, positive is better: the log ratio "
+        "shown in percent of the baseline's value, or a plain difference in the KPI's own units where "
+        "some value is 0 or below.",
         "",
         "| level | goal | baseline mean | equal within | mean difference | 95 % CI | verdict |",
         "|--:|---|--:|--:|--:|---|---|",
@@ -955,6 +1357,6 @@ def _dropped(row: dict[str, Any]) -> str:
                        ("both_failed_pairs", "both failed")):
         if row.get(key):
             parts.append(f"{row[key]} {label}")
-    if row.get("zero_baseline_pairs"):
-        parts.append(f"{row['zero_baseline_pairs']} baseline 0")
+    if row.get("nonpositive_pairs"):
+        parts.append(f"{row['nonpositive_pairs']} not positive")
     return ", ".join(parts) or "–"

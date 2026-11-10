@@ -4,6 +4,8 @@ run, the search and the final check (`evolvekit/harness/execute.py`)."""
 from __future__ import annotations
 
 import json
+import math
+import random
 import shutil
 import sqlite3
 import threading
@@ -14,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evolvekit.confirm import paired_summary
+from evolvekit.confirm import BASELINE, Comparison, _analyse, verdict_summary
 from evolvekit.harness.execute import (
     Job, _extend_check, continue_study, final_check, preview, read_job, read_preview, resume_study, run_study, run_test,
 )
@@ -252,22 +254,51 @@ def _confirm_recording(calls: list[int], settled_at: int = 6):
         assert list(seeds) == list(CHECK_SEEDS[:len(seeds)]), "every call names the whole seed list, so runs are kept"
         assert len(instances) == 3 and label == "final"
         calls.append(len(seeds))
-        summary = paired_summary([-9.0, 11.5, -0.4] if len(seeds) < settled_at else [1.3, 0.6, 1.9])
+        summary = verdict_summary([-0.09, 0.115, -0.004] if len(seeds) < settled_at else [0.013, 0.006, 0.019],
+                                  direction="minimize")
         return SimpleNamespace(per_candidate={"c1": {"summary": summary}})
     return fake_confirm
 
 
-def test_the_check_adds_runs_while_the_answer_is_open_and_time_remains(tmp_path):
+def test_the_check_says_how_often_the_answer_was_read(tmp_path):
+    lines: list[str] = []
     calls: list[int] = []
-    clock = iter([400.0, 300.0, 200.0, 100.0, 10.0, 10.0])
+    fake = _confirm_recording(calls)
+
+    def counting(*args, **kwargs):
+        comparison = fake(*args, **kwargs)
+        comparison.looks = len(calls)
+        return comparison
+
     job = Job(tmp_path, run_id="r", study="s", plan={})
-    comparison, seeds = _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lambda _m: None,
-                                      stop=threading.Event(), time_left_s=lambda: next(clock),
+    _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lines.append,
+                  stop=threading.Event(), time_left_s=lambda: 1e9, confirm=counting)
+    assert lines[-2:] == ["final check: added 9 runs per held-back case and read the answer again",
+                          "final check: the answer was read 2 times"]
+
+
+def test_the_check_adds_every_run_it_can_at_once_and_reads_the_answer_once_more(tmp_path):
+    """Decision 12: no peeking. Look 1 after the planned runs; while open, every run the cap
+    and the time allow is added at once, and look 2 is the answer, whatever it says."""
+    calls: list[int] = []
+    study = _three_held_back(tmp_path)
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    # A run per case costs ceil(2 * 3 / 1) * 20 s = 120 s: 400 s pays for three more.
+    comparison, seeds = _extend_check(study, _plan_with(), None, tmp_path, job, lambda _m: None,
+                                      stop=threading.Event(), time_left_s=lambda: 400.0,
                                       confirm=_confirm_recording(calls))
-    assert calls == [3, 4, 5, 6], "open at 3, 4 and 5 runs per case; settled at 6"
+    assert calls == [3, 6], "open at 3 runs per case; all three more added, then read once"
     assert seeds == 6 and job.state["check"] == {"seeds": 6}
     assert read_job(tmp_path)["check"] == {"seeds": 6}
     assert comparison.per_candidate["c1"]["summary"]["n"] == 3
+    calls.clear()
+    _, seeds = _extend_check(study, _plan_with(), None, tmp_path, job, lambda _m: None,
+                             stop=threading.Event(), time_left_s=lambda: 1e9, confirm=_confirm_recording(calls, 99))
+    assert calls == [3, 12] and seeds == 12, "still open at look 2: it stops anyway"
+    calls.clear()
+    _extend_check(study, _plan_with(), None, tmp_path, job, lambda _m: None,
+                  stop=threading.Event(), time_left_s=lambda: 1e9, confirm=_confirm_recording(calls, 3))
+    assert calls == [3], "settled at look 1: nothing is added"
 
 
 def test_the_check_stops_adding_runs_when_time_the_seeds_or_a_stop_say_so(tmp_path):
@@ -289,6 +320,59 @@ def test_the_check_stops_adding_runs_when_time_the_seeds_or_a_stop_say_so(tmp_pa
     stopped = threading.Event()
     stopped.set()
     assert run(_plan_with(), time_left=lambda: 1e9, stop=stopped) == ([3], 3, 3)
-    # Four workers make a round cheaper: ceil(6 / 4) * 20 = 40 s, so 100 s pays for one more, 30 s for none.
-    clock = iter([100.0, 30.0])
-    assert run(_plan_with(workers=4), time_left=lambda: next(clock))[0] == [3, 4]
+    # Four workers make a round cheaper: ceil(6 / 4) * 20 = 40 s, so 100 s pays for two more, 30 s for none.
+    assert run(_plan_with(workers=4), time_left=lambda: 100.0)[0] == [3, 5]
+    assert run(_plan_with(workers=4), time_left=lambda: 30.0)[0] == [3]
+
+
+def test_a_check_of_an_explicit_number_of_runs_is_never_extended(tmp_path):
+    calls: list[int] = []
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    free = _plan_with(run_s=0.0)  # a run that costs nothing would otherwise always fit
+    _, seeds = _extend_check(_three_held_back(tmp_path), free, None, tmp_path, job, lambda _m: None,
+                             stop=threading.Event(), time_left_s=lambda: 0.0,
+                             confirm=_confirm_recording(calls, settled_at=99), extend=False)
+    assert calls == [3] and seeds == 3
+
+
+def _confirm_of_cases(calls: list[int], *, case_gains: list[float], run_sd: float):
+    """A `confirm` that runs nothing: the real comparison (`confirm._analyse`) of held-back
+    cases whose true log gains are `case_gains`, each run noisy by `run_sd`."""
+    def fake_confirm(config, run_dir, *, seeds, instances, label, log, stop):
+        calls.append(len(seeds))
+        comparison = Comparison(label="final", objective="cost", direction="minimize", stage="full",
+                                seeds=list(seeds), instances=list(instances), baseline_id="seed", candidates=["c1"])
+        for instance, gain in zip(instances, case_gains):
+            for seed in seeds:
+                rng = random.Random(f"{instance}/{seed}")
+                comparison.runs += [
+                    {"configuration": BASELINE, "instance": instance, "seed": seed, "ok": True,
+                     "kpis": {"cost": 100.0 * math.exp(rng.gauss(0.0, run_sd))}},
+                    {"configuration": "c1", "instance": instance, "seed": seed, "ok": True,
+                     "kpis": {"cost": 100.0 * math.exp(-gain + rng.gauss(0.0, run_sd))}},
+                ]
+        _analyse(comparison)
+        return comparison
+    return fake_confirm
+
+
+def test_the_check_stops_adding_runs_when_the_cases_set_the_answer(tmp_path):
+    """A toy whose cases differ by far more than its runs: more runs cannot open the answer."""
+    calls: list[int] = []
+    lines: list[str] = []
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    _, seeds = _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lines.append,
+                             stop=threading.Event(), time_left_s=lambda: 1e9,
+                             confirm=_confirm_of_cases(calls, case_gains=[0.10, -0.08, 0.01], run_sd=0.001))
+    assert calls == [3] and seeds == 3
+    assert job.state["check"] == {"seeds": 3, "limited_by": "cases"}
+    assert "final check: the answer is set by the held-back cases, not by the runs: hold back more cases "            "for a firmer answer" in lines
+
+
+def test_the_check_adds_runs_when_the_runs_are_what_is_unsure(tmp_path):
+    calls: list[int] = []
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    _extend_check(_three_held_back(tmp_path), _plan_with(), None, tmp_path, job, lambda _m: None,
+                  stop=threading.Event(), time_left_s=lambda: 1e9,
+                  confirm=_confirm_of_cases(calls, case_gains=[0.004, 0.0, 0.002], run_sd=0.05))
+    assert calls == [3, 12] and "limited_by" not in job.state["check"]

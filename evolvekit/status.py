@@ -46,14 +46,15 @@ from typing import Any, Callable, Mapping, Sequence
 from evolvekit.economics import DEFAULT_WINDOW, series
 from evolvekit.evaluate.levels import K as LEVEL_STEPS
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
-from evolvekit.leaderboard import competes, fitness_of, rank
+from evolvekit.leaderboard import competes, fitness_of, rank, replay_veto
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
+from evolvekit.stats import log_gain, paired_summary, pct_from_log, per_instance_means
 
 __all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
 
-SCHEMA = 1
+SCHEMA = 2
 
 HOST_LOAD_MIN_RUN_S = 5.0
 """Evaluator runs shorter than this are not judged for host load: over a
@@ -97,7 +98,9 @@ def build_status(
         }
         return document
 
-    rows = list(read_jsonl(directory / "runs.jsonl"))
+    # The hold-out veto as a resumed run applies it: no view names a candidate
+    # the search keeps out.
+    rows = replay_veto(list(read_jsonl(directory / "runs.jsonl")))
     usage = list(read_jsonl(directory / "usage.jsonl"))
     events = read_events(directory)
     run = _Run(directory, rows, usage, events, moment)
@@ -143,21 +146,21 @@ def _number(value: Any) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
-def _paired_t(mean: float, sd: float, n: int) -> float:
-    """The paired t statistic. Gains that do not vary at all are as clear as a
-    result gets -- in the direction of their mean: a candidate that loses by
-    exactly 1 on every seed is not "t = inf, within noise"."""
-    if sd > 0:
-        return mean / (sd / math.sqrt(n))
-    return math.copysign(math.inf, mean) if mean else 0.0
-
-
 def _noise_note(clear: bool, worse: bool) -> str:
     if clear:
         return ""
     if worse:
-        return " (at most -2: the best is behind the baseline on these seeds, beyond the noise)"
-    return " (between -2 and 2: not distinguishable from noise)"
+        return " (the interval lies below zero: the best is behind the baseline on these seeds, beyond the noise)"
+    return " (the interval includes zero: not distinguishable from noise)"
+
+
+def _judged(summary: Mapping[str, Any]) -> tuple[str, bool, bool]:
+    """The verdict on a `paired_summary`: clear when its 95 % interval lies
+    above zero, worse when it lies below, within noise otherwise -- the rule
+    `confirm` states, on the same summary."""
+    low, high = summary["ci95"]
+    clear, worse = low > 0, high < 0
+    return ("clear" if clear else "worse" if worse else "within noise"), clear, worse
 
 
 def _spread(values: Sequence[float]) -> dict[str, Any]:
@@ -958,54 +961,70 @@ class _Run:
                 "n": len(shared),
             }
         sign = 1.0 if self._direction == "minimize" else -1.0
-        gains = [sign * (a[s] - b[s]) for s in shared]
-        mean, sd = fmean(gains), stdev(gains)
-        t = _paired_t(mean, sd, len(gains))
-        clear = mean > 0 and t >= 2.0
-        worse = mean < 0 and t <= -2.0
+        summary = paired_summary(per_instance_means({s: sign * (a[s] - b[s]) for s in shared}))
+        if summary["n"] < 2:  # runs that name one instance, on a stage not described per instance
+            return {
+                "verdict": "unknown",
+                "why": "fewer than two instances to compare: one instance run many times is one case",
+                "n": summary["n"],
+            }
+        verdict, clear, worse = _judged(summary)
+        low, high = summary["ci95"]
         return {
-            "verdict": "clear" if clear else "worse" if worse else "within noise",
+            "verdict": verdict,
             "why": (
-                f"paired over {len(shared)} shared seed(s): mean gain {mean:.6g}, "
-                f"t = {t:.2f}" + (_noise_note(clear, worse))
+                f"paired over {summary['n']} case(s): mean gain {summary['mean']:.6g}, "
+                f"95 % interval {low:.6g} to {high:.6g}" + (_noise_note(clear, worse))
                 + ". These are the seeds the search selected on, so even a clear "
                 "result is optimistic until it is confirmed on seeds it never saw"
             ),
-            "n": len(shared),
-            "mean_gain": mean,
-            "sd_gain": sd,
-            "t": t if math.isfinite(t) else None,
+            "n": summary["n"],
+            "mean_gain": summary["mean"],
+            "sd_gain": summary["sd"],
+            "ci95": summary["ci95"],
         }
 
     def _verdict_per_instance(
         self, a: Mapping[Any, float], b: Mapping[Any, float], shared: Sequence[Any]
     ) -> dict[str, Any]:
-        """Paired over `(instance, seed)` runs, each gain in percent of the
-        baseline's value on that same run -- so a large instance and a small
-        one count alike, and what the instance contributes cancels out."""
-        sign = 1.0 if self._direction == "minimize" else -1.0
-        gains = [100.0 * sign * (a[run] - b[run]) / abs(a[run]) for run in shared if a[run]]
-        if len(gains) < 2:
-            return {"verdict": "unknown", "why": "fewer than two comparable runs", "n": len(gains)}
-        mean, sd = fmean(gains), stdev(gains)
-        t = _paired_t(mean, sd, len(gains))
-        clear = mean > 0 and t >= 2.0
-        worse = mean < 0 and t <= -2.0
-        instances = len({run[0] for run in shared})
+        """Paired over instances: each `(instance, seed)` gain is the log ratio
+        to the baseline's value on that same run -- so a large instance and a
+        small one count alike, and halving and doubling are one step either
+        way -- averaged over the seeds within its instance, as `confirm` does;
+        the mean and the interval are shown in percent of the baseline. A run
+        with a value of 0 or below on either side has no log ratio and is left
+        out. The instance is the case: one instance run on many seeds is one
+        case, not many."""
+        direction = "minimize" if self._direction == "minimize" else "maximize"
+        gains = {
+            run: gain for run in shared
+            if (gain := log_gain(a[run], b[run], direction)) is not None
+        }
+        summary = paired_summary(per_instance_means(gains))
+        if summary["n"] < 2:
+            return {
+                "verdict": "unknown",
+                "why": "fewer than two instances to compare: one instance run many times is one case",
+                "n": summary["n"],
+            }
+        verdict, clear, worse = _judged(summary)  # on the log interval: the same side of zero as in percent
+        mean = pct_from_log(summary["mean"], direction)
+        low, high = (pct_from_log(end, direction) for end in summary["ci95"])
         return {
-            "verdict": "clear" if clear else "worse" if worse else "within noise",
+            "verdict": verdict,
             "why": (
-                f"paired over {len(gains)} shared run(s) on {instances} instance(s): mean gain "
-                f"{mean:.3g} % per run, t = {t:.2f}"
+                f"paired over {len(gains)} shared run(s) on {summary['n']} instance(s): mean gain "
+                f"{mean:.6g} % per instance, 95 % interval {low:.6g} to {high:.6g} %"
                 + (_noise_note(clear, worse))
                 + ". These are the instances and seeds the search selected on, so even a clear "
                 "result is optimistic until it is confirmed on seeds it never saw"
             ),
-            "n": len(gains),
-            "unit": "percent of the baseline, per run",
+            "n": summary["n"],
+            "unit": "percent of the baseline (from log ratios), per instance",
             "mean_gain": mean,
-            "sd_gain": sd,
-            "t": t if math.isfinite(t) else None,
+            "ci95": [low, high],
+            # The spread is on the log scale: kept there, never beside the percent figures.
+            "log": {"mean_gain": summary["mean"], "sd_gain": summary["sd"], "ci95": summary["ci95"]},
         }
 
     def progress(self) -> dict[str, Any]:
@@ -1734,6 +1753,8 @@ class _Run:
                     # Not in `reason`: a view reads a reason as "failed", and a
                     # candidate that broke a gate did not fail -- it is not competing.
                     "gated": row.get("gated"),
+                    # Apart too: kept out by the hold-out (`evaluate.holdout_veto`), not failed.
+                    "veto": row.get("veto"),
                     "deepest_stage": stages[-1] if stages else None,
                     "evaluation_s": durations.get(cid),
                     "usd": _number(row.get("usd")),
@@ -1807,7 +1828,7 @@ def candidate_details(
     a time re-read `runs.jsonl` and the event log per candidate, which grew
     quadratically -- about 35 minutes for a run of 2,900 candidates."""
     directory = Path(run_dir)
-    rows = {str(r.get("id")): r for r in read_jsonl(directory / "runs.jsonl")}
+    rows = {str(r.get("id")): r for r in replay_veto(list(read_jsonl(directory / "runs.jsonl")))}
     seed = next((r for r in reversed(list(rows.values())) if r.get("operator") == SEED_OPERATOR), None)
     events = read_events(directory)
     finished: dict[str, list[dict[str, Any]]] = {}
@@ -1863,6 +1884,7 @@ def _candidate_detail(
         "reject_reason": row.get("reject_reason"),
         "last_failure": row.get("last_failure"),
         "gated": row.get("gated"),
+        "veto": row.get("veto"),
         "stages_reached": row.get("stages_reached") or [],
         "stage_scores": row.get("stage_scores") or {},
         "kpis": row.get("kpis") or {},

@@ -113,7 +113,7 @@ class StageReport:
     runs: int = 1
     private: bool = False
     kpis: dict[str, float] = field(default_factory=dict)
-    kpi_cv: dict[str, float] = field(default_factory=dict)
+    kpi_cv: dict[str, float | None] = field(default_factory=dict)
     feedback: str = ""
     failure: str | None = None
     workers: int = 1
@@ -535,12 +535,19 @@ def _check_budget(config: Config, report: PreflightReport) -> None:
 
     noisy = [s for s in report.stages if s.kpi_cv]
     for stage in noisy:
-        worst = max(stage.kpi_cv.values(), default=0.0)
+        ratios = [v for v in stage.kpi_cv.values() if v is not None]
+        # A measure whose mean is zero has no ratio to take: n/a, not 0.00 %.
+        no_ratio = sorted(name for name, v in stage.kpi_cv.items() if v is None)
+        varied = f"the noisiest measure varied by {max(ratios) * 100:.2f}% across them" if ratios else (
+            "no measure's variation across them can be put as a percentage"
+        )
+        if no_ratio:
+            varied += " (" + ", ".join(f"`{name}`" for name in no_ratio) + ": n/a, mean zero)"
         seeds = stage.runs // stage.instances if stage.instances else stage.runs
         report.notes.append(
             f"stage {stage.label} ran {seeds} seed(s)"
             + (" per instance" if stage.instances else "")
-            + f"; the noisiest KPI varied by {worst * 100:.2f}% across them. The behaviour "
+            + f"; {varied}. The behaviour "
             f"signature uses {config.evaluate.signature_digits_stochastic} significant "
             "digits on this stage."
         )
@@ -762,7 +769,10 @@ def _kpi_line(stage: StageReport, limit: int = 6, first: str = "") -> str:
     parts = []
     for name, value in items:
         cv = stage.kpi_cv.get(name)
-        suffix = f" (cv {cv * 100:.2f}%)" if cv else ""
+        if cv is None and name in stage.kpi_cv:
+            suffix = " (cv n/a)"
+        else:
+            suffix = f" (cv {cv * 100:.2f}%)" if cv else ""
         parts.append(f"{name}={value:.6g}{suffix}")
     if len(stage.kpis) > limit:
         parts.append(f"... {len(stage.kpis) - limit} more")

@@ -8,10 +8,14 @@ identical program, so the filter works on the AST, not on the characters:
 
 1. parse the block;
 2. drop docstrings (comments are already gone -- they never reach the AST);
-3. canonicalise local identifiers, in order of first appearance, to `v0`, `v1`
-   ...  Top-level function and class names are left alone: they are the
-   skeleton's contract, and two blocks that differ only in which function they
-   define are genuinely different candidates;
+3. canonicalise the names the block **binds** (arguments, assignment and loop
+   targets, `with`/`except` names, comprehension and walrus targets, nested
+   defs, `global`/`nonlocal`) to `v0`, `v1` ... in order of first appearance;
+   every free name (builtins, the skeleton's helpers, imports) keeps its text,
+   so `max` and `min` are different programs.  Top-level function and class
+   names are left alone: they are the skeleton's contract, and two blocks that
+   differ only in which function they define are genuinely different
+   candidates;
 4. hash the dumped tree.
 
 A child whose hash equals its parent's is a **no-op**; one that equals any
@@ -31,11 +35,14 @@ structure, a different hash, and a full evaluation nobody wanted to buy. So a
 
 Two methods, chosen by `search.novelty.near.method`:
 
-* `local` (default, and always available) -- cosine similarity over the
-  multiset of node-type n-grams of the **canonicalised** AST. Node *types*
-  only: `Constant` is `Constant` whatever number it holds, so a block that
-  differs from an earlier one in nothing but its constants scores exactly 1.0.
-  Costs nothing and calls nothing.
+* `local` (default, and always available) -- cosine over the 3-grams the
+  change **added and removed** against its parent (the delta multiset,
+  sign-tagged), node types of the **canonicalised** AST; the parent is never a
+  match, except that a change that moved constants only is near its parent at
+  1.0. A change that moved no node type but more than constants (`max` ->
+  `min`) has an empty delta and is near nothing. The starting point indexes its
+  full, untagged vector, which no child's delta can match. Costs nothing and
+  calls nothing.
 * `embedding` -- cosine over vectors from `Provider.embed`, for the case where
   a semantic judgement beats a syntactic one. Costs one embedding call per
   child, recorded in the ledger like any other spend.
@@ -71,6 +78,7 @@ __all__ = [
     "node_ngrams",
     "cosine",
     "local_similarity",
+    "delta_grams",
     "NearBackend",
     "LocalNearIndex",
     "EmbeddingNearIndex",
@@ -87,14 +95,19 @@ comparison is about shape rather than about which node types appear at all."""
 
 
 class _Canonicaliser(ast.NodeTransformer):
-    """Rename locals to `v0`, `v1`, ... and delete docstrings."""
+    """Rename the names the block binds to `v0`, `v1`, ... and delete docstrings.
 
-    def __init__(self, protected: set[str]) -> None:
+    `bound` comes from `_bound_names`; every other name -- a builtin, a helper
+    from the skeleton, an import -- keeps its text.
+    """
+
+    def __init__(self, protected: set[str], bound: set[str]) -> None:
         self.protected = protected
+        self.bound = bound
         self.mapping: dict[str, str] = {}
 
     def _rename(self, name: str) -> str:
-        if name in self.protected or name.startswith("__"):
+        if name not in self.bound or name in self.protected or name.startswith("__"):
             return name
         if name not in self.mapping:
             self.mapping[name] = f"v{len(self.mapping)}"
@@ -120,16 +133,22 @@ class _Canonicaliser(ast.NodeTransformer):
         self._strip_docstring(node)
         return self.generic_visit(node)
 
+    # A nested def's name is bound; a top-level one is protected, so renaming
+    # it through `_rename` is a no-op.
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
         self._strip_docstring(node)
+        node.name = self._rename(node.name)
         return self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
         self._strip_docstring(node)
+        node.name = self._rename(node.name)
         return self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
         self._strip_docstring(node)
+        node.name = self._rename(node.name)
         return self.generic_visit(node)
 
     # -- identifiers -----------------------------------------------------
@@ -142,6 +161,73 @@ class _Canonicaliser(ast.NodeTransformer):
     def visit_Name(self, node: ast.Name) -> ast.AST:
         node.id = self._rename(node.id)
         return node
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.AST:
+        if node.name is not None:
+            node.name = self._rename(node.name)
+        return self.generic_visit(node)
+
+    def visit_Global(self, node: ast.Global) -> ast.AST:
+        node.names = [self._rename(name) for name in node.names]
+        return node
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> ast.AST:
+        node.names = [self._rename(name) for name in node.names]
+        return node
+
+    # `match` capture names are bound too, so they are renamed like the names
+    # that read them.
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> ast.AST:
+        if node.name is not None:
+            node.name = self._rename(node.name)
+        return self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> ast.AST:
+        if node.name is not None:
+            node.name = self._rename(node.name)
+        return self.generic_visit(node)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> ast.AST:
+        if node.rest is not None:
+            node.rest = self._rename(node.rest)
+        return self.generic_visit(node)
+
+
+def _bound_names(tree: ast.Module, protected: set[str]) -> set[str]:
+    """Every name the block binds, minus its interface and the dunders.
+
+    Assignment of every kind (plain, augmented, annotated, `for`, `with ... as`,
+    comprehension and walrus targets, `del`), arguments, `except ... as`,
+    `global`/`nonlocal`, nested `def`/`class` names and `match` captures. A
+    name that is only read -- a builtin, a skeleton helper -- is free.
+    """
+    top_level = {
+        id(node)
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name is not None:
+                names.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if id(node) not in top_level:
+                names.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name is not None:
+                names.add(node.name)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest is not None:
+                names.add(node.rest)
+    return {name for name in names - protected if not name.startswith("__")}
 
 
 def _protected_names(tree: ast.Module) -> set[str]:
@@ -159,14 +245,15 @@ def _protected_names(tree: ast.Module) -> set[str]:
 
 
 def normalise_block(block: str) -> str:
-    """The block's canonical form: no docstrings, no comments, no local names."""
+    """The block's canonical form: no docstrings, no comments, no bound names."""
     try:
         tree = ast.parse(block)
     except (SyntaxError, ValueError):  # ValueError: a null byte, or a lone surrogate (a diff's non-UTF-8 byte)
         return "\n".join(
             line.rstrip() for line in block.strip().splitlines() if line.strip()
         )
-    transformer = _Canonicaliser(_protected_names(tree))
+    protected = _protected_names(tree)
+    transformer = _Canonicaliser(protected, _bound_names(tree, protected))
     canonical = ast.fix_missing_locations(transformer.visit(tree))
     return ast.dump(canonical, annotate_fields=True, include_attributes=False)
 
@@ -197,7 +284,8 @@ def node_type_sequence(block: str) -> list[str]:
         tree = ast.parse(block)
     except (SyntaxError, ValueError):
         return []
-    transformer = _Canonicaliser(_protected_names(tree))
+    protected = _protected_names(tree)
+    transformer = _Canonicaliser(protected, _bound_names(tree, protected))
     canonical = ast.fix_missing_locations(transformer.visit(tree))
     out: list[str] = []
     stack: list[ast.AST] = [canonical]
@@ -250,19 +338,72 @@ def local_similarity(block_a: str, block_b: str, n: int = NGRAM_SIZE) -> float:
     return cosine(node_ngrams(block_a, n), node_ngrams(block_b, n))
 
 
+def delta_grams(
+    block: str, parent_block: str | None, n: int = NGRAM_SIZE
+) -> dict[tuple[str, ...], int]:
+    """The n-grams a change added (`"+"`) and removed (`"-"`) against its parent.
+
+    With no parent -- the starting point -- the block's full, untagged vector.
+    A parent that will not parse counts as empty: everything the child has, it
+    added, so every gram is tagged `"+"`. The tags keep a delta from ever
+    matching the starting point's full vector. Empty when the change moved no
+    node types at all, and when the block itself will not parse.
+    """
+    grams = node_ngrams(block, n)
+    if parent_block is None or not grams:
+        return grams
+    parent = node_ngrams(parent_block, n)
+    if not parent:
+        return {("+", *g): k for g, k in grams.items()}
+    c, p = Counter(grams), Counter(parent)
+    return {("+", *g): k for g, k in (c - p).items()} | {("-", *g): k for g, k in (p - c).items()}
+
+
+class _BlankConstants(ast.NodeTransformer):
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        node.value = None
+        node.kind = None
+        return node
+
+
+def _blanked_dump(block: str) -> str | None:
+    """The canonical dump with every `Constant` value blanked; `None` when the
+    block will not parse."""
+    try:
+        tree = ast.parse(block)
+    except (SyntaxError, ValueError):
+        return None
+    protected = _protected_names(tree)
+    canonical = _Canonicaliser(protected, _bound_names(tree, protected)).visit(tree)
+    return ast.dump(_BlankConstants().visit(canonical), include_attributes=False)
+
+
+def _constants_only(block: str, parent_block: str) -> bool:
+    """Whether `block` is `parent_block` with nothing but constant values moved."""
+    mine = _blanked_dump(block)
+    return mine is not None and mine == _blanked_dump(parent_block)
+
+
 class NearBackend(Protocol):
-    """Anything that can answer "what have I seen that is closest to this?"."""
+    """Anything that can answer "what have I seen that is closest to this?".
+
+    `parent_block` is the block the candidate was bred from (`None` for the
+    starting point); `parent_id` is never returned as a match, except by the
+    local method for a change that moved constants only.
+    """
 
     method: str
 
-    def add(self, candidate_id: str, block: str) -> None: ...
+    def add(self, candidate_id: str, block: str, parent_block: str | None = None) -> None: ...
 
-    def closest(self, block: str) -> tuple[str | None, float]: ...
+    def closest(
+        self, block: str, parent_block: str | None = None, parent_id: str | None = None
+    ) -> tuple[str | None, float]: ...
 
 
 @dataclass
 class LocalNearIndex:
-    """Node-type n-gram cosine against everything the run has kept.
+    """Cosine over each kept candidate's change (`delta_grams`) against its parent.
 
     Linear in the number of archived candidates and microseconds per
     comparison; at the 10^2-10^3 candidate scale this project targets, that is
@@ -273,17 +414,27 @@ class LocalNearIndex:
     n: int = NGRAM_SIZE
     vectors: dict[str, dict[tuple[str, ...], int]] = field(default_factory=dict)
 
-    def add(self, candidate_id: str, block: str) -> None:
-        grams = node_ngrams(block, self.n)
+    def add(self, candidate_id: str, block: str, parent_block: str | None = None) -> None:
+        grams = delta_grams(block, parent_block, self.n)
         if grams:
             self.vectors.setdefault(candidate_id, grams)
 
-    def closest(self, block: str) -> tuple[str | None, float]:
-        grams = node_ngrams(block, self.n)
+    def closest(
+        self, block: str, parent_block: str | None = None, parent_id: str | None = None
+    ) -> tuple[str | None, float]:
+        grams = delta_grams(block, parent_block, self.n)
         if not grams:
+            # No node type moved. Constants only: near its parent, so the
+            # "change the rule, not the constants" hint is true. Anything else
+            # (a `max` -> `min` swap) has an empty change vector: near nothing.
+            # With no parent id there is no twin to name.
+            if parent_id is not None and parent_block is not None and _constants_only(block, parent_block):
+                return parent_id, 1.0
             return None, 0.0
         best_id, best = None, 0.0
         for candidate_id, other in self.vectors.items():
+            if candidate_id == parent_id:
+                continue
             score = cosine(grams, other)
             if score > best:
                 best_id, best = candidate_id, score
@@ -326,16 +477,23 @@ class EmbeddingNearIndex:
             self.on_call(embedding_tokens(self.provider, [block]), 1)
         return vector
 
-    def add(self, candidate_id: str, block: str) -> None:
+    def add(self, candidate_id: str, block: str, parent_block: str | None = None) -> None:
+        """`parent_block` is accepted for the protocol; a whole block is embedded."""
         if candidate_id not in self.vectors:
             self.vectors[candidate_id] = self._embed(block)
 
-    def closest(self, block: str) -> tuple[str | None, float]:
-        if not self.vectors:
+    def closest(
+        self, block: str, parent_block: str | None = None, parent_id: str | None = None
+    ) -> tuple[str | None, float]:
+        """The parent is never a match: a child is close to where it came from
+        by construction."""
+        if not any(candidate_id != parent_id for candidate_id in self.vectors):
             return None, 0.0
         vector = self._embed(block)
         best_id, best = None, 0.0
         for candidate_id, other in self.vectors.items():
+            if candidate_id == parent_id:
+                continue
             score = _cosine_dense(vector, other)
             if score > best:
                 best_id, best = candidate_id, score
@@ -379,6 +537,8 @@ class NoveltyVerdict:
     kind: str | None = None
     twin_id: str | None = None
     similarity: float | None = None
+    twin_is_parent: bool = False
+    """For `"near"`: the twin is the parent, so the change moved constants only."""
 
     @property
     def novel(self) -> bool:
@@ -409,11 +569,10 @@ class NoveltyVerdict:
     @property
     def retry_hint(self) -> str:
         if self.kind == "near":
-            return (
-                f"Your previous answer was closest to {self.twin_id} at "
-                f"similarity {self.similarity:.2f} -- change the decision "
-                "rule, not the constants."
-            )
+            closest = f"Your previous answer was closest to {self.twin_id} at similarity {self.similarity:.2f} -- "
+            if self.twin_is_parent:
+                return closest + "change the decision rule, not the constants."
+            return closest + f"{self.twin_id} already made this change -- try a different one."
         return (
             f"Your previous answer was structurally identical to {self.twin_id} "
             "(same code once docstrings, comments and variable names are "
@@ -445,22 +604,24 @@ class NoveltyIndex:
         # A diff may hold bytes that are not UTF-8, kept as lone surrogates.
         return hashlib.sha256(self.key(block).encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
 
-    def add(self, candidate_id: str, block: str) -> str:
+    def add(self, candidate_id: str, block: str, parent_block: str | None = None) -> str:
         digest = self._digest(block)
         self.by_hash.setdefault(digest, candidate_id)
         if self.near is not None:
-            self.near.add(candidate_id, block)
+            self.near.add(candidate_id, block, parent_block=parent_block)
         return digest
 
     def lookup(self, block: str) -> str | None:
         return self.by_hash.get(self._digest(block))
 
-    def closest(self, block: str) -> tuple[str | None, float]:
+    def closest(
+        self, block: str, parent_block: str | None = None, parent_id: str | None = None
+    ) -> tuple[str | None, float]:
         """The nearest thing the run has kept, and how near. `(None, 0.0)` when
         the gate is off or nothing has been indexed yet."""
         if self.near is None:
             return None, 0.0
-        return self.near.closest(block)
+        return self.near.closest(block, parent_block=parent_block, parent_id=parent_id)
 
     def check(
         self,
@@ -486,7 +647,7 @@ class NoveltyIndex:
             return NoveltyVerdict("duplicate", twin)
         if not near:
             return NoveltyVerdict()
-        twin_id, similarity = self.closest(block)
+        twin_id, similarity = self.closest(block, parent_block, parent_id)
         if twin_id is not None and similarity >= self.threshold:
-            return NoveltyVerdict("near", twin_id, similarity)
+            return NoveltyVerdict("near", twin_id, similarity, twin_is_parent=twin_id == parent_id)
         return NoveltyVerdict()

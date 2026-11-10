@@ -42,6 +42,22 @@ def test_two_finished_runs_compare_side_by_side(tmp_path):
     assert b["final"]["line"] == "There is no final check for this run." and b["held"] == [] and b["final"]["ci95"] is None
 
 
+def test_the_compare_page_knows_which_rule_a_run_was_decided_by(tmp_path):
+    """Fix round 2: `posterior` reaches the compare page, so a file written before A1 keeps its words."""
+    from evolvekit.confirm import verdict_summary
+
+    root, home = study_with_runs(tmp_path, "Tours A")
+    finished_run(root / "runs" / "20260101-000000", decision="use")
+    other = home.create_study("demo-tour", "tune", "Tours B")
+    home.use_samples(other)
+    home.split(other, 1)
+    fresh = verdict_summary([0.01, 0.016, 0.0025], direction="minimize")
+    finished_run(home.study_root(other) / "runs" / "20260103-000000", decision="keep", summary=fresh)
+    both = compare.compare(home, root.name, other, document_of)
+    assert both["a"]["final"]["posterior"] is False, "a comparison written before A1"
+    assert both["b"]["final"]["posterior"] is True
+
+
 def test_a_side_that_does_not_exist_is_404(tmp_path):
     root, home = study_with_runs(tmp_path, "Tours A")
     finished_run(root / "runs" / "20260101-000000")

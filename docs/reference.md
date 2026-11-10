@@ -28,11 +28,13 @@ That runs the bin-packing example for six generations against the `fake`
 provider — no network, no API keys, about ten seconds — and prints a
 leaderboard, an economics table and a spend summary. The seed heuristic (best
 fit) scores −5.871; the run improves twice, to −5.620 and then to −5.370,
-spreads its candidates across five archive cells, and rejects eleven of its
-twenty: one no-op, six duplicates, two behavioural twins, one block that tried
-to `import os` (stage 0, the only hard reject) and one response that came back
-in neither of the two formats it was asked for. One further child is flagged as
-a near-duplicate and evaluated anyway. Along the way the breadth grows from
+spreads its candidates across four archive cells, and rejects ten of its
+twenty: one no-op, four duplicates, two behavioural twins, one block that tried
+to `import os` (stage 0, the only hard reject), one response that came back in
+neither of the two formats it was asked for and one that gave back its parent
+unchanged. One further child is flagged as a near-duplicate and evaluated
+anyway, and two that finished are kept out of the ranking because their
+hold-out score fell below the seed's. Along the way the breadth grows from
 three children to four on the plateau and shrinks back to three once the search
 starts climbing again.
 
@@ -115,7 +117,7 @@ interrupted or dead.
 | Section | Answers |
 |---|---|
 | `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
-| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `within noise`, or `unknown` when each score is a single run. The verdict is a paired comparison over the seeds both candidates ran on, and says in words that those are the seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
+| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero (the search's own reading, not `confirm`'s rule, which is a chance of a gain) — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
 | `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
 | `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
 | `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
@@ -123,7 +125,8 @@ interrupted or dead.
 | `candidates`, `archive`, `spend`, `log_tail` | One light row per candidate (no code), the grid snapshot, USD / tokens / evaluator seconds, and the run's last console lines. |
 
 `schema` is bumped when a key changes meaning or disappears; adding keys does not
-bump it. The document never contains `NaN` or `Infinity`. A view that fails is
+bump it. It is 2 since `progress.improvement` lost `t` and its `n` came to
+count cases rather than runs. The document never contains `NaN` or `Infinity`. A view that fails is
 listed under `errors` and leaves the other sections intact.
 
 ### The live dashboard
@@ -185,7 +188,7 @@ seed = the skeleton's EVOLVE-BLOCK
   ├─ generation g       C children; C adapts on stagnation (optional)
   │    sample P parents from the archive's elites
   │                  weight = sigmoid(z(fitness)) × 1/(1 + children)
-  │    draw 1–2 inspirations from *other* cells
+  │    draw 1 to `search.inspirations` (default 2) elites from *other* cells
   │
   │    operators   diff (SEARCH/REPLACE) · rewrite · crossover → small model
   │                big_step, every K gens or on plateau        → strong model
@@ -203,8 +206,10 @@ seed = the skeleton's EVOLVE-BLOCK
   │      after each command stage: hash the KPIs it reported
   │      = anything seen at that stage → behavioural duplicate, stop here
   │
+  ├─ hold-out below the seed's → does not compete (holdout_veto)
   ├─ insert into the archive: one elite per cell, ranked by
   │     public − holdout_penalty × max(0, public − private)
+  │     (holdout_penalty is 0 by default)
   │
   ├─ economics: cumulative USD, best, USD since the last improvement,
   │             USD per unit of gain over a sliding window
@@ -228,12 +233,16 @@ through the final stage, hold-out included, without a failure. Four kinds of
 candidate keep their finite score in `runs.jsonl` (`competes: false`) and are
 never ranked: one whose evaluation failed or timed out, one that was not
 promoted past a cheaper stage, one whose final stage was skipped by
-`budget.max_full_evals_per_day`, and one whose hold-out run failed. The reason
-is arithmetic rather than taste: a proxy score comes from a different input set,
-and the default `failure_score: -1000` *outranks* every healthy candidate whose
-minimised cost is above 1000. `run` and `status` report the count as
-`unfinished`; a number that keeps climbing is an evaluator problem, not a
-search problem.
+`budget.max_full_evals_per_day`, and one whose hold-out run failed — a hold-out
+run that does not report the measures the score is computed from fails too,
+rather than borrowing them from the public run. The reason is arithmetic rather
+than taste: a proxy score comes from a different input set, and the default
+`failure_score: -1000` *outranks* every healthy candidate whose minimised cost
+is above 1000. `run` and `status` report the count as `unfinished`; a number
+that keeps climbing is an evaluator problem, not a search problem. A fifth kind
+finished: with `evaluate.holdout_veto` on, a candidate whose hold-out score is
+below the starting point's is kept out by the veto. It is counted apart, as
+`kept out`.
 
 ### The archive
 
@@ -279,7 +288,7 @@ candidates being lost.
 
 | Operator | Model | What it sees |
 |---|---|---|
-| `diff` | small | the parent block, its score breakdown, delta summaries of 1–2 inspirations |
+| `diff` | small | the parent block, its score breakdown, delta summaries of 1 to `search.inspirations` (default 2) inspirations |
 | `rewrite` | small | the same, and asks for the whole block back |
 | `crossover` | small | the parent **and** one inspiration's block, both with score breakdowns |
 | `big_step` | strong | scheduled every `big_step_every` generations, or on plateau |
@@ -293,6 +302,10 @@ than the parent's and are shown as one-line delta summaries — a unified-diff
 stat against their own parent plus the first line of their docstring, both
 computed locally. Crossover is the one operator that also sees an inspiration's
 code, because it cannot combine two candidates otherwise.
+
+Each inspiration adds a summary and a score line to the prompt, and on a tree
+problem its whole diff, so raising `search.inspirations` raises the cost of
+every prompt. Crossover is always shown exactly one.
 
 `param_lhs` costs no tokens. It needs a declaration inside the evolve block:
 
@@ -536,7 +549,7 @@ tolerance in its KPI's units (`evolvekit/evaluate/levels.py`):
 
 ```
 q_i   = clamp(round(s_i · (v_i − b_i) / t_i), −K, K)       levels 1 … L−1, K = 10 000
-x_L   = 0.5 · tanh(s_L · (v_L − b_L) / scale_L)             scale_L = 10 % of |b_L|, or 1 when b_L = 0
+x_L   = 0.5 · tanh(s_L · (v_L − b_L) / scale_L)             scale_L = max(10 % of |b_L|, range of the seed's values of that measure over its instances)
 score = Σ q_i · (2K + 2)^(L−1−i)  +  x_L
 ```
 
@@ -546,13 +559,16 @@ The seed scores exactly 0, and its values are kept in `work/levels.json` (per st
 - Values are compared in steps of the tolerance, counted from the seed's value. Two values in the
   same step count as equal -- so two values just either side of a step boundary count as different,
   however close they are.
+- The last level's scale is the larger of a tenth of the seed's value and the seed's own range of
+  that measure over its instances (a tenth alone with one instance; 1 when both are 0), so a 40 %
+  and a 30 % gain are different numbers: a tenth of the value alone saturated near ±30 %.
 - A difference of more than K steps saturates; `status` warns when a candidate's does. Widen that
   level's tolerance.
 - At most four levels: the integer part then stays exact in double precision, and the last level
   keeps a resolution finer than a thousandth of its range. The weight between levels is 2K + 2
   rather than 2K + 1 because `tanh` of a large difference is exactly 1.0 in floating point.
 - Levels do not combine with `weights`, `penalties` (make the penalised KPI a level, or a gate),
-  `stop.target`, or `race`. A per-instance stage compares plain means (`normalize: none`, the
+  `stop.target`, or `race`; the config error names the level or gate to use instead of a penalty. A per-instance stage compares plain means (`normalize: none`, the
   default with levels): `baseline` would restate level 1 alone as a percentage.
 
 `status` reports each level's baseline, best, change and verdict and names the deciding level
@@ -784,11 +800,14 @@ then instances), and reaches the behaviour signature as `<kpi>_per_instance`.
 Three of them, because a child can repeat itself in three different ways.
 
 **Structural**, before a child is evaluated. Its block is parsed, stripped of
-docstrings and comments, its local names canonicalised to `v0, v1, …`, and the
-result hashed. A child whose hash matches its parent's is a **no-op**; one that
-matches any archived candidate is a **duplicate**. Both are written to
-`runs.jsonl` with `rejected: true`, a `reject_reason` naming the twin and a
-`twin_id`, and neither enters the archive, the parent pool, or the evaluator.
+docstrings and comments, the names it binds (arguments, assignment and loop
+targets, nested defs) canonicalised to `v0, v1, …`; builtins, the skeleton's
+helpers and imports keep their names, so `max` and `min` are different
+programs; and the result hashed. A child whose hash matches its parent's is a
+**no-op**; one that matches any archived candidate is a **duplicate**. Both are
+written to `runs.jsonl` with `rejected: true`, a `reject_reason` naming the
+twin and a `twin_id`, and neither enters the archive, the parent pool, or the
+evaluator.
 
 With `search.novelty_retry: true` (the default) the model gets exactly one
 re-prompt — "that was identical to `<id>`; propose something different" — before
@@ -811,15 +830,17 @@ search:
 
 | Method | How | Cost |
 |---|---|---|
-| `local` (default) | cosine over the multiset of node-type 3-grams of the **canonicalised** AST — the same canonicaliser the exact hash uses. Node *types* only, so a block that differs from an earlier one in nothing but its constants scores exactly **1.00**. | nothing: no call, no key, no dependency |
+| `local` (default) | cosine over the 3-grams the change added and removed (child versus parent, node types of the canonicalised AST). Adding a branch to a long block is not a near twin of that block; making the same change another child already made to the same parent is. A change that moved nothing but constants is near its parent at **1.00**. A change that moved no node type but swapped a name (`max` for `min`) is near nothing. | nothing: no call, no key, no dependency |
 | `embedding` | cosine over vectors from `Provider.embed`, for when a semantic judgement beats a syntactic one | one embedding call per new block, billed |
 | `off` | — | the Phase B behaviour |
 
 **A near-duplicate is never rejected.** It gets the same single re-prompt a
-structural duplicate gets — "closest to `<id>` at similarity 0.98 — change the
-decision rule, not the constants" — and if the retry is *still* near, the child
-is **evaluated anyway** and flagged: `novelty: "near"`, `near_twin_id`,
-`similarity`. That asymmetry is deliberate. Run 2 found nothing at all in twelve
+structural duplicate gets — "closest to `<id>` at similarity 0.98", then
+"change the decision rule, not the constants" when the twin is its parent (only
+constants moved), or "`<id>` already made this change — try a different one"
+when another candidate made the same change — and if the retry is *still* near,
+the child is **evaluated anyway** and flagged: `novelty: "near"`,
+`near_twin_id`, `similarity`. That asymmetry is deliberate. Run 2 found nothing at all in twelve
 novel samples; a filter that can starve a twelve-sample search is worse than one
 that occasionally pays for a cousin. The counts appear in the run summary,
 `status`, and both leaderboards, separately from the rejections, because a
@@ -886,19 +907,50 @@ paid calls bought nothing; that is the number these are here to drive down.
 
 ### The hold-out penalty
 
-`evaluate.holdout_penalty` (default `1.0`) defines the score everything ranks
-by:
+The hold-out acts in two ways. By default only the first is on.
+
+**The veto.** `evaluate.holdout_veto` (default `true`): a candidate whose
+private score is below the **seed's** private score does not compete. It is not
+ranked, archived or bred from, and its row carries `competes: false` and
+`veto: "holdout below the seed's …"` with the seed's value. The leaderboard
+lists these candidates under its table, each with the `!` flag — the flag and
+the veto are one condition — and counts them as "kept out by the hold-out",
+apart from the candidates that did not finish; `status` and the dashboard label
+them the same way. A row written before the veto existed is judged by it when
+it is read back, by the resumed run and by every view alike.
+
+The comparison is with the seed's hold-out score as it is, `private <
+seed's private`, with no allowance for noise: on a hold-out whose score varies
+from run to run, a candidate exactly as good as the seed is vetoed about half
+the time. When the seed's own hold-out run failed there is nothing to compare
+with, and nobody is vetoed. A resumed run reads the seed's private score back
+from `runs.jsonl`: the last seed row's, and none when that row has none.
+
+**The penalty.** `evaluate.holdout_penalty` (default `0.0`) defines the score
+everything ranks by:
 
 ```
 ranking = public − penalty × max(0, public − private)
 ```
 
-The archive, parent sampling, the leaderboard and `summary.best` all use it.
-The raw `public_score`, `private_score` and `generalization_gap` stay in the
-record untouched — the penalty changes what wins, never what is reported.
-Separately, the leaderboard flags with `!` any candidate whose private score is
-below the **seed's**: that is the 2026-08-22 failure, where the winner improved
-the public set and its hold-out went backwards relative to where it started.
+The archive, parent sampling, the leaderboard and `summary.best` all use it. At
+the default 0 the ranking score is the public score, so all of them order by
+the public score. The raw `public_score`, `private_score` and
+`generalization_gap` stay in the record untouched — the penalty changes what
+wins, never what is reported. A resumed run computes the ranking score of every
+row again with the penalty it is run with, so rows written under another value
+do not put two scales in one order.
+
+**Why the veto and not the penalty.** The 2026-08-22 failure was a winner that
+improved the public set while its hold-out went backwards from where it
+started. The veto catches exactly that, and the search learns one bit per
+candidate from the hold-out: in or out. At a penalty of 1 the hold-out was a
+continuous term of the fitness instead. The search selected on it for
+generation after generation, until it was no longer held out, and
+`generalization_gap` stopped meaning what its name says. A non-zero penalty is
+still available — set it when you want the search to prefer candidates whose
+hold-out keeps up with their public score — at that cost: the hold-out then
+trains the search, and its score is no longer an independent check.
 
 ### Adaptive breadth
 
@@ -970,11 +1022,14 @@ stop:
     threshold: 0.5
 ```
 
-Neither may fire until at least **one big step has been spent since the last
-improvement**. A plateau's first answer is the strong model, not the exit —
-the same guard `stop.min_big_steps` puts on `stop.patience`, hard-wired to one
-here. `stop.patience` still wins when both would fire, so the reason printed is
-always the first one that became true.
+Neither may fire until at least **one big step has applied since the last
+improvement** (its reply parsed into a candidate; a reply that never did is not
+counted). A plateau's first answer is the strong model, not the exit — a guard
+like the one `stop.min_big_steps` puts on `stop.patience`, hard-wired to one
+here; `stop.min_big_steps` counts big steps tried, applied or not. In a run
+that takes no big steps (`big_step_every: 0`, or no model) the guard does not
+apply. `stop.patience` still wins when both would fire, so the reason printed
+is always the first one that became true.
 
 `stop.min_gain_per_usd.window` also sets the window the whole series is
 computed over; without it the window is three generations, which is
@@ -1179,13 +1234,85 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   `retries`; and the runs are *interleaved* — the configurations' runs for one
   (instance, seed) are queued next to each other — so whatever the machine does
   over the hours happens to all of them alike.
-- **The instance is the unit.** Per instance, the difference to the baseline
-  in percent of the baseline's value, averaged over the seeds. Over instances:
-  the mean with a 95 % confidence interval (paired, Student's t), wins and
-  losses, and an exact Wilcoxon signed-rank test. The verdict is a sentence:
-  *better than the baseline*, *not distinguishable from it*, or *WORSE*.
-- **Exit code 0 only when every candidate's interval lies above zero**, so a
-  script can gate on it.
+- **The instance is the unit, and a pair is a log ratio.** Per (instance, seed)
+  pair the difference to the baseline is the log of the ratio of the two values,
+  averaged over the seeds of an instance, so a large instance and a small one
+  count alike and halving and doubling are one step either way. It is shown in
+  percent of the baseline's value: `100·(e^d − 1)` when the objective is
+  maximised, `100·(1 − e^−d)` when it is minimised (the share of the baseline's
+  value that was saved). A pair with a value of 0 or below on either side has
+  no log ratio and is left out; it is counted (`nonpositive_pairs`).
+- **The rule is one posterior.** Under the reference prior p(μ, σ²) ∝ 1/σ² the
+  true mean gain is Student's t with n − 1 degrees of freedom around the mean
+  of the instances' gains, with scale s/√n. The `chance` is P(gain > 0). The
+  rule: **use when the chance is at least 0.95** ("95 %"), **worse** when it
+  is 0.05 or less ("5 %", as strict as use), **keep** between. A
+  candidate that failed more runs than the baseline failed (pairs only the
+  candidate failed outnumber pairs only the baseline failed) is never *use*:
+  it is keep, and its sentence says *it failed N runs the starting point
+  finished*. A crash costs at most a lost pair the size of the best finished
+  gain, so without this a program that crashes on a third of its runs could
+  read *use* at a chance of 0.99996. The chance is printed to two places and
+  never on the far side of a threshold: a keep never prints 0.95 or 0.05. `worst` is the posterior's 5 % quantile,
+  so a *use* never shows a loss as its worst case; `ci95` is its 95 % interval
+  (for engineers), `range90` its 90 % interval (the 5 % and 95 % quantiles,
+  whose low end is `worst`: the range a person is shown, named *90 % range*
+  in the sentence, on the Study page and in the report, and the verdict
+  document's `range90_pct`) and `mean` the mean of the instances' gains, all in
+  percent of the baseline.
+  The sentence (`verdict`) is built from the same numbers, so it and the
+  decision cannot disagree. The frequentist interval and the exact Wilcoxon
+  signed-rank test are kept under `frequentist`, labelled as the engineers'
+  view, and `chance_margin` (the chance of losing no more than 1 %) is recorded
+  and does not decide. `comparison.json` also holds `prior: "reference"`, the
+  `log` scale of the summary (`mean`, `sd`, `ci95`, `range90`, `worst`) and `run_noise`
+  (the baseline's run-to-run noise as the search measured it: recorded, not a
+  prior). One instance has no chance (`single`); none gives `none`. A
+  `comparison.json` written before this rule has no `posterior` and keeps the
+  rule it was decided by (a chance of 0.9 and a 95 % lower bound within 1 %),
+  its words and its decision.
+- **Exit code 0 only when the rule says use for every candidate**, so a script
+  can gate on it. A candidate that fails the multiplicity step below, or whose
+  every run gave exactly the baseline's result, does not say use.
+- **The answer is read once, or twice.** The final check of a study reads its
+  answer after its first runs. If the answer is keep and more runs could help,
+  it adds all the extra runs the seeds and the time allow, at once, and reads
+  the answer once more; then it stops. A look at every step would say *use* for
+  a change that is no better more often than the rule promises. `looks` in
+  `comparison.json` counts the reads of a label (a comparison run again or
+  extended under one label reads it again), and `comparison.md` says how many.
+  With no true gain, the share of studies that read *use* under these two looks
+  was measured in a seeded simulation (6000 studies per setting, 4 held-back
+  cases of 3 runs): 8.5 % when runs are noisier than cases, 5.0 % when cases
+  are noisier than runs, 4.6 % with no repeated runs, 7.6 % when time stops the
+  extension at 4 runs. The worst case is pure run noise (every case's true gain
+  exactly 0, only the runs vary; the rule is scale-free): **about 8.9 %** read
+  *use* (20 000 studies), the bound to quote. The same null read *worse* in
+  about 5 % of studies (4.9 % on 8000, 5.3 % on 4000: a worse read once is
+  rechecked, a use is not); at the old 0.10 it was about 11 % with the recheck
+  and 17.8 % without. A 3 % true gain on 4 held-back cases reads *use* in about
+  96 % of studies. A campaign's recheck and a continued study ask a new
+  question (later data, another candidate) and are outside that rate. The app
+  offers a second read (*Check with more runs*, twice the runs per case) only after a single read,
+  never beside an answer set by the cases, and refuses a third.
+- **More runs, or more cases.** At the first read the check splits the spread
+  of the instances' gains into the part the runs explain (the pooled
+  run-to-run variance times the mean of 1/runs per instance) and the part the
+  instances themselves differ by. It adds runs only while the runs explain at
+  least a quarter. Otherwise it adds none, its log says *the answer is set by
+  the held-back cases, not by the runs: hold back more cases for a firmer
+  answer*, and `job.json` has `check.limited_by: "cases"`. With goals in order
+  of importance the split is made on the level the answer is read on.
+- **Choosing among several pays for it (Holm).** `--candidates top:N` with
+  N > 1, and the branches of a bake-off, are a family. Each candidate that is
+  *use* by its own chance keeps it only when Holm's step-down over the family
+  passes on p = 1 − chance at 0.05 (one leg: the rule's own chance). One that
+  fails becomes keep, and `comparison.md` and the verdict say *not proven among
+  k candidates (Holm)*. Each member gets `holm: {k, what, own, passed}` in
+  `comparison.json`; `own` is its decision before Holm. Candidates every run of
+  which gave exactly the baseline's result are not in the family, and with
+  fewer than two members nothing changes. In a seeded simulation, 4 branches
+  with no true gain read *use* for 3.7 % of studies (18 % without Holm).
 - **Two searches, one comparison.** `ID@OTHER_RUN_DIR` names a candidate of
   another run of the same problem, and `--against` names what the candidates
   are compared with instead of the seed — a different operator mix, a model
@@ -1196,17 +1323,29 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
   `ID@<its directory's name>`, with parent directories added when two
   directories share a name (`ID@a/run`, `ID@b/run`).
 - **A failure is a result.** When only one side of an (instance, seed) pair
-  failed or timed out, that side lost the pair: it counts as a difference as
-  large as the largest one measured anywhere in the comparison — a loss when
-  the candidate failed, a win when the baseline did — so a configuration that
+  failed or timed out, that side lost the pair: it counts as a log ratio as
+  large as the largest one measured on the candidate's own finished pairs —
+  a loss when the candidate failed, a win when the baseline did. When those
+  pairs barely differ from the baseline and the candidate failed a pair the
+  baseline finished, both are sized at least 1 % (the largest of any candidate
+  in the comparison, or 1 %): a crash is never a loss of 0 %, and a crash of
+  the baseline is a win of the same size, so failures that strike both alike
+  (timeouts, a flaky machine) cancel out. When the candidate failed no such
+  pair, a win keeps its own size, so a change that does nothing gains nothing
+  from the baseline's crashes alone. A
+  candidate that failed more runs than the baseline is never *use* (see the
+  rule above), so a configuration that
   crashes or hangs often cannot be judged on its lucky runs, and a failure
-  never weighs less than a real result. A pair in which both failed, or whose
-  baseline is 0 (a percentage of 0 is no number), says nothing about either
-  and is left out. Every kind is counted per candidate and per instance
-  (`candidate_failed_pairs`, `baseline_failed_pairs`, `both_failed_pairs`,
-  `zero_baseline_pairs`) in `comparison.json` and `comparison.md`, the verdict
-  names them, and `finished_only` keeps what the comparison would say if
-  failures cost nothing. A
+  never weighs less than a real result. It is said as the loss or win it
+  counted as in percent (`failure_counted_as_pct`, `{loss, win}`: twice the
+  cost is 100 % more, half of it 50 % less, so the two differ). A pair in which
+  both failed, or with a value of 0 or below on either side (a log of it is no
+  number), says nothing about either and is left out. Every kind is counted
+  per candidate and per instance (`candidate_failed_pairs`,
+  `baseline_failed_pairs`, `both_failed_pairs`, `nonpositive_pairs`) in
+  `comparison.json` and `comparison.md`, the verdict names them, and
+  `finished_only` keeps what the comparison would say if failures cost
+  nothing. A
   seed given twice in `--seeds` is refused. Finished runs are cached, so an
   interrupted confirmation — or one extended by more seeds — pays only for
   what is new.
@@ -1217,12 +1356,20 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
 
 With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels) every
 level is compared as well -- paired per (instance, seed), averaged over the seeds of an instance,
-with a 95 % interval per level. A level is compared in percent of the baseline, like the objective,
-unless some baseline value is 0 (a count of late tasks, say): then in the KPI's own units, and it
-says so. A level is *equal* when its mean difference lies within its tolerance; the first that is
-not decides: "equal on level 1 (deliveries_per_hour within 1 %), better on level 2 (waiting_h):
-clear". The exit code is then 0 only when every candidate is better, and clearly so, on its
-deciding level.
+with a 95 % interval per level. A level is compared as a log ratio shown in percent of the
+baseline, like the objective, unless some value is 0 or below (a count of late tasks, say): then as
+a plain difference in the KPI's own units, and it says so (`unit`). A level with a tolerance is
+judged on its 95 % interval (two one-sided tests, 1 in 40 per side): *equal* when the interval lies
+within the tolerance, *better* or *worse* when it lies wholly beyond it, and *undecided* when it
+straddles a tolerance edge, or when there are fewer than two instances. The first level that is
+not equal decides, and an undecided level decides keep: "level 1 (deliveries_per_hour) is not yet
+decided within 1 %". (Measured, a difference at the tolerance edge was called equal 2.7 % of the
+time; the earlier rule, on the point estimate, 49 %.) The last level has no tolerance: its state is
+the sign of its mean. A level that decides better or worse is read by the same rule as without
+levels, on that level's posterior, so *use* means the same with and without them: "equal on level 1
+(deliveries_per_hour within 1 %), better on level 2 (waiting_h): clear". The numbers the verdict
+shows are those of that level (`numbers_from` in the verdict names it), and levels join Holm when
+several candidates are compared. The exit code is 0 only when every candidate's decision is *use*.
 
 Use seeds the search never saw (it uses `0 … seeds-1`). If you compare several
 candidates to *choose* one, spend other seeds on the choice than on the final
@@ -1449,8 +1596,9 @@ the climb does not pay for them.
 
 **`max_usd_since_improvement`.** Patience denominated in money, which is the
 unit a plateau actually costs. It refuses to fire until at least one big step
-has been spent since the last improvement, so it can never end a run on the
-generation before the strong model would have been tried.
+has applied since the last improvement, so it can never end a run on the
+generation before the strong model would have been tried. In a run that takes
+no big steps (`big_step_every: 0`, or no model) the guard does not apply.
 
 **`max_full_evals_per_day`.** A hard stop, not a warning, and the one number
 `preflight` will argue with you about.
@@ -1581,7 +1729,7 @@ note: With 2 held-back cases a 'use' is unlikely: the worst case stays wide. Hol
 ```
 
 Three is the number [examples/cli-solver](../examples/cli-solver/README.md#4-find-out-whether-it-is-real)
-gives: with two, "not distinguishable" is the likely answer even for a real
+gives: with two, "not proven" is the likely answer even for a real
 gain. `study compile` ends its plan line with the same note, and the app
 shows it before the start and on the Study page (`notes` in the study's and
 the run's status documents).
@@ -1891,10 +2039,18 @@ that does not exist, a branch that changes files outside the open files
 (widen `vary.code.open` or the harness's `code.open`), or one that does not
 apply on the starting commit (rebase it onto it). `study verdict --json` then
 holds `candidates`: one entry per branch in the order given, `{ref, commit,
-decision, line, mean_pct, ci95_pct, worst_pct, chance, by_case}`, each with
+decision, line, mean_pct, ci95_pct, range90_pct, worst_pct, chance, by_case}`, each with
 its own line and its own figures per held-back case (`by_case`, as the
 verdict's own), which the report's *Branches compared* table shows too. The run's own line names the branch with the largest mean among those
-whose decision is `use`, as `Of 2 branches, nearest-first: …`; when none is,
+whose decision is `use`, as `Of 2 branches, nearest-first: …`, and with two
+or more branches that could pass it adds *Chosen among k branches: it passed
+the stricter check for choosing among k, but the figures are this branch's own,
+and picking the best of k tends to overstate them.* (identical branches are not counted). The
+branches are a family: a branch that is *use* by its own chance but fails
+Holm's step-down over the branches (see the rule under
+[`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export)) is
+`keep`, and its line says *Not proven on N held-back cases with k branches
+compared*. When none is use,
 it says `None of the 2 branches is shown to beat the starting point.`, the
 decision is `keep`, and today's code stays. The report says how many were
 compared, because the more are compared, the likelier one looks ahead by
@@ -2130,7 +2286,12 @@ python -m evolvekit study groups depot-a            # 2 or 3 groups, whichever k
 python -m evolvekit study groups depot-a --k 3      # or ask for 3 (2 to 5)
 ```
 
-A group needs at least two cases to learn from. `study groups` writes
+A group needs at least two cases to learn from, and a kind of case needs at
+least two held-back cases to be checked (`MIN_HELD_BACK`). Before the run, a
+kind of case with fewer is merged into the nearest one (the distance between
+the groups' centres in standardised features; for tagged groups, the group
+with the most held-back cases), and `merged_from` in the run's `groups.json`
+lists what joined it. `study groups` writes
 `groups.json` (the first time it solves each case once to read its tables;
 it refuses while a run of the study is going). Then `per_group: true` in
 `study.yaml` learns settings for each group:
@@ -2145,11 +2306,28 @@ in a complete run folder of its own, `runs/<id>/groups/<name>/`, under the
 study's time and AI cap split by the groups' cases (a group with half of the
 cases, those to learn from and the held-back ones, gets half of the hours and
 half of the cap); each group has its own final check, on its own held-back
-cases. The verdict's rule: *use* only when every group checked on two or
-more held-back cases says use; with no such group, `single`; else `keep`,
-naming the first group that does not (`Per kind of case: not every group is
-shown to beat today's settings (large: keep).`). `study verdict` prints each
-group's own line under it, and the report has a *Per kind of case* section.
+cases. The kinds of case are a choice among several, so once every kind is
+checked Holm's step-down runs over them (see the rule under
+[`confirm`](#after-the-run-is-the-improvement-real-confirm-and-export)): a
+kind's *use* is read only then, and until then its line says *Its answer is
+read once every kind of case is checked.* (If the run stops or fails first, it
+says *Its answer was not read: the run ended before every kind of case was
+checked.*, and while every group that has no answer is one of these, the run's
+line is *Per kind of case: not every kind of case is read yet.*) Each kind's own
+check is read once and, while its answer is open, extended and read again before
+Holm runs, so a chance of a gain after the second read is no longer a single
+read's: in a seeded simulation of the real procedure, 3 kinds of case with no
+true gain and runs noisier than cases (the worst case) said use for some kind
+of case in 8.8 % of studies with 2 held-back cases each and 8.5 % with 4
+(40 000 studies each; about 25 % without Holm) — under 10 %, not Holm's 5 %.
+A kind that fails Holm becomes keep, with *Not proven on N held-back cases with
+k kinds of case compared*, and its `comparison.md` says *Judged with the k kinds
+of case together (Holm)*. The verdict's rule: *use* only when every group checked on
+two or more held-back cases says use; with no such group, `single`; else
+`keep`, naming the first group that does not (`Per kind of case: not every
+group is shown to beat today's settings (large: keep).`). `study verdict`
+prints each group's own line under it, and the report has a *Per kind of case*
+section.
 A finished run writes two files into `runs/<id>/downloads/`:
 `settings_by_group.json`, each group's cases, decision and settings — those
 the search found only where the group's own decision is use, today's
@@ -2157,7 +2335,8 @@ elsewhere — and `rule.md`, which cases get which settings: for groups by
 features a one-split rule (`If the number of rows in stops is above 51, use
 the settings of group 2; otherwise those of group 1.`), for groups by tags
 one line per tag (`For cases tagged large, use today's settings (large: not
-shown to beat today's).`).
+shown to beat today's).`); a merged tag is named with its group (`For cases
+tagged large or small, …`).
 
 A per-group run cannot be continued, resumed or checked again: start the
 study again instead. It is not offered for compare (each group's verdict is
@@ -2416,8 +2595,9 @@ On macOS and Linux there is no installer: `pipx install evolvekit`, then
 4. **Split the work into stages.** Stage 0 is always `builtin-static`. Put a
    subset that runs in seconds at stage 1 with a `promote` rule, and the real
    thing at stage 2 with `private_inputs` for a hold-out. The gap between the
-   public and private score is recorded as `generalization_gap`, charged once
-   through `evaluate.holdout_penalty`, and never otherwise optimised against.
+   public and private score is recorded as `generalization_gap`, and a
+   candidate whose hold-out falls below the seed's does not compete
+   (`evaluate.holdout_veto`); the hold-out is never otherwise optimised against.
    If your problem has one instance and no natural subset, say so in the config
    and lean on step 2 instead — `examples/circlepacking/` runs two stages and
    no hold-out for exactly that reason, and its repair function does the
@@ -2573,7 +2753,8 @@ stochastic, Azure-backed evaluators.
 - **The prompt** (`evolvekit/prompts.py`) — a cacheable system half carrying
   the problem's `description`, `tools`, `constraints` and `what_counts_as_new`
   as named sections, and a bounded user half carrying the parent's block, its
-  score breakdown, its evaluator's own notes, 1–2 inspiration delta summaries,
+  score breakdown, its evaluator's own notes, delta summaries of 1 to
+  `search.inspirations` inspirations,
   the meta-scratchpad, the "Already tried" dead-end list, and the operator
   instruction. Nothing in it grows with the number of generations.
 - **Providers** (`evolvekit/providers/`) — `azure`, `openrouter`, `claude-cli`
@@ -2586,8 +2767,8 @@ stochastic, Azure-backed evaluators.
   contract-tested against recorded responses, error shapes included.
 - **Evaluation** (`evolvekit/evaluate/`) — the staged cascade,
   `top_k_per_generation` and `archive_percentile` promotion, linear and `log1p`
-  penalty scales, a private hold-out charged once through
-  `evaluate.holdout_penalty`, hard reject confined to stage 0, optional
+  penalty scales, a private hold-out that vetoes a candidate below the seed's
+  (`evaluate.holdout_veto`), hard reject confined to stage 0, optional
   `text_feedback` prose per stage, multi-seed stages that average their KPIs
   and record a per-KPI coefficient of variation, and a behaviour signature per
   command stage that stops a candidate the moment it reproduces an earlier

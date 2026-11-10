@@ -216,6 +216,7 @@ def _plateaued_policy(config) -> StopPolicy:
     policy = StopPolicy(config)
     policy.update(1.0)          # the improvement
     policy.note_big_step()      # the plateau's first answer: the strong model
+    policy.note_big_step_applied()  # ... and its response applied
     return policy
 
 
@@ -238,6 +239,21 @@ def test_the_usd_rule_does_not_fire_below_its_cap():
         StopConfig(patience=99, max_usd_since_improvement=5.0)
     )
     assert policy.update(1.0, _points(0.50)[-1]).stop is False
+
+
+def test_without_big_steps_the_exchange_rate_rule_needs_no_big_step_credit():
+    policy = StopPolicy(
+        StopConfig(patience=99, min_gain_per_usd=GainPerUsdRule(window=RULE_WINDOW, threshold=1.0)),
+        takes_big_steps=False,
+    )
+    policy.update(1.0)
+    decision = policy.update(1.0, _points(0.50, window_gain=0.01)[-1])
+    assert decision.stop and "stop.min_gain_per_usd reached" in decision.reason
+
+
+def test_without_big_steps_the_usd_rule_needs_no_big_step_credit_either():
+    policy = StopPolicy(StopConfig(patience=99, max_usd_since_improvement=0.20), takes_big_steps=False)
+    assert policy.update(1.0, _points(0.50)[-1]).stop is True
 
 
 def test_the_gain_per_usd_rule_stops_a_bad_exchange_rate():
@@ -265,9 +281,11 @@ def test_both_rules_are_off_by_default():
 def test_an_improvement_clears_the_big_step_credit_so_the_rules_hold_again():
     policy = StopPolicy(StopConfig(patience=99, max_usd_since_improvement=0.01))
     policy.note_big_step()
+    policy.note_big_step_applied()
     policy.update(1.0)          # first score: baseline
-    policy.update(5.0)          # an improvement resets big_steps_in_window
+    policy.update(5.0)          # an improvement resets both big-step counts
     assert policy.big_steps_in_window == 0
+    assert policy.big_steps_applied_in_window == 0
     assert policy.update(5.0, _points(0.50)[-1]).stop is False
 
 
@@ -491,3 +509,34 @@ def test_the_archive_snapshot_carries_the_configured_economics_window(tmp_path, 
     code = main(["status", "--run-dir", str(driver.ledger.run_dir)])
     assert code == 0
     assert "(w7)" in capsys.readouterr().out
+
+
+def test_the_driver_stops_a_run_without_big_steps_on_its_exchange_rate(tmp_path):
+    """D4: with `big_step_every: 0` both rules were documented and dead."""
+    config = load_config(EXAMPLE_CONFIG)
+    config = replace(
+        config,
+        evaluate=replace(config.evaluate, stages=config.evaluate.stages[:2]),
+        models=replace(
+            config.models,
+            small=replace(config.models.small, price_in_per_mtok=1000.0),
+            strong=replace(config.models.strong, price_in_per_mtok=1000.0),
+        ),
+        stop=replace(config.stop, patience=99, min_big_steps=0,
+                     min_gain_per_usd=GainPerUsdRule(window=2, threshold=1.0)),
+        search=replace(config.search, generations=6, children_per_generation=1, big_step_every=0,
+                       scratchpad_every=0, inspirations=0, operators={"rewrite": 1.0}),
+    )
+    assert config.search.takes_big_steps is False
+    flat = (
+        "```python\n"
+        "def priority(item, bins):\n"
+        '    """Worst fit -- worse than the seed, and never improving."""\n'
+        "    return [b - item for b in bins]\n"
+        "```"
+    )
+    provider = FakeProvider([flat], cycle=True)
+    driver = Driver(config, run_dir=tmp_path / "econ0", providers={"small": provider, "strong": provider})
+    summary = driver.run()
+    assert "stop.min_gain_per_usd reached" in summary.stop_reason
+    assert summary.generations < 6

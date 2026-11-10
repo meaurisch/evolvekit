@@ -403,7 +403,10 @@ def _run_words(status: dict[str, Any], results: dict[str, Any]) -> dict[str, Any
             "final check": _drop_empty({
                 "line": final.get("line"), "advice": final.get("advice"), "state": final.get("state"),
                 "chance of a gain": final.get("chance_words") or final.get("chance"),
-                "worst case %": final.get("worst_pct"), "mean %": final.get("mean"), "ci95 %": final.get("ci95"),
+                "at worst (5 % bound) %": final.get("worst_pct"), "mean %": final.get("mean"),
+                # The range the page shows: the 90 % range, whose low end is "at worst" (decision 15); a run
+                # written before A1 has only its 95 % range.
+                **({"90 % range %": final["range90"]} if final.get("range90") else {"95 % range %": final.get("ci95")}),
                 "rule": final.get("rule"), "next": final.get("next"),
             }),
             "held-back cases (case: start -> best, change)": rows("held"),

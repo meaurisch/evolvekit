@@ -24,7 +24,7 @@ class StageOutcome:
     """List-valued KPIs, e.g. one entry per evaluated instance. They never
     reach the score (which needs scalars) -- they exist so the behaviour
     signature can be per-instance instead of per-mean."""
-    kpi_cv: dict[str, float] = field(default_factory=dict)
+    kpi_cv: dict[str, float | None] = field(default_factory=dict)
     """Per-KPI coefficient of variation across the runs of a `seeds: N` stage.
     Empty for a single run. Zero for a KPI every run agreed on."""
     runs: int = 1
@@ -78,7 +78,7 @@ class EvalResult:
     rejected: bool = False
     reject_reason: str | None = None
     kpis: dict[str, float] = field(default_factory=dict)
-    kpi_cv: dict[str, float] = field(default_factory=dict)
+    kpi_cv: dict[str, float | None] = field(default_factory=dict)
     """The spread of each KPI over a stochastic stage's runs, merged across
     stages the way `kpis` is. Recorded, never scored: the search ranks by the
     mean, and this is here so a human can see when the mean was a coin toss."""
@@ -111,6 +111,10 @@ class EvalResult:
     gated: str | None = None
     """The gate this candidate broke (`evaluate.gates`), as `"missed = 2 > 0"`.
     It keeps its score, is not promoted and does not compete; nothing failed."""
+    veto: str | None = None
+    """Why a candidate that finished the final stage does not compete, when
+    that is its hold-out: `"holdout below the seed's <value>"`
+    (`evaluate.holdout_veto`). `None` for every other candidate."""
     abandoned: str | None = None
     """Why its evaluation did not finish, when the run was stopped in the
     middle of it (`evolvekit/stopping.py`). The driver records nothing of such
@@ -126,7 +130,7 @@ class EvalResult:
     @property
     def max_kpi_cv(self) -> float:
         """The noisiest KPI's spread, or 0.0. One number for a summary line."""
-        return max(self.kpi_cv.values(), default=0.0)
+        return max((v for v in self.kpi_cv.values() if v is not None), default=0.0)
 
     @property
     def deepest_stage(self) -> str | None:

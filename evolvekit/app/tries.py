@@ -17,7 +17,8 @@ built the same way for any harness:
   on a few cases, or a full look half done, never sets it; the status strip's
   one figure is `verdict.best_so_far`, not this line;
 * the final check's numbers, as far as it got, come from its own event log
-  with `confirm.paired_summary`, the same summary the verdict uses;
+  with `confirm.verdict_summary` over the cases' log gains, the one summary
+  the verdict decides by;
 * in a code study (a run whose `evolvekit.yaml` has `problem.tree`) each
   combination carries `diff_stat`, the lines its diff adds and removes and
   the files it touches; `None` in any other run.
@@ -35,6 +36,8 @@ from statistics import fmean
 from typing import Any
 
 import yaml
+
+from evolvekit.stats import log_gain, pct_from_log
 
 __all__ = ["digest", "tree_run"]
 
@@ -93,10 +96,14 @@ def _moment(text: Any) -> datetime | None:
 
 
 def _gain(start: float, value: float, minimize: bool) -> float | None:
-    """Percent better than `start`: positive when `value` is better."""
-    if not isinstance(start, (int, float)) or not isinstance(value, (int, float)) or start == 0:
+    """Percent better than `start`, positive when `value` is better: the log
+    ratio the final check averages, in percent of `start` (`pct_from_log`).
+    None when either is 0 or below: their ratio is no number."""
+    if not isinstance(start, (int, float)) or not isinstance(value, (int, float)):
         return None
-    return (start - value) / abs(start) * 100.0 if minimize else (value - start) / abs(start) * 100.0
+    direction = "minimize" if minimize else "maximize"
+    gain = log_gain(float(start), float(value), direction)
+    return None if gain is None else pct_from_log(gain, direction)
 
 
 def digest(run_dir: Path) -> dict[str, Any]:
@@ -257,13 +264,16 @@ def _now_h(t0: datetime, events: list[dict[str, Any]]) -> float:
 
 
 def _check(run_dir: Path, objective: str, minimize: bool) -> dict[str, Any] | None:
-    """The final check as far as it got: pairs done, per-case gains, and the summary."""
-    from evolvekit.confirm import paired_summary
+    """The final check as far as it got: pairs done, per-case gains, and the
+    summary -- the verdict's own (`confirm.verdict_summary`) over the cases'
+    log gains, so the numbers are the quantity the verdict reads."""
+    from evolvekit.confirm import verdict_summary
 
     events = _lines(run_dir / "confirm" / "final" / "events.jsonl")
     if not events:
         return None
     planned = next((e.get("runs_per_candidate") for e in events if e.get("runs_per_candidate")), None)
+    direction = "minimize" if minimize else "maximize"
     pairs: dict[tuple[str, Any], dict[str, float]] = {}
     for e in events:
         if e.get("type") != "eval_finished" or not e.get("ok"):
@@ -276,12 +286,13 @@ def _check(run_dir: Path, objective: str, minimize: bool) -> dict[str, Any] | No
     per: dict[str, list[float]] = {}
     for (case, _seed), both in pairs.items():
         if "base" in both and "new" in both:
-            gain = _gain(both["base"], both["new"], minimize)
+            gain = log_gain(both["base"], both["new"], direction)
             if gain is not None:
                 per.setdefault(case, []).append(gain)
     gains = {case: fmean(v) for case, v in per.items()}
-    summary = paired_summary(list(gains.values())) if len(gains) >= 1 else {}
+    summary = verdict_summary(list(gains.values()), direction=direction) if gains else {}
     return {"pairs": sum(len(v) for v in per.values()), "runs_per_case": planned, "cases": len(gains),
-            "per_case": {k: round(v, 4) for k, v in gains.items()},
-            "mean": summary.get("mean"), "ci95": summary.get("ci95"), "chance": summary.get("chance"),
-            "worst": summary.get("worst")}
+            "per_case": {k: round(pct_from_log(v, direction), 4) for k, v in gains.items()},
+            "mean": summary.get("mean"), "ci95": summary.get("ci95"), "range90": summary.get("range90"),
+            "chance": summary.get("chance"), "worst": summary.get("worst")}
+

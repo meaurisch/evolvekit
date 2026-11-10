@@ -3,7 +3,7 @@
 One generation is:
 
     sample P parents from the archive's elites   (sigmoid(z) x 1/(1+children))
-    pick 1-2 inspirations from *other* cells
+    pick 1..N inspirations from *other* cells    (N = search.inspirations)
     mutate                diff / rewrite / crossover / param_lhs / big_step
     novelty filter        AST-normalised hash, before anything is evaluated
     evaluate              the staged cascade
@@ -42,14 +42,16 @@ from evolvekit.candidate import (
 from evolvekit.config import TYPED_SPACE_OPERATORS, Config
 from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
-from evolvekit.evaluate.cascade import Cascade, finished_final_stage, race_warnings
+from evolvekit.evaluate.cascade import Cascade, finished_final_stage, holdout_veto, race_warnings
+from evolvekit.evaluate.scoring import ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.stages import restore_build
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
+from evolvekit.leaderboard import seed_private
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
-from evolvekit.prompts import Inspiration
+from evolvekit.prompts import Inspiration, big_step_reason
 from evolvekit.providers import Provider, build_provider
 from evolvekit.providers.base import CallCapped, supports_call_cap
 from evolvekit.search.archive import Archive
@@ -105,7 +107,11 @@ class RunSummary:
     """Candidates that were evaluated but did not finish the final stage: a
     failed or timed-out evaluation, a proxy-only candidate, a skipped final
     stage, a failed hold-out. Recorded, never ranked -- and a number that is
-    climbing is an evaluator problem, not a search problem."""
+    climbing is an evaluator problem, not a search problem. A candidate kept
+    out by the hold-out veto finished, and is counted in `vetoed` instead."""
+    vetoed: int = 0
+    """Candidates that finished the final stage with a hold-out score below
+    the seed's (`evaluate.holdout_veto`): recorded, never ranked."""
     embedding_calls: int = 0
     children_per_generation: int = 0
     """The breadth the run ended on. Equal to the configured value unless
@@ -167,11 +173,13 @@ class Driver:
         self.budget = BudgetGuard(config.budget)
         # `min_big_steps` holds a plateau open until the strong model has been
         # tried. A run without a model has no big step to wait for, and would
-        # never be allowed to stop on patience.
+        # never be allowed to stop on patience. The same relief applies to the
+        # economics rules, which otherwise wait for a big step that never comes.
         self.stop_policy = StopPolicy(
             config.stop
             if config.search.takes_big_steps
-            else replace(config.stop, min_big_steps=0)
+            else replace(config.stop, min_big_steps=0),
+            takes_big_steps=config.search.takes_big_steps,
         )
         self.behaviour = BehaviourIndex()
         self.events = EventLog(self.ledger.run_dir)
@@ -241,6 +249,8 @@ class Driver:
         """The run-log notes said once per run (`_agent_patch`, `_calling`)."""
         self._ai_out: str | None = None
         """Why no more AI changes are written (`_ai_room`): the search ends after its round."""
+        self._big_step_reason: str | None = None
+        """Which trigger planned this round's big step (`_plan_operators`), told to the model."""
         self._parent_notes: dict[str, str] = {}
         """One artefact per parent that bred a behavioural twin, spent on that
         parent's next prompt. The parent's children counter has already been
@@ -510,10 +520,11 @@ class Driver:
 
         Rebuilt from the two logs rather than accumulated, for the same reason
         the archive is: the logs are the record, and a series that drifts from
-        them would be worse than no series.
+        them would be worse than no series. Read as the replay reads them
+        (`_replayed_rows`), so the stop rules see the order the archive has.
         """
         return series(
-            self.ledger.runs(),
+            self._replayed_rows(self.ledger.runs()),
             self.ledger.usage(),
             window=self.config.stop.economics_window,
             epsilon=self.config.stop.epsilon,
@@ -524,6 +535,13 @@ class Driver:
 
     # -- resume ----------------------------------------------------------
 
+    def _replayed_rows(self, raw: list[dict]) -> list[dict]:
+        """`runs.jsonl` rows judged by today's rules: `competes` settled, the
+        hold-out veto applied against the seed's private score, and the ranking
+        score recomputed with this run's λ."""
+        reference = seed_private(raw)
+        return [self._rerank(self._settle_competes(row, reference)) for row in raw]
+
     def resume(self) -> int:
         """Rebuild the archive from `runs.jsonl`. Returns the last generation.
 
@@ -531,7 +549,9 @@ class Driver:
         that died between the last append and the last snapshot still comes
         back consistent, which is the whole reason the rebuild reads the log.
         """
-        rows = [self._settle_competes(row) for row in self.ledger.runs()]
+        raw = self.ledger.runs()
+        rows = self._replayed_rows(raw)
+        self.cascade.seed_private = seed_private(raw)
         if not rows:
             return 0
         self.grid = Archive.from_records(rows, self.config.search.archive, tree=self.repo is not None)
@@ -543,7 +563,7 @@ class Driver:
             self.by_id[candidate.id] = candidate
             if not candidate.rejected:
                 self._embed_context = (candidate.id, int(candidate.generation))
-                self.novelty.add(candidate.id, candidate.block)
+                self.novelty.add(candidate.id, candidate.block, parent_block=self._parent_block(candidate))
             # Signatures come back even for a rejected twin: it is the *first*
             # id per signature that matters, and dropping it would let the same
             # behaviour be paid for again after a resume.
@@ -559,24 +579,50 @@ class Driver:
         self._restore_budget(rows)
         return last_generation
 
-    def _settle_competes(self, row: dict) -> dict:
-        """Judge a row written before `competes` existed by today's rule.
+    def _settle_competes(self, row: dict, seed_private: float | None = None) -> dict:
+        """Judge a row written before `competes` existed by today's rule,
+        hold-out veto included (`seed_private`: the seed's private score).
 
         Without this a resumed older run would put its failed and proxy-only
         candidates straight back into the archive, which is the defect the
-        field exists to end.
+        field exists to end. A row that carries `competes` keeps it, and the
+        veto is applied on top exactly as in a live run: a row written before
+        the veto existed, whose hold-out is below the seed's, stops competing.
         """
         if "competes" in row:
-            return row
-        return {
-            **row,
-            "competes": finished_final_stage(
+            finished = bool(row["competes"])
+        else:
+            finished = finished_final_stage(
                 self.config,
                 rejected=bool(row.get("rejected")),
                 last_failure=row.get("last_failure"),
                 stages_reached=row.get("stages_reached") or [],
                 private_score=row.get("private_score"),
                 gated=row.get("gated"),
+            )
+        veto = holdout_veto(self.config, row.get("private_score"), seed_private) if finished else None
+        if veto is not None:
+            return {**row, "competes": False, "veto": veto}
+        if "competes" in row:
+            return row
+        return {**row, "competes": finished}
+
+    def _rerank(self, row: dict) -> dict:
+        """The ranking score again, with this run's `evaluate.holdout_penalty`.
+
+        A row written before the default became 0 stored a ranking score at
+        λ = 1; kept as it is, it would sit in one archive beside rows ranked by
+        the public score, two scales in one order. Rebuilt as
+        `score − λ·max(0, score − private_score)`, or `score` when the row has
+        no private score.
+        """
+        score = row.get("score")
+        if score is None:
+            return row
+        return {
+            **row,
+            "ranking_score": ranking_score(
+                float(score), float(score), row.get("private_score"), self.config.evaluate.holdout_penalty
             ),
         }
 
@@ -904,8 +950,9 @@ class Driver:
         )
         summary.near = sum(1 for c in self.archive if c.novelty == "near")
         summary.unfinished = sum(
-            1 for c in self.archive if not c.rejected and not c.competes
+            1 for c in self.archive if not c.rejected and not c.competes and not c.veto
         )
+        summary.vetoed = sum(1 for c in self.archive if not c.rejected and c.veto)
         summary.embedding_calls = self.ledger.embedding_calls
         summary.cells = len(self.grid.cells)
         summary.occupancy = self.grid.occupancy()
@@ -970,16 +1017,35 @@ class Driver:
         exactly where the last process left it -- and on a fresh run the series
         is the seed generation alone, which is what the policy was always fed
         first.
+
+        Two counts, as live: every big-step row was tried (planned), and it
+        applied unless it has the shape `_breed_one` gives a failed apply --
+        rejected, no novelty verdict, and its parent's block written back.
         """
-        big_step_generations = {
-            int(c.generation)
-            for c in self.archive
-            if str(c.operator).startswith("big_step")
-        }
+        by_id = {c.id: c for c in self.archive}
+        tried: set[int] = set()
+        applied: set[int] = set()
+        for c in self.archive:
+            if not str(c.operator).startswith("big_step"):
+                continue
+            tried.add(int(c.generation))
+            # A missing parent counts the row as applied. It cannot occur today: a
+            # big step's parent is always the archive best, which is in the archive.
+            parent = by_id.get(c.parent_id) if c.parent_id else None
+            failed = (
+                c.rejected
+                and c.novelty is None
+                and parent is not None
+                and c.block == parent.block
+            )
+            if not failed:
+                applied.add(int(c.generation))
         decision = StopDecision(False)
         for point in self._economics():
-            if point.generation in big_step_generations:
+            if point.generation in tried:
                 self.stop_policy.note_big_step()
+            if point.generation in applied:
+                self.stop_policy.note_big_step_applied()
             decision = self.stop_policy.update(point.best, point)
         return decision
 
@@ -1114,9 +1180,14 @@ class Driver:
         plan = [self.rng.choices(names, weights=shares, k=1)[0] for _ in range(count)]
         every = self.config.search.big_step_every
         scheduled = every > 0 and generation % every == 0
+        self._big_step_reason = None
         if self.config.search.takes_big_steps and (scheduled or plateau):
             plan[0] = "big_step"
+            # Tried counts here, for `min_big_steps`; applied counts in `_breed_one`.
             self.stop_policy.note_big_step()
+            self._big_step_reason = big_step_reason(
+                scheduled=scheduled, every=every, stagnant=self.stop_policy.stagnant
+            )
         return plan
 
     # -- tuning a declared space: who is worth starting from -------------
@@ -1202,6 +1273,13 @@ class Driver:
             parts.append(f"gap {candidate.generalization_gap:+.4g}")
         return ", ".join(parts)
 
+    def _parent_block(self, candidate: Candidate) -> str | None:
+        """The block `candidate` was bred from; `None` for the starting point
+        or a parent this run does not hold (the near gate then indexes the
+        candidate's whole block)."""
+        parent = self.by_id.get(candidate.parent_id or "")
+        return parent.block if parent is not None else None
+
     def _summary_of(self, candidate: Candidate) -> str:
         parent = self.by_id.get(candidate.parent_id or "")
         return delta_summary(
@@ -1211,8 +1289,8 @@ class Driver:
         )
 
     def _inspirations(self, parent: Candidate, operator: str) -> list[Inspiration]:
-        """1-2 elites from other cells; only crossover is shown their code."""
-        budget = min(self.config.search.inspirations, 2)
+        """1 to `search.inspirations` elites from other cells; only crossover is shown their code."""
+        budget = self.config.search.inspirations
         if budget <= 0:
             return []
         wanted = 1 if operator == "crossover" else self.rng.randint(1, budget)
@@ -1307,6 +1385,9 @@ class Driver:
         outcome, verdict, attempts = self._propose(
             operator, parent, inspirations, candidate_id, generation, role
         )
+        if operator == "big_step" and outcome.ok:
+            # The response parsed and applied; `_restore_stop_policy` reads the same from the row.
+            self.stop_policy.note_big_step_applied()
 
         child = Candidate(
             id=candidate_id,
@@ -1395,6 +1476,9 @@ class Driver:
         attempts = 0
         self._embed_context = (candidate_id, generation)
         hint = self._compose_hint(parent)
+        reason = self._big_step_reason if operator == "big_step" else None
+        if reason:
+            hint = "\n\n".join(part for part in (reason, hint) if part)
         outcome = self._invoke(operator, parent, inspirations, role, hint, candidate_id)
         attempts += 1
         self._bill(outcome, candidate_id, generation, operator, role)
@@ -1417,7 +1501,9 @@ class Driver:
         # One re-prompt, ever. The first real run showed the small model
         # handing back the same program three times; asking twice is worth the
         # cheap call, asking a third time is how v1 built its token bill.
-        retry = self._invoke(operator, parent, inspirations, role, verdict.retry_hint, candidate_id)
+        # A big step's re-prompt still says why it is due, as its first attempt did.
+        retry_hint = "\n\n".join(part for part in (reason, verdict.retry_hint) if part)
+        retry = self._invoke(operator, parent, inspirations, role, retry_hint, candidate_id)
         attempts += 1
         self._bill(retry, candidate_id, generation, operator, role)
         self._trace(retry, candidate_id, parent, operator, role, attempt=attempts)
@@ -1693,6 +1779,7 @@ class Driver:
             candidate.competes = result.competes
             candidate.raced_out = result.raced_out
             candidate.gated = result.gated
+            candidate.veto = result.veto
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis
@@ -1714,7 +1801,7 @@ class Driver:
             # Placement first: the cell coordinate belongs in the ledger row.
             self.grid.add(candidate)
             if not candidate.rejected:
-                self.novelty.add(candidate.id, candidate.block)
+                self.novelty.add(candidate.id, candidate.block, parent_block=self._parent_block(candidate))
             self._record(candidate)
         return False
 

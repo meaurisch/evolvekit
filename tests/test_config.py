@@ -389,7 +389,7 @@ def test_the_openrouter_variant_leaves_the_model_ids_to_be_filled_in(
 
 def test_the_base_example_declares_the_phase_b_search(example_config_path):
     config = load_config(example_config_path)
-    assert config.evaluate.holdout_penalty == 1.0
+    assert config.evaluate.holdout_penalty == 0.0 and config.evaluate.holdout_veto is True
     assert "crossover" in config.search.operators
     assert config.search.inspirations >= 1
     assert config.search.scratchpad_every >= 1
@@ -398,3 +398,10 @@ def test_the_base_example_declares_the_phase_b_search(example_config_path):
         "complexity",
         "mean_openness",
     ]
+
+
+def test_parent_top_k_is_refused_and_points_at_the_archive(minimal_raw, tmp_path):
+    raw = copy.deepcopy(minimal_raw)
+    raw["search"] = {"parent_top_k": 5}
+    with pytest.raises(ConfigError, match=r"search\.parent_top_k.*search\.archive\.top_k"):
+        build_config(raw, base_dir=tmp_path)

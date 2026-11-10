@@ -540,3 +540,294 @@ def test_per_group_end_to_end(tmp_path, capsys):
     assert json.loads((run_dir / "job.json").read_text(encoding="utf-8"))["phase"] == "done"
     assert main(["study", "report", slug, "--markdown", "--home", str(home)]) == 0
     assert "## Per kind of case" in capsys.readouterr().out
+
+
+def test_a_run_merges_a_group_without_two_held_back_cases_before_it_searches(tmp_path, monkeypatch):
+    root = per_group_study(tmp_path, sizes=[20] * 5 + [80] * 5, held=3, tags={"small": 5, "large": 5})
+
+    def stop_here(_root):
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(execute, "require_valid", lambda *args, **kwargs: None)  # no application is installed here
+    monkeypatch.setattr(execute, "measured", stop_here)  # called right after the run's groups.json is written
+    with pytest.raises(RuntimeError, match="stop here"):
+        execute.run_per_group(root, "r1", log=lambda line: None)
+    written = json.loads((root / "runs" / "r1" / groups.GROUPS).read_text(encoding="utf-8"))
+    assert list(written["groups"]) == ["large"] and written["groups"]["large"]["merged_from"] == ["small"]
+    own = json.loads((root / groups.GROUPS).read_text(encoding="utf-8"))
+    assert set(own["groups"]) == {"small", "large"}, "the study's own groups.json is left as computed"
+
+
+def _posterior(folder: Path, *, chance: float) -> None:
+    """The group's final comparison as A1 writes it: a posterior summary on its two held-back cases."""
+    path = folder / "confirm" / "final" / "comparison.json"
+    comparison = json.loads(path.read_text(encoding="utf-8"))
+    comparison["per_candidate"]["c1"]["summary"].update(
+        {"chance": chance, "n": 2, "decision": "use", "posterior": {"df": 1}})
+    path.write_text(json.dumps(comparison), encoding="utf-8")
+
+
+def test_each_groups_use_pays_for_the_number_of_groups(tmp_path):
+    from evolvekit.app.verdict import PER_GROUP_RULE
+
+    # Two groups, one leg (the chance of a gain), Holm at 0.05 on p = 1 - chance. 0.96 and 0.97 are
+    # p = 0.04 and 0.03; the smaller must be <= 0.05 / 2 = 0.025, so neither passes.
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    _posterior(run_dir / "groups" / "small", chance=0.96)
+    _posterior(run_dir / "groups" / "large", chance=0.97)
+    execute.apply_group_holm(run_dir)
+    doc = build_verdict(root, "r1")
+    assert doc["groups"]["small"]["decision"] == "keep" and doc["groups"]["large"]["decision"] == "keep"
+    assert doc["groups"]["small"]["line"].startswith("Not proven on 2 held-back cases with 2 kinds of case compared: ")
+    assert "1 kinds" not in json.dumps(doc)
+    assert doc["decision"] == "keep" and doc["rule"] == PER_GROUP_RULE
+    for name in ("small", "large"):
+        job = json.loads((run_dir / "groups" / name / "job.json").read_text(encoding="utf-8"))
+        assert job["final"]["decision"] == "keep" and job["final"]["confirmed"] is False
+    # p = 0.01 <= 0.025 and then 0.04 <= 0.05: both pass.
+    root, run_dir = per_group_run(tmp_path / "b", {"small": ("use", 2), "large": ("use", 2)})
+    _posterior(run_dir / "groups" / "small", chance=0.99)
+    _posterior(run_dir / "groups" / "large", chance=0.96)
+    execute.apply_group_holm(run_dir)
+    assert build_verdict(root, "r1")["decision"] == "use"
+
+
+def test_one_group_pays_for_nothing(tmp_path):
+    root, run_dir = per_group_run(tmp_path, {"only": ("use", 2)})
+    _posterior(run_dir / "groups" / "only", chance=0.951)
+    execute.apply_group_holm(run_dir)
+    path = run_dir / "groups" / "only" / "confirm" / "final" / "comparison.json"
+    assert "holm" not in json.loads(path.read_text(encoding="utf-8"))["per_candidate"]["c1"]
+    assert build_verdict(root, "r1")["decision"] == "use"
+
+
+def _group_check(look):
+    """One group's final check as `execute._extend_check` reads it: look 1 on the planned 3 runs
+    per case; while that answer is `keep` and more runs could help (`runs_can_help`), every run
+    the 12 seeds allow at once and look 2 -- whatever it says."""
+    from evolvekit.confirm import decision_of, runs_can_help
+
+    result = look(3)
+    if decision_of(result) == "keep" and runs_can_help(result):
+        result = look(12)
+    return result
+
+
+def _family_wise_null_use(cases: int, studies: int) -> tuple[float, float, float]:
+    """Three kinds of case of `cases` held-back cases each, no real gain anywhere, runs noisier than
+    cases (the pure run-noise worst case: the rule is scale-free): each group's check read as
+    `_group_check` reads it, then Holm over the groups (`apply_group_holm`). Returns the share of
+    `studies` seeded studies in which some kind of case says use without Holm, with it, and the
+    standard error of the second."""
+    import math
+    import random
+
+    from evolvekit.confirm import apply_holm, decision_of
+    from test_confirm import _a_study
+
+    rng = random.Random(20261109 + cases)
+    alone = paid = 0
+    for _ in range(studies):
+        results = {g: _group_check(_a_study(rng, gains=[0.0] * cases, run_sd=0.02)) for g in range(3)}
+        alone += any(decision_of(r) == "use" for r in results.values())
+        apply_holm(results, what="kinds of case")
+        paid += any(decision_of(r) == "use" for r in results.values())
+    rate = paid / studies
+    return alone / studies, rate, math.sqrt(rate * (1 - rate) / studies)
+
+
+@pytest.mark.parametrize("cases", [2, 4])
+def test_three_null_kinds_of_case_family_wise_false_use_fast_guard_after_each_groups_two_reads(
+        cases, capsys):
+    """After a group's second read, 1 - chance is no longer a single read's p-value, so Holm's 5 %
+    is not kept: some kind of case says use in about 8.8 % (3 kinds x 2 cases) and 8.5 % (3 x 4)
+    of null studies (measured on 40000 each, +- 0.14 %). The fast guard is looser than the claim, on
+    purpose: 2000 seeded studies have a standard error of about 0.65 %, and this seed reads 9.55 % for
+    2 cases, so it asserts under 11 % -- it catches a regression of two points or more. The slow test
+    holds the claim itself (under 10 % with two standard errors to spare)."""
+    studies = 2000
+    alone, rate, se = _family_wise_null_use(cases, studies)
+    with capsys.disabled():
+        print(f"\nfalse use over 3 null kinds of case x {cases} held-back cases, two reads each "
+              f"({studies} studies): unpaid {alone:.3f}, family-wise with Holm {rate:.4f} +- {se:.4f}")
+    assert alone > rate, "unpaid, three chances to be wrong say use more often"
+    assert rate < 0.11, f"{rate:.4f} of {studies} null studies: some kind of case said use"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("cases", [2, 4])
+def test_three_null_kinds_of_case_say_use_family_wise_in_under_one_in_ten_two_standard_errors_clear(
+        cases, capsys):
+    """The same on 8000 seeded studies, so that 10 % is more than two standard errors above the
+    measured family-wise rate."""
+    studies = 8000
+    alone, rate, se = _family_wise_null_use(cases, studies)
+    with capsys.disabled():
+        print(f"\nfalse use over 3 null kinds of case x {cases} held-back cases, two reads each "
+              f"({studies} studies): unpaid {alone:.3f}, family-wise with Holm {rate:.4f} +- {se:.4f}")
+    assert rate + 2 * se < 0.10, f"{rate:.4f} family-wise (2 SE = {2 * se:.4f})"
+
+
+def _real_check(folder: Path, cases: list[str], *, chance: float) -> None:
+    """A real comparison (`confirm._analyse`, its json and its markdown) for candidate c1, given a chance of `chance`."""
+    from evolvekit.confirm import BASELINE, Comparison, _analyse, render_markdown
+
+    comparison = Comparison(label="final", objective="tour_length", direction="minimize", stage="full",
+                            seeds=[1, 2, 3], instances=cases, baseline_id=BASELINE, candidates=["c1"])
+    for number, case in enumerate(cases):
+        for seed in (1, 2, 3):
+            value = 50.0 + number * 7 + seed / 10
+            comparison.runs.append({"configuration": BASELINE, "instance": case, "seed": seed, "ok": True,
+                                    "kpis": {"tour_length": value}})
+            comparison.runs.append({"configuration": "c1", "instance": case, "seed": seed, "ok": True,
+                                    "kpis": {"tour_length": value * (0.9 + 0.01 * number)}})
+    _analyse(comparison)
+    comparison.per_candidate["c1"]["summary"]["chance"] = chance
+    out = folder / "confirm" / "final"
+    (out / "comparison.json").write_text(json.dumps(comparison.to_json()), encoding="utf-8")
+    (out / "comparison.md").write_text(render_markdown(comparison), encoding="utf-8")
+
+
+def test_a_group_held_by_holm_has_its_markdown_rewritten_too(tmp_path):
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    for name, chance in (("small", 0.96), ("large", 0.97)):
+        part = json.loads((run_dir / groups.GROUPS).read_text(encoding="utf-8"))["groups"][name]
+        _real_check(run_dir / "groups" / name, part["test"], chance=chance)
+    before = (run_dir / "groups" / "small" / "confirm" / "final" / "comparison.md").read_text(encoding="utf-8")
+    assert "Holm" not in before
+    execute.apply_group_holm(run_dir)
+    after = (run_dir / "groups" / "small" / "confirm" / "final" / "comparison.md").read_text(encoding="utf-8")
+    assert "Judged with the 2 kinds of case together (Holm): does not pass" in after
+    assert "Chosen among" not in after, "kinds of case are not a choice among rivals"
+    assert "Not proven among 2 kinds of case (Holm)" in after
+
+
+LEGACY_SUMMARY = {"n": 2, "mean": 3.0, "ci95": [-1.0, 7.0], "chance": 0.93, "worst": -0.4, "wins": 2, "losses": 0,
+                  "wilcoxon": {"p": 0.5}, "verdict": "probably better: chance 0.93"}
+"""A summary written before A1: a one-sided t chance, a Wilcoxon test, no posterior, no `chance_margin`."""
+
+
+def test_a_group_written_before_the_posterior_keeps_its_page_when_the_others_pay_for_holm(tmp_path):
+    from evolvekit.confirm import LEGACY_RULE_WORDS, RULE_WORDS
+
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2), "old": ("use", 2)})
+    for name, chance in (("small", 0.96), ("large", 0.97)):
+        part = json.loads((run_dir / groups.GROUPS).read_text(encoding="utf-8"))["groups"][name]
+        _real_check(run_dir / "groups" / name, part["test"], chance=chance)
+    old = run_dir / "groups" / "old" / "confirm" / "final"
+    loaded = json.loads((run_dir / "groups" / "small" / "confirm" / "final" / "comparison.json").read_text(encoding="utf-8"))
+    result = loaded["per_candidate"]["c1"]
+    result.update(summary=dict(LEGACY_SUMMARY), failure_counted_as_pct=None)
+    result.pop("finished_only", None)
+    loaded.pop("looks", None), loaded.pop("prior", None)
+    (old / "comparison.json").write_text(json.dumps(loaded), encoding="utf-8")
+    (old / "comparison.md").write_text("old page", encoding="utf-8")
+    execute.apply_group_holm(run_dir)  # renders every group's page again: the old one must not raise
+    text = (old / "comparison.md").read_text(encoding="utf-8")
+    assert LEGACY_RULE_WORDS in text and RULE_WORDS not in text
+    assert "Wilcoxon signed-rank p = 0.5000" in text and "credible" not in text and "losing more than" not in text
+    assert "Holm" not in text, "a summary written before A1 is not in the family"
+
+
+def test_a_failing_holm_step_fails_the_run_instead_of_finishing_it(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    root = per_group_study(tmp_path, sizes=[20] * 4 + [80] * 4 + [20, 20, 80, 80], held=4, tags={"small": 6, "large": 6})
+    monkeypatch.setattr(execute, "require_valid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execute, "measured", lambda _root: None)
+    monkeypatch.setattr(execute, "plan_for", lambda *args, **kwargs: Plan.fixed())
+
+    def make_folder(study, harness, plan, root_, run_id, **kwargs):
+        folder = root_ / "runs" / run_id / "groups" / kwargs["group"]
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    class FakeDriver:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self):
+            return SimpleNamespace(stop_reason="done", generations=1, best=None, aborted=False)
+
+    monkeypatch.setattr(execute, "write_run", make_folder)
+    monkeypatch.setattr(execute, "load_config", lambda path: None)
+    monkeypatch.setattr("evolvekit.search.driver.Driver", FakeDriver)
+    monkeypatch.setattr(execute, "_final_check", lambda study, plan, config, folder, job, log, **kw: job.finish("done"))
+
+    def broken(_run_dir):
+        raise RuntimeError("holm broke")
+
+    monkeypatch.setattr(execute, "apply_group_holm", broken)
+    with pytest.raises(RuntimeError, match="holm broke"):
+        execute.run_per_group(root, "r1", log=lambda line: None)
+    job = json.loads((root / "runs" / "r1" / "job.json").read_text(encoding="utf-8"))
+    assert job["phase"] == "failed" and "holm broke" in job["error"]
+
+
+def test_while_a_later_group_is_still_checking_no_group_says_better(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs, "run_alive", lambda *args, **kwargs: True)  # the run's process lives
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    path = run_dir / "job.json"
+    job = json.loads(path.read_text(encoding="utf-8"))
+    job["phase"] = "search"
+    path.write_text(json.dumps(job), encoding="utf-8")
+    doc = build_verdict(root, "r1")
+    assert doc["decision"] == "pending"
+    for name in ("small", "large"):
+        assert doc["groups"][name]["decision"] == "pending"
+        assert doc["groups"][name]["line"] == "Its answer is read once every kind of case is checked."
+        assert "Probably better" not in doc["groups"][name]["line"]
+    assert "Probably better" not in json.dumps(doc)
+
+
+def _run_phase(run_dir: Path, phase: str) -> None:
+    path = run_dir / "job.json"
+    job = json.loads(path.read_text(encoding="utf-8"))
+    job["phase"] = phase
+    path.write_text(json.dumps(job), encoding="utf-8")
+
+
+def test_while_every_waiting_kind_of_case_is_held_the_run_says_not_every_one_is_read(tmp_path, monkeypatch):
+    """M1: no group's check is still going -- they wait for each other -- so the run does not name
+    one as unfinished."""
+    monkeypatch.setattr(jobs, "run_alive", lambda *args, **kwargs: True)  # the run's process lives
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    _run_phase(run_dir, "check")
+    doc = build_verdict(root, "r1")
+    assert doc["decision"] == "pending"
+    assert doc["line"] == "Per kind of case: not every kind of case is read yet."
+    assert "has not finished" not in doc["line"]
+    assert doc["groups"]["small"]["line"] == "Its answer is read once every kind of case is checked."
+
+
+@pytest.mark.parametrize("phase", ["stopped", "failed"])
+def test_a_run_that_ended_early_says_a_held_kind_of_case_was_not_read(tmp_path, phase):
+    """M2: a held group of a run that stopped or failed is never read: it says so, not that it waits."""
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    _run_phase(run_dir, phase)
+    doc = build_verdict(root, "r1")
+    for name in ("small", "large"):
+        assert doc["groups"][name]["decision"] == "pending"
+        assert doc["groups"][name]["line"] == ("Its answer was not read: the run ended before every kind of case "
+                                               "was checked.")
+    assert "Probably better" not in json.dumps(doc)
+
+
+def test_the_results_of_a_held_group_say_what_the_verdict_says_not_better(tmp_path, monkeypatch):
+    """I1: the group's own final check says use, the run is not done, so the verdict document holds
+    the group pending; its results page and summary say the document's words, with no figures."""
+    monkeypatch.setattr(jobs, "run_alive", lambda *args, **kwargs: True)  # the run's process lives
+    root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("use", 2)})
+    _run_phase(run_dir, "check")
+    doc = build_verdict(root, "r1")
+    data = jobs.results(root, "r1", document_of, group="small")
+    final = data["final"]
+    assert final["decision"] == "pending" and final["state"] == "missing"
+    assert final["line"] == "Its answer is read once every kind of case is checked."
+    assert final["line"] == doc["groups"]["small"]["line"] and final["advice"] == doc["groups"]["small"]["advice"]
+    for key in ("mean", "ci95", "worst_pct", "chance", "chance_words", "why_keep"):
+        assert key not in final, key
+    assert "Probably better" not in json.dumps(final) and "Probably better" not in data["summary_text"]
+    assert f"Final check (small): {doc['groups']['small']['line']}" in data["summary_text"].splitlines()
+    _run_phase(run_dir, "done")
+    assert jobs.results(root, "r1", document_of, group="small")["final"]["decision"] == "use", "read once all are done"

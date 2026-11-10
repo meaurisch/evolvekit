@@ -349,7 +349,7 @@ def _combine(
     """
     keys = set.intersection(*(set(outcome.kpis) for outcome in done.values()))
     kpis: dict[str, float] = {}
-    kpi_cv: dict[str, float] = {}
+    kpi_cv: dict[str, float | None] = {}
     vectors: dict[str, list[float]] = {}
     for key in sorted(keys):
         by_instance = [
@@ -358,7 +358,8 @@ def _combine(
         vectors[per_instance_key(key)] = [fmean(values) for values in by_instance]
         kpis[key] = fmean(vectors[per_instance_key(key)])
         if len(seeds) > 1:
-            kpi_cv[key] = fmean(_cv(values) for values in by_instance)
+            cvs = [cv for cv in (_cv(values) for values in by_instance) if cv is not None]
+            kpi_cv[key] = fmean(cvs) if cvs else None
     notes = []
     for index in range(len(names)):  # one note per instance: its seeds say the same thing
         said = next((done[(index, s)].text_feedback for s in seeds if done[(index, s)].text_feedback), "")

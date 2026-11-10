@@ -28,7 +28,9 @@ from evolvekit.leaderboard import (
     rank,
     render_html,
     render_markdown,
+    replay_veto,
     unfinished_count,
+    vetoed_count,
 )
 from evolvekit.ledger import Ledger
 from evolvekit.lock import RunLockError
@@ -109,9 +111,9 @@ evaluate:
     - kpi: priority_errors
       weight: 2.0
       scale: log1p
-  # Ranking = public - holdout_penalty * max(0, public - private). Raising this
-  # makes the search more suspicious of gains that do not survive the hold-out.
-  holdout_penalty: 1.0
+  # A candidate whose hold-out score is below the starting point's does not
+  # compete. Default shown.
+  holdout_veto: true
   # Behavioural duplicates: after every command stage the candidate's KPIs are
   # rounded and hashed, and a candidate whose fingerprint matches one already
   # seen at that stage is stopped there. Defaults shown.
@@ -147,7 +149,8 @@ stop:
   epsilon: 0.001
   target: null
   # Economics stops, both off by default. Either one only fires after at least
-  # one big step has been spent since the last improvement.
+  # one big step has been applied since the last improvement. In a run that
+  # takes no big steps (`big_step_every: 0`, or no model) the guard does not apply.
   # max_usd_since_improvement: 0.25    # patience, denominated in money
   # min_gain_per_usd:                  # score units per USD over a window
   #   window: 3
@@ -157,14 +160,13 @@ search:
   children_per_generation: 3
   generations: 6
   big_step_every: 3
-  parent_top_k: 5
   seed: 0
   operators:
     diff: 0.5
     rewrite: 0.3
     crossover: 0.2
     # param_lhs: 0.2   # costs no tokens; needs a `# PARAMS: {...}` line in the block
-  inspirations: 2       # 1-2 elites from other cells, shown as delta summaries
+  inspirations: 2       # 1 to this many elites from other cells, as delta summaries
   scratchpad_every: 5   # meta-scratchpad refresh, in generations; 0 turns it off
   novelty_retry: true   # re-prompt once when the model repeats itself
   # Let the run decide how wide to search: two flat generations add a child,
@@ -654,6 +656,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"rejected    : {summary.rejection_breakdown}")
     print(f"near-dupes  : {summary.near_breakdown}")
     print(f"unfinished  : {summary.unfinished} (evaluated, never ranked)")
+    print(f"kept out    : {summary.vetoed} by the hold-out (finished, never ranked)")
     totals = summary.totals
     print(
         f"spend       : ${totals.get('usd', 0.0):.4f} over "
@@ -896,7 +899,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1 if state == "missing" else 0
 
     ledger = Ledger(args.run_dir)
-    rows = ledger.runs()
+    rows = replay_veto(ledger.runs())
     if not rows:
         return 0
     print()
@@ -921,6 +924,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(
         f"unfinished   : {unfinished_count(rows)} did not finish the final stage "
         "(failed, not promoted or skipped; never ranked)"
+    )
+    print(
+        f"kept out     : {vetoed_count(rows)} by the hold-out "
+        "(finished; hold-out score below the starting point's)"
     )
     print(f"generations  : {max(int(r.get('generation', 0)) for r in rows)}")
     print(
@@ -962,9 +969,9 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
 
 
 def cmd_confirm(args: argparse.Namespace) -> int:
-    """Exit 0 when every candidate's 95 % interval lies above zero, 1 otherwise
-    -- so a script can gate on "the improvement is real"."""
-    from evolvekit.confirm import confirm, render_markdown
+    """Exit 0 when the rule says use for every candidate (`confirm.decision_of`),
+    1 otherwise -- so a script can gate on "the improvement is real"."""
+    from evolvekit.confirm import confirm, decision_of, render_markdown
 
     try:
         seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
@@ -978,12 +985,9 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     )
     print(render_markdown(comparison))
     print(f"written to {Path(args.run_dir) / 'confirm' / args.label}")
-    # With evaluate.score.levels the claim is the lexicographic one: better,
-    # and clear, on the first level that is not equal.
-    confirmed = all(
-        result["levels"]["confirmed"] if "levels" in result else (result["summary"].get("ci95") or [0.0])[0] > 0
-        for result in comparison.per_candidate.values()
-    )
+    # The verdict's own rule; with evaluate.score.levels the claim is the
+    # lexicographic one: better, and clear, on the first level that is not equal.
+    confirmed = all(decision_of(result) == "use" for result in comparison.per_candidate.values())
     return 0 if confirmed else 1
 
 

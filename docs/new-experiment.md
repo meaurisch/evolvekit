@@ -127,10 +127,10 @@ evaluate:
     weights: {excess_pct: 1.0}
   penalties:
     - {kpi: priority_errors, weight: 2.0, scale: log1p}
-  holdout_penalty: 1.0
 ```
 
-The public/private gap is charged once via `evaluate.holdout_penalty` and
+The hold-out is a veto: a candidate whose private score is below the seed's
+does not compete (`evaluate.holdout_veto`, on by default), and the hold-out is
 never otherwise optimised against. A stochastic evaluator gets `seeds: N`
 (KPIs averaged, per-KPI coefficient of variation recorded). No natural
 subset? Run two stages and lean on penalty KPIs — that is what
