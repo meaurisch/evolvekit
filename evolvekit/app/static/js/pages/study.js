@@ -346,7 +346,7 @@
       : x.right === "both" ? html`${EK.runTimeline(Object.assign({ width: w }, tl))}<div style="height:8px"></div>${EK.rangeStrip(x.range, { width: w })}`
       : x.range ? EK.rangeStrip(x.range, { width: w, onAccent: acc }) : "";
     var acts = x.acts.map(function (a) { return EK.button(a.text, Object.assign({ kind: "primary", onAccent: acc }, a)); });
-    var rule = x.rule ? html`<p class="type-small strip-rule${acc ? "" : " ink-2"}">${st.results && st.results.final && st.results.final.posterior === false ? "The rule: use it at 9 in 10 or better, worst within 1 %." : "The rule: use it at 19 in 20 or better."} ${EK.link("Why", { act: "why", cls: acc ? "on-accent-link" : "" })}</p>` : "";
+    var rule = x.rule ? html`<p class="type-small strip-rule${acc ? "" : " ink-2"}">${st.results && st.results.final && st.results.final.posterior === false ? "The rule: use it at a 90 % chance or better, worst within 1 %." : "The rule: use it at a 95 % chance or better."} ${EK.link("Why", { act: "why", cls: acc ? "on-accent-link" : "" })}</p>` : "";
     var facts = liveFacts(st.status).concat(runFacts());
     var factLine = facts.length ? html`<div class="strip-facts${acc ? "" : " ink-2"}">${facts.map(function (f) { return html`<span>${f}</span>`; })}</div>` : "";
     return html`<section class="status-strip${acc ? " is-accent" : ""}" aria-label="Status" aria-live="polite" aria-atomic="true">
@@ -1017,7 +1017,7 @@
         }).catch(EK.fail);
       },
       why: function () {
-        EK.openDrawer({ title: "The rule", body: html`<p class="type-body">${(st.results && st.results.final && st.results.final.rule) || "Use when the chance of a gain is at least 19 in 20."}</p>
+        EK.openDrawer({ title: "The rule", body: html`<p class="type-body">${(st.results && st.results.final && st.results.final.rule) || "Use when the chance of a gain is at least 95 %."}</p>
           <p class="type-small ink-2">The final check runs the best combination and today’s ${whatOf()} on the held-back cases, which the search never saw.</p>` });
       },
       busy: function () {

@@ -226,6 +226,6 @@ def test_the_report_shows_the_90_range_whose_low_end_is_at_least(tmp_path, use_r
     low, high = v["range90_pct"]
     assert f"between {low:.1f} % and {high:.1f} % lower (90 % range)." in text
     assert f"at least {low:.1f} % better" in v["line"] and v["line"] in text
-    assert "95 %" not in text
+    assert "95 % interval" not in text and "95 % range" not in text, "the rule says 95 %; no range does"
     legacy, _ = use_run
     assert "(95 % interval)." in _text(legacy)

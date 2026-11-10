@@ -48,8 +48,8 @@ def test_a_worst_case_that_rounds_to_nothing_is_said_as_about_the_same():
 def test_the_final_check_decides_with_the_chance_and_the_worst_case():
     use = words_for([1.3, 0.6, 1.9], what="settings", baseline="PyVRP's own defaults")
     assert use["state"] == "confirmed" and use["decision"] == "use"
-    assert use["chance_words"] == "about 19 in 20"
-    assert use["line"] == ("Probably better: 1.3 % lower real cost on 3 held-back cases, a chance of about 19 in 20; "
+    assert use["chance_words"] == "about 96 %"
+    assert use["line"] == ("Probably better: 1.3 % lower real cost on 3 held-back cases, a chance of about 96 %; "
                            "at worst 0.3 % worse than your starting point (PyVRP's own defaults).")
     assert use["advice"] == "Use the new settings: they are probably better on cases the search never saw."
     assert use["rule"].startswith("The app says use it when"), "a summary written before A1 states its own rule"
@@ -59,17 +59,17 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
                             "at least 4.5 % better than your starting point.")
     keep = words_for([-9.0, 11.5, -0.4])
     assert keep["state"] == "unclear" and keep["decision"] == "keep"
-    assert keep["line"].startswith("Not proven on 3 held-back cases: a chance of about 11 in 20 of a gain; at worst 24.9 % worse")
+    assert keep["line"].startswith("Not proven on 3 held-back cases: a chance of about 54 % of a gain; at worst 24.9 % worse")
     assert keep["advice"] == "Keep today's settings for now: the gain is not proven."
     worse = words_for([-1.5, -1.0, -1.2, -0.8])
     assert worse["state"] == "worse" and worse["decision"] == "worse"
-    assert worse["line"].startswith("Worse on 4 held-back cases: 1.1 % higher real cost, a chance of less than 1 in 20 of a gain")
+    assert worse["line"].startswith("Worse on 4 held-back cases: 1.1 % higher real cost, a chance of less than 1 % of a gain")
     assert words_for([0.4])["state"] == "single" and words_for([0.4])["decision"] == "single"
     assert words_for([3.0, 3.1, 2.9, -1.4])["decision"] == "keep", "the chance is high, the worst case beyond 1 %"
-    assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "less than 1 in 20" and jobs._chance_words(0.98) == "better than 19 in 20"
-    assert jobs._chance_words(0.5) == "about 10 in 20" and jobs._chance_words(None) == ""
-    assert jobs._chance_words(0.947) == "under 19 in 20", "a keep never reads like the rule's 19 in 20"
-    assert jobs._chance_words(0.9) == "about 18 in 20" and jobs._chance_words(0.897) == "about 18 in 20"
+    assert jobs._chance_words(0.999) == "almost certain" and jobs._chance_words(0.02) == "about 2 %" and jobs._chance_words(0.98) == "about 98 %"
+    assert jobs._chance_words(0.5) == "about 50 %" and jobs._chance_words(None) == ""
+    assert jobs._chance_words(0.947) == "under 95 %", "a keep never reads like the rule's 95 %"
+    assert jobs._chance_words(0.9) == "about 90 %" and jobs._chance_words(0.897) == "about 90 %"
     decided = words_for([-9.0, 11.5, -0.4], decision="use")
     assert decided["decision"] == "use" and decided["state"] == "confirmed", "the run's own decision, when it has one"
 
@@ -77,15 +77,15 @@ def test_the_final_check_decides_with_the_chance_and_the_worst_case():
 def test_the_final_check_says_what_to_do():
     unclear = words([-10.1, 11.5], 0.7)
     assert unclear["state"] == "unclear" and unclear["decision"] == "keep"
-    assert unclear["line"] == ("Not proven on 3 held-back cases: a chance of about 12 in 20 of a gain; at worst 10.1 % worse "
+    assert unclear["line"] == ("Not proven on 3 held-back cases: a chance of about 60 % of a gain; at worst 10.1 % worse "
                                "(somewhere between 10.1 % worse and 11.5 % better).")
     assert unclear["advice"] == "Keep today's settings for now: the gain is not proven."
     confirmed = words([1.2, 5.0], 3.1)
-    assert confirmed["line"] == ("Probably better: 3.1 % lower real cost on 3 held-back cases, a chance of better than 19 in 20; "
+    assert confirmed["line"] == ("Probably better: 3.1 % lower real cost on 3 held-back cases, a chance of about 99 %; "
                                  "at least 1.2 % better than your starting point.")
     assert confirmed["advice"] == "Use the new settings: they are probably better on cases the search never saw."
     worse = words([-8.0, -1.0], -4.0)
-    assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of less than 1 in 20 of a gain "
+    assert worse["line"] == ("Worse on 3 held-back cases: 4.0 % higher real cost, a chance of about 2 % of a gain "
                              "(likely between 1.0 % and 8.0 % worse).")
     assert worse["advice"] == "Keep today's settings: the new settings did worse on cases the search never saw."
     single = words(None, 2.0)
@@ -144,17 +144,17 @@ def test_an_answer_read_twice_is_not_checked_a_third_time(tmp_path):
 
 
 def test_a_comparison_written_before_a1_keeps_its_words():
-    """Decision 13d: "under 19 in 20" only for a summary that carries the posterior."""
+    """Decision 13d: "under 95 %" only for a summary that carries the posterior."""
     legacy = words_for([1.0, 1.6, 0.25], decision="use")
     assert legacy["chance"] == pytest.approx(0.932, abs=0.002) and legacy["posterior"] is False
-    assert legacy["chance_words"] == "about 19 in 20" and "a chance of about 19 in 20" in legacy["line"]
-    assert jobs._chance_words(0.932) == "under 19 in 20" and jobs._chance_words(0.932, posterior=False) == "about 19 in 20"
-    assert jobs._chance_words(0.897, posterior=False) == "under 9 in 10", "the old rule's own guard"
+    assert legacy["chance_words"] == "about 93 %" and "a chance of about 93 %" in legacy["line"]
+    assert jobs._chance_words(0.948) == "under 95 %" and jobs._chance_words(0.948, posterior=False) == "about 95 %"
+    assert jobs._chance_words(0.897, posterior=False) == "under 90 %", "the old rule's own guard"
     from evolvekit.confirm import verdict_summary
 
     summary = verdict_summary([0.01, 0.016, 0.0025], direction="minimize")
     fresh = jobs._final_words({"final": {"candidate": "c1"}}, comparison(None, cases=3, summary=summary), GOAL, "settings")
-    assert fresh["posterior"] is True and fresh["decision"] == "keep" and fresh["chance_words"] == "under 19 in 20"
+    assert fresh["posterior"] is True and fresh["decision"] == "keep" and fresh["chance_words"] == "about 93 %"
     assert "at worst" in fresh["line"] and "its 90 % range is" in fresh["line"], \
         "at worst is the 5 % quantile; the range's ends are named as the range"
 
@@ -189,13 +189,13 @@ def test_the_pages_range_is_the_90_range_whose_low_end_is_at_least():
 
 
 def test_a_use_states_its_chance_in_figures():
-    """Decision 15: "almost certain" alone gives no figure; a use always says its chance in twentieths."""
+    """Decision 15: "almost certain" alone gives no figure; a use always says its chance in percent."""
     sure, summary = _a1_words([0.05, 0.051, 0.049, 0.05, 0.0505])
     assert summary["chance"] >= 0.995 and sure["decision"] == "use"
-    assert "a chance of over 19 in 20 (almost certain)" in sure["line"], sure["line"]
+    assert "a chance of over 99 % (almost certain)" in sure["line"], sure["line"]
     likely, summary = _a1_words([0.05, 0.02, 0.06, -0.01, 0.04])
     assert likely["decision"] == "use" and f"a chance of {likely['chance_words']};" in likely["line"], likely["line"]
-    assert "in 20" in likely["chance_words"]
+    assert likely["chance_words"].endswith(" %")
 
 
 def test_a_comparison_written_before_a1_keeps_its_own_range():
@@ -255,7 +255,7 @@ def test_a_summary_to_paste():
     assert jobs._summary_text(data).splitlines() == [
         "PyVRP: tune solver settings (PyVRP), run 20260927-005503",
         "Answer: Keep today's settings for now: the gain is not proven.",
-        "The app says use it when the chance of a gain is at least 9 in 10 and the worst plausible case is within 1 % of today.",
+        "The app says use it when the chance of a gain is at least 90 % and the worst plausible case is within 1 % of today.",
         "Set-up: 20 s per case, 30 min in total; the search learned from 2 cases and was checked on 1 held-back case."
         " Compared with PyVRP's own defaults.",
         "Search: " + data["headline"],

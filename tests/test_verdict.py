@@ -294,9 +294,9 @@ def test_verdict_files_list_existing_downloads(use_run):
     assert build_verdict(root, run)["files"] == [f"runs/{run}/downloads/settings.json"], "relative to the study folder"
 
 
-@pytest.mark.parametrize("p,words", [(0.996, "almost certain"), (0.95, "about 19 in 20"), (0.897, "about 18 in 20"), (0.947, "under 19 in 20"),
-                                     (0.5, "about 10 in 20"), (0.04, "less than 1 in 20"), (None, ""),
-                                     (0.98, "better than 19 in 20"), (0.96, "about 19 in 20"), (0.03, "less than 1 in 20")])
+@pytest.mark.parametrize("p,words", [(0.996, "almost certain"), (0.95, "about 95 %"), (0.897, "about 90 %"), (0.947, "under 95 %"),
+                                     (0.5, "about 50 %"), (0.04, "about 4 %"), (None, ""),
+                                     (0.98, "about 98 %"), (0.96, "about 96 %"), (0.003, "less than 1 %")])
 def test_chance_words_table(p, words):
     assert _chance_words(p) == words
 
@@ -890,10 +890,10 @@ def test_the_app_says_why_a_candidate_that_failed_runs_is_not_use():
     assert words["failed_more"] == 4, "the page's caption reads it (R6)"
 
 
-def test_a_keep_just_above_one_in_20_never_reads_like_worse():
-    """Decision 14b: worse is at 1 in 20, so a keep's chance just above it says which side it is on."""
-    assert _chance_words(0.06) == "over 1 in 20" and _chance_words(0.05) == "about 1 in 20"
-    assert _chance_words(0.04) == "less than 1 in 20" and _chance_words(0.08) == "about 2 in 20"
+def test_a_keep_just_above_five_percent_never_reads_like_worse():
+    """Decision 14b: worse is at 5 %, so a keep's chance just above it says which side it is on."""
+    assert _chance_words(0.052) == "over 5 %" and _chance_words(0.05) == "about 5 %"
+    assert _chance_words(0.04) == "about 4 %" and _chance_words(0.08) == "about 8 %"
 
 
 def _a1_run(tmp_path: Path) -> tuple[Path, dict]:

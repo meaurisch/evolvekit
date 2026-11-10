@@ -1069,6 +1069,13 @@ re-derive the formula; these are the re-derivations.
     is the average over the held-back cases ("on average over 5 held-back cases"), so a single case
     below it does not read as a broken promise. Legacy comparisons keep their own range and words.
     Cost if wrong: the page's range is narrower than the engineers' 95 % interval; both are labelled.
+16. **The owner's review: chances in percent, not twentieths.** The owner accepted the rule
+    (decisions 11–15) and asked for percentages over "19 in 20". The rule reads "Use when the
+    chance of a gain is at least 95 %."; a chance shows in whole percent ("about 96 %"), "almost
+    certain" from 0.995 ("over 99 %" in a use's sentence), "less than 1 %" below 0.005. The guards
+    stay: a keep just under the bar reads "under 95 %", one just over worse's bar "over 5 %"; a
+    comparison written before A1 guards its own 90 % ("under 90 %") and its rule sentence says
+    "at least 90 %". Only words change, never a decision.
 
 ## Open questions for the builder check
 

@@ -89,7 +89,7 @@ The defaults and the winner, interleaved, under identical conditions; per
 instance and in aggregate, with the chance of a gain and a 95 % credible
 interval (the frequentist interval and a Wilcoxon test beside them, for
 engineers); exit code 0 only if the rule says use (a chance of a gain of at
-least 19 in 20). "Not proven" is a possible and honest outcome — with only
+least 95 %). "Not proven" is a possible and honest outcome — with only
 two fresh instances, as here, it is the likely one even for a real gain: an
 interval over two differences is wide. Hold back more instances than that for a claim.
 

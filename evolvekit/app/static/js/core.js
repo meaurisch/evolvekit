@@ -175,17 +175,17 @@
     var toward = direction === "higher" ? "higher" : "lower", away = toward === "higher" ? "lower" : "higher";
     return Math.abs(v).toFixed(1) + " % " + (v > 0 ? toward : away);
   };
-  /** The chance of a gain in words; under the rule's 19 in 20 it never rounds up to read like a pass.
-      A comparison written before A1 (`posterior === false`) keeps its own words: under its 9 in 10. */
+  /** The chance of a gain in whole percent; under the rule's 95 % it never rounds up to read like a pass,
+      and just over worse's 5 % it says so. A comparison written before A1 (`posterior === false`) guards
+      its own 90 %. */
   EK.chanceWords = function (p, posterior) {
     if (p == null || !isFinite(p)) return "";
     if (p >= 0.995) return "almost certain";
-    if (posterior === false) { if (p < 0.9 && Math.round(p * 20) >= 18) return "chance under 9 in 10"; }
-    else if (p < 0.95 && Math.round(p * 20) >= 19) return "chance under 19 in 20";
-    if (p < 0.05) return "chance less than 1 in 20";
-    if (posterior !== false && p > 0.05 && Math.round(p * 20) <= 1) return "chance over 1 in 20"; // never reads like worse's 1 in 20
-    if (Math.round(p * 20) >= 20) return "chance better than 19 in 20";
-    return "chance about " + Math.round(p * 20) + " in 20";
+    var pct = Math.round(p * 100), rule = posterior === false ? 90 : 95;
+    if (p * 100 < rule && pct >= rule) return "chance under " + rule + " %";
+    if (posterior !== false && p > 0.05 && pct <= 5) return "chance over 5 %"; // never reads like worse's 5 %
+    if (pct < 1) return "chance less than 1 %";
+    return "chance about " + pct + " %";
   };
   EK.plural = function (n, one, many) { return EK.int(n) + " " + (n === 1 ? one : (many || one + "s")); };
   EK.duration = function (seconds) {

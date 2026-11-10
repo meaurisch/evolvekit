@@ -215,3 +215,11 @@ branches) through the in-app browser, in a fresh home whose path has a space, bu
 - PR: [meaurisch/evolvekit#79](https://github.com/meaurisch/evolvekit/pull/79), `algo/1-verdict`
   against `master`, stacked on #78. **PASS.** The session stopped here at the owner's request; A2–A4
   start from [the handoff prompt](../design/2026-11-09-algorithms-a2-a4-session-prompt.md).
+
+### The owner's review (2026-11-10)
+
+The owner accepted the rule and its measured rates, and asked for chances in percent instead of
+"19 in 20" (plan decision 16): "Use when the chance of a gain is at least 95 %.", "about 96 %",
+"under 95 %", "over 5 %". Words only; no decision changes. Gate after the change: 2913 passed, 1 failed, 5 skipped in 43:03;
+the one failure was a report test that asserted no "95 %" anywhere (the rule now says it), narrowed
+to "no 95 % range"; that file then passed (25 tests).

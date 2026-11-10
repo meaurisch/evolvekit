@@ -65,7 +65,7 @@ These are binding. Each plan you write carries them into its Global Constraints 
 2. **The rule** (A1 decisions 11–14, which replace design §4's conjugate prior and §8
    decision 3's "conjugate prior"): the posterior is the reference prior,
    μ | d ~ t(n − 1, mean, sd/√n) over per-case log-ratio effects; use when the chance of a gain
-   ≥ 0.95 ("19 in 20"), worse when ≤ 0.05, else keep; a candidate that failed more runs than the
+   ≥ 0.95 (said "95 %": the owner wants percentages, never "19 in 20"), worse when ≤ 0.05, else keep; a candidate that failed more runs than the
    starting point is never use; Holm (one leg, p = 1 − chance, 0.05) wherever a choice is made
    among branches, candidates, kinds of case or levels. Do not reintroduce κ0, a "prior scale",
    the 9-in-10 threshold or a 1 % margin leg.

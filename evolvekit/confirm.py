@@ -82,10 +82,10 @@ USE_MARGIN_PCT = 1.0
 """The margin of `chance_margin` (the chance of losing no more than this many %),
 kept in `comparison.json` for engineers, and of the rule a comparison written
 before A1 was decided by. It does not decide: with x_m < 0, P(gain > x_m) is at
-least P(gain > 0), so a chance of a gain of 19 in 20 already passes it."""
+least P(gain > 0), so a chance of a gain of 95 % already passes it."""
 
 WORSE_CHANCE = 0.05
-"""`decide` says "worse" up to this chance of a gain, "under 1 in 20": P(gain < 0) >= 0.95,
+"""`decide` says "worse" up to this chance of a gain, 5 %: P(gain < 0) >= 0.95,
 as strict as "use" (decision 14b)."""
 
 _LEGACY_WORSE_CHANCE = 0.1
@@ -98,11 +98,11 @@ _LEGACY_USE_CHANCE = 0.9
 """The rule a comparison written before the posterior was decided by: "use"
 from a one-sided t chance of 0.9 with the 95 % lower bound within 1 %."""
 
-RULE_WORDS = "Use when the chance of a gain is at least 19 in 20."
+RULE_WORDS = "Use when the chance of a gain is at least 95 %."
 """The rule in one sentence, as the page states it."""
 
 LEGACY_RULE_WORDS = (
-    "The app says use it when the chance of a gain is at least 9 in 10 "
+    "The app says use it when the chance of a gain is at least 90 % "
     "and the worst plausible case is within 1 % of today."
 )
 """The rule a comparison written before A1 was decided by, as the page stated it then."""

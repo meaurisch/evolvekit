@@ -361,12 +361,12 @@ sentence under it are the verdict's own `line` and `advice`, word for word,
 as `evolvekit study verdict` prints them: the page never composes its own.
 While the final check runs there is no verdict yet, so the strip says *No
 answer yet*. The app decides by one fixed rule, stated under the answer:
-*Use when the chance of a gain is at least 19 in 20.* It says *worse* when
-the chance of a gain is under 1 in 20 (0.05 or less: as strict as use), and
+*Use when the chance of a gain is at least 95 %.* It says *worse* when
+the chance of a gain is 5 % or less (as strict as use), and
 never *use* for a change that failed more runs than today's settings did: that
 is keep, and its line says so first (*Not proven on 3 held-back cases: it
-failed 4 runs the starting point finished; …*). A keep's chance just above 1
-in 20 reads *over 1 in 20*, never like worse's. With no true gain, the worst
+failed 4 runs the starting point finished; …*). A keep's chance just above 5 %
+reads *over 5 %*, never like worse's; one just under 95 % reads *under 95 %*. With no true gain, the worst
 case (pure run noise) reads *use* in about 8.9 % of studies and *worse* in
 about 5 %. The chance shown is
 the chance the rule reads, so a *use* never shows a loss as its worst case.
@@ -378,11 +378,11 @@ card, the report and the assistant's figures. Its low end is the sentence's
 reads, so a *use* reads *at least 4.5 % better … on average over 5 held-back
 cases; its 90 % range is likely between 4.5 % and 8.0 % better*. *At least* is
 the average over the held-back cases, so a single case below it breaks no
-promise, and a *use* gives its chance in figures too (*a chance of better than
-19 in 20*, *a chance of over 19 in 20 (almost certain)*). The 95 % interval
+promise, and a *use* gives its chance in figures too (*a chance of about 97 %*,
+*a chance of over 99 % (almost certain)*). The 95 % interval
 stays in `comparison.json` and `.md` as `ci95`, for engineers. A study whose final check
-was written before this rule keeps the rule it was decided by (*use it at 9 in
-10 or better, worst within 1 %*), with its own words, its own 95 % range and its
+was written before this rule keeps the rule it was decided by (*use it at a 90 %
+chance or better, worst within 1 %*), with its own words, its own 95 % range and its
 own decision.
 
 While a round's changes are being written by the AI the strip says so —
@@ -397,10 +397,10 @@ the spend too, and once the run is finished the verdict's own figure among
 its facts.
 
 - **Use it** (the strip turns orange): *Probably better: 1.4 % lower cost
-  on 3 held-back cases, a chance of about 19 in 20; …*, then *Use the new
+  on 3 held-back cases, a chance of about 96 %; …*, then *Use the new
   settings: they are probably better on cases the search never saw.*;
   *Save settings file* and *Copy* a summary.
-- **Keep**: *Not proven on 3 held-back cases: …* (*a chance under 19 in 20*),
+- **Keep**: *Not proven on 3 held-back cases: …* (*a chance under 95 %*),
   then *Keep today's settings … for now: the gain is not proven.*; *Check
   with more runs* (twice the runs per case, said on the button) keeps the runs it did and adds others. It is offered
   only after a single read of the answer: the final check reads its answer
@@ -804,7 +804,7 @@ names:
 | `line`, `advice` | the verdict's one sentence, as the Study page shows it, and the sentence after it |
 | `measure` | `{"kpi", "label", "unit", "direction"}` of the measure that decided |
 | `held_back` | `{"cases", "runs_per_case"}` |
-| `mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point: the posterior mean, its 95 % credible range (for engineers), `range90_pct` its 90 % range -- the 5 % and 95 % quantiles, the range the page, the card, the report and the assistant show, named "90 % range" (`null` for a final check written before A1, which shows its 95 % range) -- `worst_pct` the 5 % bound the rule reads and `range90_pct`'s low end, the same number (the change is at least this with a chance of 19 in 20), `chance` the chance of a gain; with goals in order of importance, those of the level the answer is read on (`numbers_from`); absent with `pending`, `stopped` and `skipped`, and on a `keep` whose every run gave exactly today's result (its `line` begins "No difference in any run"; the page shows that line and no band) |
+| `mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct`, `chance`, `chance_words` | the paired statistics, in percent of the starting point: the posterior mean, its 95 % credible range (for engineers), `range90_pct` its 90 % range -- the 5 % and 95 % quantiles, the range the page, the card, the report and the assistant show, named "90 % range" (`null` for a final check written before A1, which shows its 95 % range) -- `worst_pct` the 5 % bound the rule reads and `range90_pct`'s low end, the same number (the change is at least this with a 95 % chance), `chance` the chance of a gain; with goals in order of importance, those of the level the answer is read on (`numbers_from`); absent with `pending`, `stopped` and `skipped`, and on a `keep` whose every run gave exactly today's result (its `line` begins "No difference in any run"; the page shows that line and no band) |
 | `levels` | with goals in order of importance: one entry per goal with the same keys (its own `chance` among them), `deciding: true` on the one that decided and `read_on: true` on the one the answer is read on (the deciding one, else the level the comparison could go no further than) |
 | `numbers_from` | with goals in order of importance: `{"level", "kpi", "unit", "deciding"}`, the level whose figures `mean_pct`, `ci95_pct`, `range90_pct`, `worst_pct` and `chance` are |
 | `limited_by` | `"cases"` when the final check found that only more held-back cases could firm the answer up (the runs' own noise is a small part of what keeps it open), so it added no runs; on a keep, `why_keep` then says so |

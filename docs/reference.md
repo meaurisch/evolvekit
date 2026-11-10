@@ -1245,8 +1245,8 @@ stage that [runs once per instance](#one-run-per-instance-instances-workers-retr
 - **The rule is one posterior.** Under the reference prior p(μ, σ²) ∝ 1/σ² the
   true mean gain is Student's t with n − 1 degrees of freedom around the mean
   of the instances' gains, with scale s/√n. The `chance` is P(gain > 0). The
-  rule: **use when the chance is at least 0.95** ("19 in 20"), **worse** when it
-  is 0.05 or less ("under 1 in 20", as strict as use), **keep** between. A
+  rule: **use when the chance is at least 0.95** ("95 %"), **worse** when it
+  is 0.05 or less ("5 %", as strict as use), **keep** between. A
   candidate that failed more runs than the baseline failed (pairs only the
   candidate failed outnumber pairs only the baseline failed) is never *use*:
   it is keep, and its sentence says *it failed N runs the starting point

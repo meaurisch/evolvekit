@@ -264,7 +264,7 @@ def test_a_chance_never_prints_on_the_far_side_of_a_threshold():
 
 
 def test_worse_is_judged_as_strictly_as_use():
-    """Decision 14b: worse at a chance of a gain of 0.05 or less, "under 1 in 20"; a comparison
+    """Decision 14b: worse at a chance of a gain of 0.05 or less, "5 %"; a comparison
     written before A1 keeps its own 0.10."""
     from evolvekit.confirm import WORSE_CHANCE
 
@@ -356,7 +356,7 @@ def test_with_goals_in_order_the_page_bolds_the_levels_answer_not_the_objectives
 def test_a_comparison_written_before_the_posterior_decides_as_it_did():
     """Review Focus 3: a stored summary without the posterior keeps the rule it was decided by."""
     assert decide({"n": 3, "chance": 0.96, "worst": -0.5}) == "use"
-    assert decide({"n": 3, "chance": 0.92, "worst": -0.5}) == "use", "the old rule's 9 in 10"
+    assert decide({"n": 3, "chance": 0.92, "worst": -0.5}) == "use", "the old rule's 90 %"
     assert decide({"n": 3, "chance": 0.96, "worst": -1.5}) == "keep"
     assert decide({"n": 3, "chance": 0.05, "worst": -4.0}) == "worse"
     assert decide(paired_summary([1.3, 0.6, 1.9])) == "use" and decide(paired_summary([3.0, 3.1, 2.9, -1.4])) == "keep"

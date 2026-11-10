@@ -67,9 +67,9 @@
     var r = EK.shownRange({ mean: 0, range90: s.range90, ci95: s.ci95 });
     if (!r) return "One case: a number, no range";
     var range = EK.rangeWords(r[1], r[2], r[3], r[4]), legacy = s.posterior === false, rule = legacy ? 0.9 : 0.95;
-    if (s.decision === "use" && !legacy && s.chance != null && s.chance >= 0.995) return "Almost certain: a chance over 19 in 20 · " + range;
+    if (s.decision === "use" && !legacy && s.chance != null && s.chance >= 0.995) return "Almost certain: a chance over 99 % · " + range;
     if (s.decision === "keep" && s.failed_more) return "The chance does not decide: it failed " + s.failed_more + " run" + (s.failed_more === 1 ? "" : "s") + " the starting point finished · " + range;
-    if (s.decision === "keep" && s.chance != null && s.chance < rule) return (legacy ? "Chance under 9 in 10 · " : "Chance under 19 in 20 · ") + range;
+    if (s.decision === "keep" && s.chance != null && s.chance < rule) return (legacy ? "Chance under 90 % · " : "Chance under 95 % · ") + range;
     return s.chance != null ? EK.capital(EK.chanceWords(s.chance, s.posterior)) + " · " + range : range;
   };
 

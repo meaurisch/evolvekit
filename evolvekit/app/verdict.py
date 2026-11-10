@@ -16,7 +16,7 @@ mean; `ci95_pct` a 95 % credible interval, for engineers; `range90_pct` the
 comparison written before A1, which shows its 95 % interval); and `worst_pct`
 the 5 % quantile, the one-sided bound the rule reads and the 90 % range's low
 end, the same number -- so "use" holds exactly when the chance
-of a gain is at least 19 in 20 (and then the worst case shown is no loss). A
+of a gain is at least 95 % (and then the worst case shown is no loss). A
 comparison written before A1 keeps the rule, the words and the `rule`
 sentence it was decided by (`posterior: false`). In `by_case`,
 `start` and `best` are a held-back case's means over the final check's runs
@@ -56,7 +56,7 @@ branches is shown to beat the starting point." and then no figures, held-back
 rows or changes of its own: no unnamed branch speaks for the run. The key
 exists only on bake-off runs.
 
-The words themselves -- the chance in twentieths, the decision of a run made
+The words themselves -- the chance in whole percent, the decision of a run made
 before runs decided, and the sentences of the final check -- live here too.
 """
 
@@ -133,31 +133,26 @@ _LEGACY_USE_CHANCE = 0.9
 
 
 def _chance_words(p: float | None, posterior: bool = True) -> str:
-    """A chance of a gain in twentieths: "about 19 in 20", never sounding
-    certain: "better than 19 in 20" above it, "less than 1 in 20" below 1 in 20,
-    and "almost certain" from 0.995; nothing for no chance. A chance just
-    under the rule's 19 in 20 says so ("under 19 in 20"), never rounding up
-    to read like a pass. A comparison written before A1 (`posterior=False`)
-    keeps the words it had, guarding its own 9 in 10 ("under 9 in 10")."""
+    """A chance of a gain in whole percent: "about 96 %", "almost certain"
+    from 0.995 and "less than 1 %" under 0.005; nothing for no chance. A
+    chance just under the rule's 95 % says so ("under 95 %"), never rounding
+    up to read like a pass, and one just over worse's 5 % says so ("over 5 %").
+    A comparison written before A1 (`posterior=False`) guards its own 90 %
+    ("under 90 %")."""
     if p is None:
         return ""
     if p >= 0.995:
         return "almost certain"
-    if p < 0.05:
-        return "less than 1 in 20"
-    if posterior and p > WORSE_CHANCE and round(p * 20) <= round(WORSE_CHANCE * 20):
-        # 0.06 would round to "about 1 in 20", which reads like worse's 1 in 20 when the rule said keep.
-        return f"over {round(WORSE_CHANCE * 20)} in 20"
-    if not posterior:
-        if p < _LEGACY_USE_CHANCE and round(p * 20) >= round(_LEGACY_USE_CHANCE * 20):
-            return "under 9 in 10"
-    elif p < USE_CHANCE and round(p * 20) >= round(USE_CHANCE * 20):
-        # 0.947 would round to "about 19 in 20", which reads like the rule's
-        # 19 in 20 when the rule said no: say which side of it the chance is.
-        return f"under {round(USE_CHANCE * 20)} in 20"
-    if round(p * 20) >= 20:
-        return "better than 19 in 20"
-    return f"about {round(p * 20)} in 20"
+    pct, rule = round(p * 100), USE_CHANCE if posterior else _LEGACY_USE_CHANCE
+    if p < rule and pct >= round(rule * 100):
+        # 0.947 would round to "about 95 %", which reads like the rule's 95 % when the rule said no.
+        return f"under {round(rule * 100)} %"
+    if posterior and p > WORSE_CHANCE and pct <= round(WORSE_CHANCE * 100):
+        # 0.052 would round to "about 5 %", which reads like worse's 5 % when the rule said keep.
+        return f"over {round(WORSE_CHANCE * 100)} %"
+    if pct < 1:
+        return "less than 1 %"
+    return f"about {pct} %"
 
 
 def _chance_of(summary: dict[str, Any]) -> float | None:
@@ -372,7 +367,7 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
                     "advice": use_advice}
         # The chance in figures even when almost certain; "at least" is the average over the held-back
         # cases, so one case below it is no broken promise; the range's low end is the same number.
-        how_sure = "" if not words else (f", a chance of over {round(USE_CHANCE * 20)} in 20 (almost certain)" if sure
+        how_sure = "" if not words else (", a chance of over 99 % (almost certain)" if sure
                                          else f", a chance of {words}")
         return {**base, "state": "confirmed",
                 "line": f"Probably better: {_pct(mean)} {better} {goal['says']}{how_sure}; "

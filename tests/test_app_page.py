@@ -1128,10 +1128,11 @@ def test_the_settings_legend_says_the_goals_direction_and_not_checked():
 
 
 def test_the_pages_chance_words_never_read_like_worse_on_a_keep():
-    """Decision 14b in the page's own words: worse is at 1 in 20, so 0.06 says "over 1 in 20"."""
-    out = _node("""process.stdout.write(JSON.stringify([EK.chanceWords(0.06), EK.chanceWords(0.05),
-        EK.chanceWords(0.04), EK.chanceWords(0.06, false)]));""")
-    assert out == ["chance over 1 in 20", "chance about 1 in 20", "chance less than 1 in 20", "chance about 1 in 20"]
+    """Decision 14b in the page's own words: worse is at 5 %, so 0.052 says "over 5 %"."""
+    out = _node("""process.stdout.write(JSON.stringify([EK.chanceWords(0.052), EK.chanceWords(0.05),
+        EK.chanceWords(0.04), EK.chanceWords(0.052, false), EK.chanceWords(0.947), EK.chanceWords(0.003)]));""")
+    assert out == ["chance over 5 %", "chance about 5 %", "chance about 4 %", "chance about 5 %", "chance under 95 %",
+                   "chance less than 1 %"]
 
 
 def test_a_keep_that_failed_more_runs_never_captions_its_chance_as_almost_certain():
@@ -1144,7 +1145,7 @@ def test_a_keep_that_failed_more_runs_never_captions_its_chance_as_almost_certai
     assert out[0].startswith("The chance does not decide: it failed 4 runs the starting point finished · ")
     assert out[1].startswith("The chance does not decide: it failed 1 run the starting point finished · ")
     assert "Almost certain" not in out[0] + out[1]
-    assert out[2].startswith("Chance under 19 in 20 · ")
+    assert out[2].startswith("Chance under 95 % · ")
     assert "failed_more: f.failed_more" in STUDY_PAGE
 
 
@@ -1169,9 +1170,9 @@ def test_the_pages_range_is_the_90_range_and_its_low_end_is_the_sentences_at_lea
         card: EK.cardOf({{ kind: "finished", slug: "s", decision: "use", mean: 6.0, range90: r, ci95: [3.0, 9.0],
                            verdict: {{ says: "use", line: "", advice: "" }} }}).range }}));""")
     assert f"90 % range from {at_least} % better to " in out["use"], (line, out["use"])
-    assert out["use"].startswith("Chance better than 19 in 20 · ")
-    assert out["sure"].startswith("Almost certain: a chance over 19 in 20 · 90 % range from ")
-    assert out["keep"] == "Chance under 19 in 20 · 90 % range from 8.0 % worse to 11.5 % better", "one decimal, as the sentence"
+    assert out["use"].startswith("Chance about 98 % · ")
+    assert out["sure"].startswith("Almost certain: a chance over 99 % · 90 % range from ")
+    assert out["keep"] == "Chance under 95 % · 90 % range from 8.0 % worse to 11.5 % better", "one decimal, as the sentence"
     assert f"90 % range from {at_least} % better" in out["aria"] and "95 %" not in out["aria"]
     assert out["card"] == [6.0, *summary["range90"], "90 % range", 1], "the card draws the 90 % range, not ci95"
     assert 'f.range90 ? EK.rangeCaption({ decision: "use"' in STUDY_PAGE and STUDY_PAGE.count('"Likely range') == 1, \
@@ -1184,7 +1185,7 @@ def test_a_range_written_before_a1_keeps_its_own_name_and_digits():
     out = _node("""process.stdout.write(JSON.stringify({
         keep: EK.rangeCaption({ decision: "keep", chance: 0.5, ci95: [-1.234, 3.456], posterior: false }),
         shown: EK.shownRange({ mean: 1, ci95: [-1.234, 3.456] }), none: EK.shownRange({ mean: 1 })}));""")
-    assert out["keep"] == "Chance under 9 in 10 · 95 % range from 1.23 % worse to 3.46 % better"
+    assert out["keep"] == "Chance under 90 % · 95 % range from 1.23 % worse to 3.46 % better"
     assert out["shown"] == [1, -1.234, 3.456, "95 % range", 2] and out["none"] is None
 
 
