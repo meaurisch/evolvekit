@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, stdev, variance
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from evolvekit import resources
 from evolvekit.config import ProblemConfig, StageConfig, embedded_params
@@ -582,6 +582,7 @@ def run_command_stage(
     cancel: "threading.Event | None" = None,
     app: str | None = None,
     source_id: str | None = None,
+    seeds: Sequence[int] | None = None,
 ) -> StageOutcome:
     """Run the stage's evaluator `stage.seeds` times and combine the results.
 
@@ -603,8 +604,16 @@ def run_command_stage(
 
     For a tree problem, `app` is what `{app}` becomes and `source_id` the
     tree's commit, which keys the cache instead of the folder.
+
+    `seeds` replaces the stage's own `0 .. seeds-1`, as in
+    `fanout.run_instance_stage`: the noise check runs the seed again on seeds
+    the stage itself may not run (`evaluate/noise.py`).
     """
-    if stage.seeds <= 1:
+    seed_values = list(seeds) if seeds is not None else list(range(max(1, stage.seeds)))
+    if not seed_values:
+        raise ValueError("run_command_stage: no seed to run")
+    if len(seed_values) == 1:
+        seed = seed_values[0]
         single = _run_once(
             candidate_path,
             stage,
@@ -612,7 +621,7 @@ def run_command_stage(
             out_path=out_path,
             cwd=cwd,
             private=private,
-            seed=0,
+            seed=seed,
             required_kpis=required_kpis,
             observer=observer,
             configuration=configuration,
@@ -622,14 +631,15 @@ def run_command_stage(
             source_id=source_id,
         )
         if single.ok:
-            # One run has no variance, but it is a run on seed 0: the reference
-            # a later candidate's paired difference is taken against.
+            # One run has no variance, but it is a run on its seed (0 in a
+            # search): the reference a later candidate's paired difference is
+            # taken against.
             single.seed_runs = {k: [v] for k, v in single.kpis.items()}
             single.seed_vectors = {k: [list(v)] for k, v in single.vector_kpis.items()}
-            single.seed_list = (0,)
+            single.seed_list = (seed,)
         return single
     outcomes: list[StageOutcome] = []
-    for seed in range(stage.seeds):
+    for seed in seed_values:
         outcome = _run_once(
             candidate_path,
             stage,
@@ -650,7 +660,7 @@ def run_command_stage(
         if not outcome.ok:
             failed = _combine_failure(outcomes)
             return failed
-    return _combine(outcomes)
+    return _combine(outcomes, seed_values)
 
 
 def _seeded_path(out_path: Path, seed: int) -> Path:
@@ -685,9 +695,10 @@ def _cv(values: list[float]) -> float | None:
     return spread / abs(mean_value) if mean_value != 0.0 else None
 
 
-def _combine(outcomes: list[StageOutcome]) -> StageOutcome:
+def _combine(outcomes: list[StageOutcome], seeds: Sequence[int] | None = None) -> StageOutcome:
     """Average N successful runs of one stage into a single outcome, or fail
-    when they disagree about the length of a vector KPI."""
+    when they disagree about the length of a vector KPI. `seeds` are the
+    seeds the runs were made on, in order (default `0 .. N-1`)."""
     first = outcomes[0]
     keys = set(first.kpis)
     for outcome in outcomes[1:]:
@@ -740,7 +751,7 @@ def _combine(outcomes: list[StageOutcome]) -> StageOutcome:
         vector_var=vector_var,
         seed_runs={k: [o.kpis[k] for o in outcomes] for k in sorted(keys)},
         seed_vectors={name: [list(o.vector_kpis[name]) for o in outcomes] for name in vectors},
-        seed_list=tuple(range(len(outcomes))),
+        seed_list=tuple(seeds) if seeds is not None else tuple(range(len(outcomes))),
         # The first run's, not a concatenation: N notes about the same program
         # is N times the prompt for no extra information.
         text_feedback=first.text_feedback,

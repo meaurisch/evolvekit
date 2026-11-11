@@ -201,6 +201,7 @@ class Driver:
             on_event=self._on_evaluation,
             stop=self.run_stop.event,
             time_left=self.run_stop.left_s,
+            log=self.log,
         )
         self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
         self.breadth = AdaptiveBreadth.from_config(config.search)

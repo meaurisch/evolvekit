@@ -204,7 +204,8 @@ def test_every_instance_and_seed_is_a_run_of_its_own_and_instances_weigh_the_sam
         [_candidate(config, "g000-c0001", seed=True)]
     )["g000-c0001"]
 
-    assert sorted(_calls(tmp_path))[0][:2] == ("b1", 0) and len(_calls(tmp_path)) == 4
+    # 2 instances x 2 seeds, and the seed once more on seed 0 on the median-time instance (the noise check)
+    assert sorted(_calls(tmp_path))[0][:2] == ("b1", 0) and len(_calls(tmp_path)) == 5
     final = result.outcomes[-1]
     assert final.instance_names == ("s1", "b1")
     assert final.vector_kpis["cost_per_instance"] == [100.25, 1000.25], "seeds average within an instance"
@@ -240,6 +241,12 @@ def test_with_normalize_baseline_the_variance_is_in_percent_of_the_seed(tmp_path
     ref = cascade.reference["full"]
     names = ["s1", "b1"]
     raw_var = statistics.variance([100.0, 100.5])   # the seed's two runs on s1
+    # The toy (`scale + 0.5·seed`) gives the same numbers for the same seed: the
+    # rules read the paired noise, 0 with only the seed. The units are those of
+    # the across estimate, read here as on a stage that is not repeatable.
+    assert cascade.noise.repeatable("full") is True
+    assert cascade.noise.vector_sd("full", "cost_pct_of_baseline", 0) == 0.0
+    cascade.noise.set_repeatable("full", False)
     pct = cascade.noise.vector_sd("full", "cost_pct_of_baseline", 0)
     assert pct == pytest.approx(math.sqrt(raw_var) * 100 / ref[names[0]]), "Decision 4: percent on the percent vector"
     assert cascade.noise.vector_sd("full", "cost_per_instance", 0) == pytest.approx(math.sqrt(raw_var)), "raw stays raw"
@@ -490,7 +497,8 @@ def test_the_daily_cap_is_applied_on_admission(tmp_path):
     )
     assert [r.competes for r in results.values()] == [True, True, False]
     assert "daily full-evaluation cap reached" in results["g001-c0003"].last_failure
-    assert len(_calls(tmp_path)) == 2
+    # Two candidates, and the seed's noise check (seed 0 again, seed 1), which the cap does not count.
+    assert len(_calls(tmp_path)) == 4
 
 
 # -- what the status document makes of it ----------------------------------

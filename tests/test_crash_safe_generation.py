@@ -46,7 +46,9 @@ def _config(tmp_path: Path, **evaluate):
                     {
                         "id": "full", "kind": "command", "kpis_from": "stdout", "timeout": 60,
                         "instances": ["a", "bb", "ccc"],
-                        "command": f'"{sys.executable}" solver.py --instance {{instance}} --seed {{seed}} {{params}}',
+                        # No {seed}: the seed is not run again to measure the noise
+                        # (`evaluate/noise.py`), so every call counted here is the cache's.
+                        "command": f'"{sys.executable}" solver.py --instance {{instance}} {{params}}',
                     },
                 ],
                 "score": {"objective": "cost", "direction": "minimize"},

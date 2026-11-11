@@ -90,6 +90,7 @@ live run is built from:
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
+  | `noise_checked` | once per run, after the seed has passed the final stage and been [run again](#stochastic-evaluators-seeds-n) | `stage`, `instance` (the one the seed ran again on; `null` without instances), `repeatable`, `runs` (the seed's runs compared there) and `cv` (the objective's relative noise the search now reads; 0 on a repeatable stage at `seeds: 1`) |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
 
@@ -117,7 +118,7 @@ interrupted or dead.
 | Section | Answers |
 |---|---|
 | `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
-| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero (the search's own reading, not `confirm`'s rule, which is a chance of a gain) — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
+| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero (the search's own reading, not `confirm`'s rule, which is a chance of a gain) — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. `noise` is the run's [noise estimate](#stochastic-evaluators-seeds-n) at the final `stage` (`work/noise.json`): `repeatable` (`null` until measured), `source` (`replicates`, `calibration`, `paired` or `none`: where `sd` came from), and per measure `sd` (the noise of one run, one side of a comparison, that the search reads), `sd_across` (the across-seed estimate, always), `cv` (relative), with `runs_per_candidate` (the stage's `seeds`); `source: none` with empty maps when nothing was measured. |
 | `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
 | `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
 | `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
@@ -699,6 +700,59 @@ re-expression of its own seed, silently stops filtering. So on a stage with
 digits on a mean of N runs is a claim about the program; nine is a claim about
 the dice.
 
+**The run's noise estimate: `work/noise.json`.** Every command stage's outcome
+adds to one estimate the whole run shares, per stage (and per hold-out, as
+`<stage>/private`) and per measure: each candidate with two or more runs
+contributes its own sample variance over its seeds, and the estimate is their
+pool (per element for a per-instance list, in that list's own units; under
+`normalize: baseline` the objective's is in percent of the seed, its
+`_per_instance` list's raw). A candidate that failed, was raced out or was
+abandoned contributes nothing. The file is saved after every generation and read
+back on resume; a run written before it starts with no noise.
+
+*Is the evaluator repeatable?* Once per run, after the seed has passed the
+final stage, and only when that stage's command has a `{seed}`: the seed is run
+**once more on seed 0**, with the cache bypassed (a lookup would read the first
+run back), on the instance whose seed run took the median time (without
+`instances`, on the whole input set). If every measure equals the first run to
+`evaluate.signature_digits` (the ones in `evaluate.signature_ignore`, a run
+time, left out), the stage is *repeatable*: same program, same seed, same
+numbers. Every candidate runs on the same seeds, so on such a stage what matters
+is how far two candidates' *difference* on matching seeds moves, not how far
+the seeds spread: the noise a comparison reads is the **paired** one — for
+each candidate with two or more seeds, the variance of its per-seed differences
+to the seed's run on the same seed, pooled, and halved to be the noise of one
+side. At `seeds: 1` that is 0: a repeatable evaluator is compared exactly, as
+before. On a stage that is not repeatable (a wall-clock solver) the noise is the
+across-seed one.
+
+*When nothing replicates* (`seeds: 1`, not repeatable): the same check also
+runs the seed on **seed 1**, one more run in all, and the three runs of the
+seed on that instance calibrate the noise: their relative spread is taken to
+hold on every instance, independently, so one run of the stage has variance
+`cv² · Σ seed_mean_i² / M²` over the M instances. Three runs are two degrees of
+freedom, so a calibrated noise is quoted to **one significant digit** ("about
+2 %"). The first candidate with replicates of its own replaces the calibration;
+on a repeatable stage it is measured and reported (`sd_across`) but never read.
+The extra runs are not evaluations of the search (no `eval_started` /
+`eval_finished`, not cached, not counted against `budget.max_full_evals_per_day`); the run logs one
+line (`noise: the seed run again on i2: one run varies by about 2 % (the
+search's comparisons allow for it)`, or `… the evaluator gives the same numbers
+for the same seed (comparisons are paired by seed)`) and the event log one
+`noise_checked`. A failed extra run is logged and leaves the stage unmeasured.
+
+*No `{seed}`*: with `seeds: 1` nothing is run again and the noise is 0 —
+every comparison is made as if the evaluator were exact, which is how every
+rule read before this estimate existed. (`seeds > 1` without `{seed}` is a
+config error, above.)
+
+Limits: the estimate is read as it is from the first candidates on — two
+degrees of freedom after a calibration — with no minimum of evidence before it
+counts. It is shown by `status` (`progress.noise`) and
+[`preflight`](#before-you-spend-anything-preflight); for now the search's own
+comparisons are made as before, and each rule that comes to read the estimate
+says so in its own section and is listed here.
+
 ### One run per instance: `instances`, `workers`, `retries`
 
 A classic stage hands the evaluator a whole input set and gets one JSON object
@@ -1185,7 +1239,16 @@ Then it checks the config against what it just measured:
   how many days of calendar time it spans;
 * projected evaluator wall clock for the whole run — a note under a day, a
   warning over it;
-* on a `seeds: N` stage, how much the noisiest KPI moved between the runs.
+* on a `seeds: N` stage, how much the noisiest KPI moved between the runs;
+* at the final stage, the run-to-run noise, measured as a run measures it
+  ([the seed run again](#stochastic-evaluators-seeds-n): seed 0 once more, and
+  seed 1 at `seeds: 1`, on the median-time instance) — one line of four:
+  `run-to-run noise at stage full: one run varies by about 2 % (3 runs of the
+  seed on i3)` (one significant digit: three runs), the same with `(seeds: 3)`
+  when the stage's own runs give it, `stage full: the evaluator gives the same
+  numbers for the same seed; comparisons are paired by seed`, or `stage full:
+  the command has no {seed}, so the noise cannot be measured; every comparison
+  is made as if the evaluator were exact`. An extra run that fails is a warning.
 
 `--provider-check` is the only part that spends anything: one minimal call per
 configured model role, `embed` included when a slot exists, with the prompt
@@ -1206,6 +1269,7 @@ stage full                 ok      0.3s  (timeout 300s per run)
     | weibull: 5.808% excess over L1 across 8 instance(s), best 4.762%, worst 6.931%
     | worst single instance: full-or-8 at 8.571% excess
 
+note    : stage full: the evaluator gives the same numbers for the same seed; comparisons are paired by seed
 note    : projected evaluator wall clock for the whole run: about 19.3s, excluding model latency.
 
 verdict : clean (0 failure(s), 0 warning(s))

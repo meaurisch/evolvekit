@@ -45,6 +45,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from evolvekit.economics import DEFAULT_WINDOW, series
 from evolvekit.evaluate.levels import K as LEVEL_STEPS
+from evolvekit.evaluate.noise import NOISE_FILE, Noise
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
 from evolvekit.leaderboard import competes, fitness_of, rank, replay_veto
 from evolvekit.ledger import read_jsonl
@@ -1079,7 +1080,24 @@ class _Run:
             "spread": self._spread_basis(),
             "screening": self._screening_agreement(),
             "levels": self._levels(),
+            "noise": self._noise(),
         }
+
+    def _noise(self) -> dict[str, Any]:
+        """The run's noise estimate at the final stage (`work/noise.json`,
+        `evaluate/noise.py`): per measure the one-side noise of one run the
+        search's comparisons read, the across-seed one, the relative one, and
+        where it came from. No file: `source: none`, nothing measured."""
+        final = self._final_stage
+        described = next(
+            (s for s in self.described.get("stages") or [] if isinstance(s, Mapping) and s.get("id") == final), {}
+        )
+        seeds = described.get("seeds")
+        runs = seeds if isinstance(seeds, int) and not isinstance(seeds, bool) and seeds >= 1 else 1
+        view = Noise.load(self.directory / "work" / NOISE_FILE).to_status(final) if final else {
+            "repeatable": None, "source": "none", "sd": {}, "sd_across": {}, "cv": {},
+        }
+        return {"stage": final, **view, "runs_per_candidate": runs}
 
     def _levels(self) -> dict[str, Any]:
         """`evaluate.score.levels`, level by level: the baseline against the

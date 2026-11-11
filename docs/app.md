@@ -727,7 +727,11 @@ run's `decision`, `line`, `advice` and `rule`, each group's `name`,
 `download/settings_by_group` and `download/rule` are the run's two files; a
 group folder's dashboard is at `/studies/{name}/runs/{run}/groups/{folder}/dashboard/`
 (the `dashboard` of `status` on such a run); and each run's dashboard at
-`/studies/{name}/runs/{run}/dashboard/`. Managing studies: `DELETE
+`/studies/{name}/runs/{run}/dashboard/` (it draws the engine's status
+document, `docs/reference.md` "Watching a run", whose `progress.noise` is how
+much one run of a combination varies at the final stage: `stage`,
+`repeatable`, `source`, and per measure `sd`, `sd_across` and `cv`, with
+`runs_per_candidate`). Managing studies: `DELETE
 /api/studies/{name}` moves one to the trash (409 while it runs or waits) and
 `POST /api/trash/{entry}/restore` brings it back; `POST
 /api/studies/{name}/duplicate` with `{name}` copies the setup and the cases;

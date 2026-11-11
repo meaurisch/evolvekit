@@ -13,7 +13,7 @@ import statistics
 
 import pytest
 
-from evolvekit.evaluate.noise import Noise
+from evolvekit.evaluate.noise import CALIBRATION_ID, Noise
 from evolvekit.evaluate.types import StageOutcome
 
 
@@ -68,6 +68,9 @@ def test_the_file_round_trips_and_a_broken_one_is_no_noise(tmp_path):
     assert Noise.load(path).sd("full", "cost") == 0.0
     path.write_text('{"schema": 1, "stages": {"full": {"kpis": {"cost": {"across": 3}}}}}', encoding="utf-8")
     assert Noise.load(path).sd("full", "cost") == 0.0, "a file of the wrong shape is no noise either"
+    path.write_text('{"schema": 1, "stages": {"full": {"kpis": {"cost": {"across": '
+                    '{"a": {"runs": 3, "mean": 1.0, "var": -4.0}}}}}}}', encoding="utf-8")
+    assert Noise.load(path).sd("full", "cost") == 0.0, "a negative variance is no variance"
     assert Noise.load(tmp_path / "missing.json").known("full") is False
 
 
@@ -223,24 +226,23 @@ def test_a_score_by_levels_has_no_summed_noise():
     assert noise.score_sd("full", score, seeds=1) == 0.0
 
 
-def test_the_status_shows_each_kpis_noise_and_the_scores():
-    from evolvekit.config import ScoreConfig
-
+def test_the_status_shows_each_kpis_noise_and_where_it_came_from():
     noise = Noise()
     noise.observe("full", "seed", _runs([100.0, 104.0, 96.0]), is_seed=True)
     noise.observe("full", "a", _runs([99.0, 103.2, 95.4]))
-    score = ScoreConfig(objective="cost", direction="minimize", weights={"cost": 1.0})
-    status = noise.to_status("full", score)
-    assert status["repeatable"] is None and status["known"] is True
-    assert set(status["kpis"]) == {"cost"}
-    cost = status["kpis"]["cost"]
-    assert cost["sd"] == pytest.approx(cost["sd_across"]) == pytest.approx(noise.sd_across("full", "cost"))
-    assert cost["cv"] == pytest.approx(noise.cv("full", "cost"))
-    assert status["score_sd"] == pytest.approx(cost["sd"])
+    status = noise.to_status("full")
+    assert status["repeatable"] is None and status["source"] == "replicates"
+    assert set(status["sd"]) == set(status["sd_across"]) == set(status["cv"]) == {"cost"}
+    assert status["sd"]["cost"] == pytest.approx(status["sd_across"]["cost"]) == pytest.approx(noise.sd_across("full", "cost"))
+    assert status["cv"]["cost"] == pytest.approx(noise.cv("full", "cost"))
     noise.set_repeatable("full", True)
-    again = noise.to_status("full", score)
-    assert again["repeatable"] is True and again["kpis"]["cost"]["sd"] < again["kpis"]["cost"]["sd_across"]
-    assert Noise().to_status("full", score) == {"repeatable": None, "known": False, "kpis": {}, "score_sd": 0.0}
+    again = noise.to_status("full")
+    assert again["repeatable"] is True and again["source"] == "paired"
+    assert again["sd"]["cost"] < again["sd_across"]["cost"]
+    assert Noise().to_status("full") == {"repeatable": None, "source": "none", "sd": {}, "sd_across": {}, "cv": {}}
+    calibrated = Noise()
+    calibrated.calibrate("full", {"cost": [100.0, 110.0, 90.0]}, instance=None, instances=1)
+    assert calibrated.to_status("full")["source"] == "calibration"
 
 
 def test_the_pooled_variance_is_within_5_percent_of_the_truth_over_4000_candidates():
@@ -255,3 +257,224 @@ def test_the_pooled_variance_is_within_5_percent_of_the_truth_over_4000_candidat
         noise.observe("full", f"c{i}", _out({"cost": statistics.fmean(runs)},
                                             kpi_var={"cost": statistics.variance(runs)}))
     assert noise.sd("full", "cost") ** 2 == pytest.approx(4.0, rel=0.05)
+
+
+# -- calibration ----------------------------------------------------------------
+
+
+def test_a_calibration_from_one_instance_sets_the_relative_noise_for_all():
+    """Three runs on instance 1 give its relative noise; the stage-level value is a
+    mean of 3 independent instances with that relative noise each, so its variance
+    is cv² · Σ seed_mean_i² / M²."""
+    noise = Noise()
+    noise.calibrate("full", {"cost": [100.0, 102.0, 98.0]}, instance=1, instances=3,
+                    seed_means={"cost": [50.0, 100.0, 200.0]})
+    cv = statistics.stdev([100.0, 102.0, 98.0]) / 100.0
+    assert noise.cv("full", "cost") == pytest.approx(cv)
+    assert noise.sd("full", "cost") == pytest.approx(math.sqrt(cv**2 * (50**2 + 100**2 + 200**2)) / 3)
+    assert noise.vector_sd("full", "cost_per_instance", 1) == pytest.approx(2.0)
+    assert noise.vector_sd("full", "cost_per_instance", 0) is None, "measured on instance 1 only"
+
+
+def test_real_replicates_replace_the_calibration():
+    noise = Noise()
+    noise.calibrate("full", {"cost": [100.0, 110.0, 90.0]}, instance=None, instances=1)
+    assert noise.sd("full", "cost") == pytest.approx(10.0)
+    noise.observe("full", "a", _out({"cost": 10.0}, kpi_var={"cost": 4.0}))
+    assert noise.sd("full", "cost") == pytest.approx(2.0)
+    assert noise.cv("full", "cost") == pytest.approx(0.2), "sqrt(4) / 10: the calibration's ratio is gone too"
+
+
+def test_on_a_repeatable_stage_the_calibration_is_reported_but_not_read():
+    noise = Noise()
+    noise.calibrate("full", {"cost": [100.0, 100.0, 103.0]}, instance=None, instances=1)
+    noise.set_repeatable("full", True)
+    assert noise.sd("full", "cost") == 0.0 and noise.cv("full", "cost") == 0.0
+    assert noise.sd_across("full", "cost") == pytest.approx(statistics.stdev([100.0, 100.0, 103.0]))
+
+
+def test_a_calibration_survives_a_resume(tmp_path):
+    noise = Noise(tmp_path / "noise.json")
+    noise.calibrate("full", {"cost": [100.0, 102.0, 98.0]}, instance=0, instances=2,
+                    seed_means={"cost": [100.0, 50.0]})
+    noise.save()
+    again = Noise.load(tmp_path / "noise.json")
+    assert noise.sd("full", "cost") > 0
+    assert again.sd("full", "cost") == pytest.approx(noise.sd("full", "cost"))
+    assert CALIBRATION_ID in json_of(tmp_path / "noise.json")["stages"]["full"]["kpis"]["cost"]["across"]
+
+
+def json_of(path):
+    import json
+
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_the_calibration_instance_is_the_one_whose_seed_run_took_the_median_time():
+    from evolvekit.config import StageConfig
+    from evolvekit.evaluate.noise import check_stage
+
+    stage = StageConfig(id="full", kind="command", command="x {seed}", instances=("a", "b", "c", "d"))
+    picked = check_stage(stage, StageOutcome(stage_id="full", ok=True, instance_durations=[3.0, 1.0, 2.0, 4.0]))
+    assert picked.instances == ("c",), "sorted 1, 2, 3, 4: position (4 - 1) // 2 = 1 is 2.0, instance c"
+    tied = check_stage(stage, StageOutcome(stage_id="full", ok=True, instance_durations=[1.0, 1.0, 1.0, 1.0]))
+    assert tied.instances == ("b",), "ties by position"
+    whole = StageConfig(id="full", kind="command", command="x {seed}")
+    assert check_stage(whole, StageOutcome(stage_id="full", ok=True)) is whole
+
+
+# -- the seed run again, in a cascade -------------------------------------------
+
+# cost = scale(instance) * (1 + x), plus 3 * seed (repeatable) or fresh noise every
+# call (wall-clock). Every call leaves calls/<instance>.<seed>.<pid> and sleeps by
+# the instance's rank, so the seed's runs take ordered times: i2 is the median.
+TOY = r'''
+import argparse, json, os, random, time
+p = argparse.ArgumentParser()
+p.add_argument("--instance"); p.add_argument("--x", type=float); p.add_argument("--seed", type=int, default=0)
+p.add_argument("--mode")
+a = p.parse_args()
+os.makedirs("calls", exist_ok=True)
+seen = len([n for n in os.listdir("calls") if n.startswith("%s.%d." % (a.instance, a.seed))])
+open(os.path.join("calls", "%s.%d.%d" % (a.instance, a.seed, os.getpid())), "w").close()
+rank = {"i1": 1, "i2": 2, "i3": 3}[a.instance]
+time.sleep(0.15 * rank)
+if a.mode == "flaky" and seen >= 1:
+    raise SystemExit("the second run on the same seed crashed")
+scale = {"i1": 100.0, "i2": 1000.0, "i3": 500.0}[a.instance]
+cost = scale * (1.0 + a.x)
+cost += random.gauss(0.0, 2.0) if a.mode == "wall-clock" else 3.0 * a.seed
+print(json.dumps({"cost": cost, "vehicles": 4}))
+'''
+
+
+def _toy(tmp_path, mode, *, seeds=1, placeholder=True, instances=True):
+    from evolvekit.config import build_config
+
+    (tmp_path / "toy.py").write_text(TOY, encoding="utf-8")
+    seed = " --seed {seed}" if placeholder else ""
+    stage = {"id": "full", "kind": "command", "kpis_from": "stdout", "seeds": seeds,
+             "command": "{python} toy.py --instance " + ("{instance}" if instances else "i2")
+             + f" --mode {mode}{seed} {{params}}"}
+    if instances:
+        stage["instances"] = ["i1", "i2", "i3"]
+    return build_config(
+        {
+            "problem": {"parameters": {"x": {"type": "float", "low": -0.5, "high": 0.5, "default": 0.0}}},
+            "evaluate": {
+                "stages": [{"id": "static", "kind": "builtin-static"}, stage],
+                "score": {"objective": "cost", "direction": "minimize"},
+            },
+            "search": {"operators": {"param_lhs": 1.0}},
+        },
+        base_dir=tmp_path,
+    )
+
+
+def seed_candidate(config):
+    from evolvekit.candidate import SEED_OPERATOR, Candidate, splice_block
+
+    block = config.problem.parameters.render_block({"x": 0.0})
+    source = splice_block(config.problem.skeleton_source(), block, config.problem.block_start, config.problem.block_end)
+    return Candidate(id="g000-c0001", generation=0, block=block, source=source, operator=SEED_OPERATOR)
+
+
+def _calls(tmp_path):
+    found: dict[str, list[int]] = {}
+    for path in (tmp_path / "calls").iterdir():
+        instance, seed, _ = path.name.split(".")
+        found.setdefault(instance, []).append(int(seed))
+    return {k: sorted(v) for k, v in sorted(found.items())}
+
+
+def _cascade(config, tmp_path, *, events=None, lines=None):
+    from evolvekit.evaluate import Cascade
+
+    return Cascade(config, work_dir=tmp_path / "work",
+                   on_event=(lambda t, **f: events.append({"type": t, **f})) if events is not None else None,
+                   log=lines.append if lines is not None else None)
+
+
+def test_the_check_runs_seed_0_again_on_the_median_instance_and_finds_it_repeatable(tmp_path):
+    config = _toy(tmp_path, "repeatable", seeds=1)
+    events, lines = [], []
+    cascade = _cascade(config, tmp_path, events=events, lines=lines)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert cascade.noise.repeatable("full") is True and cascade.noise.repeatable("full/private") is True
+    assert _calls(tmp_path) == {"i1": [0], "i2": [0, 0, 1], "i3": [0]}, "seed 0 again (no cache) and seed 1, median instance"
+    assert cascade.noise.sd("full", "cost") == 0.0, "paired, seeds: 1: today's behaviour"
+    assert cascade.noise.sd_across("full", "cost") > 0, "the calibration is still measured and reported"
+    checked = [e for e in events if e["type"] == "noise_checked"]
+    assert len(checked) == 1 and checked[0]["stage"] == "full" and checked[0]["instance"] == "i2"
+    assert checked[0]["repeatable"] is True and checked[0]["runs"] == 3
+    assert lines == ["noise: the seed run again on i2: the evaluator gives the same numbers for the same seed "
+                     "(comparisons are paired by seed)"]
+    assert not [e for e in events if e["type"] == "eval_started" and e.get("instance") == "i2"][1:], \
+        "the extra runs are not evaluations of the search"
+    assert json_of(tmp_path / "work" / "noise.json")["stages"]["full"]["repeatable"] is True, "saved"
+
+
+def test_a_wall_clock_evaluator_is_not_repeatable_and_is_calibrated(tmp_path):
+    config = _toy(tmp_path, "wall-clock", seeds=1)
+    lines = []
+    cascade = _cascade(config, tmp_path, lines=lines)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert cascade.noise.repeatable("full") is False
+    assert cascade.noise.cv("full", "cost") > 0 and cascade.noise.sd("full", "cost") > 0
+    assert cascade.noise.sd("full", "vehicles") == 0.0, "a measure that does not vary has no noise"
+    assert len(lines) == 1 and lines[0].startswith("noise: the seed run again on i2: one run varies by about ")
+    assert lines[0].endswith(" % (the search's comparisons allow for it)")
+
+
+def test_a_stage_with_seeds_only_runs_the_repeat(tmp_path):
+    config = _toy(tmp_path, "repeatable", seeds=3)
+    cascade = _cascade(config, tmp_path)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert _calls(tmp_path)["i2"] == [0, 0, 1, 2], "one extra run: seed 0"
+    assert cascade.noise.repeatable("full") is True
+
+
+def test_without_a_seed_placeholder_nothing_is_run_again(tmp_path):
+    config = _toy(tmp_path, "repeatable", seeds=1, placeholder=False)
+    cascade = _cascade(config, tmp_path)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert cascade.noise.repeatable("full") is None and cascade.noise.sd("full", "cost") == 0.0
+    assert all(len(v) == 1 for v in _calls(tmp_path).values())
+
+
+def test_without_instances_the_check_runs_on_the_whole_input_set(tmp_path):
+    config = _toy(tmp_path, "wall-clock", seeds=1, instances=False)
+    cascade = _cascade(config, tmp_path)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert _calls(tmp_path) == {"i2": [0, 0, 1]}
+    assert cascade.noise.repeatable("full") is False and cascade.noise.sd("full", "cost") > 0
+
+
+def test_the_check_runs_once_per_run(tmp_path):
+    config = _toy(tmp_path, "repeatable", seeds=1)
+    cascade = _cascade(config, tmp_path)
+    cascade.evaluate_generation([seed_candidate(config)])
+    first = _calls(tmp_path)
+    cascade.evaluate_generation([seed_candidate(config)])
+    _cascade(config, tmp_path).evaluate_generation([seed_candidate(config)])  # resumed on the same work dir
+    assert _calls(tmp_path) == first
+
+
+def test_a_failed_extra_run_leaves_the_repeatability_unmeasured(tmp_path):
+    config = _toy(tmp_path, "flaky", seeds=1)
+    lines = []
+    cascade = _cascade(config, tmp_path, lines=lines)
+    result = cascade.evaluate_generation([seed_candidate(config)])["g000-c0001"]
+    assert result.competes, "the seed itself is unharmed"
+    assert cascade.noise.repeatable("full") is None and cascade.noise.sd_across("full", "cost") == 0.0
+    assert len(lines) == 1 and lines[0].startswith("noise: the seed could not be run again on i2")
+
+
+def test_the_extra_runs_are_not_counted_against_the_daily_cap(tmp_path):
+    from evolvekit.budget import BudgetGuard
+    from evolvekit.evaluate import Cascade
+
+    config = _toy(tmp_path, "repeatable", seeds=1)
+    budget = BudgetGuard(config.budget)
+    Cascade(config, work_dir=tmp_path / "work", budget=budget).evaluate_generation([seed_candidate(config)])
+    assert budget.full_evals_today() == 1

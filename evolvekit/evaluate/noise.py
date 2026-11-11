@@ -24,24 +24,45 @@ With nothing to pool the noise is 0, which is how every rule read before.
 Vectors are pooled the same way, per vector key and per element
 (`<kpi>_per_instance`, `<obj>_pct_of_baseline`, an evaluator's own list), each
 in its own units. The whole estimate is kept in `work/noise.json`.
+
+**The seed run again** (once per run, `Cascade._check_noise` and `preflight`):
+when the final stage's command has a `{seed}`, the seed is run once more on
+seed 0 with the cache bypassed, on the instance whose seed run took the median
+time (`check_stage`). The same numbers to the signature's digits make the
+stage *repeatable*. At `seeds: 1` it also runs on seed 1, and the three runs
+calibrate the across-seed estimate where nothing replicates (`calibrate`):
+two degrees of freedom, so it is quoted to one significant digit only.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, variance
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
+from evolvekit.evaluate.signature import round_significant
 from evolvekit.ledger import _atomic_write
 
 if TYPE_CHECKING:  # annotations only: this module stays a leaf
-    from evolvekit.config import ScoreConfig
+    from evolvekit.config import ScoreConfig, StageConfig
     from evolvekit.evaluate.types import StageOutcome
 
-__all__ = ["CALIBRATION_ID", "NOISE_FILE", "Noise", "SEED_ID"]
+__all__ = [
+    "CALIBRATION_ID",
+    "NOISE_FILE",
+    "Check",
+    "Noise",
+    "SEED_ID",
+    "about_pct",
+    "check_seeds",
+    "check_stage",
+    "measurable",
+    "record_check",
+]
 
 NOISE_FILE = "noise.json"
 CALIBRATION_ID = "(calibration)"
@@ -72,6 +93,17 @@ def _empty_stage() -> dict[str, Any]:
     return {"repeatable": None, "kpis": {}, "vectors": {}}
 
 
+def _across(group: Mapping[str, Any], usable: Callable[[Any], bool], *, calibration: bool = True) -> dict[str, Any]:
+    """The across entries of one KPI (or vector) that count: those `usable`,
+    and the calibration only while no real candidate has one -- the replicates
+    the run measured win over three runs of the seed. `calibration=False`
+    leaves it out whatever else there is."""
+    chosen = {cid: e for cid, e in group.items() if usable(e)}
+    if CALIBRATION_ID in chosen and (not calibration or len(chosen) > 1):
+        del chosen[CALIBRATION_ID]
+    return chosen
+
+
 def _number(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError(f"not a finite number: {value!r}")
@@ -80,6 +112,13 @@ def _number(value: Any) -> float:
 
 def _optional(value: Any) -> float | None:
     return None if value is None else _number(value)
+
+
+def _variance(value: Any) -> float:
+    number = _number(value)
+    if number < 0:
+        raise ValueError(f"not a variance: {value!r}")
+    return number
 
 
 def _count(value: Any) -> int:
@@ -136,11 +175,11 @@ def _element(clean: Callable[[list], list]) -> Callable[[Any], list | None]:
 
 
 def _across_element(e: list) -> list:
-    return [_optional(e[0]), _number(e[1]), _count(e[2])]
+    return [_optional(e[0]), _variance(e[1]), _count(e[2])]
 
 
 def _paired_element(e: list) -> list:
-    return [_count(e[0]), _number(e[1])]
+    return [_count(e[0]), _variance(e[1])]
 
 
 def _kpi_group(entry: Any) -> dict[str, Any]:
@@ -148,10 +187,10 @@ def _kpi_group(entry: Any) -> dict[str, Any]:
     return {
         "across": _entries(
             entry.get("across", {}),
-            lambda e: {"runs": _count(_mapping(e)["runs"]), "mean": _optional(e.get("mean")), "var": _number(e["var"])},
+            lambda e: {"runs": _count(_mapping(e)["runs"]), "mean": _optional(e.get("mean")), "var": _variance(e["var"])},
         ),
         "paired": _entries(
-            entry.get("paired", {}), lambda e: {"df": _count(_mapping(e)["df"]), "var": _number(e["var"])}
+            entry.get("paired", {}), lambda e: {"df": _count(_mapping(e)["df"]), "var": _variance(e["var"])}
         ),
     }
 
@@ -305,31 +344,34 @@ class Noise:
 
     # -- reading ---------------------------------------------------------
 
-    def _kpi_pool(self, key: str, kpi: str, kind: str) -> _Pool:
+    def _kpi_pool(self, key: str, kpi: str, kind: str, *, calibration: bool = True) -> _Pool:
         entry = self._stages.get(key, {}).get("kpis", {}).get(kpi)
         if entry is None:
             return _Pool([], [])
         if kind == "across":
-            chosen = [e for e in entry["across"].values() if e["runs"] >= 2]
+            chosen = list(_across(entry["across"], lambda e: e["runs"] >= 2, calibration=calibration).values())
             return _Pool([e["var"] for e in chosen], [e["runs"] - 1 for e in chosen])
         chosen = [e for e in entry["paired"].values() if e["df"] >= 1]
         return _Pool([e["var"] for e in chosen], [e["df"] for e in chosen])
 
-    def _element_pool(self, key: str, name: str, index: int, kind: str) -> _Pool:
+    def _element_pool(self, key: str, name: str, index: int, kind: str, *, calibration: bool = True) -> _Pool:
         entry = self._stages.get(key, {}).get("vectors", {}).get(name)
         if entry is None:
             return _Pool([], [])
-        variances, dfs = [], []
-        for elements in entry[kind].values():
+
+        def usable(elements: list) -> bool:
             if index >= len(elements) or elements[index] is None:
-                continue
+                return False
+            return elements[index][2] >= 2 if kind == "across" else elements[index][0] >= 1
+
+        group = _across(entry["across"], usable, calibration=calibration) if kind == "across" else {
+            cid: elements for cid, elements in entry["paired"].items() if usable(elements)
+        }
+        variances, dfs = [], []
+        for elements in group.values():
             element = elements[index]
-            if kind == "across" and element[2] >= 2:
-                variances.append(element[1])
-                dfs.append(element[2] - 1)
-            elif kind == "paired" and element[0] >= 1:
-                variances.append(element[1])
-                dfs.append(element[0])
+            variances.append(element[1])
+            dfs.append(element[2] - 1 if kind == "across" else element[0])
         return _Pool(variances, dfs)
 
     def sd(self, key: str, kpi: str) -> float:
@@ -348,16 +390,18 @@ class Noise:
     def vector_sd(self, key: str, vector_key: str, index: int) -> float | None:
         """`sd` for one element of a vector KPI, in that vector's units;
         `None` when nothing is known about that element."""
-        across = self._element_pool(key, vector_key, index, "across").across()
         if self.repeatable(key):
             paired = self._element_pool(key, vector_key, index, "paired").paired()
             if paired is not None:
                 return math.sqrt(paired)
             # Repeatable, with across entries for the element but no pair yet
-            # (only the seed replicated, or a calibration run): no paired noise
-            # is measured, and on a repeatable stage that reads as 0 -- today.
-            # At `seeds: 1` there is no across entry either, so: None.
+            # (only the seed replicated): no paired noise is measured, and on a
+            # repeatable stage that reads as 0 -- today. At `seeds: 1` there is
+            # no across entry either, so: None. The calibration is never read
+            # on a repeatable stage, not even as "replicated".
+            across = self._element_pool(key, vector_key, index, "across", calibration=False).across()
             return 0.0 if across is not None else None
+        across = self._element_pool(key, vector_key, index, "across").across()
         return math.sqrt(across) if across is not None else None
 
     def cv(self, key: str, kpi: str) -> float:
@@ -381,8 +425,8 @@ class Noise:
         else:
             ratios = [
                 e["var"] / e["mean"] ** 2
-                for e in entry["across"].values()
-                if e["runs"] >= 2 and e["mean"] is not None and e["mean"] != 0.0
+                for e in _across(entry["across"], lambda e: e["runs"] >= 2).values()
+                if e["mean"] is not None and e["mean"] != 0.0
             ]
         return math.sqrt(fmean(ratios)) if ratios else 0.0
 
@@ -402,7 +446,8 @@ class Noise:
                         continue
                     ratios.append(element[1] / 2.0 / means[i] ** 2)
         else:
-            for elements in entry["across"].values():
+            replicated = _across(entry["across"], lambda es: any(e is not None and e[2] >= 2 for e in es))
+            for elements in replicated.values():
                 for element in elements:
                     if element is None or element[2] < 2 or element[0] is None or element[0] == 0.0:
                         continue
@@ -439,18 +484,233 @@ class Noise:
                     return True
         return False
 
-    def to_status(self, key: str, score: "ScoreConfig") -> dict[str, Any]:
-        """What `status` can show of stage `key`: per KPI the noise the rules
-        read, the across-seed one, and the relative one; the score's noise of
-        one run. Engine words: it is for engineers."""
-        stage = self._stages.get(key, {})
-        kpis = sorted(stage.get("kpis", {}))
+    def source(self, key: str) -> str:
+        """Where `sd` of stage `key` comes from: `paired` on a repeatable
+        stage, else `replicates` (a candidate's own runs), `calibration` (the
+        seed run again, nothing replicated), or `none`."""
+        if self.repeatable(key):
+            return "paired"
+        stage = self._stages.get(key)
+        if stage is None:
+            return "none"
+        found: set[str] = set()
+        for entry in stage["kpis"].values():
+            found.update(cid for cid, e in entry["across"].items() if e["runs"] >= 2)
+        for entry in stage["vectors"].values():
+            found.update(
+                cid for cid, es in entry["across"].items() if any(e is not None and e[2] >= 2 for e in es)
+            )
+        if found - {CALIBRATION_ID}:
+            return "replicates"
+        return "calibration" if found else "none"
+
+    def to_status(self, key: str) -> dict[str, Any]:
+        """What `status` shows of stage `key` (`progress.noise`): per KPI the
+        one-side noise of one run the rules read (`sd`), the across-seed one
+        (`sd_across`, always) and the relative one (`cv`); where `sd` came
+        from. Engine words: it is for engineers."""
+        source = self.source(key)
+        kpis = [] if source == "none" else sorted(self._stages.get(key, {}).get("kpis", {}))
         return {
             "repeatable": self.repeatable(key),
-            "known": self.known(key),
-            "kpis": {
-                kpi: {"sd": self.sd(key, kpi), "sd_across": self.sd_across(key, kpi), "cv": self.cv(key, kpi)}
-                for kpi in kpis
-            },
-            "score_sd": self.score_sd(key, score, 1),
+            "source": source,
+            "sd": {kpi: self.sd(key, kpi) for kpi in kpis},
+            "sd_across": {kpi: self.sd_across(key, kpi) for kpi in kpis},
+            "cv": {kpi: self.cv(key, kpi) for kpi in kpis},
         }
+
+    # -- the seed run again ------------------------------------------------
+
+    def calibrate(
+        self,
+        key: str,
+        kpi_values: Mapping[str, Sequence[float]],
+        *,
+        instance: int | None,
+        instances: int,
+        seed_means: Mapping[str, Sequence[float]] | None = None,
+    ) -> None:
+        """The across estimate from the seed's own runs, where no candidate
+        replicates (`seeds: 1`): per KPI its values on one instance (or on the
+        whole input set, `instance=None`), kept under `CALIBRATION_ID`.
+
+        On a per-instance stage the runs were made on instance `instance` of
+        `instances` (M). That element of `<kpi>_per_instance` is known; the
+        stage-level value is a mean of M instance runs, which are taken to
+        carry the measured relative noise `cv` each, independently, so its
+        variance is `cv² · Σ_i seed_mean_i² / M²` over the seed's per-instance
+        means in the stage-level value's units (`seed_means[kpi]`: percent of
+        the seed under `normalize: baseline`, else raw). Without those means,
+        or at a mean of 0 where no ratio exists, the same absolute noise on
+        every instance: `var / M`.
+
+        A real candidate's entry for the same KPI makes this one ignored by
+        every accessor, and a repeatable stage never reads it: it is still
+        reported, as `sd_across`."""
+        stage = self._stage(key)
+        m = max(1, int(instances))
+        for kpi, raw in kpi_values.items():
+            values = [_number(v) for v in raw]
+            if len(values) < 2:
+                continue
+            mean, var, runs = fmean(values), variance(values), len(values)
+            entry = stage["kpis"].setdefault(kpi, {"across": {}, "paired": {}})
+            if instance is None:
+                entry["across"][CALIBRATION_ID] = {"runs": runs, "mean": mean, "var": var}
+                continue
+            if not 0 <= instance < m:
+                raise ValueError(f"calibrate: instance {instance} is not one of {m}")
+            means = (seed_means or {}).get(kpi)
+            if means is not None and len(means) == m and mean != 0.0:
+                scalar = var / mean**2 * sum(float(x) ** 2 for x in means) / m**2
+                scalar_mean: float | None = fmean(float(x) for x in means)
+            else:
+                scalar, scalar_mean = var / m, None
+            entry["across"][CALIBRATION_ID] = {"runs": runs, "mean": scalar_mean, "var": scalar}
+            elements: list[list | None] = [None] * m
+            elements[instance] = [mean, var, runs]
+            vector = stage["vectors"].setdefault(f"{kpi}_per_instance", {"across": {}, "paired": {}})
+            vector["across"][CALIBRATION_ID] = elements
+
+
+# -- the seed run again: shared by the cascade and preflight ---------------------
+
+
+def measurable(stage: "StageConfig") -> bool:
+    """Can the seed be run again on a chosen seed: a command with `{seed}`."""
+    return stage.kind == "command" and "{seed}" in stage.command
+
+
+def check_seeds(stage: "StageConfig") -> tuple[int, ...]:
+    """The extra runs: seed 0 again (the repeatability check) and, only where
+    nothing replicates (`seeds: 1`), seed 1 for the calibration."""
+    return (0,) if stage.seeds > 1 else (0, 1)
+
+
+def _median_index(stage: "StageConfig", outcome: "StageOutcome") -> int | None:
+    """The instance whose seed run took the median time: sorted by duration
+    (ties by position), position `(M - 1) // 2`. `None` without instances."""
+    m = len(stage.instances)
+    if m == 0:
+        return None
+    durations = list(outcome.instance_durations)
+    if len(durations) != m:
+        return (m - 1) // 2  # no timings to go by: the middle one
+    return sorted(range(m), key=lambda i: (durations[i], i))[(m - 1) // 2]
+
+
+def check_stage(stage: "StageConfig", outcome: "StageOutcome") -> "StageConfig":
+    """The stage the extra runs are made on: on a per-instance stage, only
+    the instance whose seed run took the median time -- a typical one, neither
+    the quickest nor the one that decides the clock; without instances the
+    stage itself, on its whole input set."""
+    index = _median_index(stage, outcome)
+    if index is None:
+        return stage
+    return dataclasses.replace(stage, instances=(stage.instances[index],))
+
+
+@dataclass(frozen=True)
+class Check:
+    """What the seed run again found at one stage."""
+
+    repeatable: bool
+    instance: str | None
+    """The instance the extra runs were made on, as people name it; `None`
+    on a stage without instances."""
+    runs: int
+    """The seed's runs that were compared there: its own, and the extra ones."""
+    calibrated: bool
+    """Whether the runs also calibrated the across estimate (`seeds: 1`)."""
+
+
+def record_check(
+    noise: Noise,
+    key: str,
+    stage: "StageConfig",
+    first: "StageOutcome",
+    extra: "StageOutcome",
+    *,
+    objective: str,
+    digits: int,
+    ignore: Iterable[str] = (),
+) -> Check | None:
+    """Compare the seed's first run on seed 0 (`first`, its outcome at
+    `stage`) with the repeat (`extra`, the outcome of `check_seeds(stage)` on
+    `check_stage(stage, first)`), and record what that says in `noise`.
+
+    Repeatable iff every KPI the repeat reported (but `ignore`d ones, which
+    are not about behaviour: a run time) equals the first run's after
+    `round_significant(·, digits)`; set on `key` and `key/private` (the same
+    command). At `seeds: 1` the three runs -- first, repeat, seed 1 --
+    calibrate `key` (`Noise.calibrate`). `None`, and nothing recorded, when
+    the two cannot be compared: the seed's first runs have no seed 0, or no
+    KPI is in both."""
+    if 0 not in first.seed_list or 0 not in extra.seed_list:
+        return None
+    j0, e0 = first.seed_list.index(0), extra.seed_list.index(0)
+    index = _median_index(stage, first)
+    skip = set(ignore)
+    names = list(first.instance_names)
+    m = len(names) if index is not None else 1
+
+    firsts: dict[str, float] = {}
+    others: dict[str, list[float]] = {}
+    for kpi, runs in extra.seed_runs.items():
+        if len(runs) != len(extra.seed_list):
+            continue
+        if index is not None:
+            rows = first.seed_vectors.get(f"{kpi}_per_instance")
+            if not rows or len(rows) <= j0 or len(rows[j0]) != m:
+                continue
+            value = rows[j0][index]
+        else:
+            base = first.seed_runs.get(kpi)
+            if not base or len(base) <= j0:
+                continue
+            value = base[j0]
+        firsts[kpi] = float(value)
+        others[kpi] = [float(runs[e0])] + [float(v) for i, v in enumerate(runs) if i != e0]
+    compared = [kpi for kpi in firsts if kpi not in skip]
+    if not compared:
+        return None
+
+    def same(a: float, b: float) -> bool:
+        return round_significant(a, digits) == round_significant(b, digits)
+
+    repeatable = all(same(firsts[kpi], others[kpi][0]) for kpi in compared)
+    if index is None:
+        # An evaluator's own lists on a stage without instances are part of
+        # what it does, as in the behaviour signature.
+        for name, rows in extra.seed_vectors.items():
+            base_rows = first.seed_vectors.get(name)
+            if not base_rows or len(base_rows) <= j0 or len(rows) <= e0 or len(rows[e0]) != len(base_rows[j0]):
+                continue
+            repeatable = repeatable and all(same(a, b) for a, b in zip(base_rows[j0], rows[e0]))
+
+    for target in (key, f"{key}/private"):
+        noise.set_repeatable(target, repeatable)
+    calibrated = stage.seeds <= 1 and len(extra.seed_list) >= 2
+    if calibrated:
+        values = {kpi: [firsts[kpi], *others[kpi]] for kpi in firsts}
+        seed_means: dict[str, Sequence[float]] | None = None
+        if index is not None:
+            seed_means = {}
+            for kpi in values:
+                pct = first.vector_kpis.get(f"{objective}_pct_of_baseline") if kpi == objective else None
+                means = pct if pct is not None and len(pct) == m else first.vector_kpis.get(f"{kpi}_per_instance")
+                if means is not None:
+                    seed_means[kpi] = means
+        noise.calibrate(key, values, instance=index, instances=m, seed_means=seed_means)
+    return Check(
+        repeatable=repeatable,
+        instance=names[index] if index is not None and index < len(names) else None,
+        runs=len(first.seed_list) + len(extra.seed_list),
+        calibrated=calibrated,
+    )
+
+
+def about_pct(cv: float) -> str:
+    """A relative noise in percent, to one significant digit: a calibration
+    has 2 degrees of freedom, and more digits would claim what it cannot."""
+    return f"{round_significant(100.0 * float(cv), 1):g}"

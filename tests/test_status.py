@@ -856,3 +856,60 @@ def test_whether_the_cheap_stage_predicts_the_expensive_one_can_be_read_off(tmp_
     assert pair["spearman"] == pytest.approx(0.8)
     assert pair["verdict"].startswith("the earlier stage ranks candidates much as")
     assert "range is restricted" in screening["why"]
+
+
+# -- progress.noise ----------------------------------------------------------
+
+
+def _noise_file(run_dir: Path, stages: dict) -> None:
+    (run_dir / "work").mkdir(parents=True, exist_ok=True)
+    (run_dir / "work" / "noise.json").write_text(json.dumps({"schema": 1, "stages": stages}), encoding="utf-8")
+
+
+def test_progress_reports_the_noise_per_measure(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(100)
+    run.row("g000-c0001", 0, 100.0)
+    _noise_file(tmp_path, {"full": {"repeatable": False, "kpis": {
+        "cost": {"across": {"g001-c0002": {"runs": 3, "mean": 100.0, "var": 4.0}}, "paired": {}}}, "vectors": {}}})
+    noise = build_status(tmp_path, now=NOW)["progress"]["noise"]
+    assert noise["sd"] == {"cost": pytest.approx(2.0)} and noise["source"] == "replicates"
+    assert noise["sd_across"] == {"cost": pytest.approx(2.0)} and noise["repeatable"] is False
+    assert noise["cv"] == {"cost": pytest.approx(0.02)} and noise["stage"] == "full"
+    assert noise["runs_per_candidate"] == 1
+
+
+def test_progress_reports_the_paired_noise_on_a_repeatable_stage(tmp_path):
+    from evolvekit.evaluate.noise import Noise
+    from evolvekit.evaluate.types import StageOutcome
+
+    def runs(values):
+        return StageOutcome(stage_id="full", ok=True, kpis={"cost": statistics.fmean(values)},
+                            kpi_var={"cost": statistics.variance(values)}, seed_runs={"cost": list(values)},
+                            seed_list=(0, 1, 2), runs=3)
+
+    run = RunDir(tmp_path)
+    run.event("run_started", 100, objective="cost", direction="minimize", first_generation=1, generations_planned=3,
+              stages=[{"id": "full", "kind": "command", "seeds": 3, "final": True}])
+    run.row("g000-c0001", 0, 100.0)
+    (tmp_path / "work").mkdir()
+    noise = Noise(tmp_path / "work" / "noise.json")
+    noise.observe("full", "g000-c0001", runs([100.0, 105.0, 95.0]), is_seed=True)
+    noise.observe("full", "g001-c0002", runs([99.1, 103.9, 95.0]))
+    noise.set_repeatable("full", True)
+    noise.save()
+    shown = build_status(tmp_path, now=NOW)["progress"]["noise"]
+    assert shown["source"] == "paired" and shown["repeatable"] is True and shown["runs_per_candidate"] == 3
+    d = [99.1 - 100.0, 103.9 - 105.0, 95.0 - 95.0]
+    assert shown["sd"]["cost"] == pytest.approx(math.sqrt(statistics.variance(d) / 2))
+    assert shown["sd_across"]["cost"] > shown["sd"]["cost"]
+    json.dumps(shown, allow_nan=False)
+
+
+def test_progress_says_none_without_a_noise_file(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(100)
+    run.row("g000-c0001", 0, 100.0)
+    assert build_status(tmp_path, now=NOW)["progress"]["noise"] == {
+        "stage": "full", "repeatable": None, "source": "none", "sd": {}, "sd_across": {}, "cv": {},
+        "runs_per_candidate": 1}

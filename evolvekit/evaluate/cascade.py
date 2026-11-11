@@ -25,7 +25,15 @@ from evolvekit.config import Config, PromoteRule, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
 from evolvekit.evaluate.levels import Anchor, level_score, make_anchor
-from evolvekit.evaluate.noise import NOISE_FILE, Noise
+from evolvekit.evaluate.noise import (
+    NOISE_FILE,
+    Noise,
+    about_pct,
+    check_seeds,
+    check_stage,
+    measurable,
+    record_check,
+)
 from evolvekit.evaluate.scoring import compute_score, ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
 from evolvekit.evaluate.stages import (
@@ -187,8 +195,11 @@ class Cascade:
         on_event: Callable[..., Any] | None = None,
         stop: threading.Event | None = None,
         time_left: Callable[[], float | None] | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
+        self.log = log
+        """A console line for the run (the driver's `log`); `None` says nothing."""
         self.stop = stop
         """The run's own stop (`evolvekit/stopping.py`): once set, evaluations
         in flight are stopped, none is started, and what did not finish is
@@ -334,6 +345,8 @@ class Cascade:
             # reads it back on a resume: one whose hold-out failed leaves none.
             if candidate.operator == SEED_OPERATOR and not results[cid].abandoned:
                 self.seed_private = results[cid].private_score
+                self._check_noise(candidate, paths, results)
+                self.noise.save()
 
         for result in results.values():
             # `finished_final_stage(..., seed_private=...)` in two halves, so
@@ -714,6 +727,92 @@ class Cascade:
             return
         key = f"{stage.id}/private" if private else stage.id
         self.noise.observe(key, candidate.id, outcome, is_seed=candidate.operator == SEED_OPERATOR)
+
+    def _check_noise(self, seed: Candidate, paths: dict[str, Path], results: dict[str, EvalResult]) -> None:
+        """The seed run again at the final stage, once per run (`evaluate/noise.py`):
+        seed 0 once more with the cache bypassed -- a lookup would read the
+        first run back and call every evaluator repeatable -- and, at
+        `seeds: 1`, seed 1, on the instance whose seed run took the median
+        time. It says whether the stage is repeatable and, where nothing
+        replicates, calibrates the noise. Not counted against
+        `budget.max_full_evals_per_day`: it is a measurement, not a candidate."""
+        final = self.config.final_stage
+        if final.kind != "command" or self.noise.repeatable(final.id) is not None or self._stopping():
+            return
+        result = results[seed.id]
+        if result.abandoned or final.id not in result.stages_reached:
+            return
+        if not measurable(final):
+            if final.seeds > 1:
+                # Its runs are repeats of one command: whatever differs between them is noise.
+                for key in (final.id, f"{final.id}/private"):
+                    self.noise.set_repeatable(key, False)
+            return  # seeds: 1 and no {seed}: nothing to measure, σ̂ = 0 as before
+        first = next(
+            (o for o in result.outcomes if o.stage_id == final.id and not o.private and o.ok), None
+        )
+        if first is None:
+            return
+        where = self._check_where(final, first)
+        try:
+            extra = self._run_again(final, seed, paths[seed.id], first)
+        except Exception as exc:  # noqa: BLE001 - a measurement must not end the run
+            self._say(f"noise: the seed could not be run again{where} ({exc}); the noise stays unmeasured")
+            return
+        check = None
+        if extra.ok and not extra.abandoned:
+            check = record_check(
+                self.noise, final.id, final, first, extra,
+                objective=self.config.evaluate.score.objective,
+                digits=self.config.evaluate.signature_digits,
+                ignore=self.config.evaluate.signature_ignore,
+            )
+        if check is None:
+            why = extra.failure or ("it was stopped" if extra.abandoned else "its measures could not be compared")
+            self._say(f"noise: the seed could not be run again{where} ({why}); the noise stays unmeasured")
+            return
+        cv = self.noise.cv(final.id, self.config.evaluate.score.objective)
+        if self.on_event is not None:
+            self.on_event("noise_checked", stage=final.id, instance=check.instance,
+                          repeatable=check.repeatable, runs=check.runs, cv=cv)
+        if check.repeatable:
+            said = "the evaluator gives the same numbers for the same seed (comparisons are paired by seed)"
+        else:
+            said = f"one run varies by about {about_pct(cv)} % (the search's comparisons allow for it)"
+        self._say(f"noise: the seed run again{where}: {said}")
+
+    def _run_again(self, final: StageConfig, seed: Candidate, path: Path, first: StageOutcome) -> StageOutcome:
+        """The extra runs of `_check_noise`: no cache, no observer (they are
+        not evaluations of the search), no budget entry."""
+        stage, seeds = check_stage(final, first), check_seeds(final)
+        on_tree_args = self._on_tree(seed.id)
+        if stage.fans_out:
+            job = Job(candidate_id=seed.id, candidate_path=path,
+                      configuration=self._configurations.get(seed.id), **on_tree_args)
+            return run_instance_stage(
+                [job], stage, out_dir=self.work_dir / "stage_out" / "noise-check", cwd=self.config.base_dir,
+                required_kpis=self.config.evaluate.required_kpis, cache=None, seeds=seeds, stop=self.stop,
+            )[seed.id]
+        return run_command_stage(
+            path, stage, inputs=stage.inputs,
+            out_path=self.work_dir / "stage_out" / "noise-check" / f"{seed.id}.{stage.id}.json",
+            cwd=self.config.base_dir, required_kpis=self.config.evaluate.required_kpis,
+            configuration=self._configurations.get(seed.id), cache=None, cancel=self.stop,
+            seeds=seeds, **on_tree_args,
+        )
+
+    @staticmethod
+    def _check_where(stage: StageConfig, outcome: StageOutcome) -> str:
+        picked = check_stage(stage, outcome)
+        if picked is stage or not picked.instances:
+            return ""
+        index = stage.instances.index(picked.instances[0])
+        names = outcome.instance_names or stage.instance_names()
+        return f" on {names[index]}" if index < len(names) else ""
+
+    def _say(self, line: str) -> None:
+        if self.log is not None:
+            self.log(line)
 
     def _observer(
         self, candidate_id: str, stage: StageConfig, *, private: bool
