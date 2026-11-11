@@ -276,6 +276,26 @@ def test_a_calibration_from_one_instance_sets_the_relative_noise_for_all():
     assert noise.vector_sd("full", "cost_per_instance", 0) is None, "measured on instance 1 only"
 
 
+def test_the_calibrated_variance_is_unbiased_within_3_percent_over_20000_trials():
+    """The calibration rule as an estimator: 3 runs with cv 2 % on instance 1 of
+    μ = [50, 100, 200]; true one-run variance of the stage mean cv²·Σμ²/M². The
+    ratio s²/x̄² is unbiased for cv² up to O(cv²) (~0.04 % here); one trial's
+    estimate has relative sd 1 (2 df), so over 20 000 trials SE = 0.71 %:
+    ± 3 % is over 4 SE away."""
+    rng = random.Random(20261111)
+    mu, cv = [50.0, 100.0, 200.0], 0.02
+    truth = cv**2 * sum(m * m for m in mu) / 9
+    total, trials = 0.0, 20_000
+    for _ in range(trials):
+        noise = Noise()
+        runs = [rng.gauss(mu[1], cv * mu[1]) for _ in range(3)]
+        noise.calibrate("full", {"cost": runs}, instance=1, instances=3, seed_means={"cost": mu})
+        total += noise.sd("full", "cost") ** 2
+    ratio = total / trials / truth
+    print(f"calibrated variance / truth over {trials} trials: {ratio:.4f}")
+    assert ratio == pytest.approx(1.0, abs=0.03)
+
+
 def test_real_replicates_replace_the_calibration():
     noise = Noise()
     noise.calibrate("full", {"cost": [100.0, 110.0, 90.0]}, instance=None, instances=1)
@@ -426,6 +446,26 @@ def test_a_wall_clock_evaluator_is_not_repeatable_and_is_calibrated(tmp_path):
     assert lines[0].endswith(" % (the search's comparisons allow for it)")
 
 
+def test_under_normalize_baseline_the_calibration_knows_the_percent_element_and_the_raw_scalar(tmp_path):
+    """Decision 4 for the calibration: the percent vector's element is the raw one
+    scaled by 100 / ref_i, and `<obj>_raw` has a raw scalar beside the percent one."""
+    config = _toy(tmp_path, "wall-clock", seeds=1)  # instances, normalize: baseline (the default)
+    cascade = _cascade(config, tmp_path)
+    cascade.evaluate_generation([seed_candidate(config)])
+    noise, ref = cascade.noise, cascade.reference["full"]["i2"]
+    raw = noise.vector_sd("full", "cost_per_instance", 1)
+    assert raw is not None and raw > 0
+    assert noise.vector_sd("full", "cost_pct_of_baseline", 1) == pytest.approx(raw * 100.0 / ref)
+    assert noise.vector_sd("full", "cost_pct_of_baseline", 0) is None, "measured on i2 only"
+    cv = noise.cv("full", "cost")  # the relative noise measured on i2
+    means = list(cascade.reference["full"].values())  # the seed's raw means: its reference
+    assert noise.sd("full", "cost_raw") == pytest.approx(math.sqrt(cv**2 * sum(x * x for x in means)) / 3), \
+        "raw units, all three instances"
+    assert noise.sd("full", "cost") == pytest.approx(math.sqrt(cv**2 * 3 * 100.0**2) / 3), \
+        "percent: every instance's seed mean is 100"
+    assert "cost_raw_per_instance" not in json_of(tmp_path / "work" / "noise.json")["stages"]["full"]["vectors"]
+
+
 def test_a_stage_with_seeds_only_runs_the_repeat(tmp_path):
     config = _toy(tmp_path, "repeatable", seeds=3)
     cascade = _cascade(config, tmp_path)
@@ -468,6 +508,18 @@ def test_a_failed_extra_run_leaves_the_repeatability_unmeasured(tmp_path):
     assert result.competes, "the seed itself is unharmed"
     assert cascade.noise.repeatable("full") is None and cascade.noise.sd_across("full", "cost") == 0.0
     assert len(lines) == 1 and lines[0].startswith("noise: the seed could not be run again on i2")
+
+
+def test_the_check_is_skipped_when_the_run_has_less_time_left_than_one_seed_run(tmp_path):
+    from evolvekit.evaluate import Cascade
+
+    config = _toy(tmp_path, "repeatable", seeds=1)
+    lines = []
+    cascade = Cascade(config, work_dir=tmp_path / "work", time_left=lambda: 0.01, log=lines.append)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert all(len(v) == 1 for v in _calls(tmp_path).values()), "nothing was run again"
+    assert cascade.noise.repeatable("full") is None
+    assert len(lines) == 1 and lines[0].startswith("noise: the seed was not run again on i2: 0 s of the run's time")
 
 
 def test_the_extra_runs_are_not_counted_against_the_daily_cap(tmp_path):

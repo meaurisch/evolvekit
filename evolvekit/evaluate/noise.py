@@ -62,6 +62,7 @@ __all__ = [
     "check_stage",
     "measurable",
     "record_check",
+    "run_duration",
 ]
 
 NOISE_FILE = "noise.json"
@@ -529,6 +530,7 @@ class Noise:
         instance: int | None,
         instances: int,
         seed_means: Mapping[str, Sequence[float]] | None = None,
+        elements: Mapping[str, str | None] | None = None,
     ) -> None:
         """The across estimate from the seed's own runs, where no candidate
         replicates (`seeds: 1`): per KPI its values on one instance (or on the
@@ -542,7 +544,9 @@ class Noise:
         means in the stage-level value's units (`seed_means[kpi]`: percent of
         the seed under `normalize: baseline`, else raw). Without those means,
         or at a mean of 0 where no ratio exists, the same absolute noise on
-        every instance: `var / M`.
+        every instance: `var / M`. `elements` names the vector a KPI's element
+        goes to (default `<kpi>_per_instance`; `None`: none, for a derived
+        scalar such as `<obj>_raw` whose element is the evaluator's own).
 
         A real candidate's entry for the same KPI makes this one ignored by
         every accessor, and a repeatable stage never reads it: it is still
@@ -567,10 +571,23 @@ class Noise:
             else:
                 scalar, scalar_mean = var / m, None
             entry["across"][CALIBRATION_ID] = {"runs": runs, "mean": scalar_mean, "var": scalar}
-            elements: list[list | None] = [None] * m
-            elements[instance] = [mean, var, runs]
-            vector = stage["vectors"].setdefault(f"{kpi}_per_instance", {"across": {}, "paired": {}})
-            vector["across"][CALIBRATION_ID] = elements
+            vector_key = (elements or {}).get(kpi, f"{kpi}_per_instance")
+            if vector_key is not None:
+                self.calibrate_element(key, vector_key, values, instance=instance, instances=m)
+
+    def calibrate_element(
+        self, key: str, vector_key: str, values: Sequence[float], *, instance: int, instances: int
+    ) -> None:
+        """One element of a vector KPI from the seed's runs on instance
+        `instance` of `instances`, in that vector's units; the others unknown."""
+        values = [_number(v) for v in values]
+        m = max(1, int(instances))
+        if len(values) < 2 or not 0 <= instance < m:
+            return
+        row: list[list | None] = [None] * m
+        row[instance] = [fmean(values), variance(values), len(values)]
+        vector = self._stage(key)["vectors"].setdefault(vector_key, {"across": {}, "paired": {}})
+        vector["across"][CALIBRATION_ID] = row
 
 
 # -- the seed run again: shared by the cascade and preflight ---------------------
@@ -597,6 +614,15 @@ def _median_index(stage: "StageConfig", outcome: "StageOutcome") -> int | None:
     if len(durations) != m:
         return (m - 1) // 2  # no timings to go by: the middle one
     return sorted(range(m), key=lambda i: (durations[i], i))[(m - 1) // 2]
+
+
+def run_duration(stage: "StageConfig", outcome: "StageOutcome") -> float:
+    """How long one of the seed's runs took where the check runs it again:
+    on the median-time instance, else one run of the whole stage."""
+    index = _median_index(stage, outcome)
+    if index is not None and len(outcome.instance_durations) == len(stage.instances):
+        return float(outcome.instance_durations[index])
+    return float(outcome.duration_s) / max(1, outcome.runs)
 
 
 def check_stage(stage: "StageConfig", outcome: "StageOutcome") -> "StageConfig":
@@ -694,14 +720,32 @@ def record_check(
     if calibrated:
         values = {kpi: [firsts[kpi], *others[kpi]] for kpi in firsts}
         seed_means: dict[str, Sequence[float]] | None = None
+        elements: dict[str, str | None] = {}
+        pct_name = f"{objective}_pct_of_baseline"
+        pct = first.vector_kpis.get(pct_name) if index is not None else None
+        raw_means = first.vector_kpis.get(f"{objective}_per_instance")
+        baseline = pct is not None and len(pct) == m and raw_means is not None and len(raw_means) == m
         if index is not None:
             seed_means = {}
             for kpi in values:
-                pct = first.vector_kpis.get(f"{objective}_pct_of_baseline") if kpi == objective else None
-                means = pct if pct is not None and len(pct) == m else first.vector_kpis.get(f"{kpi}_per_instance")
+                means = pct if kpi == objective and baseline else first.vector_kpis.get(f"{kpi}_per_instance")
                 if means is not None:
                     seed_means[kpi] = means
-        noise.calibrate(key, values, instance=index, instances=m, seed_means=seed_means)
+        if baseline and objective in values:
+            # `normalize: baseline`: the objective is in percent of the seed, so
+            # are its scalar and its percent vector; `<obj>_raw` and
+            # `<obj>_per_instance` stay raw (Decision 4). The reference on the
+            # instance is `100 · raw_i / pct_i`; scaling the runs by
+            # `100 / ref_i` scales their variance by `(100 / ref_i)²`.
+            values[f"{objective}_raw"] = list(values[objective])
+            seed_means[f"{objective}_raw"] = raw_means
+            elements[f"{objective}_raw"] = None
+            if pct[index] != 0.0:
+                ref = 100.0 * raw_means[index] / pct[index]
+                if ref != 0.0:
+                    noise.calibrate_element(key, pct_name, [100.0 * v / ref for v in values[objective]],
+                                            instance=index, instances=m)
+        noise.calibrate(key, values, instance=index, instances=m, seed_means=seed_means, elements=elements)
     return Check(
         repeatable=repeatable,
         instance=names[index] if index is not None and index < len(names) else None,

@@ -33,6 +33,7 @@ from evolvekit.evaluate.noise import (
     check_stage,
     measurable,
     record_check,
+    run_duration,
 )
 from evolvekit.evaluate.scoring import compute_score, ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
@@ -744,7 +745,9 @@ class Cascade:
             return
         if not measurable(final):
             if final.seeds > 1:
-                # Its runs are repeats of one command: whatever differs between them is noise.
+                # Defensive: `config.py` refuses `seeds > 1` without `{seed}`, so
+                # this is not reached through a config. Such runs would be
+                # repeats of one command: whatever differs between them is noise.
                 for key in (final.id, f"{final.id}/private"):
                     self.noise.set_repeatable(key, False)
             return  # seeds: 1 and no {seed}: nothing to measure, σ̂ = 0 as before
@@ -754,6 +757,14 @@ class Cascade:
         if first is None:
             return
         where = self._check_where(final, first)
+        left = self.time_left() if self.time_left is not None else None
+        needed = run_duration(final, first)
+        if left is not None and left < needed:
+            self._say(
+                f"noise: the seed was not run again{where}: {left:.0f} s of the run's time is left, "
+                f"less than one of its runs ({needed:.0f} s); the noise stays unmeasured"
+            )
+            return
         try:
             extra = self._run_again(final, seed, paths[seed.id], first)
         except Exception as exc:  # noqa: BLE001 - a measurement must not end the run
