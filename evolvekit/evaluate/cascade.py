@@ -25,6 +25,7 @@ from evolvekit.config import Config, PromoteRule, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
 from evolvekit.evaluate.levels import Anchor, level_score, make_anchor
+from evolvekit.evaluate.noise import NOISE_FILE, Noise
 from evolvekit.evaluate.scoring import compute_score, ranking_score
 from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
 from evolvekit.evaluate.stages import (
@@ -226,6 +227,10 @@ class Cascade:
         }
         """Per stage, what `evaluate.score.levels` are measured from: the
         seed's values (`evaluate/levels.py`). On disk for the same reason."""
+        self.noise: Noise = Noise.load(self.work_dir / NOISE_FILE)
+        """The run's noise estimate (`evaluate/noise.py`): every command-stage
+        outcome adds to it, and it is saved after every generation. A run from
+        before the file starts with none."""
         self.seed_private: float | None = None
         """The seed's private score: what `evaluate.holdout_veto` compares every
         hold-out with. Set whenever a seed is evaluated (the last one wins: an
@@ -298,6 +303,7 @@ class Cascade:
                 elif not outcome.ok:
                     failed += 1
                 self._absorb(results[cid], outcome, stage)
+                self._note_noise(stage, by_id[cid], outcome, private=False)
                 if outcome.params is not None:
                     self._configure(cid, paths[cid], outcome.params)
                 if not outcome.ok:
@@ -342,6 +348,7 @@ class Cascade:
             )
             result.veto = holdout_veto(self.config, result.private_score, self.seed_private) if finished else None
             result.competes = finished and result.veto is None
+        self.noise.save()
         return results
 
     def _stopping(self) -> bool:
@@ -674,7 +681,39 @@ class Cascade:
         relative = [100.0 * values[name] / reference[name] for name in shared]
         outcome.kpis[f"{objective}_raw"] = outcome.kpis[objective]
         outcome.kpis[objective] = fmean(relative)
-        outcome.vector_kpis[f"{objective}_pct_of_baseline"] = relative
+        pct = f"{objective}_pct_of_baseline"
+        outcome.vector_kpis[pct] = relative
+        # The noise in the units each number is in: `<obj>_per_instance` stays
+        # raw (the race and the twin rule compare raw values), the percent
+        # vector's is scaled by (100 / ref_i)², and the stage-level objective
+        # -- now a mean of M' percentages -- has the variance of one run
+        # fmean(pct variances) / M'; `<obj>_raw` keeps the raw one.
+        position = {name: i for i, name in enumerate(outcome.instance_names)}
+        raw_var = outcome.vector_var.get(per_instance_key(objective))
+        if raw_var is not None and len(raw_var) == len(outcome.instance_names):
+            pct_var = [(100.0 / reference[name]) ** 2 * raw_var[position[name]] for name in shared]
+            outcome.vector_var[pct] = pct_var
+            outcome.kpi_var[f"{objective}_raw"] = fmean(raw_var) / len(raw_var)
+            outcome.kpi_var[objective] = fmean(pct_var) / len(pct_var)
+        rows = outcome.seed_vectors.get(per_instance_key(objective))
+        if rows and all(len(row) == len(outcome.instance_names) for row in rows):
+            # Per seed in percent too, so that paired differences exist in the score's unit.
+            pct_rows = [[100.0 * row[position[name]] / reference[name] for name in shared] for row in rows]
+            outcome.seed_vectors[pct] = pct_rows
+            if objective in outcome.seed_runs:
+                outcome.seed_runs[f"{objective}_raw"] = outcome.seed_runs[objective]
+            outcome.seed_runs[objective] = [fmean(row) for row in pct_rows]
+
+    # -- noise -----------------------------------------------------------
+
+    def _note_noise(
+        self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome, *, private: bool
+    ) -> None:
+        """Add a command stage's outcome to the run's noise estimate."""
+        if stage.kind != "command":
+            return
+        key = f"{stage.id}/private" if private else stage.id
+        self.noise.observe(key, candidate.id, outcome, is_seed=candidate.operator == SEED_OPERATOR)
 
     def _observer(
         self, candidate_id: str, stage: StageConfig, *, private: bool
@@ -855,6 +894,7 @@ class Cascade:
             )
             result = results[cid]
             result.outcomes.append(outcome)
+            self._note_noise(stage, by_id[cid], outcome, private=True)
             if outcome.abandoned:
                 result.abandoned = outcome.failure or "the run was stopped during its hold-out run"
                 continue

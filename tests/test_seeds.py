@@ -10,6 +10,7 @@ what this file is about.
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -196,6 +197,24 @@ def test_vector_kpis_are_averaged_element_by_element(tmp_path):
     body = "payload = {'kpis': {'v': 1.0, 'per': [float(seed), 2.0 * seed]}}"
     outcome = _run(tmp_path, body, seeds=3)
     assert outcome.vector_kpis["per"] == pytest.approx([1.0, 2.0])
+
+
+def test_a_seeded_stage_reports_the_variance_of_one_run(tmp_path):
+    """`value` is 10 + seed: 10, 11, 12 over three seeds (`NOISY`)."""
+    outcome = _run(tmp_path, NOISY, seeds=3)
+    assert outcome.kpi_var["value"] == pytest.approx(statistics.variance([10.0, 11.0, 12.0]))
+    assert outcome.kpi_var["steady"] == 0.0
+    assert outcome.seed_runs["value"] == pytest.approx([10.0, 11.0, 12.0]) and outcome.seed_list == (0, 1, 2)
+    one = _run(tmp_path, NOISY, seeds=1)
+    assert one.kpi_var == {} and one.vector_var == {}
+    assert one.seed_runs["value"] == pytest.approx([10.0]) and one.seed_list == (0,), "the reference of a later pair"
+
+
+def test_a_seeded_stage_reports_its_vectors_variance_per_element(tmp_path):
+    body = "payload = {'kpis': {'v': 1.0, 'bins_per_instance': [float(seed), 2.0 * seed]}}"
+    outcome = _run(tmp_path, body, seeds=3)
+    assert outcome.vector_var["bins_per_instance"] == pytest.approx([1.0, 4.0])
+    assert outcome.seed_vectors["bins_per_instance"] == [[0.0, 0.0], [1.0, 2.0], [2.0, 4.0]]
 
 
 def test_ragged_vectors_fail_the_stage_and_say_which_seed(tmp_path):

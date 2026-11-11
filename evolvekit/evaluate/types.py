@@ -27,6 +27,24 @@ class StageOutcome:
     kpi_cv: dict[str, float | None] = field(default_factory=dict)
     """Per-KPI coefficient of variation across the runs of a `seeds: N` stage.
     Empty for a single run. Zero for a KPI every run agreed on."""
+    kpi_var: dict[str, float] = field(default_factory=dict)
+    """Per scalar KPI, the sample variance (n - 1) of *one run* of the
+    stage-level value, over the seeds of a `seeds: N` stage. On a per-instance
+    stage, `fmean(vector_var[<kpi>_per_instance]) / M` over its M instances.
+    Empty with one seed. What `evaluate/noise.py` pools."""
+    vector_var: dict[str, list[float]] = field(default_factory=dict)
+    """Per vector KPI, per element, the sample variance over seeds; on a
+    per-instance stage `<kpi>_per_instance` holds each instance's, in raw
+    units (`<obj>_pct_of_baseline` its percent twin). Empty with one seed."""
+    seed_runs: dict[str, list[float]] = field(default_factory=dict)
+    """Per scalar KPI, the value of each seed's run, in the order of `seed_list`
+    (filled with one seed too: the seed's run is the reference of a pair)."""
+    seed_vectors: dict[str, list[list[float]]] = field(default_factory=dict)
+    """Per vector KPI, per seed, the vector that seed's run reported."""
+    seed_list: tuple[int, ...] = ()
+    """The seeds that were run, in order."""
+    instance_durations: list[float] = field(default_factory=list)
+    """On a per-instance stage: per instance, the mean duration of its runs."""
     runs: int = 1
     """How many times this stage's command was executed (`stage.seeds`)."""
     text_feedback: str = ""

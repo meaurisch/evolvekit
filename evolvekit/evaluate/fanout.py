@@ -35,7 +35,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import fmean
+from statistics import fmean, variance
 from typing import Mapping, Sequence
 
 from evolvekit.config import ConfigError, StageConfig
@@ -351,15 +351,30 @@ def _combine(
     kpis: dict[str, float] = {}
     kpi_cv: dict[str, float | None] = {}
     vectors: dict[str, list[float]] = {}
+    kpi_var: dict[str, float] = {}
+    vector_var: dict[str, list[float]] = {}
+    seed_runs: dict[str, list[float]] = {}
+    seed_vectors: dict[str, list[list[float]]] = {}
     for key in sorted(keys):
         by_instance = [
             [done[(index, seed)].kpis[key] for seed in seeds] for index in range(len(names))
         ]
         vectors[per_instance_key(key)] = [fmean(values) for values in by_instance]
         kpis[key] = fmean(vectors[per_instance_key(key)])
+        # Per seed, what that seed's runs reached on every instance, and the
+        # stage-level value of that one run: the seed's are the reference of a
+        # later candidate's paired difference on the same seed.
+        rows = [[done[(index, seed)].kpis[key] for index in range(len(names))] for seed in seeds]
+        seed_vectors[per_instance_key(key)] = rows
+        seed_runs[key] = [fmean(row) for row in rows]
         if len(seeds) > 1:
             cvs = [cv for cv in (_cv(values) for values in by_instance) if cv is not None]
             kpi_cv[key] = fmean(cvs) if cvs else None
+            # Each instance's variance over its seeds; one run of the stage is
+            # the mean of M independent instance runs, so its variance is
+            # the mean of theirs over M.
+            vector_var[per_instance_key(key)] = [variance(values) for values in by_instance]
+            kpi_var[key] = fmean(vector_var[per_instance_key(key)]) / len(names)
     notes = []
     for index in range(len(names)):  # one note per instance: its seeds say the same thing
         said = next((done[(index, s)].text_feedback for s in seeds if done[(index, s)].text_feedback), "")
@@ -372,6 +387,14 @@ def _combine(
         kpis=kpis,
         vector_kpis=vectors,
         kpi_cv=kpi_cv,
+        kpi_var=kpi_var,
+        vector_var=vector_var,
+        seed_runs=seed_runs,
+        seed_vectors=seed_vectors,
+        seed_list=tuple(seeds),
+        instance_durations=[
+            fmean(done[(index, seed)].duration_s for seed in seeds) for index in range(len(names))
+        ],
         # Three instances' worth: a prompt is not a log.
         text_feedback="\n".join(notes[:3])[:FEEDBACK_LIMIT],
         stderr=first.stderr,

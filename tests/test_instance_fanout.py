@@ -9,7 +9,9 @@ seed and flags, writes one JSON object, and knows nothing about evolvekit.
 from __future__ import annotations
 
 import json
+import math
 import os
+import statistics
 import sys
 import threading
 import time
@@ -211,6 +213,57 @@ def test_every_instance_and_seed_is_a_run_of_its_own_and_instances_weigh_the_sam
     assert final.kpi_cv["cost"] < 0.01
     assert final.text_feedback == "b1: slow to converge"
     assert result.competes is True
+
+
+def test_a_per_instance_stage_reports_each_instances_variance_and_the_stage_mean_s(tmp_path):
+    """The toy solver's cost is `scale + 0.5·seed`: seeds 0 and 1 differ by 0.5 on every instance."""
+    instances = _instances(tmp_path, s1={"scale": 100}, s2={"scale": 300}, b1={"scale": 1000})
+    config = build_config(_raw(instances, seeds=2, normalize="none"), base_dir=tmp_path)
+    outcome = Cascade(config, work_dir=tmp_path / "work").evaluate_generation(
+        [_candidate(config, "g000-c0001", seed=True)]
+    )["g000-c0001"].outcomes[-1]
+    per_instance_runs = [[100.0, 100.5], [300.0, 300.5], [1000.0, 1000.5]]
+    var = outcome.vector_var["cost_per_instance"]
+    assert var == pytest.approx([statistics.variance(v) for v in per_instance_runs])
+    assert outcome.kpi_var["cost"] == pytest.approx(statistics.fmean(var) / 3)
+    assert outcome.seed_list == (0, 1)
+    assert outcome.seed_vectors["cost_per_instance"] == [[100.0, 300.0, 1000.0], [100.5, 300.5, 1000.5]]
+    assert outcome.seed_runs["cost"] == pytest.approx([1400.0 / 3, 1401.5 / 3])
+    assert len(outcome.instance_durations) == 3 and all(d >= 0.0 for d in outcome.instance_durations)
+
+
+def test_with_normalize_baseline_the_variance_is_in_percent_of_the_seed(tmp_path):
+    instances = _instances(tmp_path, s1={"scale": 100}, b1={"scale": 10_000})
+    config = build_config(_raw(instances, seeds=2), base_dir=tmp_path)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_candidate(config, "g000-c0001", seed=True)])
+    ref = cascade.reference["full"]
+    names = ["s1", "b1"]
+    raw_var = statistics.variance([100.0, 100.5])   # the seed's two runs on s1
+    pct = cascade.noise.vector_sd("full", "cost_pct_of_baseline", 0)
+    assert pct == pytest.approx(math.sqrt(raw_var) * 100 / ref[names[0]]), "Decision 4: percent on the percent vector"
+    assert cascade.noise.vector_sd("full", "cost_per_instance", 0) == pytest.approx(math.sqrt(raw_var)), "raw stays raw"
+    pct_var = [raw_var * (100 / ref[n]) ** 2 for n in names]
+    assert cascade.noise.sd("full", "cost") == pytest.approx(math.sqrt(statistics.fmean(pct_var) / 2)), "the score's unit"
+    assert cascade.noise.sd("full", "cost_raw") == pytest.approx(math.sqrt(raw_var / 2))
+    assert (tmp_path / "work" / "noise.json").is_file(), "saved at the end of the generation"
+
+
+def test_a_run_written_before_the_noise_file_resumes_with_no_noise(tmp_path):
+    from evolvekit.search.driver import Driver
+
+    instances = _instances(tmp_path, s1={"scale": 100}, b1={"scale": 1000})
+    raw = _raw(instances, seeds=2)
+    raw["search"].update({"children_per_generation": 2, "generations": 1, "seed": 1})
+    config = build_config(raw, base_dir=tmp_path)
+    Driver(config, run_dir=tmp_path / "run").run()
+    (tmp_path / "run" / "work" / "noise.json").unlink()   # as a run from before the noise file left it
+
+    driver = Driver(config, run_dir=tmp_path / "run")
+    assert driver.resume() == 1
+    assert driver.cascade.noise.known("full") is False
+    driver.run(generations=1)
+    assert driver.cascade.noise.known("full") is True, "the next stochastic candidate starts the estimate"
 
 
 def test_every_run_is_reported_under_its_instances_name(tmp_path):

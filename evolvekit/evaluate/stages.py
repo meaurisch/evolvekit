@@ -27,7 +27,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import fmean, stdev
+from statistics import fmean, stdev, variance
 from typing import TYPE_CHECKING, Any, Callable
 
 from evolvekit import resources
@@ -605,7 +605,7 @@ def run_command_stage(
     tree's commit, which keys the cache instead of the folder.
     """
     if stage.seeds <= 1:
-        return _run_once(
+        single = _run_once(
             candidate_path,
             stage,
             inputs=inputs,
@@ -621,6 +621,13 @@ def run_command_stage(
             app=app,
             source_id=source_id,
         )
+        if single.ok:
+            # One run has no variance, but it is a run on seed 0: the reference
+            # a later candidate's paired difference is taken against.
+            single.seed_runs = {k: [v] for k, v in single.kpis.items()}
+            single.seed_vectors = {k: [list(v)] for k, v in single.vector_kpis.items()}
+            single.seed_list = (0,)
+        return single
     outcomes: list[StageOutcome] = []
     for seed in range(stage.seeds):
         outcome = _run_once(
@@ -716,12 +723,24 @@ def _combine(outcomes: list[StageOutcome]) -> StageOutcome:
             )
         vectors[name] = [fmean(column) for column in zip(*(o.vector_kpis[name] for o in outcomes))]
 
+    # The noise of one run (`evaluate/noise.py` pools it): there are always two
+    # or more runs here, `seeds: 1` never combines.
+    kpi_var = {k: variance([o.kpis[k] for o in outcomes]) for k in sorted(keys)}
+    vector_var = {
+        name: [variance(column) for column in zip(*(o.vector_kpis[name] for o in outcomes))]
+        for name in vectors
+    }
     return StageOutcome(
         stage_id=first.stage_id,
         ok=True,
         kpis=kpis,
         vector_kpis=vectors,
         kpi_cv=kpi_cv,
+        kpi_var=kpi_var,
+        vector_var=vector_var,
+        seed_runs={k: [o.kpis[k] for o in outcomes] for k in sorted(keys)},
+        seed_vectors={name: [list(o.vector_kpis[name]) for o in outcomes] for name in vectors},
+        seed_list=tuple(range(len(outcomes))),
         # The first run's, not a concatenation: N notes about the same program
         # is N times the prompt for no extra information.
         text_feedback=first.text_feedback,
