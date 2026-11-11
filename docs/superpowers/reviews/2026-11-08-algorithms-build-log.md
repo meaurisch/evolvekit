@@ -223,3 +223,29 @@ The owner accepted the rule and its measured rates, and asked for chances in per
 "under 95 %", "over 5 %". Words only; no decision changes. Gate after the change: 2913 passed, 1 failed, 5 skipped in 43:03;
 the one failure was a report test that asserted no "95 %" anywhere (the rule now says it), narrowed
 to "no 95 % range"; that file then passed (25 tests).
+
+## Step 0 for A2–A4 — a clean start (2026-11-11)
+
+The second session runs from [the handoff prompt](../design/2026-11-09-algorithms-a2-a4-session-prompt.md),
+started by another session, in the git worktree `.claude/worktrees/app-redesign-build-17432c` (the
+main checkout holds `algo/1-verdict`).
+
+- `git status --porcelain` empty. Base: A0 (#78) and A1 (#79) are merged, so **`master` at 90c8c38**
+  ("Merge pull request #79"); `algo/2-noise` is cut from it.
+- `user.email` and `user.name` as required.
+- Python is the main checkout's `.venv/Scripts/python.exe` with `PYTHONPATH` set to the worktree
+  (the venv's editable install points at the main checkout; `PYTHONPATH` makes every test and
+  subprocess import the worktree's code). The git-ignored `benchmarks/pyvrp_hard/instances/` was
+  copied into the worktree.
+- `python tasks.py check` on master: **2905 passed, 1 failed, 13 skipped** in 30:47. The failure is
+  the worktree's path, not the code: `test_check_a_sample_that_fails_names_the_engineer_s_program`
+  asserts that the fix sentence does not contain "trees" (a removed checkout's path), and this
+  worktree's path is `…\.claude\worktrees\…`. It passes in the main checkout; every later gate in
+  this log carries the same one failure for the same reason. Eight more tests skip than in the
+  first session (environmental; the later gates print their reasons).
+- `python benchmarks/operator_mixes.py --seeds 5` on master (the "before" of A2):
+
+  | Regime | lhs only | local only | mix |
+  |---|--:|--:|--:|
+  | far (defaults 1225.00) | 1031.56 | 1106.35 | 1034.30 |
+  | mature (defaults 102.57) | 102.20 | 100.05 | 100.30 |
