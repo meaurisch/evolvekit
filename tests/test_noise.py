@@ -530,3 +530,41 @@ def test_the_extra_runs_are_not_counted_against_the_daily_cap(tmp_path):
     budget = BudgetGuard(config.budget)
     Cascade(config, work_dir=tmp_path / "work", budget=budget).evaluate_generation([seed_candidate(config)])
     assert budget.full_evals_today() == 1
+
+
+# -- the hold-out veto's noise margin (A2.1c) ---------------------------------
+
+
+def _equal_and_worse_veto_rates(tmp_path, shift: float) -> tuple[float, float]:
+    """Kept-out rates with and without the margin for a candidate `shift`
+    below the seed on the hold-out; both scores are means of 3 runs of sd 1."""
+    from evolvekit.evaluate.cascade import holdout_veto
+
+    config = _toy(tmp_path, "repeatable")  # evaluate.holdout_veto is on by default
+    assert config.evaluate.holdout_veto is True
+    rng = random.Random(7)
+    margin = 2.0 / math.sqrt(3)
+    kept_out = literal = 0
+    for _ in range(20_000):
+        seed = statistics.fmean(rng.gauss(0, 1) for _ in range(3))
+        mine = statistics.fmean(rng.gauss(shift, 1) for _ in range(3))
+        kept_out += holdout_veto(config, mine, seed, margin) is not None
+        literal += holdout_veto(config, mine, seed) is not None
+    return kept_out / 20_000, literal / 20_000
+
+
+def test_a_candidate_as_good_as_the_seed_is_kept_out_in_about_8_percent(tmp_path):
+    """Both hold-out scores are means of 3 runs of sd 1, so their difference has
+    sd sqrt(2/3) and the margin is 2/sqrt(3): P(Z < -sqrt(2)) = 7.86 %.
+    20 000 trials: SE 0.19 %; measured 7.95 % (Decision 12)."""
+    kept_out, literal = _equal_and_worse_veto_rates(tmp_path, 0.0)
+    assert 0.070 <= kept_out <= 0.088
+    assert 0.48 <= literal <= 0.52, "the literal rule keeps out about half"
+
+
+def test_a_candidate_clearly_worse_on_the_hold_out_is_still_kept_out_in_over_97_percent(tmp_path):
+    """Truly worse by 3 (one run's sd is 1): mine - seed is N(-3, 0.816), the margin
+    1.155: P(diff < -1.155) = Phi(2.26) = 98.8 %. 20 000 trials: SE 0.08 %."""
+    kept_out, literal = _equal_and_worse_veto_rates(tmp_path, -3.0)
+    assert kept_out >= 0.97
+    assert literal >= kept_out

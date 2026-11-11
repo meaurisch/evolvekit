@@ -64,18 +64,21 @@ __all__ = [
 ]
 
 
-def holdout_veto(config: Config, private_score: float | None, seed_private: float | None) -> str | None:
+def holdout_veto(
+    config: Config, private_score: float | None, seed_private: float | None, margin: float = 0.0
+) -> str | None:
     """Why a candidate's hold-out keeps it from competing, or `None`.
 
     With `evaluate.holdout_veto` on, a candidate whose private score is below
-    the seed's private score does not compete. The rule is the literal
-    comparison, with no allowance for noise. Without a seed hold-out to
-    compare with (the seed's own hold-out run failed, or there is none),
-    nobody is vetoed."""
+    the seed's private score by more than `margin` does not compete:
+    `private < seed_private - margin`. The margin is the hold-out's noise
+    (`Cascade.holdout_margin`); at 0 -- no noise estimate -- the rule is the
+    literal comparison. Without a seed hold-out to compare with (the seed's
+    own hold-out run failed, or there is none), nobody is vetoed."""
     if not config.evaluate.holdout_veto or private_score is None or seed_private is None:
         return None
-    if private_score < seed_private:
-        return veto_reason(seed_private)
+    if private_score < seed_private - margin:
+        return veto_reason(seed_private, margin)
     return None
 
 
@@ -88,6 +91,7 @@ def finished_final_stage(
     private_score: float | None,
     gated: str | None = None,
     seed_private: float | None = None,
+    holdout_margin: float = 0.0,
 ) -> bool:
     """Whether a candidate's score may be compared with anybody else's.
 
@@ -108,7 +112,8 @@ def finished_final_stage(
       score with no discount -- the one thing the hold-out is there to prevent.
 
     And one case that finished: a hold-out **below the seed's**
-    (`seed_private`), when `evaluate.holdout_veto` is on; see `holdout_veto`.
+    (`seed_private`) by more than `holdout_margin`, when `evaluate.holdout_veto`
+    is on; see `holdout_veto`.
 
     Takes plain values rather than an `EvalResult` so that a `runs.jsonl` row
     written before the `competes` field existed can be judged by the same rule.
@@ -121,7 +126,7 @@ def finished_final_stage(
     held_out = final.private_inputs or final.private_instances
     if final.kind == "command" and held_out and private_score is None:
         return False
-    return holdout_veto(config, private_score, seed_private) is None
+    return holdout_veto(config, private_score, seed_private, holdout_margin) is None
 
 
 def race_warnings(config: Config) -> list[str]:
@@ -249,6 +254,9 @@ class Cascade:
         aborted seed is evaluated again), `None` when its hold-out did not
         score; a resumed run rebuilds it from `runs.jsonl`
         (`leaderboard.seed_private`)."""
+        self.seed_public: float | None = None
+        """The same seed's public score, set and rebuilt with `seed_private`:
+        what `holdout_margin` rescales the public run's noise by."""
         self._trees: dict[str, Tree] = {}
         """Per candidate, its worktree (`problem.tree`): made by `_materialise`."""
         self._tree_errors: dict[str, str] = {}
@@ -346,9 +354,13 @@ class Cascade:
             # reads it back on a resume: one whose hold-out failed leaves none.
             if candidate.operator == SEED_OPERATOR and not results[cid].abandoned:
                 self.seed_private = results[cid].private_score
+                self.seed_public = results[cid].public_score
                 self._check_noise(candidate, paths, results)
                 self.noise.save()
 
+        # One margin for the whole generation, from the estimate as it stands
+        # once this generation's hold-out runs and the seed's are in.
+        margin = self.holdout_margin()
         for result in results.values():
             # `finished_final_stage(..., seed_private=...)` in two halves, so
             # that a vetoed candidate's row can say why it does not compete.
@@ -360,7 +372,11 @@ class Cascade:
                 private_score=result.private_score,
                 gated=result.gated,
             )
-            result.veto = holdout_veto(self.config, result.private_score, self.seed_private) if finished else None
+            judged = finished and result.private_score is not None
+            result.holdout_margin = margin if judged else None
+            result.veto = (
+                holdout_veto(self.config, result.private_score, self.seed_private, margin) if finished else None
+            )
             result.competes = finished and result.veto is None
         self.noise.save()
         return results
@@ -719,6 +735,33 @@ class Cascade:
             outcome.seed_runs[objective] = [fmean(row) for row in pct_rows]
 
     # -- noise -----------------------------------------------------------
+
+    def holdout_margin(self) -> float:
+        """How far below the seed's hold-out score a candidate's may lie before
+        the veto keeps it out: `2 · σ_priv`, twice the sd of one candidate's
+        hold-out score (`Noise.score_sd`, a mean over the final stage's
+        `seeds`; the hold-out runs as many as the public stage). The
+        difference of two equal candidates then has sd `√2 · σ_priv`, and an
+        equal candidate is kept out with P(Z < -√2), about 8 %.
+
+        `σ_priv` is the hold-out's own estimate when it has one. Otherwise
+        (a hold-out that replicates nothing, which calibration does not
+        cover) the public run's noise, rescaled to the hold-out's size by
+        `|seed_private / seed_public|` -- only when both seed scores are
+        non-zero and of one sign: across a change of sign the ratio says
+        nothing about scale. Else 0, the literal rule; always 0 with
+        `score.levels`. On a repeatable stage both estimates are the paired
+        ones, 0 at `seeds: 1`."""
+        final, score = self.config.final_stage, self.config.evaluate.score
+        if score.levels:
+            return 0.0
+        private_key = f"{final.id}/private"
+        if self.noise.known(private_key):
+            return 2.0 * self.noise.score_sd(private_key, score, final.seeds)
+        public, private = self.seed_public, self.seed_private
+        if public is None or private is None or public == 0 or private == 0 or (public > 0) != (private > 0):
+            return 0.0
+        return 2.0 * self.noise.score_sd(final.id, score, final.seeds) * abs(private / public)
 
     def _note_noise(
         self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome, *, private: bool

@@ -133,6 +133,10 @@ class EvalResult:
     """Why a candidate that finished the final stage does not compete, when
     that is its hold-out: `"holdout below the seed's <value>"`
     (`evaluate.holdout_veto`). `None` for every other candidate."""
+    holdout_margin: float | None = None
+    """The noise margin its hold-out was judged with (`Cascade.holdout_margin`):
+    `0.0` with no noise estimate, the literal rule. `None` when it did not
+    finish with a hold-out score."""
     abandoned: str | None = None
     """Why its evaluation did not finish, when the run was stopped in the
     middle of it (`evolvekit/stopping.py`). The driver records nothing of such

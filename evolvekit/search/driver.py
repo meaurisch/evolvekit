@@ -48,7 +48,7 @@ from evolvekit.evaluate.signature import BehaviourIndex
 from evolvekit.evaluate.stages import restore_build
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
-from evolvekit.leaderboard import seed_private
+from evolvekit.leaderboard import seed_private, seed_public
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration, big_step_reason
@@ -553,6 +553,7 @@ class Driver:
         raw = self.ledger.runs()
         rows = self._replayed_rows(raw)
         self.cascade.seed_private = seed_private(raw)
+        self.cascade.seed_public = seed_public(raw)
         if not rows:
             return 0
         self.grid = Archive.from_records(rows, self.config.search.archive, tree=self.repo is not None)
@@ -589,6 +590,8 @@ class Driver:
         field exists to end. A row that carries `competes` keeps it, and the
         veto is applied on top exactly as in a live run: a row written before
         the veto existed, whose hold-out is below the seed's, stops competing.
+        Each row is judged with the noise margin it was judged with live
+        (`holdout_margin`); a row from before the margin, literally.
         """
         if "competes" in row:
             finished = bool(row["competes"])
@@ -601,7 +604,8 @@ class Driver:
                 private_score=row.get("private_score"),
                 gated=row.get("gated"),
             )
-        veto = holdout_veto(self.config, row.get("private_score"), seed_private) if finished else None
+        margin = float(row.get("holdout_margin") or 0.0)  # none on a row from before A2: the literal rule
+        veto = holdout_veto(self.config, row.get("private_score"), seed_private, margin) if finished else None
         if veto is not None:
             return {**row, "competes": False, "veto": veto}
         if "competes" in row:
@@ -1781,6 +1785,7 @@ class Driver:
             candidate.raced_out = result.raced_out
             candidate.gated = result.gated
             candidate.veto = result.veto
+            candidate.holdout_margin = result.holdout_margin
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis

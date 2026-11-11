@@ -964,21 +964,41 @@ paid calls bought nothing; that is the number these are here to drive down.
 The hold-out acts in two ways. By default only the first is on.
 
 **The veto.** `evaluate.holdout_veto` (default `true`): a candidate whose
-private score is below the **seed's** private score does not compete. It is not
-ranked, archived or bred from, and its row carries `competes: false` and
-`veto: "holdout below the seed's …"` with the seed's value. The leaderboard
-lists these candidates under its table, each with the `!` flag — the flag and
-the veto are one condition — and counts them as "kept out by the hold-out",
+private score is below the **seed's** private score by more than a noise margin
+does not compete. It is not ranked, archived or bred from, and its row carries
+`competes: false` and `veto: "holdout below the seed's …"` with the seed's
+value (and, when the margin is not 0, `"… by more than its noise margin …"`).
+The leaderboard lists these candidates under its table, each with the `!` flag
+— the flag and the veto are one condition — and counts them as "kept out by the hold-out",
 apart from the candidates that did not finish; `status` and the dashboard label
 them the same way. A row written before the veto existed is judged by it when
 it is read back, by the resumed run and by every view alike.
 
-The comparison is with the seed's hold-out score as it is, `private <
-seed's private`, with no allowance for noise: on a hold-out whose score varies
-from run to run, a candidate exactly as good as the seed is vetoed about half
-the time. When the seed's own hold-out run failed there is nothing to compare
-with, and nobody is vetoed. A resumed run reads the seed's private score back
-from `runs.jsonl`: the last seed row's, and none when that row has none.
+The comparison is `private < seed's private − margin`. The margin is twice the
+sd of one candidate's hold-out score as the run's noise estimate
+(`work/noise.json`) gives it: `2 · σ̂/√seeds`, σ̂ the sd of one run of the
+score and `seeds` the final stage's, the seed's own runs included. When the
+hold-out has no estimate of its own (it replicates nothing, e.g. at `seeds: 1`),
+the public stage's noise stands in, rescaled by `|seed's private / seed's
+public|` — only when both are non-zero and of one sign; otherwise the margin is
+0. On a repeatable evaluator (same program and same seed give the same numbers)
+the margin uses the paired noise, which is 0 at `seeds: 1`: the literal rule.
+It is 0 with `score.levels`. One margin is computed per generation, and every
+row that finished with a hold-out score records the one it was judged with as
+`holdout_margin` (`0.0` with no noise estimate; absent on rows from before the
+margin, which are judged by the literal rule). The `!` flag follows the same
+margin.
+
+With the margin, a candidate exactly as good as the seed is kept out in about
+8 % of cases; without a noise estimate (σ̂ = 0, an evaluator with neither
+`seeds: N` nor `{seed}`) the comparison is literal, and on a hold-out that
+varies from run to run about half of them are. The 8 % is an average over runs:
+the seed's hold-out score is one draw, so in one run the rate for an equal
+candidate can be well above or below it. A candidate truly worse by three times
+one run's sd is still kept out in about 99 % of cases at `seeds: 3`. When the
+seed's own hold-out run failed there is nothing to compare with, and nobody is
+vetoed. A resumed run reads the seed's private (and public) score back from
+`runs.jsonl`: the last seed row's, and none when that row has none.
 
 **The penalty.** `evaluate.holdout_penalty` (default `0.0`) defines the score
 everything ranks by:

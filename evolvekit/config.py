@@ -1089,7 +1089,8 @@ class EvaluateConfig:
     holdout_veto: bool = True
     """Whether a candidate whose private score is below the seed's private
     score is kept from competing (`cascade.holdout_veto`). The comparison is
-    the literal `private < seed's private`, with no allowance for noise."""
+    `private < seed's private - margin`, the margin the hold-out's noise
+    (`Cascade.holdout_margin`); with no noise estimate it is 0, the literal rule."""
     signature_digits: int = DEFAULT_SIGNATURE_DIGITS
     signature_digits_stochastic: int = DEFAULT_SIGNATURE_DIGITS_STOCHASTIC
     """Used in place of `signature_digits` on a stage with `seeds: N > 1`.

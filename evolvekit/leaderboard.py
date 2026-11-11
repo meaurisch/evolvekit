@@ -33,6 +33,7 @@ __all__ = [
     "unfinished_count",
     "competes",
     "seed_private",
+    "seed_public",
     "replay_veto",
     "veto_reason",
     "vetoed_count",
@@ -59,9 +60,18 @@ def competes(row: Mapping[str, Any]) -> bool:
     return not row.get("rejected") and bool(row.get("competes", True))
 
 
-def veto_reason(reference: float) -> str:
-    """The sentence a vetoed row carries: `evaluate.holdout_veto`'s reason."""
-    return f"holdout below the seed's {reference:.6g}"
+def veto_reason(reference: float, margin: float = 0.0) -> str:
+    """The sentence a vetoed row carries: `evaluate.holdout_veto`'s reason,
+    naming the noise margin when the veto allowed one."""
+    if margin == 0:
+        return f"holdout below the seed's {reference:.6g}"
+    return f"holdout below the seed's {reference:.6g} by more than its noise margin {margin:.3g}"
+
+
+def _margin(row: Mapping[str, Any]) -> float:
+    """The noise margin a row was judged with; a row from before the margin
+    existed has none and is judged by the literal rule."""
+    return float(row.get("holdout_margin") or 0.0)
 
 
 def _replayed_veto(row: Mapping[str, Any], reference: float | None) -> str | None:
@@ -74,10 +84,10 @@ def _replayed_veto(row: Mapping[str, Any], reference: float | None) -> str | Non
         return None
     if row.get("rejected") or not row.get("competes", True):
         return None
-    private = row.get("private_score")
-    if private is None or float(private) >= reference:
+    private, margin = row.get("private_score"), _margin(row)
+    if private is None or float(private) >= reference - margin:
         return None
-    return veto_reason(reference)
+    return veto_reason(reference, margin)
 
 
 def replay_veto(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -159,10 +169,20 @@ def seed_private(rows: Sequence[dict[str, Any]]) -> float | None:
     compare every hold-out with. It is the **last** seed row's (an aborted seed
     is evaluated again, and the attempt that worked is the reference); `None`
     when that row has no private score, or there is no seed row."""
+    return _last_seed_score(rows, "private_score")
+
+
+def seed_public(rows: Sequence[dict[str, Any]]) -> float | None:
+    """The same seed row's public score: what the veto's noise margin rescales
+    the public run's noise by (`Cascade.holdout_margin`)."""
+    return _last_seed_score(rows, "public_score")
+
+
+def _last_seed_score(rows: Sequence[dict[str, Any]], key: str) -> float | None:
     for row in reversed(rows):
         if row.get("operator") == "human-seed":
-            private = row.get("private_score")
-            return None if private is None else float(private)
+            value = row.get(key)
+            return None if value is None else float(value)
     return None
 
 
@@ -186,9 +206,10 @@ def _kept_out_lines(rows: Sequence[dict[str, Any]]) -> list[str]:
 
 
 def _flagged(row: Mapping[str, Any], reference: float | None) -> bool:
+    """The `!` flag: the veto's condition, with the row's own noise margin."""
     private = row.get("private_score")
     return (
-        reference is not None and private is not None and float(private) < reference
+        reference is not None and private is not None and float(private) < reference - _margin(row)
     )
 
 

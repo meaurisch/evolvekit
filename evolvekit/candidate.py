@@ -155,6 +155,10 @@ class Candidate:
     """`"holdout below the seed's <value>"` when the candidate finished the
     final stage but its private score is below the seed's
     (`evaluate.holdout_veto`): it does not compete. `None` otherwise."""
+    holdout_margin: float | None = None
+    """The noise margin the veto judged its hold-out with (`0.0`: the literal
+    rule). `None` on a row that did not finish with a hold-out score, and on
+    a row written before the margin existed, which is judged literally."""
     competes: bool = True
     """False when the candidate did not finish the final stage -- a failed
     evaluation, a proxy-only candidate, a final stage skipped by the daily cap,
