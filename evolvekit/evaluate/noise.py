@@ -33,7 +33,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, variance
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from evolvekit.ledger import _atomic_write
 
@@ -100,50 +100,98 @@ def _sequence(value: Any) -> list:
     return value
 
 
+_BAD = (ValueError, TypeError, KeyError, IndexError)
+"""What a malformed value of `noise.json` raises while it is checked."""
+
+
+def _entries(raw: Any, clean: Callable[[Any], Any]) -> dict[str, Any]:
+    """`{id: clean(value)}` for a mapping of entries, leaving out each one
+    that does not check: one bad number costs that entry, not the file."""
+    try:
+        raw = _mapping(raw)
+    except _BAD:
+        return {}
+    kept = {}
+    for name, value in raw.items():
+        try:
+            kept[str(name)] = clean(value)
+        except _BAD:
+            continue
+    return kept
+
+
+def _element(clean: Callable[[list], list]) -> Callable[[Any], list | None]:
+    """One element of a vector entry, or `None` (unknown) when it does not
+    check: the elements are positional, so a bad one cannot just be dropped."""
+
+    def check(value: Any) -> list | None:
+        if value is None:
+            return None
+        try:
+            return clean(_sequence(value))
+        except _BAD:
+            return None
+
+    return check
+
+
+def _across_element(e: list) -> list:
+    return [_optional(e[0]), _number(e[1]), _count(e[2])]
+
+
+def _paired_element(e: list) -> list:
+    return [_count(e[0]), _number(e[1])]
+
+
+def _kpi_group(entry: Any) -> dict[str, Any]:
+    entry = _mapping(entry)
+    return {
+        "across": _entries(
+            entry.get("across", {}),
+            lambda e: {"runs": _count(_mapping(e)["runs"]), "mean": _optional(e.get("mean")), "var": _number(e["var"])},
+        ),
+        "paired": _entries(
+            entry.get("paired", {}), lambda e: {"df": _count(_mapping(e)["df"]), "var": _number(e["var"])}
+        ),
+    }
+
+
+def _vector_group(entry: Any) -> dict[str, Any]:
+    entry = _mapping(entry)
+    across, paired = _element(_across_element), _element(_paired_element)
+    return {
+        "across": _entries(entry.get("across", {}), lambda es: [across(e) for e in _sequence(es)]),
+        "paired": _entries(entry.get("paired", {}), lambda es: [paired(e) for e in _sequence(es)]),
+    }
+
+
+def _seed(raw: Any) -> dict[str, Any]:
+    """The seed's runs: one unit -- seeds and values only mean something together."""
+    seed = _mapping(raw)
+    return {
+        "seeds": [_count(s) for s in _sequence(seed.get("seeds", []))],
+        "kpis": {str(k): [_number(v) for v in _sequence(vs)] for k, vs in _mapping(seed.get("kpis", {})).items()},
+        "vectors": {
+            str(k): [[_number(v) for v in _sequence(row)] for row in _sequence(rows)]
+            for k, rows in _mapping(seed.get("vectors", {})).items()
+        },
+    }
+
+
 def _clean_stage(raw: Any) -> dict[str, Any]:
-    """One stage of `noise.json`, checked; a ValueError for any wrong shape."""
+    """One stage of `noise.json`, checked. A malformed entry is left out and
+    the rest kept; a stage that is not a mapping at all raises."""
     raw = _mapping(raw)
     stage = _empty_stage()
     repeatable = raw.get("repeatable")
-    if repeatable is not None and not isinstance(repeatable, bool):
-        raise ValueError("repeatable")
-    stage["repeatable"] = repeatable
-    for kpi, entry in _mapping(raw.get("kpis", {})).items():
-        entry = _mapping(entry)
-        stage["kpis"][str(kpi)] = {
-            "across": {
-                str(cid): {"runs": _count(e["runs"]), "mean": _optional(e.get("mean")), "var": _number(e["var"])}
-                for cid, e in ((c, _mapping(e)) for c, e in _mapping(entry.get("across", {})).items())
-            },
-            "paired": {
-                str(cid): {"df": _count(e["df"]), "var": _number(e["var"])}
-                for cid, e in ((c, _mapping(e)) for c, e in _mapping(entry.get("paired", {})).items())
-            },
-        }
-    for name, entry in _mapping(raw.get("vectors", {})).items():
-        entry = _mapping(entry)
-        across = {}
-        for cid, elements in _mapping(entry.get("across", {})).items():
-            across[str(cid)] = [
-                None if e is None else [_optional(_sequence(e)[0]), _number(e[1]), _count(e[2])]
-                for e in _sequence(elements)
-            ]
-        paired = {}
-        for cid, elements in _mapping(entry.get("paired", {})).items():
-            paired[str(cid)] = [
-                None if e is None else [_count(_sequence(e)[0]), _number(e[1])] for e in _sequence(elements)
-            ]
-        stage["vectors"][str(name)] = {"across": across, "paired": paired}
+    stage["repeatable"] = repeatable if isinstance(repeatable, bool) else None
+    stage["kpis"] = _entries(raw.get("kpis", {}), _kpi_group)
+    stage["vectors"] = _entries(raw.get("vectors", {}), _vector_group)
     if raw.get("seed") is not None:
-        seed = _mapping(raw["seed"])
-        stage["seed"] = {
-            "seeds": [_count(s) for s in _sequence(seed.get("seeds", []))],
-            "kpis": {str(k): [_number(v) for v in _sequence(vs)] for k, vs in _mapping(seed.get("kpis", {})).items()},
-            "vectors": {
-                str(k): [[_number(v) for v in _sequence(row)] for row in _sequence(rows)]
-                for k, rows in _mapping(seed.get("vectors", {})).items()
-            },
-        }
+        try:
+            stage["seed"] = _seed(raw["seed"])
+        except _BAD:
+            pass  # no reference: the candidates' paired entries already made stay
     return stage
 
 
@@ -161,9 +209,9 @@ class Noise:
         noise = cls(path)
         try:
             payload = _mapping(json.loads(Path(path).read_text(encoding="utf-8")))
-            stages = {str(key): _clean_stage(raw) for key, raw in _mapping(payload.get("stages", {})).items()}
-        except (OSError, ValueError, TypeError, KeyError, IndexError):
+        except (OSError, ValueError):
             return noise
+        stages = _entries(payload.get("stages", {}), _clean_stage)
         noise._stages = stages
         return noise
 
@@ -191,10 +239,13 @@ class Noise:
         raced out or abandoned carries no replicate -- and only one with two or
         more seeds says anything about noise. The seed's runs are kept, one seed
         or more, as the reference of the other candidates' paired differences."""
+        # The latest observation of an id is the one that counts, even when it
+        # brings no replicate: what it replaced is forgotten first.
+        if key in self._stages:
+            self._forget(self._stages[key], candidate_id)
         if not outcome.ok or outcome.raced_out or outcome.abandoned:
             return
         stage = self._stage(key)
-        self._forget(stage, candidate_id)
         if is_seed:
             stage["seed"] = {
                 "seeds": list(outcome.seed_list),
@@ -302,8 +353,10 @@ class Noise:
             paired = self._element_pool(key, vector_key, index, "paired").paired()
             if paired is not None:
                 return math.sqrt(paired)
-            # A repeatable stage without pairs (`seeds: 1`): the element was
-            # seen, and on its own seed it has no noise.
+            # Repeatable, with across entries for the element but no pair yet
+            # (only the seed replicated, or a calibration run): no paired noise
+            # is measured, and on a repeatable stage that reads as 0 -- today.
+            # At `seeds: 1` there is no across entry either, so: None.
             return 0.0 if across is not None else None
         return math.sqrt(across) if across is not None else None
 
@@ -358,8 +411,9 @@ class Noise:
 
     def score_sd(self, key: str, score: "ScoreConfig", seeds: int) -> float:
         """One candidate's stage score, a mean over `seeds` runs: the weighted
-        sum's sd, `sqrt(Σ w_k² · sd_k²) / √seeds`. Levels compare goal by goal
-        and have no such sum: 0."""
+        sum's sd, `sqrt(Σ w_k² · sd_k²) / √seeds`, over `score.weights` only:
+        the penalty terms are taken to carry no noise. Levels compare goal by
+        goal and have no such sum: 0."""
         if score.levels:
             return 0.0
         weights = score.weights or {score.objective: 1.0}

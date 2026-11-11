@@ -156,6 +156,93 @@ def test_repeatability_and_both_estimates_survive_a_resume(tmp_path):
     assert again.sd_across("full", "cost") == pytest.approx(noise.sd_across("full", "cost"))
 
 
+def test_a_later_observation_without_a_replicate_replaces_the_earlier_one():
+    """The latest observation of an id counts, even a failed one: what it replaced goes."""
+    noise = Noise()
+    noise.observe("full", "a", _out({"cost": 10.0}, kpi_var={"cost": 4.0}))
+    noise.observe("full", "b", _out({"cost": 10.0}, kpi_var={"cost": 16.0}))
+    noise.observe("full", "a", _out({}, ok=False))
+    assert noise.sd("full", "cost") == pytest.approx(4.0), "only b's 16 is left"
+    noise.observe("full", "b", _out({"cost": 10.0}, runs=1))
+    assert not noise.known("full")
+
+
+def test_a_repeatable_element_seen_only_across_has_no_noise_and_an_unseen_one_is_unknown():
+    noise = Noise()
+    noise.observe("full", "seed", _out({"cost": 50.0}, vectors={"cost_per_instance": [100.0]},
+                                       vector_var={"cost_per_instance": [4.0]}), is_seed=True)
+    noise.set_repeatable("full", True)
+    assert noise.vector_sd("full", "cost_per_instance", 0) == 0.0, "replicated, but no pair yet"
+    assert noise.vector_sd("full", "cost_per_instance", 1) is None
+    assert noise.vector_sd("full", "bins_per_instance", 0) is None
+
+
+def test_one_malformed_entry_is_left_out_and_the_rest_kept(tmp_path):
+    import json
+
+    path = tmp_path / "noise.json"
+    path.write_text(json.dumps({"schema": 1, "stages": {
+        "full": {"repeatable": "yes",
+                 "kpis": {"cost": {"across": {"a": {"runs": 3, "mean": 10.0, "var": 4.0},
+                                              "b": {"runs": 3, "mean": 10.0, "var": "16"}}},
+                          "late": "broken"},
+                 "vectors": {"cost_per_instance": {"across": {"a": [[100.0, 9.0, 3], [1.0, "x", 3]]}}},
+                 "seed": {"seeds": [0, 1], "kpis": {"cost": ["bad", 1.0]}}},
+        "proxy": 7}}), encoding="utf-8")
+    noise = Noise.load(path)
+    assert noise.sd("full", "cost") == pytest.approx(2.0), "b's bad variance costs b, not a"
+    assert noise.repeatable("full") is None, "an unreadable repeatability is not measured"
+    assert noise.vector_sd("full", "cost_per_instance", 0) == pytest.approx(3.0)
+    assert noise.vector_sd("full", "cost_per_instance", 1) is None, "a bad element is unknown"
+    assert noise.known("proxy") is False
+
+
+def test_the_relative_noise_of_a_stage_without_instances_uses_its_scalars():
+    noise = Noise()
+    noise.observe("full", "a", _out({"cost": 10.0}, kpi_var={"cost": 4.0}))
+    noise.observe("full", "b", _out({"cost": 20.0}, kpi_var={"cost": 4.0}))
+    noise.observe("full", "z", _out({"cost": 0.0}, kpi_var={"cost": 1.0}))  # no ratio at a mean of 0
+    assert noise.cv("full", "cost") == pytest.approx(math.sqrt((4 / 100 + 4 / 400) / 2))
+    assert noise.cv("full", "other") == 0.0
+
+    paired = Noise()
+    paired.observe("full", "seed", _runs([100.0, 104.0, 96.0]), is_seed=True)
+    paired.observe("full", "a", _runs([99.0, 103.2, 95.4]))
+    paired.set_repeatable("full", True)
+    v_d = statistics.variance([-1.0, -0.8, -0.6])
+    assert paired.cv("full", "cost") == pytest.approx(math.sqrt(v_d / 2 / 100.0**2))
+
+
+def test_a_score_by_levels_has_no_summed_noise():
+    from evolvekit.config import LevelConfig, ScoreConfig
+
+    noise = Noise()
+    noise.observe("full", "a", _out({"cost": 10.0}, kpi_var={"cost": 4.0}))
+    level = LevelConfig(kpi="cost", direction="minimize")
+    score = ScoreConfig(objective="cost", direction="minimize", weights={"cost": 1.0}, levels=(level,))
+    assert noise.score_sd("full", score, seeds=1) == 0.0
+
+
+def test_the_status_shows_each_kpis_noise_and_the_scores():
+    from evolvekit.config import ScoreConfig
+
+    noise = Noise()
+    noise.observe("full", "seed", _runs([100.0, 104.0, 96.0]), is_seed=True)
+    noise.observe("full", "a", _runs([99.0, 103.2, 95.4]))
+    score = ScoreConfig(objective="cost", direction="minimize", weights={"cost": 1.0})
+    status = noise.to_status("full", score)
+    assert status["repeatable"] is None and status["known"] is True
+    assert set(status["kpis"]) == {"cost"}
+    cost = status["kpis"]["cost"]
+    assert cost["sd"] == pytest.approx(cost["sd_across"]) == pytest.approx(noise.sd_across("full", "cost"))
+    assert cost["cv"] == pytest.approx(noise.cv("full", "cost"))
+    assert status["score_sd"] == pytest.approx(cost["sd"])
+    noise.set_repeatable("full", True)
+    again = noise.to_status("full", score)
+    assert again["repeatable"] is True and again["kpis"]["cost"]["sd"] < again["kpis"]["cost"]["sd_across"]
+    assert Noise().to_status("full", score) == {"repeatable": None, "known": False, "kpis": {}, "score_sd": 0.0}
+
+
 def test_the_pooled_variance_is_within_5_percent_of_the_truth_over_4000_candidates():
     """The estimator itself: 4000 candidates, 3 runs each, true sd 2. The pooled
     variance is unbiased; its SE is 4/sqrt(4000) = 0.063 (1.6 %), so 5 % is
