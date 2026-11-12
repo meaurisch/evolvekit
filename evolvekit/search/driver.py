@@ -44,7 +44,7 @@ from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage, holdout_veto, race_warnings
 from evolvekit.evaluate.scoring import ranking_score
-from evolvekit.evaluate.signature import BehaviourIndex
+from evolvekit.evaluate.signature import Behaviour, BehaviourIndex
 from evolvekit.evaluate.stages import restore_build
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
@@ -571,6 +571,15 @@ class Driver:
             # behaviour be paid for again after a resume.
             for stage_id, signature in (candidate.behaviour_signatures or {}).items():
                 self.behaviour.add(candidate.id, stage_id, signature)
+            # The numbers the noise rule compares, with the stage score. A twin's
+            # at the stage that caught it never became a target in the run that
+            # wrote the row, so they do not become one now. A row from before
+            # them is a target by its hash only.
+            caught_at = candidate.stages_reached[-1] if candidate.behaviour_twin_id and candidate.stages_reached else None
+            for stage_id, raw_values in (candidate.behaviour_values or {}).items():
+                values = Behaviour.from_json(raw_values)
+                if values is not None and stage_id != caught_at:
+                    self.behaviour.add(candidate.id, stage_id, "", values)
             if candidate.novelty == "behavioural":
                 self._remember_dead_end(candidate)
             last_generation = max(last_generation, int(candidate.generation))
@@ -1800,6 +1809,7 @@ class Driver:
             candidate.last_failure = result.last_failure
             candidate.feedback = result.feedback
             candidate.behaviour_signatures = result.behaviour_signatures
+            candidate.behaviour_values = result.behaviour_values
             candidate.behaviour_twin_id = result.behaviour_twin_id
             if result.behaviour_twin_id is not None:
                 candidate.novelty = "behavioural"

@@ -116,11 +116,10 @@ evaluate:
   holdout_veto: true
   # Behavioural duplicates: after every command stage the candidate's KPIs are
   # rounded and hashed, and a candidate whose fingerprint matches one already
-  # seen at that stage is stopped there. Defaults shown.
+  # seen at that stage is stopped there. On a noisy evaluator the run's own
+  # noise decides instead (docs/reference.md, "The novelty filters").
+  # Defaults shown.
   signature_digits: 9
-  # Used instead on a `seeds: N > 1` stage: a stochastic evaluator moves the
-  # eighth digit for free, so at nine digits nothing ever looks like a twin.
-  signature_digits_stochastic: 3
   signature_ignore: [runtime_s, complexity, static_problems]
 
 models:

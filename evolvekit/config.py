@@ -23,7 +23,6 @@ from evolvekit.space import ParameterSpace, SpaceError
 __all__ = [
     "ConfigError",
     "DEFAULT_SIGNATURE_DIGITS",
-    "DEFAULT_SIGNATURE_DIGITS_STOCHASTIC",
     "DEFAULT_SIGNATURE_IGNORE",
     "Config",
     "ProblemConfig",
@@ -160,19 +159,17 @@ DEFAULT_FORBIDDEN_IMPORTS = (
 DEFAULT_SIGNATURE_DIGITS = 9
 """Significant digits every KPI is rounded to before it is fingerprinted.
 Enough that two genuinely different behaviours never collide, few enough that
-the last bits of a float sum cannot separate two identical ones."""
+the last bits of a float sum cannot separate two identical ones. On a noisy
+stage twins are judged by the run's noise instead (`evaluate/signature.py`)."""
 
-DEFAULT_SIGNATURE_DIGITS_STOCHASTIC = 3
-"""Significant digits used instead, on a stage with `seeds: N > 1`.
-
-A stochastic evaluator never fingerprints identically. Two runs of the same
-program on the same instances differ in the eighth digit for free -- a
-different random restart, a different tie broken by hash order, a solver that
-stopped a microsecond later -- so at nine digits every candidate is novel and
-the behavioural filter, the one thing standing between an hour-long evaluator
-and a re-expression of its own seed, silently stops working. Three digits says
-"the same to a tenth of a percent", which on a mean over N runs is a claim
-about the program rather than about the dice."""
+REMOVED_SIGNATURE_DIGITS_STOCHASTIC = (
+    "evaluate.signature_digits_stochastic: behaviour twins are now judged by the run's noise; "
+    "remove signature_digits_stochastic (a child is a twin when every measure is within the "
+    "noise of an earlier candidate that scored at least as well; see 'The novelty filters' "
+    "in docs/reference.md)"
+)
+"""Why the key is refused: three digits called 0.3 % apart a twin under a
+0.1 % noise and 1.5 % apart novel under a 2 % one (A2.2)."""
 
 DEFAULT_SIGNATURE_IGNORE: tuple[str, ...] = (
     "runtime_s",
@@ -1092,9 +1089,6 @@ class EvaluateConfig:
     `private < seed's private - margin`, the margin the hold-out's noise
     (`Cascade.holdout_margin`); with no noise estimate it is 0, the literal rule."""
     signature_digits: int = DEFAULT_SIGNATURE_DIGITS
-    signature_digits_stochastic: int = DEFAULT_SIGNATURE_DIGITS_STOCHASTIC
-    """Used in place of `signature_digits` on a stage with `seeds: N > 1`.
-    See `DEFAULT_SIGNATURE_DIGITS_STOCHASTIC` for why it has to be coarser."""
     signature_ignore: tuple[str, ...] = DEFAULT_SIGNATURE_IGNORE
     """The behaviour signature: which KPIs it is built from and how precisely.
     See `evolvekit/evaluate/signature.py`."""
@@ -1102,14 +1096,6 @@ class EvaluateConfig:
     """Keep every successful evaluator run under `work/cache/` and look an
     identical one up instead of running it again (`evaluate/cache.py`). Off for
     an evaluator whose answer to the same question is meant to change."""
-
-    def digits_for(self, stage: StageConfig) -> int:
-        """How precisely to fingerprint one stage's KPIs."""
-        return (
-            self.signature_digits_stochastic
-            if stage.stochastic
-            else self.signature_digits
-        )
 
     @property
     def required_kpis(self) -> tuple[str, ...]:
@@ -1130,6 +1116,8 @@ class EvaluateConfig:
     @staticmethod
     def parse(raw: Any) -> "EvaluateConfig":
         data = _as_mapping(raw, "evaluate")
+        if "signature_digits_stochastic" in data:
+            raise ConfigError(REMOVED_SIGNATURE_DIGITS_STOCHASTIC)
         _reject_unknown(
             data,
             {
@@ -1140,7 +1128,6 @@ class EvaluateConfig:
                 "holdout_penalty",
                 "holdout_veto",
                 "signature_digits",
-                "signature_digits_stochastic",
                 "signature_ignore",
                 "cache",
                 "gates",
@@ -1227,14 +1214,6 @@ class EvaluateConfig:
             signature_digits=_as_int(
                 data.get("signature_digits", DEFAULT_SIGNATURE_DIGITS),
                 "evaluate.signature_digits",
-                minimum=1,
-            ),
-            signature_digits_stochastic=_as_int(
-                data.get(
-                    "signature_digits_stochastic",
-                    DEFAULT_SIGNATURE_DIGITS_STOCHASTIC,
-                ),
-                "evaluate.signature_digits_stochastic",
                 minimum=1,
             ),
             signature_ignore=signature_ignore,
@@ -1575,14 +1554,14 @@ class NoveltyConfig:
     near: NearDuplicateConfig = field(default_factory=NearDuplicateConfig)
     behavioural: str = "on"
     """`on` (default): every command stage is fingerprinted and checked against
-    every prior signature at that stage, as it always was. `off`: skip the
-    fingerprinting and the check entirely. `auto`: skip it per-stage when the
-    stage is stochastic (`seeds > 1`) -- on a wall-clock-bounded solver a
-    stochastic stage's KPIs vary enough that, even at the coarser
-    `signature_digits_stochastic` rounding, two runs of the same candidate
-    almost never hash equal (0 hits in the first PyVRP run), so the filter
-    pays for a hash on every candidate at every such stage and catches
-    nothing. A deterministic stage keeps fingerprinting either way."""
+    every prior signature at that stage (by the run's noise on a stage that
+    is not repeatable and has an estimate, `evaluate/signature.py`). `off`:
+    skip the fingerprinting and the check entirely. `auto`: do not check a
+    stochastic stage (`seeds > 1`) while it says nothing a twin could be
+    judged by -- its noise is still 0 and it is not known to be repeatable
+    (the seed run again says so). What such a stage did is still kept, so
+    the seed is a twin target once the check starts. A deterministic stage
+    is checked either way."""
 
     @staticmethod
     def parse(raw: Any) -> "NoveltyConfig":

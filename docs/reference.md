@@ -688,18 +688,6 @@ number the candidate never achieved.
 `seeds: N > 1` without a `{seed}` placeholder is a config error, because N
 identical runs is N times the bill for one sample.
 
-**The behaviour signature has to give ground, and this is the important part.**
-A stochastic evaluator never fingerprints identically. A different random
-restart, a tie broken by a different hash order, a solver that stopped a
-microsecond later — and the eighth significant digit has already moved. At the
-default nine digits every candidate on such a stage looks novel, and the
-behavioural filter, the one thing standing between an hour-long evaluator and a
-re-expression of its own seed, silently stops filtering. So on a stage with
-`seeds > 1` the fingerprint is built from the *means* and rounded to
-`evaluate.signature_digits_stochastic` (default `3`) instead. Three significant
-digits on a mean of N runs is a claim about the program; nine is a claim about
-the dice.
-
 **The run's noise estimate: `work/noise.json`.** Every command stage's outcome
 adds to one estimate the whole run shares, per stage (and per hold-out, as
 `<stage>/private`) and per measure: each candidate with two or more runs
@@ -749,9 +737,14 @@ config error, above.)
 Limits: the estimate is read as it is from the first candidates on — two
 degrees of freedom after a calibration — with no minimum of evidence before it
 counts. It is shown by `status` (`progress.noise`) and
-[`preflight`](#before-you-spend-anything-preflight); for now the search's own
-comparisons are made as before, and each rule that comes to read the estimate
-says so in its own section and is listed here.
+[`preflight`](#before-you-spend-anything-preflight). Each rule that reads the
+estimate says so in its own section and is listed here:
+
+- the hold-out veto's margin ([The hold-out penalty](#the-hold-out-penalty));
+- behaviour twins on a stage that is not repeatable
+  ([The novelty filters](#the-novelty-filters--structural-near-and-behavioural),
+  *Behavioural*): within the noise of an earlier candidate that scored at
+  least as well, instead of equal to nine digits.
 
 ### One run per instance: `instances`, `workers`, `retries`
 
@@ -946,6 +939,56 @@ rather than changing it. A list-valued KPI (the example evaluator emits
 `bins_per_instance`) is folded into the signature element by element, so the
 fingerprint is per-instance rather than per-mean; an evaluator that emits only
 scalars is unaffected.
+
+*On a noisy evaluator* a fingerprint is no use — a different random restart, a
+solver that stopped a microsecond later, and the eighth digit has moved — and
+fewer digits are no answer either: three significant digits call two
+candidates 0.3 % apart twins under a 0.1 % noise, and 1.5 % apart novel under a
+2 % one. So on a stage whose evaluator is **not repeatable** and that has a
+[noise estimate](#stochastic-evaluators-seeds-n) (`work/noise.json`), a child is
+a twin of an earlier candidate when every measure the evaluator reports — per
+case on a stage with `instances` (the `<kpi>_per_instance` values, in the
+evaluator's own units; nothing derived, no percent of the seed), every scalar
+and list otherwise, minus `signature_ignore` — is within
+`c · σ̂ · √(2/seeds)` of that candidate's, **and** that candidate scored at
+least as well at the stage. It is then a twin *of the best such* (ties: the
+first seen). A child within the noise of everything it resembles but ahead of
+all of it is evaluated: on a noisy stage that is the only way to find out
+whether it is better, so a child is stopped only when it measures no better
+than something already paid for.
+
+- `σ̂` is one run's noise of that measure (per case: that case's); where a
+  case's is unknown — a calibration measured one case — the relative noise
+  times the value. A measure with no noise (a `vehicles` count beside a noisy
+  `cost`) must be equal at `signature_digits`; one missing on either side, or
+  a list of another length, is never a twin.
+- `c` is √2 for one noisy number (the margin is then `2·σ̂/√seeds`) and grows
+  with their count (about 2.4 for ten), so that a true twin is caught about
+  **84 %** of the time however many cases the stage has; at `2·σ̂` per case,
+  ten cases would catch one 18 % of the time.
+- A real difference of four noise sd (twice the margin) is still called a twin
+  about **8 %** of the time.
+- Where many earlier candidates sit close together, a child truly one run-sd
+  better than all of them is evaluated about 95 % of the time at `seeds: 3`
+  (about 84 % at `seeds: 1`). When those candidates' own scores are noisy, the
+  luckiest of them can measure above a better child, which then counts as its
+  twin far more often; that is selection on measured scores, not this rule.
+
+On a **repeatable** evaluator (same program, same seed, same numbers, which the
+seed run again establishes) two programs that behave alike give equal numbers
+on the same seeds, so the nine-digit fingerprint stays the rule, as it does
+with no noise estimate. Every candidate's fingerprint and compared numbers,
+with its stage score, are kept (`behaviour_signatures`, `behaviour_values` on
+its row), so the seed is a twin target under either rule and a resumed run
+compares with what its rows kept; a row written before `behaviour_values` is a
+target by its fingerprint only. `evaluate.signature_digits_stochastic`, the
+three-digit rounding this replaces, is a config error.
+
+`search.novelty.behavioural`: `on` (default) checks every command stage, `off`
+none. `auto` does not check a stage with `seeds > 1` while it says nothing a
+twin could be judged by — its noise is still 0 and it is not known to be
+repeatable — but keeps what each candidate did there, so the check starts,
+seed included, once the seed run again or the runs' spread has said.
 
 That last filter exists because of the 2026-08-22/23 run: five paid children
 were monotone re-expressions of best fit — `-(b - item) ** 1.01`, `item - b`
@@ -1666,7 +1709,6 @@ evaluate:
       timeout: 12000        # per run
       seeds: 2              # a noisy objective needs a mean, not a sample
       private_inputs: [holdout]
-  signature_digits_stochastic: 3
 ```
 
 **`patience ≥ 8`.** The second real Phase C run gave up on `patience: 4` after

@@ -144,9 +144,9 @@ evaluate:
       # One run. The evaluator seeds the module-level `random` generator from
       # {seed}, so a candidate that searches randomly would be measured on a
       # single roll of its dice here. Raise this to 3 once candidates start
-      # doing that: the KPIs become means, `kpi_cv` records the spread, and the
-      # behaviour signature switches to `signature_digits_stochastic`. The
-      # timeout is per run, so `seeds: 3` is up to 90 s of wall clock.
+      # doing that: the KPIs become means, `kpi_cv` records the spread, and
+      # behaviour twins are judged by the run's noise. The timeout is per
+      # run, so `seeds: 3` is up to 90 s of wall clock.
       seeds: 1
 
   score:
@@ -177,7 +177,6 @@ evaluate:
 
   # The default hold-out veto applies, and with no hold-out it never fires.
   signature_digits: 9
-  signature_digits_stochastic: 3
   signature_ignore: [runtime_s, build_s, complexity, static_problems]
 
 models:

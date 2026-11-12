@@ -117,6 +117,10 @@ class EvalResult:
     and for `preflight`."""
     behaviour_signatures: dict[str, str] = field(default_factory=dict)
     """One fingerprint per command stage reached; see `evaluate/signature.py`."""
+    behaviour_values: dict[str, dict] = field(default_factory=dict)
+    """Per command stage reached, what the noise twin rule compares:
+    `{"kpis": {...}, "vectors": {...}, "score": float}`, the compared numbers
+    rounded to `signature_digits` and the stage score (`signature.Behaviour`)."""
     behaviour_twin_id: str | None = None
     """The earlier candidate this one behaved identically to, if any. Set
     together with `rejected`: a twin keeps its KPIs and its score for the

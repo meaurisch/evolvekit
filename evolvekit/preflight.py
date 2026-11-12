@@ -606,9 +606,8 @@ def _check_budget(config: Config, report: PreflightReport) -> None:
         report.notes.append(
             f"stage {stage.label} ran {seeds} seed(s)"
             + (" per instance" if stage.instances else "")
-            + f"; {varied}. The behaviour "
-            f"signature uses {config.evaluate.signature_digits_stochastic} significant "
-            "digits on this stage."
+            + f"; {varied}. Behaviour twins on this stage are compared within how far "
+            "its runs vary (exactly, on an evaluator that repeats itself on a seed)."
         )
     for stage_config in config.evaluate.stages:
         if stage_config.fans_out and stage_config.normalize == "baseline":

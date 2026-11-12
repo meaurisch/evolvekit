@@ -36,7 +36,14 @@ from evolvekit.evaluate.noise import (
     run_duration,
 )
 from evolvekit.evaluate.scoring import compute_score, ranking_score
-from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
+from evolvekit.evaluate.signature import (
+    Behaviour,
+    BehaviourIndex,
+    behaviour_signature,
+    compared_numbers,
+    round_significant,
+    twin_margins,
+)
 from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
     STDERR_LIMIT,
@@ -910,31 +917,74 @@ class Cascade:
 
         The static stage is skipped on purpose: it reports size, not
         behaviour, and every syntactically valid candidate would look alike.
-        `search.novelty.behavioural` can skip a stage too: `off` always does,
-        `auto` does on a stochastic stage, where this filter is proven inert.
+        `search.novelty.behavioural` can skip a stage too: `off` always does;
+        `auto` does not check a stochastic stage while it knows neither a noise
+        nor that the stage is repeatable, but keeps what it saw.
+
+        Two rules (`evaluate/signature.py`): on a stage that is not repeatable
+        and has a noise estimate (`noise.sd` of the objective > 0), the child
+        is a twin of the best earlier candidate it is within the noise of on
+        every compared number, among those that scored at least as well. On a
+        repeatable stage, and with no noise, the 9-digit hash. Either way the
+        candidate's hash and numbers are kept, so the seed is a target in both.
         """
         if stage.kind != "command" or outcome.private:
             return False
         mode = self.config.search.novelty.behavioural
-        if mode == "off" or (mode == "auto" and stage.stochastic):
+        if mode == "off":
             return False
+        evaluate = self.config.evaluate
+        objective = evaluate.score.objective
+        repeatable = self.noise.repeatable(stage.id)
+        noisy = repeatable is not True and self.noise.sd(stage.id, objective) > 0
+        skip = mode == "auto" and stage.stochastic and repeatable is not True and not noisy
         signature = behaviour_signature(
             outcome.kpis,
             outcome.vector_kpis,
-            ignore=self.config.evaluate.signature_ignore,
-            # Coarser on a stochastic stage: see
-            # `config.DEFAULT_SIGNATURE_DIGITS_STOCHASTIC`. At nine digits a
-            # noisy evaluator makes every candidate look novel, which turns
-            # the behavioural filter off exactly where it is most expensive to
-            # be without.
-            digits=self.config.evaluate.digits_for(stage),
+            ignore=evaluate.signature_ignore,
+            digits=evaluate.signature_digits,
         )
-        if not signature:
+        seen = compared_numbers(
+            outcome, ignore=evaluate.signature_ignore, per_instance=stage.fans_out, objective=objective
+        )
+        digits = evaluate.signature_digits
+        behaviour = Behaviour(
+            {k: round_significant(v, digits) for k, v in seen.kpis.items()},
+            {k: [round_significant(x, digits) for x in v] for k, v in seen.vectors.items()},
+            float(result.stage_scores.get(stage.id, result.score)),
+        )
+        if not signature and not (behaviour.kpis or behaviour.vectors):
             return False
-        result.behaviour_signatures[stage.id] = signature
-        verdict = self.signatures.check(stage.id, signature)
+        # Nothing to compare number by number (every measure ignored but a
+        # derived one): the hash, which then says no more than it did before.
+        noisy = noisy and bool(behaviour.kpis or behaviour.vectors)
+        if signature:
+            result.behaviour_signatures[stage.id] = signature
+        result.behaviour_values[stage.id] = behaviour.to_json()
+        if skip:
+            self.signatures.add(candidate_id, stage.id, signature, behaviour)
+            return False
+        if noisy:
+            margins = twin_margins(
+                behaviour,
+                {k: self.noise.sd(stage.id, k) for k in behaviour.kpis},
+                {
+                    k: [self.noise.vector_sd(stage.id, k, i) for i in range(len(v))]
+                    for k, v in behaviour.vectors.items()
+                },
+                stage.seeds,
+                cvs={
+                    **{k: self.noise.cv(stage.id, k) for k in behaviour.kpis},
+                    **{k: self.noise.vector_cv(stage.id, k) for k in behaviour.vectors},
+                },
+            )
+            verdict = self.signatures.check_values(
+                stage.id, behaviour, margins, digits, exclude=candidate_id
+            )
+        else:
+            verdict = self.signatures.check(stage.id, signature)
         if not verdict.duplicate or verdict.twin_id == candidate_id:
-            self.signatures.add(candidate_id, stage.id, signature)
+            self.signatures.add(candidate_id, stage.id, signature, behaviour)
             return False
         result.behaviour_twin_id = verdict.twin_id
         result.rejected = True

@@ -244,6 +244,18 @@ def test_signature_digits_must_be_positive(minimal_raw, tmp_path):
         build(raw, tmp_path)
 
 
+def test_the_stochastic_digit_count_is_gone_and_says_what_replaced_it(minimal_raw, tmp_path):
+    """Behaviour twins on a noisy stage are judged by the run's noise (A2.2):
+    a digit count left in a config would claim a rule that no longer runs."""
+    raw = copy.deepcopy(minimal_raw)
+    raw["evaluate"]["signature_digits_stochastic"] = 3
+    with pytest.raises(ConfigError) as caught:
+        build(raw, tmp_path)
+    message = str(caught.value)
+    assert "evaluate.signature_digits_stochastic" in message
+    assert "behaviour twins are now judged by the run's noise; remove signature_digits_stochastic" in message
+
+
 # -- extends ----------------------------------------------------------------
 
 

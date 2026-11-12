@@ -137,9 +137,14 @@ class Candidate:
     """Cosine similarity to `near_twin_id`, by whichever method
     `search.novelty.near.method` names."""
     behaviour_twin_id: str | None = None
-    """The earlier candidate whose behaviour this one reproduced exactly."""
+    """The earlier candidate whose behaviour this one reproduced: exactly, or
+    within the run's noise on a noisy stage (`evaluate/signature.py`)."""
     behaviour_signatures: dict[str, str] = field(default_factory=dict)
     """One fingerprint per command stage reached, keyed by stage id."""
+    behaviour_values: dict[str, dict] = field(default_factory=dict)
+    """Per command stage reached, the numbers the noise twin rule compared and
+    the stage score (`{"kpis", "vectors", "score"}`): what a resumed run
+    compares later children with. Empty on a row written before it."""
     params: dict[str, Any] | None = None
     """The configuration this candidate resolved to, as data, when the problem
     declares `problem.parameters`. Validated by the static stage; what the

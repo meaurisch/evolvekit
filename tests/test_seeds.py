@@ -19,7 +19,6 @@ import pytest
 from evolvekit.candidate import Candidate
 from evolvekit.config import (
     ConfigError,
-    DEFAULT_SIGNATURE_DIGITS_STOCHASTIC,
     StageConfig,
     build_config,
 )
@@ -81,21 +80,6 @@ def test_zero_seeds_is_refused(minimal_raw, tmp_path):
             minimal_raw,
             tmp_path,
         )
-
-
-def test_the_stochastic_digit_count_has_a_default_and_is_configurable(
-    minimal_raw, tmp_path
-):
-    evaluate = build_config(minimal_raw, base_dir=tmp_path).evaluate
-    assert evaluate.signature_digits_stochastic == DEFAULT_SIGNATURE_DIGITS_STOCHASTIC
-    assert evaluate.signature_digits_stochastic < evaluate.signature_digits
-
-    plain = StageConfig(id="a", kind="command", command="x {candidate} {out}")
-    noisy = StageConfig(
-        id="b", kind="command", command="x {candidate} {out} {seed}", seeds=3
-    )
-    assert evaluate.digits_for(plain) == evaluate.signature_digits
-    assert evaluate.digits_for(noisy) == evaluate.signature_digits_stochastic
 
 
 # -- argv ------------------------------------------------------------------
@@ -294,13 +278,11 @@ def _candidate(cid: str, tail: str) -> Candidate:
 
 
 def test_a_noisy_evaluator_still_catches_a_behavioural_twin(minimal_raw, tmp_path):
-    """The whole point of `signature_digits_stochastic`.
-
-    The evaluator reports a value that wobbles in the sixth digit between
-    runs -- a solver that stopped a microsecond later. Two structurally
-    different candidates that do the same thing must still be recognised as
-    twins, and at nine digits they never would be.
-    """
+    """The evaluator reports a value that wobbles in the sixth digit between
+    seeds. Two structurally different candidates that do the same thing must
+    still be recognised as twins: the wobble is the run's noise, and the twin
+    rule allows for it (A2.2). Nothing ran the seed again here, so the stage's
+    repeatability is unknown and the across-seed noise is read."""
     script = tmp_path / "wobbly.py"
     script.write_text(
         "import json, sys, pathlib, hashlib\n"
@@ -324,16 +306,16 @@ def test_a_noisy_evaluator_still_catches_a_behavioural_twin(minimal_raw, tmp_pat
     assert "behavioural duplicate" in (second["b"].reject_reason or "")
 
 
-def test_the_same_wobble_at_nine_digits_would_look_novel(minimal_raw, tmp_path):
-    """The failure mode the coarser rounding exists to prevent, made explicit."""
-    from evolvekit.evaluate.signature import behaviour_signature
+def test_the_same_wobble_at_nine_digits_would_look_novel_but_is_within_the_noise():
+    """The failure mode the noise margin exists to prevent, made explicit."""
+    from evolvekit.evaluate.signature import Behaviour, behaviour_signature, twin_margins, within
 
     run_a = {"value": 7.000001}
     run_b = {"value": 7.000002}
     fine = dict(ignore=(), digits=9)
-    coarse = dict(ignore=(), digits=DEFAULT_SIGNATURE_DIGITS_STOCHASTIC)
     assert behaviour_signature(run_a, {}, **fine) != behaviour_signature(run_b, {}, **fine)
-    assert behaviour_signature(run_a, {}, **coarse) == behaviour_signature(run_b, {}, **coarse)
+    margins = twin_margins(Behaviour(run_a, {}), {"value": 1e-6}, {}, seeds=3)
+    assert within(Behaviour(run_a, {}), Behaviour(run_b, {}), margins, 9)
 
 
 def test_the_spread_reaches_the_candidate_record(minimal_raw, tmp_path):
