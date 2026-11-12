@@ -969,9 +969,9 @@ does not compete. It is not ranked, archived or bred from, and its row carries
 `competes: false` and `veto: "holdout below the seed's …"` with the seed's
 value (and, when the margin is not 0, `"… by more than its noise margin …"`).
 The leaderboard lists these candidates under its table, each with the `!` flag
-— the flag and the veto are one condition — and counts them as "kept out by the hold-out",
-apart from the candidates that did not finish; `status` and the dashboard label
-them the same way. A row written before the veto existed is judged by it when
+— the flag and the veto are one condition — and counts them as "kept out by the
+hold-out", apart from the candidates that did not finish; `status` and the
+dashboard label them the same way. A row written before the veto existed is judged by it when
 it is read back, by the resumed run and by every view alike.
 
 The comparison is `private < seed's private − margin`. The margin is twice the
@@ -983,7 +983,9 @@ the public stage's noise stands in, rescaled by `|seed's private / seed's
 public|` — only when both are non-zero and of one sign; otherwise the margin is
 0. On a repeatable evaluator (same program and same seed give the same numbers)
 the margin uses the paired noise, which is 0 at `seeds: 1`: the literal rule.
-It is 0 with `score.levels`. One margin is computed per generation, and every
+It is 0 with `score.levels`. One margin is computed per generation, read after
+that generation's own hold-out runs, so early in a run the candidates' own
+replicates are part of the estimate they are judged by. Every
 row that finished with a hold-out score records the one it was judged with as
 `holdout_margin` (`0.0` with no noise estimate; absent on rows from before the
 margin, which are judged by the literal rule). The `!` flag follows the same

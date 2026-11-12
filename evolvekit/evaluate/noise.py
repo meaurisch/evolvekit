@@ -485,6 +485,24 @@ class Noise:
                     return True
         return False
 
+    def read_known(self, key: str) -> bool:
+        """Whether the estimate the accessors read has data: on a repeatable
+        stage the paired pool only (an across estimate there is reported, not
+        read), otherwise any (`known`)."""
+        if not self.repeatable(key):
+            return self.known(key)
+        stage = self._stages.get(key)
+        if stage is None:
+            return False
+        if any(e["df"] >= 1 for entry in stage["kpis"].values() for e in entry["paired"].values()):
+            return True
+        return any(
+            e is not None and e[0] >= 1
+            for entry in stage["vectors"].values()
+            for elements in entry["paired"].values()
+            for e in elements
+        )
+
     def source(self, key: str) -> str:
         """Where `sd` of stage `key` comes from: `paired` on a repeatable
         stage, else `replicates` (a candidate's own runs), `calibration` (the

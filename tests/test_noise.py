@@ -346,10 +346,11 @@ def test_the_calibration_instance_is_the_one_whose_seed_run_took_the_median_time
 # -- the seed run again, in a cascade -------------------------------------------
 
 # cost = scale(instance) * (1 + x), plus 3 * seed (repeatable) or fresh noise every
-# call (wall-clock). Every call leaves calls/<instance>.<seed>.<pid> and sleeps by
-# the instance's rank, so the seed's runs take ordered times: i2 is the median.
+# call (wall-clock). Every call leaves calls/<instance>.<seed>.<pid>. The seed's runs
+# take the times `_TOY_TIMES` gives them (the `toy_times` fixture), so i2 is the median
+# whatever the machine's load: measured times would let a busy machine reorder them.
 TOY = r'''
-import argparse, json, os, random, time
+import argparse, json, os, random
 p = argparse.ArgumentParser()
 p.add_argument("--instance"); p.add_argument("--x", type=float); p.add_argument("--seed", type=int, default=0)
 p.add_argument("--mode")
@@ -357,8 +358,6 @@ a = p.parse_args()
 os.makedirs("calls", exist_ok=True)
 seen = len([n for n in os.listdir("calls") if n.startswith("%s.%d." % (a.instance, a.seed))])
 open(os.path.join("calls", "%s.%d.%d" % (a.instance, a.seed, os.getpid())), "w").close()
-rank = {"i1": 1, "i2": 2, "i3": 3}[a.instance]
-time.sleep(0.15 * rank)
 if a.mode == "flaky" and seen >= 1:
     raise SystemExit("the second run on the same seed crashed")
 scale = {"i1": 100.0, "i2": 1000.0, "i3": 500.0}[a.instance]
@@ -366,6 +365,28 @@ cost = scale * (1.0 + a.x)
 cost += random.gauss(0.0, 2.0) if a.mode == "wall-clock" else 3.0 * a.seed
 print(json.dumps({"cost": cost, "vehicles": 4}))
 '''
+
+_TOY_TIMES = {"i1": 0.15, "i2": 0.30, "i3": 0.45}
+
+
+@pytest.fixture(autouse=True)
+def toy_times(monkeypatch):
+    """The toy's instances take fixed, ordered times: the median-instance choice
+    reads these in place of the measured `instance_durations`, so it is the same
+    under any load. Other stages (other instance names) are left as measured."""
+    import dataclasses
+
+    from evolvekit.evaluate import noise as noise_module
+
+    measured = noise_module._median_index
+
+    def ordered(stage, outcome):
+        if stage.instances and set(stage.instances) <= set(_TOY_TIMES) \
+                and len(outcome.instance_durations) == len(stage.instances):
+            outcome = dataclasses.replace(outcome, instance_durations=[_TOY_TIMES[i] for i in stage.instances])
+        return measured(stage, outcome)
+
+    monkeypatch.setattr(noise_module, "_median_index", ordered)
 
 
 def _toy(tmp_path, mode, *, seeds=1, placeholder=True, instances=True):

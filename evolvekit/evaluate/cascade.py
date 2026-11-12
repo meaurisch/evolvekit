@@ -744,7 +744,8 @@ class Cascade:
         difference of two equal candidates then has sd `√2 · σ_priv`, and an
         equal candidate is kept out with P(Z < -√2), about 8 %.
 
-        `σ_priv` is the hold-out's own estimate when it has one. Otherwise
+        `σ_priv` is the hold-out's own estimate when it has one -- on a
+        repeatable hold-out, a paired one (`Noise.read_known`). Otherwise
         (a hold-out that replicates nothing, which calibration does not
         cover) the public run's noise, rescaled to the hold-out's size by
         `|seed_private / seed_public|` -- only when both seed scores are
@@ -756,7 +757,7 @@ class Cascade:
         if score.levels:
             return 0.0
         private_key = f"{final.id}/private"
-        if self.noise.known(private_key):
+        if self.noise.read_known(private_key):
             return 2.0 * self.noise.score_sd(private_key, score, final.seeds)
         public, private = self.seed_public, self.seed_private
         if public is None or private is None or public == 0 or private == 0 or (public > 0) != (private > 0):
