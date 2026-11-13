@@ -1696,15 +1696,13 @@ class ArchiveConfig:
         )
         given = tuple(DescriptorConfig.parse(d, i) for i, d in enumerate(raw_descriptors))
         descriptors = given or DEFAULT_DESCRIPTORS
-        for kind, names in (
-            ("kpi", [d.kpi for d in descriptors if d.param is None]),
-            ("parameter", [d.param for d in descriptors if d.param is not None]),
-        ):
-            duplicates = sorted({n for n in names if names.count(n) > 1})
-            if duplicates:
-                raise ConfigError(
-                    f"search.archive.descriptors: duplicate {kind}(s) {duplicates}"
-                )
+        names = [d.name for d in descriptors]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ConfigError(
+                f"search.archive.descriptors: duplicate kpi(s) or parameter(s) {duplicates}: "
+                "every axis needs a name of its own"
+            )
         return ArchiveConfig(
             descriptors=descriptors,
             top_k=_as_int(data.get("top_k", 20), "search.archive.top_k", minimum=1),

@@ -8,7 +8,7 @@ import pytest
 
 from evolvekit.candidate import Candidate
 from evolvekit.config import ArchiveConfig, ConfigError, DescriptorConfig, SearchConfig
-from evolvekit.search.archive import Archive, descriptor_value, sigmoid
+from evolvekit.search.archive import Archive, cut_points, descriptor_value, sigmoid
 
 
 def make(
@@ -192,10 +192,10 @@ def test_one_outlier_no_longer_squashes_an_auto_axis():
     archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4),)))
     for i, value in enumerate([1, 2, 3, 4, 5, 6, 7, 1000]):
         archive.add(make(f"c{i}", score=float(i), complexity=value))
-    assert archive.axes[0].edges == [2.75, 4.5, 6.25]
+    assert archive.axes[0].edges == [2.5, 4.5, 6.5], "halfway between neighbouring values"
     assert len(archive.cells) == 4, "equal counts; equal width put seven in bin 0"
-    assert archive.axes[0].label(0) == "1..2.75" and archive.axes[0].label(3) == "6.25..1000"
-    assert archive.to_dict()["descriptors"][0]["edges"] == [2.75, 4.5, 6.25]
+    assert archive.axes[0].label(0) == "1..2.5" and archive.axes[0].label(3) == "6.5..1000"
+    assert archive.to_dict()["descriptors"][0]["edges"] == [2.5, 4.5, 6.5]
 
 
 def test_an_auto_axis_rebins_when_its_members_double():
@@ -205,11 +205,11 @@ def test_an_auto_axis_rebins_when_its_members_double():
         archive.add(make(f"c{i}", score=float(i), complexity=float(i + 1)))
         seen.append(list(archive.axes[0].edges))
     assert seen[0] == [], "one member: everything is bin 0"
-    assert seen[1] == [1.25, 1.5, 1.75]            # 2 members
+    assert seen[1] == [1.5]          # 2 members: one gap, one cut
     assert seen[2] == seen[1], "not at 3"
-    assert seen[3] == [1.75, 2.5, 3.25]            # 4 members
+    assert seen[3] == [1.5, 2.5, 3.5]            # 4 members
     assert seen[4] == seen[5] == seen[6] == seen[3], "not at 5, 6 or 7"
-    assert seen[7] == [2.75, 4.5, 6.25]            # 8 members
+    assert seen[7] == [2.5, 4.5, 6.5]            # 8 members
     assert seen[8] == seen[7]
 
 
@@ -219,6 +219,66 @@ def test_an_auto_axis_with_one_distinct_value_puts_everyone_in_bin_0():
         archive.add(make(f"c{i}", score=float(i), complexity=5.0))
     assert archive.axes[0].edges == []
     assert set(archive.cells) == {(0,)}
+
+
+@pytest.mark.parametrize(
+    "values, edges",
+    [
+        ([1] * 7 + [5], [3.0]),                       # quantiles 1, 1, 1: one cut, not three at 1
+        ([3] * 6 + [1, 9], [2.0, 6.0]),
+        ([1] * 10 + [2, 3, 4, 5], [1.5, 2.5, 3.5]),   # tied quantiles: the fullest bin is cut
+        ([10] * 5 + [11] * 5 + [12] * 5 + [13] * 5 + [14] * 4 + [20] * 8, [10.5, 12.5, 17.0]),
+    ],
+)
+def test_tied_quantile_edges_never_merge_distinct_values(values, edges):
+    assert cut_points(values, 4) == edges
+    assert len(set(edges)) == len(edges) and not set(edges) & set(values), "every cut lies between two values"
+    archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4),)))
+    for i, value in enumerate(values):
+        archive.add(make(f"c{i:02d}", score=float(i), complexity=float(value)))
+    archive._refit()
+    archive._rebin()
+    by_value: dict[float, set] = {}
+    for member in archive.members.values():
+        by_value.setdefault(member.kpis["complexity"], set()).add(tuple(member.cell))
+    cells = [cell for found in by_value.values() for cell in found]
+    assert all(len(found) == 1 for found in by_value.values())
+    if len(by_value) <= 4:
+        assert len(set(cells)) == len(by_value), "no two distinct values share a cell"
+    else:
+        assert len(set(cells)) == 4
+
+
+def test_two_distinct_values_take_two_cells_as_soon_as_they_are_seen():
+    archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4),)))
+    for i, value in enumerate([1] * 7 + [5]):
+        archive.add(make(f"c{i}", score=float(i), complexity=float(value)))
+    assert archive.members["c0"].cell != archive.members["c7"].cell
+
+
+def test_an_update_that_moves_a_value_cuts_the_edges_again_as_a_resume_would():
+    config = ArchiveConfig(descriptors=(DescriptorConfig("complexity", 2),))
+    live = Archive.from_config(config)
+    for cid, size in (("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0)):
+        live.add(make(cid, score=0.0, complexity=size))
+    assert live.axes[0].edges == [2.5]
+    pooled = make("b", score=0.0, complexity=10.0)
+    live.update(pooled)
+    rows = [make(cid, score=0.0, complexity=size).to_record() for cid, size in (("a", 1.0), ("c", 3.0), ("d", 4.0))]
+    rows.insert(1, pooled.to_record())
+    resumed = Archive.from_records(rows, config)
+    assert live.axes[0].edges == resumed.axes[0].edges == [3.5]
+    assert live.cells.keys() == resumed.cells.keys()
+    assert {m.id: m.cell for m in live.members.values()} == {m.id: m.cell for m in resumed.members.values()}
+
+
+def test_an_update_that_keeps_the_values_keeps_the_edges():
+    archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 2),)))
+    for cid, size in (("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 40.0)):
+        archive.add(make(cid, score=0.0, complexity=size))
+    before = list(archive.axes[0].edges)
+    archive.update(make("b", score=5.0, complexity=2.0))
+    assert archive.axes[0].edges == before
 
 
 def test_a_rebin_keeps_the_elite_rule_and_an_update():
@@ -288,6 +348,22 @@ def test_a_parameter_axis_reads_the_parameters_own_scale():
     assert descriptor_value(rate, "rate", param="rate", space=space) == pytest.approx(0.5)
     assert descriptor_value(rate, "mode", param="mode", space=space) == 1.0
     assert descriptor_value(make("none", score=0.0), "rate", param="rate", space=space) == 0.0
+
+
+def test_a_parameter_axis_is_labelled_in_the_parameters_own_values():
+    from evolvekit.space import ParameterSpace
+
+    space = ParameterSpace.parse({
+        "a": FLOAT01,
+        "rate": {"type": "float", "low": 0.01, "high": 100.0, "log": True, "default": 1.0},
+        "mode": {"type": "choice", "choices": ["x", "y", "z"], "default": "x"},
+    })
+    config = ArchiveConfig(descriptors=tuple(DescriptorConfig(bins=4, lo=0.0, hi=1.0, param=n) for n in space.names))
+    archive = Archive.from_config(config, space=space)
+    a, rate, mode = archive.axes
+    assert [a.label(i) for i in range(4)] == ["0..0.25", "0.25..0.5", "0.5..0.75", "0.75..1"]
+    assert rate.label(0) == "0.01..0.1" and rate.label(3) == "10..100", "log scale: decades"
+    assert [mode.label(i) for i in range(4)] == ["x", "-", "y", "z"]
 
 
 def test_the_grid_with_parameter_axes_rebuilds_from_run_records(tmp_path):

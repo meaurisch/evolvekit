@@ -328,11 +328,18 @@ search:
 lands in the end bin. A `range: auto` axis is cut at the **quantiles** of its
 members' values (`statistics.quantiles(..., method="inclusive")`), so each bin
 holds about as many members and one outlier cannot squash every other
-candidate into the bottom bin. The cut points move only when the member count
-doubles — at 2, 4, 8, 16 … members — and every member is then placed again;
-until two distinct values have been seen, everything is in bin 0.
+candidate into the bottom bin. Each cut sits halfway between two neighbouring
+distinct values, so tied values — a count such as `complexity` repeats a lot —
+never put two distinct values in one bin while there are no more distinct
+values than bins; with fewer distinct values than bins every one has a bin of
+its own, and quantiles that tie are replaced by a cut through the fullest bin.
+The cut points move only when the member count doubles — at 2, 4, 8, 16 …
+members — and every member is then placed again (and when a re-evaluation
+changes a member's value, the last cut is made again with it, as a resumed run
+makes it); until a re-bin has seen two distinct values, everything is in bin 0.
 `archive.json` lists each auto axis's cut points under `edges`, and a cell's
-label gives its quantile range.
+label gives its range. A parameter axis's label is in the parameter's own
+values (`0.25..0.5`; the choices in it, `fast/slow`).
 
 *Parameter axes.* With `problem.parameters` declared and no `descriptors`
 written, the grid's axes are the **first two declared parameters** (one when

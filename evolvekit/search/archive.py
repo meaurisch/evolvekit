@@ -24,16 +24,16 @@ from __future__ import annotations
 
 import math
 import random
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from statistics import fmean, pstdev, quantiles
 from typing import Any, Iterable, Sequence
 
 from evolvekit.candidate import Candidate
 from evolvekit.config import ArchiveConfig, DescriptorConfig
-from evolvekit.space import ParameterSpace
+from evolvekit.space import Parameter, ParameterSpace
 
-__all__ = ["Archive", "Axis", "Cell", "Placement", "descriptor_value", "diff_complexity", "sigmoid"]
+__all__ = ["Archive", "Axis", "Cell", "Placement", "cut_points", "descriptor_value", "diff_complexity", "sigmoid"]
 
 
 def diff_complexity(diff: str) -> int:
@@ -92,6 +92,61 @@ def descriptor_value(
     return number if math.isfinite(number) else 0.0
 
 
+def cut_points(values: Sequence[float], bins: int) -> list[float]:
+    """The cut points of a quantile axis: at most `bins - 1`, each halfway
+    between two neighbouring distinct values, so two distinct values never
+    share a bin unless there are more distinct values than bins.
+
+    With no more distinct values than bins, every gap gets a cut. Otherwise
+    each quantile (`statistics.quantiles(values, n=bins, method="inclusive")`)
+    moves to the gap just below it -- a value equal to a quantile goes up, as
+    `bisect_right` on the quantile itself would put it -- and tied quantiles
+    collapse into one cut. When ties leave fewer than `bins - 1` cuts, the bin
+    holding the most members is split at the gap nearest its median, until
+    there are `bins - 1`.
+    """
+    distinct = sorted(set(values))
+    if len(distinct) < 2 or bins < 2:
+        return []
+    gaps = [(a + b) / 2.0 for a, b in zip(distinct, distinct[1:])]
+    if len(distinct) <= bins:
+        return gaps
+    chosen = {
+        max(0, min(len(gaps) - 1, bisect_left(distinct, q) - 1))
+        for q in quantiles(values, n=bins, method="inclusive")
+    }
+    ordered = sorted(values)
+    while len(chosen) < bins - 1:
+        bounds = [-math.inf] + [gaps[i] for i in sorted(chosen)] + [math.inf]
+        best: tuple[int, int] | None = None   # (members in the bin, gap to cut)
+        for low, high in zip(bounds, bounds[1:]):
+            inside = [v for v in ordered if low < v < high]
+            free = [i for i, gap in enumerate(gaps) if low < gap < high and i not in chosen]
+            if not free:
+                continue
+            median = inside[len(inside) // 2]
+            gap = min(free, key=lambda i: (abs(gaps[i] - median), i))
+            if best is None or len(inside) > best[0]:
+                best = (len(inside), gap)
+        if best is None:
+            break
+        chosen.add(best[1])
+    return [gaps[i] for i in sorted(chosen)]
+
+
+def _parameter_label(parameter: Parameter, index: int, bins: int) -> str:
+    """A `param` bin in the parameter's own values: the range its unit-scale
+    bounds map back to, or the choices that fall in it."""
+    low, high = index / bins, (index + 1) / bins
+    if not parameter.numeric:
+        names = [
+            str(c) for c in parameter.categories
+            if min(bins - 1, int(parameter.to_unit(c) * bins)) == index
+        ]
+        return "/".join(names) if names else "-"
+    return f"{parameter.from_unit(low):g}..{parameter.from_unit(high):g}"
+
+
 @dataclass
 class Axis:
     """One descriptor axis.
@@ -112,11 +167,17 @@ class Axis:
     auto: bool
     param: str | None = None
     edges: list[float] = field(default_factory=list)
+    parameter: Parameter | None = None
+    """The declared parameter of a `param` axis, for labels in its own values."""
 
     @staticmethod
-    def from_config(cfg: DescriptorConfig) -> "Axis":
+    def from_config(cfg: DescriptorConfig, space: ParameterSpace | None = None) -> "Axis":
+        parameter = None
+        if cfg.param is not None:
+            parameter = next((p for p in space or () if p.name == cfg.param), None)
         return Axis(
-            kpi=cfg.name, bins=cfg.bins, lo=cfg.lo, hi=cfg.hi, auto=cfg.auto, param=cfg.param
+            kpi=cfg.name, bins=cfg.bins, lo=cfg.lo, hi=cfg.hi, auto=cfg.auto, param=cfg.param,
+            parameter=parameter,
         )
 
     def observe(self, value: float) -> bool:
@@ -130,14 +191,10 @@ class Axis:
         return moved
 
     def fit(self, values: Sequence[float]) -> None:
-        """New quantile edges for an auto axis; fewer than two distinct values
-        put every member in bin 0."""
-        if not self.auto:
-            return
-        if len(set(values)) < 2 or self.bins < 2:
-            self.edges = []
-            return
-        self.edges = list(quantiles(values, n=self.bins, method="inclusive"))
+        """New quantile edges for an auto axis (`cut_points`); fewer than two
+        distinct values put every member in bin 0."""
+        if self.auto:
+            self.edges = cut_points(values, self.bins)
 
     def index(self, value: float) -> int:
         if self.auto:
@@ -152,6 +209,8 @@ class Axis:
     def label(self, index: int) -> str:
         lo = 0.0 if self.lo is None else self.lo
         hi = 0.0 if self.hi is None else self.hi
+        if self.parameter is not None:
+            return _parameter_label(self.parameter, index, self.bins)
         if self.auto:
             if not self.edges:
                 return f"{lo:g}" if not hi > lo else f"{lo:g}..{hi:g}"
@@ -233,6 +292,8 @@ class Archive:
     rebinned_at: int = 0
     """The member count at the last quantile re-bin of the auto axes; the next
     comes when the count reaches `max(2, 2 * rebinned_at)` (2, 4, 8, ...)."""
+    fitted: list[str] = field(default_factory=list)
+    """The ids of the members the last re-bin cut its edges from."""
 
     # -- construction ----------------------------------------------------
 
@@ -241,7 +302,7 @@ class Archive:
         config: ArchiveConfig, *, tree: bool = False, space: ParameterSpace | None = None
     ) -> "Archive":
         return Archive(
-            axes=[Axis.from_config(d) for d in config.descriptors],
+            axes=[Axis.from_config(d, space) for d in config.descriptors],
             top_k=config.top_k,
             tree=tree,
             space=space,
@@ -346,25 +407,37 @@ class Archive:
     def update(self, candidate: Candidate) -> None:
         """A member's fitness changed (its runs pooled with a re-evaluation):
         every member is placed again with the elite rule (`_rebin`), as on a
-        resume that reads the pooled value from the start; the quantile edges
-        stay where the last re-bin put them. Not a member: nothing."""
+        resume that reads the pooled value from the start. When the change moved
+        the member's value on an auto axis and the member was in the last re-bin,
+        the edges are cut again from the same members, now with the pooled
+        value -- the edges a resume cuts. Not a member: nothing."""
         if candidate.id not in self.members:
             return
+        previous = self.members[candidate.id]
+        moved = any(
+            axis.auto and self.value_on(axis, previous) != self.value_on(axis, candidate)
+            for axis in self.axes
+        )
         self.members[candidate.id] = candidate
         for axis in self.axes:
             axis.observe(self.value_on(axis, candidate))
+        if moved and candidate.id in self.fitted:
+            self._refit(self.fitted)
         self._rebin()
 
     def _rebin_due(self) -> bool:
         """An auto axis re-bins each time the member count doubles: at 2, 4, 8, ..."""
         return any(axis.auto for axis in self.axes) and len(self.members) >= max(2, 2 * self.rebinned_at)
 
-    def _refit(self) -> None:
-        """New quantile edges on every auto axis, from every member's value."""
-        members = sorted(self.members.values(), key=lambda c: c.id)
+    def _refit(self, ids: Sequence[str] | None = None) -> None:
+        """New quantile edges on every auto axis, from every member's value
+        (or those of `ids`, the members of the last re-bin)."""
+        chosen = sorted(self.members if ids is None else [i for i in ids if i in self.members])
         for axis in self.axes:
-            axis.fit([self.value_on(axis, member) for member in members])
-        self.rebinned_at = len(self.members)
+            axis.fit([self.value_on(axis, self.members[i]) for i in chosen])
+        if ids is None:
+            self.rebinned_at = len(self.members)
+            self.fitted = chosen
 
     def _rebin(self) -> None:
         """Re-place everything the grid already holds (new edges, or a changed fitness)."""

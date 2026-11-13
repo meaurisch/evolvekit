@@ -507,3 +507,8 @@ def test_a_tuning_config_defaults_to_its_first_two_parameters(tmp_path):
 def test_a_config_without_parameters_keeps_the_complexity_axis(minimal_raw, tmp_path):
     config = build(minimal_raw, tmp_path)
     assert [(d.kpi, d.param) for d in config.search.archive.descriptors] == [("complexity", None)]
+
+
+def test_a_kpi_axis_and_a_parameter_axis_may_not_share_a_name(tmp_path):
+    with pytest.raises(ConfigError, match=r"duplicate kpi\(s\) or parameter\(s\) \[.x.\]"):
+        build(_tuning_raw(tmp_path, [{"kpi": "x"}, {"param": "x"}]), tmp_path)
