@@ -258,7 +258,7 @@ print(json.dumps({"value": 10.0 + (1.0 if a.x > 0.5 else 0.0) + a.seed / 1000.0}
 '''
 
 
-def _toy(tmp_path, every=2, max_full_evals_per_day=1000, toy=TOY, holdout=False):
+def _toy(tmp_path, every=2, max_full_evals_per_day=1000, toy=TOY, holdout=False, descriptors=None):
     from evolvekit.config import build_config
 
     (tmp_path / "toy.py").write_text(toy, encoding="utf-8")
@@ -275,6 +275,8 @@ def _toy(tmp_path, every=2, max_full_evals_per_day=1000, toy=TOY, holdout=False)
     }
     if holdout:
         raw["evaluate"]["stages"][1]["private_inputs"] = ["held"]
+    if descriptors is not None:
+        raw["search"]["archive"] = {"descriptors": descriptors}
     return build_config(raw, base_dir=tmp_path)
 
 
@@ -386,6 +388,24 @@ def test_a_resumed_run_reads_its_reevaluations_back(tmp_path):
     Driver(config, run_dir=run_dir).run(generations=2)
     done = _reevaluations(run_dir)
     assert [(r["seed"], r["prior_runs"]) for r in done] == [(2000, 1), (2001, 2), (2002, 3)]
+
+
+def test_a_reevaluation_on_an_auto_kpi_axis_leaves_the_grid_a_resume_rebuilds(tmp_path):
+    """The re-evaluation pools the best's `value` in place; the grid's quantile
+    edges are cut again with the pooled value, as the resume cuts them."""
+    from evolvekit.search.driver import Driver
+
+    config = _toy(tmp_path, descriptors=[{"kpi": "value", "bins": 2}])
+    run_dir = tmp_path / "run"
+    live = Driver(config, run_dir=run_dir)
+    live.run(generations=4)
+    assert live.best.replicates == 3
+    resumed = Driver(config, run_dir=run_dir)
+    resumed.resume()
+    assert live.grid.axes[0].edges == resumed.grid.axes[0].edges
+    assert live.grid.axes[0].edges == [pytest.approx((10.0 + live.best.kpis["value"]) / 2)], \
+        "halfway between the seed and the pooled best"
+    assert {m.id: m.cell for m in live.grid.members.values()} == {m.id: m.cell for m in resumed.grid.members.values()}
 
 
 def test_the_daily_cap_counts_and_stops_a_reevaluation(tmp_path):

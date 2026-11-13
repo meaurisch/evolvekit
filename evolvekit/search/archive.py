@@ -294,6 +294,10 @@ class Archive:
     comes when the count reaches `max(2, 2 * rebinned_at)` (2, 4, 8, ...)."""
     fitted: list[str] = field(default_factory=list)
     """The ids of the members the last re-bin cut its edges from."""
+    fitted_values: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    """Each of those members' values on the auto axes when the edges were cut:
+    what `update` compares with, since a re-evaluation changes the member's
+    KPIs in place on the object the grid holds."""
 
     # -- construction ----------------------------------------------------
 
@@ -413,15 +417,11 @@ class Archive:
         value -- the edges a resume cuts. Not a member: nothing."""
         if candidate.id not in self.members:
             return
-        previous = self.members[candidate.id]
-        moved = any(
-            axis.auto and self.value_on(axis, previous) != self.value_on(axis, candidate)
-            for axis in self.axes
-        )
         self.members[candidate.id] = candidate
         for axis in self.axes:
             axis.observe(self.value_on(axis, candidate))
-        if moved and candidate.id in self.fitted:
+        cut_with = self.fitted_values.get(candidate.id)
+        if cut_with is not None and cut_with != self._auto_values(candidate):
             self._refit(self.fitted)
         self._rebin()
 
@@ -438,6 +438,10 @@ class Archive:
         if ids is None:
             self.rebinned_at = len(self.members)
             self.fitted = chosen
+        self.fitted_values = {i: self._auto_values(self.members[i]) for i in chosen}
+
+    def _auto_values(self, candidate: Candidate) -> tuple[float, ...]:
+        return tuple(self.value_on(axis, candidate) for axis in self.axes if axis.auto)
 
     def _rebin(self) -> None:
         """Re-place everything the grid already holds (new edges, or a changed fitness)."""

@@ -262,11 +262,12 @@ def test_an_update_that_moves_a_value_cuts_the_edges_again_as_a_resume_would():
     for cid, size in (("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0)):
         live.add(make(cid, score=0.0, complexity=size))
     assert live.axes[0].edges == [2.5]
-    pooled = make("b", score=0.0, complexity=10.0)
-    live.update(pooled)
-    rows = [make(cid, score=0.0, complexity=size).to_record() for cid, size in (("a", 1.0), ("c", 3.0), ("d", 4.0))]
-    rows.insert(1, pooled.to_record())
-    resumed = Archive.from_records(rows, config)
+    # As the driver's re-evaluation does it: the member the grid holds is changed
+    # in place, and `update` is handed that same object.
+    member = live.members["b"]
+    member.kpis = {**member.kpis, "complexity": 10.0}
+    live.update(member)
+    resumed = Archive.from_records([m.to_record() for m in sorted(live.members.values(), key=lambda m: m.id)], config)
     assert live.axes[0].edges == resumed.axes[0].edges == [3.5]
     assert live.cells.keys() == resumed.cells.keys()
     assert {m.id: m.cell for m in live.members.values()} == {m.id: m.cell for m in resumed.members.values()}
