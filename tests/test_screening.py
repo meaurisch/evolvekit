@@ -217,6 +217,8 @@ def _raw(tmp_path: Path, *, generations: int = 7, children: int = 4) -> dict:
             "seed": 3,
             "novelty": {"behavioural": "off", "near": {"method": "off"}},
         },
+        # The run's one hypercube can find the best x early; patience must not end it before round 6.
+        "stop": {"patience": 20},
     }
 
 

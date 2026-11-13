@@ -18,11 +18,12 @@ do that over a typed `problem.parameters` space, each for a different reason:
                 highest -- which is how the search learns that one boolean
                 costs five percent without anybody reading a chart.
 
-All three are arithmetic on dicts, need no model and cost no tokens. A
-candidate is judged by the deepest stage it finished: with `normalize:
-baseline` a screening stage and the full stage are both "percent of the
-baseline", so a configuration screened out early still tells the estimator
-where not to look.
+All three are arithmetic on dicts, need no model and cost no tokens. What
+the estimator reads is a rank, not a score: finished candidates by fitness,
+then those screened out by a cheaper stage (by how deep they got and that
+stage's score), then the raced-out and vetoed ones, then the failed and gated
+ones. Only the order matters to a split into good and bad, so a configuration
+screened out early tells the estimator where not to look on any scale.
 """
 
 from __future__ import annotations
@@ -54,7 +55,9 @@ no region is ever ruled out by a handful of samples."""
 
 @dataclass(frozen=True)
 class Observation:
-    """One configuration and how it did. Higher `fitness` is better."""
+    """One configuration and how it did. Higher `fitness` is better; only the
+    order counts. The driver passes a rank score (`Driver._observations`:
+    minus the position, in four tiers), not a score on the objective's scale."""
 
     values: Mapping[str, Any]
     fitness: float
@@ -69,13 +72,19 @@ def propose_tpe(
 ) -> dict[str, Any] | None:
     """The configuration, among `CANDIDATES` drawn from the good density, where
     good configurations are most over-represented. `None` when there are too
-    few observations to say."""
+    few observations to say. Every configuration in `taken` (the siblings
+    proposed so far this generation) counts as a bad observation and is never
+    proposed itself."""
     usable = [o for o in observations if all(p.name in o.values for p in space)]
     if len(usable) < MIN_OBSERVATIONS:
         return None
     ranked = sorted(usable, key=lambda o: -o.fitness)
     n_good = max(2, math.ceil(GOOD_FRACTION * len(ranked)))
     good, bad = ranked[:n_good], ranked[n_good:]
+    # The constant liar: a sibling already proposed this generation is not yet
+    # evaluated, and is told to the estimator as a bad configuration, so parallel
+    # proposals spread out. Added after the split, it never changes `n_good`.
+    bad += [Observation(v, -math.inf) for v in taken if all(p.name in v for p in space)]
 
     densities = {p.name: (_Density(p, good), _Density(p, bad)) for p in space}
     seen = [dict(v) for v in taken] + [dict(o.values) for o in usable]

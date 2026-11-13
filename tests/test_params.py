@@ -111,15 +111,20 @@ def test_a_block_with_nothing_to_sweep_yields_no_variant():
 
 
 def test_the_operator_costs_no_tokens_and_reports_what_it_changed():
-    outcome = param_lhs(candidate(), seed=5)
+    outcome = param_lhs(candidate(), row={"ALPHA": 7.25, "STEPS": 6})
     assert outcome.ok and outcome.mode == "param_lhs"
     assert outcome.completion is None and outcome.messages == []
-    assert set(outcome.meta["params"]) == {"ALPHA", "STEPS"}
-    assert outcome.block != BLOCK
+    assert outcome.meta["params"] == {"ALPHA": 7.25, "STEPS": 6}
+    assert "ALPHA = 7.25\n" in outcome.block and "STEPS = 6\n" in outcome.block
+
+
+def test_a_constant_the_row_does_not_name_keeps_its_value():
+    outcome = param_lhs(candidate(), row={"ALPHA": 1.5, "OTHER": 3})
+    assert outcome.meta["params"] == {"ALPHA": 1.5, "STEPS": 3}
 
 
 def test_the_operator_fails_loudly_on_a_param_less_block():
-    outcome = param_lhs(candidate("def f():\n    return 1\n"), seed=1)
+    outcome = param_lhs(candidate("def f():\n    return 1\n"), row={"ALPHA": 1.0})
     assert not outcome.ok
     assert "no sweepable parameters" in outcome.error
 

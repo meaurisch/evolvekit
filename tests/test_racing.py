@@ -334,8 +334,7 @@ def test_the_driver_does_not_learn_from_a_raced_out_candidate_as_if_it_had_finis
                       stages_reached=["static", "proxy"], raced_out="raced out after 2 of 5 instances")
     driver.archive = [finished, raced]
     values = {o.values["x"]: o.fitness for o in driver._observations()}
-    assert values[-0.05] == -95.0
-    assert values[0.2] <= -95.0, "no better than the worst finished candidate"
+    assert values[0.2] < values[-0.05], "ranked below the worst finished candidate"
 
 
 def test_the_race_is_against_the_best_so_far_not_against_the_baseline(tmp_path):

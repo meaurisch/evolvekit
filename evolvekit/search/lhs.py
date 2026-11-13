@@ -13,7 +13,7 @@ from __future__ import annotations
 import random
 from typing import Any, Mapping, Sequence
 
-__all__ = ["latin_hypercube", "sweep_params"]
+__all__ = ["latin_hypercube", "rows_for_params", "sweep_params"]
 
 
 def latin_hypercube(
@@ -57,7 +57,21 @@ def sweep_params(
         return [dict(base) for _ in range(max(1, n_variants))]
 
     samples = latin_hypercube({k: ranges[k] for k in keys}, n_variants - 1, seed)
-    for sample in samples:
+    return variants + rows_for_params(ranges, base, samples)
+
+
+def rows_for_params(
+    ranges: Mapping[str, Sequence[float]],
+    base: Mapping[str, Any],
+    rows: Sequence[Mapping[str, float]],
+) -> list[dict[str, Any]]:
+    """Each hypercube row as a configuration of the block's constants: the
+    keys present in both `base` and `ranges` from the row, rounded as
+    `sweep_params` rounds them (an integer base value stays an integer, the
+    rest to six decimals); the others held at their base values."""
+    keys = sorted(set(base) & set(ranges))
+    out: list[dict[str, Any]] = []
+    for sample in rows:
         variant = dict(base)
         for key in keys:
             base_value = base[key]
@@ -67,5 +81,5 @@ def sweep_params(
                 if isinstance(base_value, int) and not isinstance(base_value, bool)
                 else round(raw, 6)
             )
-        variants.append(variant)
-    return variants
+        out.append(variant)
+    return out

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import shutil
 
 import pytest
@@ -19,7 +20,7 @@ from evolvekit.harness.library import BUILT_IN
 from evolvekit.harness.manifest import Setting, load_harness
 from evolvekit.harness.plan import Plan
 from evolvekit.harness.study import SettingChoice, Study, load_study, save_study
-from evolvekit.search.operators import param_lhs_typed
+from evolvekit.search.operators import latin_rows, param_lhs_typed
 from evolvekit.space import ParameterSpace, SpaceError
 
 
@@ -170,9 +171,16 @@ def test_prior_outside_the_study_range_is_dropped(tmp_path):
     assert memory.priors_for(home, study, document_of=docs.get) == {}
 
 
+def lhs_children(space, count: int, per_cube: int = 10):
+    """`count` `param_lhs` children over `space`, as the driver hands them out:
+    the rows of hypercubes of `per_cube` rows, each cube from its own seed."""
+    rows = [row for s in range(count // per_cube) for row in latin_rows(space, per_cube, random.Random(s))]
+    return [param_lhs_typed(space, seed_candidate(space), row=values, prior=names) for values, names in rows]
+
+
 def test_prior_share_of_draws():
     space = ParameterSpace.parse({"n": {"type": "int", "low": 2, "high": 30, "default": 8, "prior": {"value": 12, "weight": 0.3}}})
-    drawn = [param_lhs_typed(space, seed_candidate(space), seed=s) for s in range(1000)]
+    drawn = lhs_children(space, 1000)
     share = sum("n" in r.meta.get("prior", []) for r in drawn) / 1000
     assert abs(share - 0.3) <= 0.05
     assert all(abs(space.parameters[0].to_unit(r.meta["params"]["n"]) - space.parameters[0].to_unit(12)) <= 0.1 + 1e-9
@@ -182,7 +190,7 @@ def test_prior_share_of_draws():
 def test_prior_never_excludes_range_ends():
     space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5,
                                         "prior": {"value": 0.5, "weight": 0.5}}})
-    values = [param_lhs_typed(space, seed_candidate(space), seed=s).meta["params"]["x"] for s in range(1000)]
+    values = [r.meta["params"]["x"] for r in lhs_children(space, 1000)]
     assert any(v < 0.05 for v in values) and any(v > 0.95 for v in values)
 
 
@@ -193,10 +201,11 @@ def test_prior_draws_are_seeded():
         "init": {"type": "choice", "choices": ["random", "nearest"], "default": "random", "prior": {"value": "nearest", "weight": 0.5}},
     })
     for seed in range(30):
-        first, second = (param_lhs_typed(space, seed_candidate(space), seed=seed) for _ in range(2))
-        assert first.meta == second.meta and first.block == second.block
-        if "init" in first.meta.get("prior", []):
-            assert first.meta["params"]["init"] == "nearest", "a choice is drawn as the value itself"
+        first, second = (latin_rows(space, 6, random.Random(seed)) for _ in range(2))
+        assert first == second
+        for values, names in first:
+            if "init" in names:
+                assert values["init"] == "nearest", "a choice is drawn as the value itself"
 
 
 NO_PRIOR = ParameterSpace.parse({
@@ -206,25 +215,22 @@ NO_PRIOR = ParameterSpace.parse({
     "init": {"type": "choice", "choices": ["random", "nearest"], "default": "random"},
     "or_opt": {"type": "bool", "default": False},
 })
-BEFORE_PRIORS = {  # what `param_lhs_typed` drew at 430a6e4, before priors existed
-    0: {"n": 10, "r": 1736, "a": 0.00608193, "init": "random", "or_opt": True},
-    1: {"n": 23, "r": 4925, "a": 0.0167434, "init": "random", "or_opt": True},
-    7: {"n": 14, "r": 20176, "a": 0.0461724, "init": "random", "or_opt": False},
-    42: {"n": 7, "r": 110, "a": 0.0429623, "init": "nearest", "or_opt": True},
-}
 
 
 def test_no_prior_draws_as_before():
-    for seed, values in BEFORE_PRIORS.items():
-        result = param_lhs_typed(NO_PRIOR, seed_candidate(NO_PRIOR), seed=seed)
-        assert result.meta == {"params": values}, seed
+    """Without a prior a cube is the space's own hypercube: nothing more is drawn."""
+    for seed in (0, 1, 7, 42):
+        rows = latin_rows(NO_PRIOR, 6, random.Random(seed))
+        assert [values for values, _ in rows] == NO_PRIOR.latin_hypercube(6, random.Random(seed))
+        assert all(names == [] for _, names in rows)
+        child = param_lhs_typed(NO_PRIOR, seed_candidate(NO_PRIOR), row=rows[0][0], prior=rows[0][1])
+        assert child.meta == {"params": rows[0][0]}
 
 
 def test_a_prior_at_a_range_end_is_reflected_not_piled_on_the_end():
     space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5,
                                         "prior": {"value": 0.0, "weight": 0.5}}})
-    near = [r.meta["params"]["x"] for r in (param_lhs_typed(space, seed_candidate(space), seed=s) for s in range(400))
-            if "x" in r.meta.get("prior", [])]
+    near = [r.meta["params"]["x"] for r in lhs_children(space, 400) if "x" in r.meta.get("prior", [])]
     assert len(near) > 100 and all(0.0 <= v <= 0.1 + 1e-9 for v in near)
     assert sum(v == 0.0 for v in near) <= 2, "clamping would put about half of them on 0.0"
 

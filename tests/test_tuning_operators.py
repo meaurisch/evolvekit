@@ -7,6 +7,7 @@ so far -- all plain arithmetic on a declared `problem.parameters` space.
 
 from __future__ import annotations
 
+import json
 import random
 import sys
 from statistics import fmean
@@ -18,6 +19,7 @@ from evolvekit.config import ConfigError, build_config
 from evolvekit.search.operators import param_cross, param_local, param_tpe
 from evolvekit.search.tuning import MIN_OBSERVATIONS, Observation, propose_tpe
 from evolvekit.space import ParameterSpace
+from tests.test_params import sweepable_project  # noqa: F401  (a fixture)
 
 
 def _raw_space(extra: int = 24) -> dict:
@@ -198,27 +200,226 @@ def _screening_driver(tmp_path, *, normalized: bool):
 
 
 @pytest.mark.parametrize("normalized", [True, False])
-def test_a_screening_score_is_an_observation_only_where_it_is_on_the_same_scale(tmp_path, normalized):
-    """A candidate screened out by the proxy stage is judged by the proxy's
-    score. With `normalize: baseline` on every stage both are percentages of
-    the baseline and can be ranked together; with plain means they are costs on
-    different instances -- the proxy's one small instance makes every screened
-    candidate look better than any finished one."""
+def test_observations_are_ranks_in_four_tiers(tmp_path, normalized):
+    """Q4: what the estimator reads is a rank, best first: (1) finished, by
+    fitness; (2) screened out, by the deepest stage reached and that stage's
+    score -- on any scale, since only the order counts; (3) raced out or kept
+    out by the hold-out veto, one shared rank; (4) failed or gated, one shared
+    rank, the worst. A proxy's score of 9 on its one small instance beats both
+    finished scores as a number and still ranks below them."""
     driver = _screening_driver(tmp_path, normalized=normalized)
     space = driver.config.problem.parameters
-    near, far, crashed = ({**space.defaults(), "neighbours": n} for n in (30, 110, 70))
+    full = ["static", "proxy", "full"]
+
+    def at(n: int) -> dict:
+        return {**space.defaults(), "neighbours": n}
+
     driver.archive = [
-        _candidate(space, "g001-c0002", near, score=-1000.0, competes=True, stages_reached=["static", "proxy", "full"]),
-        _candidate(space, "g001-c0003", far, score=-120.0, competes=False, stages_reached=["static", "proxy"]),
-        _candidate(space, "g001-c0004", crashed, score=-1e9, competes=False, stages_reached=["static"],
+        _candidate(space, "g001-c0002", at(20), score=3.0, competes=True, stages_reached=full,
+                   stage_scores={"proxy": 3.0, "full": 3.0}),
+        _candidate(space, "g001-c0003", at(30), score=5.0, competes=True, stages_reached=full,
+                   stage_scores={"proxy": 5.0, "full": 5.0}),
+        _candidate(space, "g001-c0004", at(40), score=9.0, competes=False, stages_reached=["static", "proxy"],
+                   stage_scores={"proxy": 9.0}),
+        _candidate(space, "g001-c0005", at(50), score=20.0, competes=False, stages_reached=full,
+                   stage_scores={"proxy": 20.0, "full": 20.0}, raced_out="raced out after 2 of 3 instances"),
+        _candidate(space, "g001-c0006", at(60), score=50.0, competes=False, stages_reached=full,
+                   stage_scores={"proxy": 50.0, "full": 50.0}, veto="holdout below the seed's 1.0"),
+        _candidate(space, "g001-c0007", at(70), score=-1e9, competes=False, stages_reached=["static"],
                    last_failure="stage proxy: exit 1"),
+        _candidate(space, "g001-c0008", at(80), score=60.0, competes=False, stages_reached=full,
+                   gated="missed = 2 > 0"),
     ]
     seen = {o.values["neighbours"]: o.fitness for o in driver._observations()}
-    assert seen[30] == -1000.0 and seen[70] == -1001.0, "a crash is the worst observation either way"
-    if normalized:
-        assert seen[110] == -120.0
-    else:
-        assert 110 not in seen, "a cost on another input set is not a judgement of this configuration"
+    assert set(seen) == {20, 30, 40, 50, 60, 70, 80}, "the screened one is an observation on any scale"
+    assert seen[30] > seen[20] > seen[40] > seen[50], "finished by fitness, then screened, then raced out"
+    assert seen[50] == seen[60], "raced out and vetoed share one rank"
+    assert seen[60] > seen[70] == seen[80], "failed and gated share the worst rank"
+    assert seen[30] == -1.0 and seen[20] == -2.0 and seen[40] == -3.0, "a rank is minus the position"
+
+
+def test_tied_observations_share_the_mean_position(tmp_path):
+    driver = _screening_driver(tmp_path, normalized=False)
+    space = driver.config.problem.parameters
+    full = ["static", "proxy", "full"]
+    driver.archive = [
+        _candidate(space, f"g001-c000{i}", {**space.defaults(), "neighbours": n}, score=s, competes=True,
+                   stages_reached=full, stage_scores={"full": s})
+        for i, (n, s) in enumerate([(20, 4.0), (30, 2.0), (40, 2.0), (50, 1.0)], start=2)
+    ]
+    seen = {o.values["neighbours"]: o.fitness for o in driver._observations()}
+    assert seen == {20: -1.0, 30: -2.5, 40: -2.5, 50: -4.0}
+
+
+def test_siblings_proposed_this_generation_push_tpe_away():
+    """The constant liar (Q19): a configuration already proposed this
+    generation joins the bad set, so the estimator rates its neighbourhood
+    lower and the next proposal lands further from it. Same observations, same
+    rng seed, with and without the sibling taken: over 200 seeds the mean
+    distance from the sibling grows. (Before, `taken` only excluded the exact
+    point, and the two proposals were the same.)"""
+    space = _wide_space(0)
+    history = _history(space, 30, seed=7)
+    plain, liar = [], []
+    for s in range(200):
+        sibling = propose_tpe(space, history, random.Random(s))
+        plain.append(space.distance(propose_tpe(space, history, random.Random(10_000 + s)), sibling))
+        pushed = propose_tpe(space, history, random.Random(10_000 + s), taken=[sibling])
+        liar.append(space.distance(pushed, sibling))
+    print(f"mean distance from the sibling: {fmean(plain):.4f} without, {fmean(liar):.4f} with it taken")
+    assert fmean(liar) > fmean(plain) + 0.05, "measured: 0.145 without, 0.252 with it taken"
+
+
+def test_a_taken_configuration_does_not_count_towards_the_good_set():
+    """`taken` is added after the split: it never changes `n_good`."""
+    space = _wide_space(0)
+    history = _history(space, MIN_OBSERVATIONS - 1, 1)
+    taken = [o.values for o in _history(space, 5, 2)]
+    assert propose_tpe(space, history, random.Random(1), taken=taken) is None, "taken points are not observations"
+
+
+# -- one run-wide hypercube (Q3, Decision 8) -------------------------------
+
+
+def _driver(tmp_path, *, operators, children, generations, space, constraints=None):
+    from evolvekit.search.driver import Driver
+
+    problem: dict = {"parameters": {name: {"type": "float", "low": lo, "high": hi, "default": (lo + hi) / 2}
+                                    for name, (lo, hi) in space.items()}}
+    if constraints:
+        problem["parameter_constraints"] = constraints
+    config = build_config(
+        {
+            "problem": problem,
+            "evaluate": {
+                "stages": [
+                    {"id": "static", "kind": "builtin-static"},
+                    {"id": "full", "kind": "command", "kpis_from": "stdout", "command": "{python} solver.py {params}"},
+                ],
+                "score": {"objective": "cost", "direction": "minimize"},
+            },
+            "search": {"operators": operators, "children_per_generation": children, "generations": generations},
+        },
+        base_dir=tmp_path,
+    )
+    return Driver(config, run_dir=tmp_path / "run", log=lambda m: None)
+
+
+def _lhs_state(tmp_path) -> dict:
+    return json.loads((tmp_path / "run" / "work" / "lhs.json").read_text(encoding="utf-8"))
+
+
+def test_the_lhs_children_of_a_run_share_one_hypercube(tmp_path):
+    """Q3, Decision 8: with the default shares a generation has 0-2 param_lhs children;
+    over the run they take the rows of one cube, so the first K cover K strata of every
+    parameter. generations 2 x children 4 x share 0.5 -> 4 expected -> K = 4."""
+    driver = _driver(tmp_path, operators={"param_lhs": 0.5, "param_local": 0.5}, children=4, generations=2,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    rows = [driver._next_lhs_row(driver._seed_candidate()) for _ in range(4)]
+    for name in ("x", "y"):
+        assert sorted(int(row[name] * 4) for row in rows) == [0, 1, 2, 3]
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["K"] == 4
+
+
+def test_the_cube_size_is_clamped_to_4_and_64(tmp_path):
+    small = _driver(tmp_path / "a", operators={"param_lhs": 0.1, "param_local": 0.9}, children=2, generations=2,
+                    space={"x": (0.0, 1.0)})
+    big = _driver(tmp_path / "b", operators={"param_lhs": 1.0}, children=20, generations=50, space={"x": (0.0, 1.0)})
+    small._next_lhs_row(small._seed_candidate())
+    big._next_lhs_row(big._seed_candidate())
+    assert _lhs_state(tmp_path / "a")["cubes"]["typed"]["K"] == 4
+    assert _lhs_state(tmp_path / "b")["cubes"]["typed"]["K"] == 64
+
+
+def test_the_cube_is_kept_and_the_next_row_survives_a_resume(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 1.0)})
+    first = [driver._next_lhs_row(driver._seed_candidate()) for _ in range(3)]
+    state = _lhs_state(tmp_path)
+    assert state["cubes"]["typed"]["next"] == 3 and state["cubes"]["typed"]["K"] == 8
+    again = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 1.0)})
+    assert again._next_lhs_row(again._seed_candidate()) == state["cubes"]["typed"]["rows"][3]
+    assert first == state["cubes"]["typed"]["rows"][:3]
+
+
+def test_a_new_cube_is_built_when_the_rows_run_out(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 0.5, "param_local": 0.5}, children=4, generations=2,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    first = [driver._next_lhs_row(driver._seed_candidate()) for _ in range(4)]
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["built"] == 1
+    fifth = driver._next_lhs_row(driver._seed_candidate())
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert cube["built"] == 2 and cube["next"] == 1 and cube["rows"][0] == fifth
+    assert fifth not in first
+
+
+def test_a_param_lhs_child_draws_one_number_from_the_run_per_cube(tmp_path):
+    """The run's generator gives one draw per cube and nothing per child."""
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 1.0)})
+    driver._next_lhs_row(driver._seed_candidate())
+    after_build = driver.rng.getstate()
+    for _ in range(5):
+        driver._invoke("param_lhs", driver._seed_candidate(), [], "none", None, "g001-c0009")
+    assert driver.rng.getstate() == after_build
+
+
+def test_a_reprompted_lhs_child_takes_the_next_row(tmp_path):
+    """A child whose row is a configuration the run already holds is a
+    duplicate; its one re-prompt takes the next row of the cube."""
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=4, generations=4,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    space = driver.config.problem.parameters
+    seed = driver._seed_candidate()
+    driver._next_lhs_row(seed)  # row 0, handed out earlier
+    rows = _lhs_state(tmp_path)["cubes"]["typed"]["rows"]
+    driver.novelty.add("g001-c0050", space.render_block(rows[1]), parent_block=seed.block)
+    child = driver._breed_one(2, "param_lhs", seed)
+    assert not child.rejected and child.block == space.render_block(rows[2])
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["next"] == 3
+    assert driver._taken == [rows[2]]
+
+
+def test_a_row_that_breaks_a_constraint_is_passed_over(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=4, generations=4,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)}, constraints=["x <= y"])
+    space = driver.config.problem.parameters
+    handed = [driver._next_lhs_row(driver._seed_candidate()) for _ in range(6)]
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert all(space.satisfies(row) for row in handed)
+    assert cube["next"] > 6, "some rows broke the constraint and were passed over"
+    assert handed == [row for row in cube["rows"][: cube["next"]] if space.satisfies(row)]
+
+
+def test_a_cube_of_rows_that_all_break_a_constraint_leaves_the_last_to_the_static_stage(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=2,
+                     space={"x": (0.0, 1.0)}, constraints=["x == 0.5"])
+    row = driver._next_lhs_row(driver._seed_candidate())
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert cube["next"] == cube["K"] == 4 and row == cube["rows"][3]
+
+
+def test_an_untyped_params_block_gets_a_cube_of_its_own(sweepable_project, tmp_path):  # noqa: F811
+    """`# PARAMS` ranges as the key; integers stay integers. A parent whose
+    declaration differs gets its own cube."""
+    from evolvekit.candidate import Candidate as _Candidate
+    from evolvekit.config import load_config
+    from evolvekit.search.driver import Driver
+
+    driver = Driver(load_config(sweepable_project), run_dir=tmp_path / "run", log=lambda m: None)
+    seed = driver._seed_candidate()
+    rows = [driver._next_lhs_row(seed) for _ in range(9)]
+    key = 'params:{"ALPHA": [0.0, 10.0], "STEPS": [1.0, 9.0]}'
+    cube = _lhs_state(tmp_path)["cubes"][key]
+    assert cube["K"] == 9 and cube["rows"] == rows  # generations 3 x children 3 x share 1
+    assert all(isinstance(r["STEPS"], int) and isinstance(r["ALPHA"], float) for r in rows)
+    assert sorted(int(r["ALPHA"] / 10.0 * 9) for r in rows) == list(range(9))
+    outcome = driver._invoke("param_lhs", seed, [], "none", None, "g001-c0002")
+    second = _lhs_state(tmp_path)["cubes"][key]
+    assert outcome.ok and second["built"] == 2 and outcome.meta["params"] == second["rows"][0]
+    assert f"STEPS = {outcome.meta['params']['STEPS']}\n" in outcome.block
+    other = _Candidate(id="o", generation=1, block=seed.block.replace('"ALPHA": [0.0, 10.0]', '"ALPHA": [0.0, 20.0]'),
+                       source="", operator="rewrite")
+    driver._next_lhs_row(other)
+    assert set(_lhs_state(tmp_path)["cubes"]) == {key, 'params:{"ALPHA": [0.0, 20.0], "STEPS": [1.0, 9.0]}'}
 
 
 # -- configuration and the whole loop --------------------------------------

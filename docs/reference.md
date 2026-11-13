@@ -363,7 +363,7 @@ candidates being lost.
 | `rewrite` | small | the same, and asks for the whole block back |
 | `crossover` | small | the parent **and** one inspiration's block, both with score breakdowns |
 | `big_step` | strong | scheduled every `big_step_every` generations, or on plateau |
-| `param_lhs` | none | a Latin-hypercube variant of the block's own constants |
+| `param_lhs` | none | the next row of the run's Latin hypercube over the block's own constants |
 | `param_local` | none | a good configuration; moves one to three of its parameters a little |
 | `param_cross` | none | two good configurations; each parameter from one of them |
 | `param_tpe` | none | every configuration evaluated so far, the failed ones included |
@@ -389,6 +389,25 @@ WIDTH = 128.0
 Blocks without that line are never routed to it, so listing it in
 `search.operators` against a skeleton that declares nothing is harmless.
 
+**One hypercube for the run.** The `param_lhs` children of a run take the rows
+of one Latin hypercube in turn, so the first K of them cover K strata of every
+parameter — however the children fall across generations (with the default
+shares a generation has none, one or two). The cube is sized from the run's
+expected number of `param_lhs` children (`search.generations ×
+children_per_generation × its share / the sum of shares`), at least 4 rows and
+at most 64, and a new one is built when it is used up. A row that breaks a
+[constraint](#constraints-between-parameters-problemparameter_constraints), or
+equals the parent's configuration, is passed over; a child the novelty filter
+finds a duplicate is asked once more and takes the next row. A typed
+`problem.parameters` space has one cube; a `# PARAMS` block one per declaration
+(a parent that declares other ranges gets its own). The cubes and the next row
+of each are kept in `work/lhs.json` (`{"cubes": {"typed" | "params:<ranges as
+JSON>": {"K", "built", "next", "rows"}}}`, with `prior` beside `rows` when a
+parameter has one), so a resumed run hands out the rows the uninterrupted run
+would have; a run without the file builds a cube at its next `param_lhs` child.
+Building a cube takes one number from the run's random stream; a child takes
+none.
+
 `param_local`, `param_cross` and `param_tpe` work on a declared
 [`problem.parameters`](#tuning-a-command-problemparameters) space and are what
 makes a model-free run a *search* rather than a sweep. `param_lhs` fills the box
@@ -399,14 +418,19 @@ and moves one parameter twice as often as two, two twice as often as three; an
 integer moves by at least one, a boolean flips. `param_cross` tries gains
 together that were found separately. `param_tpe` is a Tree-structured Parzen
 Estimator: it models, parameter by parameter, where good configurations are
-dense relative to bad ones and proposes where that ratio is highest — a
-candidate that crashed counts as the worst observation, so a region that kills
-the solver is not proposed again, one that was raced out counts as no better
-than the worst finished one (whatever its screening score), and one that was
-only screened by a cheap stage still says where not to look — when every command
-stage lists `instances` with `normalize: baseline`, so that its score is on the final
-stage's scale; otherwise only finished candidates (and failures) are observations. Until there are eight observations it takes
-a local step instead, and the record says so.
+dense relative to bad ones and proposes where that ratio is highest. It reads
+**ranks**, not scores, in four tiers, best first: finished candidates by
+fitness; candidates screened out by a cheaper stage, by the deepest stage they
+reached and that stage's score (on any scale: only the order counts, and they
+rank below every finished one); raced-out candidates and those kept out by the
+hold-out veto, one shared rank (whatever their screening score); and failed or
+gated candidates, one shared rank, the worst — so a region that kills the
+solver is not proposed again. Ties share the mean position. The siblings
+already proposed in the same generation (by any operator) count as bad
+observations until they are evaluated (a "constant liar"), so several
+`param_tpe` children of one generation spread out instead of proposing the same
+neighbourhood. Until there are eight observations it takes a local step
+instead, and the record says so.
 
 Which to use depends on how good the defaults already are. Measured at equal
 budget, five search seeds each, on two stand-in solvers
@@ -561,10 +585,11 @@ nothing can be called, imported or reached through an attribute (`evolvekit/expr
 - **Refused before any solving.** The static stage refuses a configuration that breaks a
   constraint -- with its sentence (`says`) and the values -- and the command never starts. One that
   cannot be computed for a configuration (a division by zero) counts as broken.
-- **Not proposed in the first place.** `param_lhs`, `param_local`, `param_cross` and `param_tpe` draw
+- **Not proposed in the first place.** `param_local`, `param_cross` and `param_tpe` draw
   again, up to 100 times, rather than propose a configuration that breaks one; after that the last
-  draw is left to the static stage. A model sees the constraints in the prompt, under the parameter
-  list.
+  draw is left to the static stage. `param_lhs` passes over the rows of the run's hypercube that
+  break one; after a whole cube's worth of such rows the last is left to the static stage. A model
+  sees the constraints in the prompt, under the parameter list.
 
 Prefer a space in which every value is valid: tune a truck *premium* of 0 or more rather than two
 costs that must stay ordered, a scale within ±20 % rather than "no more than 20 % from today". A

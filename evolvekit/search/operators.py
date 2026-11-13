@@ -17,7 +17,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from evolvekit.candidate import Candidate, splice_block
 from evolvekit.config import Config
@@ -25,9 +25,9 @@ from evolvekit.diffs import DiffError, apply_response
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.prompts import Inspiration, build_messages
 from evolvekit.providers.base import Completion, Provider, ProviderError
-from evolvekit.search.params import param_variant
+from evolvekit.search.params import apply_params, current_values, declared_ranges
 from evolvekit.search.tuning import Observation, propose_tpe
-from evolvekit.space import CONSTRAINT_ATTEMPTS, PRIOR_BAND, Parameter, ParameterSpace
+from evolvekit.space import PRIOR_BAND, Parameter, ParameterSpace
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only when a tree problem is handled
     from evolvekit.tree import Repo
@@ -40,6 +40,7 @@ __all__ = [
     "run_operator",
     "param_lhs",
     "param_lhs_typed",
+    "latin_rows",
     "param_local",
     "param_cross",
     "param_tpe",
@@ -262,81 +263,70 @@ def _on_tree(
         trees.remove(ctx.run_dir, ctx.draft_id)
 
 
-def param_lhs(parent: Candidate, *, seed: int, n_variants: int = 6) -> OperatorResult:
-    """Zero-LLM-cost parameter sweep over the block's declared `# PARAMS:`.
+_NOTHING_TO_SWEEP = (
+    "param_lhs found no sweepable parameters: the block declares no "
+    "`# PARAMS: {...}` line with matching module-level assignments"
+)
+
+
+def param_lhs(parent: Candidate, *, row: Mapping[str, Any]) -> OperatorResult:
+    """Zero-LLM-cost parameter sweep over the block's declared `# PARAMS:`:
+    the parent's block with its constants set to `row`, one row of the run's
+    Latin hypercube over those ranges (the driver's `_next_lhs_row`, rounded by
+    `lhs.rows_for_params`). A constant the row does not name keeps its value.
 
     Returns a failed result when the block declares nothing to sweep. The
     driver checks `params.has_params()` before routing a child here, so that
     branch only shows up when a candidate has dropped the declaration its
     parent had.
     """
-    variant = param_variant(parent.block, seed=seed, n_variants=n_variants)
-    if variant is None:
-        return OperatorResult(
-            operator="param_lhs",
-            messages=[],
-            error=(
-                "param_lhs found no sweepable parameters: the block declares no "
-                "`# PARAMS: {...}` line with matching module-level assignments"
-            ),
-        )
-    block, values = variant
+    ranges = declared_ranges(parent.block)
+    base = current_values(parent.block, set(ranges)) if ranges else {}
+    if not base:
+        return OperatorResult(operator="param_lhs", messages=[], error=_NOTHING_TO_SWEEP)
+    values = {**base, **{name: value for name, value in row.items() if name in base}}
     return OperatorResult(
         operator="param_lhs",
         messages=[],
-        block=block,
+        block=apply_params(parent.block, values),
         mode="param_lhs",
         meta={"params": values},
     )
 
 
 def param_lhs_typed(
-    space: ParameterSpace, parent: Candidate, *, seed: int, n_variants: int = 6
+    space: ParameterSpace, parent: Candidate, *, row: Mapping[str, Any], prior: Sequence[str] = ()
 ) -> OperatorResult:
-    """The same sweep over a declared `problem.parameters` space.
-
-    Types and scales come from the declaration, so a boolean is flipped rather
-    than frozen, a choice is drawn from its values, and a log-scale parameter is
-    covered decade by decade. The child's block is *rendered* from the sampled
-    values, so it does not matter what shape the parent's code is in.
-
-    A parameter with a `prior` (what an earlier study's winner suggests) is,
-    in each variant, drawn with the prior's weight as its chance from the band
-    around the value instead (`PRIOR_BAND`; a bool or a choice takes the value
-    itself); `meta["prior"]` names the parameters drawn so. The other draws
-    still cover the whole range: a prior never excludes a value.
-    """
-    rng = random.Random(seed)
-    base = parent.params or space.defaults()
-
-    def sweep() -> list[tuple[dict, list[str]]]:
-        drawn = _with_priors(space, space.latin_hypercube(max(2, n_variants), rng), rng)
-        return [(v, names) for v, names in drawn if v != base]
-
-    variants = sweep()
-    if space.constraints:
-        # Draw the hypercube again until some of it satisfies the constraints;
-        # after CONSTRAINT_ATTEMPTS draws the static stage has the last word.
-        for _ in range(CONSTRAINT_ATTEMPTS):
-            feasible = [(v, names) for v, names in variants if space.satisfies(v)]
-            if feasible:
-                variants = feasible
-                break
-            variants = sweep()
-    if not variants:  # a space of one point
-        return OperatorResult(
-            operator="param_lhs",
-            messages=[],
-            error="param_lhs found nothing to sweep: every sample equals the parent",
-        )
-    values, priored = variants[seed % len(variants)]
+    """The same sweep over a declared `problem.parameters` space: `row`, one
+    row of the run's hypercube (`latin_rows`), rendered as the child's block,
+    so it does not matter what shape the parent's code is in. `prior` names
+    the parameters of the row drawn near a prior (`meta["prior"]`)."""
+    values = dict(row)
     return OperatorResult(
         operator="param_lhs",
         messages=[],
         block=space.render_block(values),
         mode="param_lhs",
-        meta={"params": values, **({"prior": priored} if priored else {})},
+        meta={"params": values, **({"prior": list(prior)} if prior else {})},
     )
+
+
+def latin_rows(space: ParameterSpace, count: int, rng: random.Random) -> list[tuple[dict, list[str]]]:
+    """A Latin hypercube of `count` configurations over a declared space, each
+    with the names of its parameters drawn near a prior.
+
+    Types and scales come from the declaration, so a boolean is flipped rather
+    than frozen, a choice is drawn from its values, and a log-scale parameter is
+    covered decade by decade (`ParameterSpace.latin_hypercube`).
+
+    A parameter with a `prior` (what an earlier study's winner suggests) is,
+    in each row, drawn with the prior's weight as its chance from the band
+    around the value instead (`PRIOR_BAND`; a bool or a choice takes the value
+    itself). The other draws still cover the whole range: a prior never
+    excludes a value. Without a prior nothing more is drawn from `rng` than
+    the hypercube itself.
+    """
+    return _with_priors(space, space.latin_hypercube(count, rng), rng)
 
 
 def _with_priors(space: ParameterSpace, variants: list[dict], rng: random.Random) -> list[tuple[dict, list[str]]]:
@@ -423,12 +413,14 @@ def param_tpe(
     observations: list[Observation],
     *,
     seed: int,
+    taken: Sequence[Mapping[str, Any]] = (),
 ) -> OperatorResult:
     """The configuration a Tree-structured Parzen Estimator rates highest, given
-    every configuration evaluated so far (`search/tuning.py`). With too few
-    observations to estimate anything it is a local step instead."""
+    every configuration evaluated so far (`search/tuning.py`) and the siblings
+    already proposed this generation (`taken`: a constant liar, counted bad).
+    With too few observations to estimate anything it is a local step instead."""
     rng = random.Random(seed)
-    proposal = propose_tpe(space, observations, rng)
+    proposal = propose_tpe(space, observations, rng, taken=taken)
     if proposal is None:
         base = dict(parent.params or space.defaults())
         child = space.draw(lambda: space.perturb(base, rng))

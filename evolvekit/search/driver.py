@@ -56,7 +56,7 @@ from evolvekit.leaderboard import (
     seed_private,
     seed_public,
 )
-from evolvekit.ledger import Ledger
+from evolvekit.ledger import Ledger, _atomic_write
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration, big_step_reason
 from evolvekit.providers import Provider, build_provider
@@ -68,6 +68,7 @@ from evolvekit.search.operators import (
     OPERATOR_ROLES,
     OperatorResult,
     TreeContext,
+    latin_rows,
     param_cross,
     param_lhs,
     param_lhs_typed,
@@ -75,7 +76,8 @@ from evolvekit.search.operators import (
     param_tpe,
     run_operator,
 )
-from evolvekit.search.params import has_params
+from evolvekit.search.lhs import latin_hypercube, rows_for_params
+from evolvekit.search.params import current_values, declared_ranges, has_params
 from evolvekit.search.scratchpad import Scratchpad
 from evolvekit.search.screening import SCREENING_FILE, ScreenControl
 from evolvekit.search.tuning import Observation
@@ -88,12 +90,15 @@ def _random_stream(seed: int, recorded: int) -> random.Random:
     """The run's generator: reproducible, and never the same stream twice.
 
     A fresh run is seeded with `search.seed`, as it always was. A resumed run
-    seeded the same way draws the same operators, parents and `param_lhs` sweep
-    seeds as its first generation did -- and `param_lhs` samples from that seed
-    alone, so the children it breeds are blocks the run already holds and the
-    novelty filter discards them. Folding in how much the directory already
-    holds gives a resumed run a stream of its own that is still a function of
-    the seed and the directory, so resuming stays reproducible too.
+    seeded the same way would draw the same operators, parents and seeds as its
+    first generation did -- and an operator that samples from such a seed alone
+    breeds blocks the run already holds, which the novelty filter discards.
+    Folding in how much the directory already holds gives a resumed run a
+    stream of its own that is still a function of the seed and the directory,
+    so resuming stays reproducible too. (`param_lhs` rows do not come from
+    this stream on resume: the run's hypercube and its next row are kept in
+    `work/lhs.json`, so a resumed run hands out the rows the uninterrupted
+    run would have.)
     """
     return random.Random(seed if recorded == 0 else f"{seed}/{recorded}")
 
@@ -215,6 +220,12 @@ class Driver:
             log=self.log,
         )
         self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
+        self._lhs: dict[str, dict] = self._read_lhs()
+        """The run's Latin hypercubes (`work/lhs.json`), one per space: what
+        `param_lhs` children take their rows from, in order (`_next_lhs_row`)."""
+        self._taken: list[dict] = []
+        """The configurations proposed so far in this generation (`_breed`):
+        what `param_tpe` counts as bad before they are evaluated."""
         self.breadth = AdaptiveBreadth.from_config(config.search)
         self.screens: dict[str, ScreenControl] = self._screen_controls()
         """Per stage with `promote.adapt` before a command stage, its screening
@@ -1383,45 +1394,162 @@ class Driver:
         others = [c for c in self._tuning_elites() if c.id != parent.id and c.params != parent.params]
         return self.rng.choice(others) if others else None
 
+    # -- one Latin hypercube for the run (`param_lhs`) ----------------------
+
+    LHS_ROWS = (4, 64)
+    """The fewest and the most rows of one cube."""
+
+    def _lhs_path(self) -> Path:
+        return self.ledger.run_dir / "work" / "lhs.json"
+
+    def _read_lhs(self) -> dict[str, dict]:
+        """`work/lhs.json`'s cubes; none for a run written before it (or before
+        its first `param_lhs` child), and a malformed entry is dropped: a cube
+        is then built at the next `param_lhs` child."""
+        try:
+            data = json.loads(self._lhs_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        cubes = data.get("cubes") if isinstance(data, dict) else None
+        if not isinstance(cubes, dict):
+            return {}
+        kept: dict[str, dict] = {}
+        for key, cube in cubes.items():
+            if (
+                isinstance(cube, dict)
+                and isinstance(cube.get("rows"), list)
+                and all(isinstance(row, dict) for row in cube["rows"])
+                and isinstance(cube.get("next"), int)
+                and isinstance(cube.get("K"), int)
+                and isinstance(cube.get("built"), int)
+            ):
+                kept[str(key)] = cube
+        return kept
+
+    def _write_lhs(self) -> None:
+        path = self._lhs_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, json.dumps({"cubes": self._lhs}, indent=1) + "\n")
+
+    def _lhs_size(self) -> int:
+        """The run's expected number of `param_lhs` children, clamped to
+        `LHS_ROWS`: `generations x children x share(param_lhs) / sum of shares`."""
+        search = self.config.search
+        total = sum(w for w in search.operators.values() if w > 0)
+        share = max(0.0, search.operators.get("param_lhs", 0.0))
+        expected = search.generations * search.children_per_generation * share / total if total > 0 else 0.0
+        low, high = self.LHS_ROWS
+        return min(high, max(low, math.ceil(expected - 1e-9)))
+
+    def _lhs_take(self, parent: Candidate) -> tuple[dict, list[str]] | None:
+        """The next row of the run's hypercube for `parent`'s space, and the
+        names of its parameters drawn near a prior. `None` when an untyped
+        parent declares nothing to sweep.
+
+        A typed space has one cube (`"typed"`); a `# PARAMS` block one per
+        declaration, keyed by its ranges as sorted JSON. A row that breaks a
+        constraint, or equals the parent's configuration, is passed over; after
+        a whole cube's worth of such rows the last is handed out anyway (the
+        static stage has the last word). When the rows run out a new cube is
+        built from one draw of the run's generator -- the only number a
+        `param_lhs` child ever draws from it."""
+        space = self.config.problem.parameters
+        if space is not None:
+            key, base, ok = "typed", dict(parent.params or space.defaults()), space.satisfies
+            names = set(space.names)
+
+            def build(size: int, rng: random.Random) -> tuple[list[dict], list[list[str]]]:
+                drawn = latin_rows(space, size, rng)
+                return [values for values, _ in drawn], [prior for _, prior in drawn]
+        else:
+            ranges = declared_ranges(parent.block)
+            base = current_values(parent.block, set(ranges)) if ranges else {}
+            if not base:
+                return None
+            key, ok, names = "params:" + json.dumps(ranges, sort_keys=True), (lambda _row: True), set(base)
+
+            def build(size: int, rng: random.Random) -> tuple[list[dict], list[list[str]]]:
+                rows = rows_for_params(ranges, base, latin_hypercube(ranges, size, rng.randrange(1 << 30)))
+                return rows, [[] for _ in rows]
+
+        passed = 0
+        while True:
+            cube = self._lhs.get(key)
+            if cube is not None and cube["rows"] and set(cube["rows"][0]) != names:
+                cube = None  # a cube of another space: not this one's rows
+            if cube is None or cube["next"] >= len(cube["rows"]):
+                size = self._lhs_size()
+                rows, priors = build(size, random.Random(self.rng.randrange(1 << 30)))
+                cube = {"K": size, "built": (cube or {}).get("built", 0) + 1, "next": 0, "rows": rows}
+                if any(priors):
+                    cube["prior"] = priors
+                self._lhs[key] = cube
+            index = cube["next"]
+            cube["next"] = index + 1
+            row = dict(cube["rows"][index])
+            prior = list(cube.get("prior", [[]] * len(cube["rows"]))[index])
+            passed += 1
+            if (row != base and ok(row)) or passed >= cube["K"]:
+                break
+        self._write_lhs()
+        return row, prior
+
+    def _next_lhs_row(self, parent: Candidate) -> dict | None:
+        """The row the next `param_lhs` child of `parent` takes (`_lhs_take`)."""
+        taken = self._lhs_take(parent)
+        return taken[0] if taken is not None else None
+
     def _observations(self) -> list[Observation]:
-        """Every configuration that was evaluated, judged by the deepest stage
-        it finished. One that crashed or timed out is an observation too -- the
-        worst one: that is a region not to propose in again.
+        """Every configuration that was evaluated, as a rank score (higher is
+        better, minus the position): only the order reaches the estimator, so
+        numbers on different scales never meet. Four tiers, best first:
 
-        A raced-out candidate still carries the score of the stage before the
-        race -- a screening score that may beat every finished candidate's --
-        but the race has just shown it to be behind the best. It is recorded at
-        the floor, no better than the worst finished configuration, rather
-        than as the good configuration its screening score would make it.
+        1. finished (it competes), by fitness;
+        2. screened out by a cheaper stage, by the deepest stage it reached and
+           that stage's score -- whatever the scale, since it is ranked below
+           every finished one;
+        3. raced out, or kept out by the hold-out veto: one shared rank. The
+           race has just shown it to be behind the best, whatever its
+           screening score; a vetoed one does worse than the seed where it was
+           not selected on, and the estimator must not learn to propose there;
+        4. failed or gated: one shared rank, the worst -- a region not to
+           propose in again.
 
-        A candidate that was screened out by a cheaper stage is judged by that
-        stage's score only when it is on the same scale as the final stage's:
-        when every command stage states the objective as a percentage of the
-        baseline (`normalize: baseline`). A plain mean over a proxy's few small
-        instances is a different number altogether, and would rank every
-        screened-out candidate above every finished one."""
-        commands = [stage for stage in self.config.evaluate.stages if stage.kind == "command"]
-        same_scale = all(stage.fans_out and stage.normalize == "baseline" for stage in commands)
-        scored: list[tuple[Candidate, float]] = []
+        Ties (inside a tier, or a whole tier 3 or 4) share the mean position."""
+        index = {stage.id: i for i, stage in enumerate(self.config.evaluate.stages)}
+        finished: list[tuple[float, Candidate]] = []
+        screened: list[tuple[tuple[int, float], Candidate]] = []
         behind: list[Candidate] = []
         failed: list[Candidate] = []
         for c in self.archive:
             if not c.params or c.rejected:
                 continue
-            # A configuration that broke a gate is as bad as one that crashed:
-            # a region the estimator should not propose in again.
             if c.last_failure or c.gated:
                 failed.append(c)
-            elif c.raced_out:
+            elif c.raced_out or c.veto:
                 behind.append(c)
             elif c.competes and c.fitness is not None:
-                scored.append((c, float(c.fitness)))
-            elif same_scale and c.stages_reached and c.score is not None:
-                scored.append((c, float(c.score)))
-        floor = min((value for _, value in scored), default=0.0)
-        observations = [Observation(c.params, value) for c, value in scored]
-        observations += [Observation(c.params, floor) for c in behind]
-        observations += [Observation(c.params, floor - 1.0) for c in failed]
+                finished.append((float(c.fitness), c))
+            elif c.stages_reached:
+                deepest = c.stages_reached[-1]
+                score = c.stage_scores.get(deepest, c.score)
+                if score is not None:
+                    screened.append(((index.get(deepest, -1), float(score)), c))
+        groups: list[list[Candidate]] = []
+        for tier in (finished, screened):
+            tier.sort(key=lambda pair: pair[0], reverse=True)
+            for i, (key, c) in enumerate(tier):
+                if i and key == tier[i - 1][0]:
+                    groups[-1].append(c)
+                else:
+                    groups.append([c])
+        groups += [tier for tier in (behind, failed) if tier]
+        observations: list[Observation] = []
+        position = 1
+        for group in groups:
+            rank = position + (len(group) - 1) / 2
+            observations += [Observation(c.params, -rank) for c in group]
+            position += len(group)
         return observations
 
     def _parent_pool(self, wanted: int) -> list[Candidate]:
@@ -1524,6 +1652,7 @@ class Driver:
         pool = self._parent_pool(self.config.search.parents_wanted(len(plan)))
         best = self.best
         children: list[Candidate] = []
+        self._taken = []  # this generation's proposals so far (`_breed_one`)
         for slot, operator in enumerate(plan):
             if not self.budget.check().allowed or self._provider_is_dead() or self.run_stop.triggered:
                 break
@@ -1553,6 +1682,9 @@ class Driver:
         outcome, verdict, attempts = self._propose(
             operator, parent, inspirations, candidate_id, generation, role
         )
+        if outcome.ok and isinstance(outcome.meta.get("params"), dict):
+            # Q19: any sibling with a configuration, whichever operator proposed it.
+            self._taken.append(dict(outcome.meta["params"]))
         if operator == "big_step" and outcome.ok:
             # The response parsed and applied; `_restore_stop_policy` reads the same from the row.
             self.stop_policy.note_big_step_applied()
@@ -1658,12 +1790,16 @@ class Driver:
         verdict = self.novelty.check(
             outcome.block or "", parent.block, parent.id, near=wants_near
         )
-        if verdict.novel or not self.config.search.novelty_retry or role == "none":
+        if verdict.novel or not self.config.search.novelty_retry:
+            return outcome, verdict, attempts
+        if role == "none" and operator != "param_lhs":
+            # Seeded from the run's stream once: asked again it would hand back the same.
+            # A `param_lhs` child asked again takes the cube's next row, and costs nothing.
             return outcome, verdict, attempts
         if operator == "agent_patch":
             # A whole agent run is not re-asked for a duplicate: the next round's brief shows it.
             return outcome, verdict, attempts
-        if not self._ai_room():
+        if role != "none" and not self._ai_room():
             return outcome, verdict, attempts
 
         # One re-prompt, ever. The first real run showed the small model
@@ -1695,11 +1831,14 @@ class Driver:
         candidate_id: str,
     ) -> OperatorResult:
         if operator == "param_lhs":
-            seed = self.rng.randrange(1 << 30)
+            taken = self._lhs_take(parent)
             space = self.config.problem.parameters
+            if taken is None:  # the parent declares nothing to sweep: the operator says so
+                return param_lhs(parent, row={})
+            row, prior = taken
             if space is not None:
-                return param_lhs_typed(space, parent, seed=seed)
-            return param_lhs(parent, seed=seed)
+                return param_lhs_typed(space, parent, row=row, prior=prior)
+            return param_lhs(parent, row=row)
         if operator in TYPED_SPACE_OPERATORS:
             seed = self.rng.randrange(1 << 30)
             space = self.config.problem.parameters
@@ -1708,7 +1847,7 @@ class Driver:
                 return param_local(space, parent, seed=seed)
             if operator == "param_cross":
                 return param_cross(space, parent, self._mate_for(parent), seed=seed)
-            return param_tpe(space, parent, self._observations(), seed=seed)
+            return param_tpe(space, parent, self._observations(), seed=seed, taken=self._taken)
         if operator == "agent_patch":
             return self._agent_patch(parent, role, candidate_id)
         return run_operator(
