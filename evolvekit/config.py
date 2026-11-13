@@ -1609,28 +1609,50 @@ provider, no key and no `models` section -- and must never reach for one."""
 
 @dataclass(frozen=True)
 class DescriptorConfig:
-    """One axis of the MAP-Elites grid: a KPI, a bin count and a range.
+    """One axis of the MAP-Elites grid: a KPI or a parameter, a bin count and a range.
 
-    `range: auto` (or an omitted range) lets the archive widen the axis as it
-    sees values, re-binning what it already holds. Any KPI the evaluator emits
-    works; `complexity` is emitted by the static stage for free.
+    `range: auto` (or an omitted range) lets the archive bin a KPI axis by the
+    quantiles of the values it has seen, re-binning what it already holds when
+    its members double. Any KPI the evaluator emits works; `complexity` is
+    emitted by the static stage for free. A `param` axis (`{param: name}`)
+    names a declared `problem.parameters` entry instead: its range is known, so
+    it is fixed equal-width bins over the parameter's unit scale `[0, 1]`.
     """
 
-    kpi: str
+    kpi: str = ""
     bins: int = 4
     lo: float | None = None
     hi: float | None = None
+    param: str | None = None
 
     @property
     def auto(self) -> bool:
         return self.lo is None or self.hi is None
 
+    @property
+    def name(self) -> str:
+        """What the axis is called: the parameter's name, else the KPI's."""
+        return self.param if self.param is not None else self.kpi
+
     @staticmethod
     def parse(raw: Any, index: int) -> "DescriptorConfig":
         path = f"search.archive.descriptors[{index}]"
         data = _as_mapping(raw, path)
-        _reject_unknown(data, {"kpi", "bins", "range"}, path)
+        _reject_unknown(data, {"kpi", "param", "bins", "range"}, path)
         bins = _as_int(data.get("bins", 4), f"{path}.bins", minimum=1)
+        if ("kpi" in data) == ("param" in data):
+            raise ConfigError(
+                f"{path}: give one of `kpi` or `param` -- a KPI the evaluator emits, "
+                "or the name of one of problem.parameters"
+            )
+        if "param" in data:
+            if data.get("range", "auto") not in (None, "auto"):
+                raise ConfigError(
+                    f"{path}.range: a parameter axis spans the parameter's range; leave `range` out"
+                )
+            return DescriptorConfig(
+                bins=bins, lo=0.0, hi=1.0, param=_as_str(data["param"], f"{path}.param")
+            )
         raw_range = data.get("range", "auto")
         lo = hi = None
         if raw_range not in (None, "auto"):
@@ -1660,6 +1682,10 @@ class ArchiveConfig:
 
     descriptors: tuple[DescriptorConfig, ...] = DEFAULT_DESCRIPTORS
     top_k: int = 20
+    descriptors_given: bool = False
+    """`search.archive.descriptors` was written in the config. When it was not
+    and the config declares `problem.parameters`, the root parse replaces the
+    default with the first two parameters (`_default_parameter_axes`)."""
 
     @staticmethod
     def parse(raw: Any) -> "ArchiveConfig":
@@ -1668,19 +1694,59 @@ class ArchiveConfig:
         raw_descriptors = _as_list(
             data.get("descriptors"), "search.archive.descriptors"
         )
-        descriptors = tuple(
-            DescriptorConfig.parse(d, i) for i, d in enumerate(raw_descriptors)
-        ) or DEFAULT_DESCRIPTORS
-        names = [d.kpi for d in descriptors]
-        duplicates = sorted({n for n in names if names.count(n) > 1})
-        if duplicates:
-            raise ConfigError(
-                f"search.archive.descriptors: duplicate kpi(s) {duplicates}"
-            )
+        given = tuple(DescriptorConfig.parse(d, i) for i, d in enumerate(raw_descriptors))
+        descriptors = given or DEFAULT_DESCRIPTORS
+        for kind, names in (
+            ("kpi", [d.kpi for d in descriptors if d.param is None]),
+            ("parameter", [d.param for d in descriptors if d.param is not None]),
+        ):
+            duplicates = sorted({n for n in names if names.count(n) > 1})
+            if duplicates:
+                raise ConfigError(
+                    f"search.archive.descriptors: duplicate {kind}(s) {duplicates}"
+                )
         return ArchiveConfig(
             descriptors=descriptors,
             top_k=_as_int(data.get("top_k", 20), "search.archive.top_k", minimum=1),
+            descriptors_given=bool(given),
         )
+
+
+PARAMETER_AXES = 2
+"""A tuning run's default grid: its first two declared parameters, 4 bins each."""
+
+
+def _default_parameter_axes(config: "Config") -> "Config":
+    """`search.archive.descriptors` against `problem.parameters`.
+
+    Given: every `param` axis must name a declared parameter. Not given, with a
+    declared space: the first two parameters (one when there is one), 4 fixed
+    bins each over the unit scale. A tuning candidate's `complexity` is the
+    size of a generated block whose shape never changes, so the default axis
+    would put every candidate in one cell.
+    """
+    archive = config.search.archive
+    space = config.problem.parameters
+    if archive.descriptors_given:
+        for index, axis in enumerate(archive.descriptors):
+            if axis.param is None:
+                continue
+            path = f"search.archive.descriptors[{index}].param"
+            if space is None:
+                raise ConfigError(
+                    f"{path}: names a parameter, and this config declares no problem.parameters"
+                )
+            if axis.param not in space.names:
+                raise ConfigError(
+                    f"{path}: {axis.param!r} is not a parameter; the parameters are {space.names}"
+                )
+        return config
+    if space is None:
+        return config
+    axes = tuple(
+        DescriptorConfig(bins=4, lo=0.0, hi=1.0, param=name) for name in space.names[:PARAMETER_AXES]
+    )
+    return replace(config, search=replace(config.search, archive=replace(archive, descriptors=axes)))
 
 
 @dataclass(frozen=True)
@@ -1855,6 +1921,7 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
         source=source,
     )
     config = _tree_rules(config)
+    config = _default_parameter_axes(config)
     _check_embedding_route(config)
     _check_parameter_placeholders(config)
     _check_typed_operators(config)

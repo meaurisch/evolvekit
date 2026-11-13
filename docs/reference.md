@@ -307,8 +307,9 @@ below the starting point's is kept out by the veto. It is counted apart, as
 ### The archive
 
 `search.archive.descriptors` is a list of axes, each naming a KPI the evaluator
-already emits, a bin count, and either an explicit `range: [lo, hi]` or
-`range: auto` (which widens and re-bins as the run discovers values):
+already emits (`kpi:`) or one of `problem.parameters` (`param:`), a bin count,
+and for a KPI either an explicit `range: [lo, hi]` or `range: auto` (bins drawn
+from the values the run has seen):
 
 ```yaml
 search:
@@ -323,6 +324,38 @@ search:
         range: [0.0, 0.25]
 ```
 
+*Bins.* An explicit `range` is cut into `bins` equal widths; a value outside it
+lands in the end bin. A `range: auto` axis is cut at the **quantiles** of its
+members' values (`statistics.quantiles(..., method="inclusive")`), so each bin
+holds about as many members and one outlier cannot squash every other
+candidate into the bottom bin. The cut points move only when the member count
+doubles — at 2, 4, 8, 16 … members — and every member is then placed again;
+until two distinct values have been seen, everything is in bin 0.
+`archive.json` lists each auto axis's cut points under `edges`, and a cell's
+label gives its quantile range.
+
+*Parameter axes.* With `problem.parameters` declared and no `descriptors`
+written, the grid's axes are the **first two declared parameters** (one when
+the space has one), 4 bins each — a tuning candidate's `complexity` hardly
+changes, so the default axis would put every candidate in one cell. Name
+others with `{param: name, bins: 4}`; a name that is not a declared parameter
+is a config error that lists them. A parameter's range is known, so its axis
+is fixed: `bins` equal parts (quarters at 4) of the parameter's range on its own scale (its unit
+scale — logarithmic for `log: true`; a choice by its position in the list),
+never quantile-binned and never re-binned. A study (`evolvekit study`) writes
+its axes explicitly: two of its tuned values, the harness's recommended
+settings first in the harness's order, else the first two the study tunes.
+
+```yaml
+search:
+  archive:
+    descriptors:
+      - param: max_iterations    # fixed quarters of its range
+        bins: 4
+      - kpi: mean_openness       # quantile bins
+        bins: 4
+```
+
 Each cell keeps one elite — the best candidate that landed in it — and the
 archive keeps a global top-k besides. A candidate only ever displaces the elite
 of its own cell, which is what stops a run collapsing onto a single lineage.
@@ -335,7 +368,7 @@ or on any gain when its score is the mean of more runs than the elite's
 noise estimate — a repeatable evaluator, or `seeds: 1` without `{seed}` — that is
 a strict `>`, as it always was. A challenger exactly as good as the elite, both
 measured with noise sd σ, takes the cell in about 24 % of trials (50 % without
-the margin). A re-bin after an auto axis widens applies the same rule, in id
+the margin). A re-bin of the auto axes applies the same rule, in id
 order; a resumed run rebuilds the grid with the noise as it is when it resumes.
 
 Choose the second axis for *behaviour*, not quality. The bin-packing example
@@ -350,10 +383,10 @@ run resumes — the snapshot is a convenience, the log is the record. `status`
 and `leaderboard` print cell occupancy; the HTML dashboard draws the grid.
 
 The `cells=` figure printed each generation is the occupancy *after* that
-generation's inserts, and it can go **down**: an axis with `range: auto` widens
-when it sees a new value, which re-bins every member the grid already holds and
-can merge two cells into one. A falling count is the grid rescaling, not
-candidates being lost.
+generation's inserts, and it can go **down**: an axis with `range: auto` moves
+its cut points when its members double, which re-bins every member the grid
+already holds and can merge two cells into one. A falling count is the grid
+rescaling, not candidates being lost.
 
 ### Operators
 
@@ -1972,7 +2005,9 @@ that work once for one application — a solver, a simulator, any program with
 settings — so that tuning it becomes a set of choices instead of a config
 file; a **study** is one such set of choices, in a folder of its own.
 `evolvekit study run` compiles a study into an ordinary run directory, so
-everything in this README applies to it.
+everything in this README applies to it. A study that tunes values spreads its
+archive over two of them (`search.archive.descriptors`, the harness's
+recommended settings first; see [The archive](#the-archive)).
 
 Three harnesses come with evolvekit:
 

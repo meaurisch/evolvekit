@@ -21,6 +21,7 @@ def make(
     rejected: bool = False,
     ranking: float | None = None,
     replicates: int = 0,
+    params: dict | None = None,
 ) -> Candidate:
     return Candidate(
         id=cid,
@@ -34,6 +35,7 @@ def make(
         rejected=rejected,
         kpis={"complexity": complexity, "behaviour": behaviour},
         replicates=replicates,
+        params=params,
     )
 
 
@@ -128,8 +130,9 @@ def test_a_rebin_applies_the_noise_rule_in_id_order():
     archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 2),)))
     archive.noise_sd = 1.0
     archive.add(make("a", score=1.0, complexity=10.0))
-    archive.add(make("b", score=1.5, complexity=11.0))
-    archive.add(make("c", score=0.0, complexity=100.0))   # widens: a and b share the bottom bin
+    archive.add(make("b", score=1.5, complexity=11.0))    # re-bin at 2: a and b apart
+    archive.add(make("c", score=0.0, complexity=100.0))
+    archive.add(make("d", score=0.0, complexity=200.0))   # re-bin at 4: a and b share the bottom bin
     assert archive.members["a"].cell == archive.members["b"].cell
     assert archive.cells[tuple(archive.members["a"].cell)].elite_id == "a", "1.5 is within 1.0 + 1"
 
@@ -167,23 +170,137 @@ def test_a_missing_kpi_falls_back_to_zero_and_complexity_to_the_block():
 # -- auto ranges -----------------------------------------------------------
 
 
-def test_an_auto_axis_widens_and_rebins_what_it_already_holds():
+def test_an_auto_axis_rebins_what_it_already_holds():
     archive = Archive.from_config(
-        ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4),))
+        ArchiveConfig(descriptors=(DescriptorConfig("complexity", 2),))
     )
     archive.add(make("a", score=-1.0, complexity=10.0))
     archive.add(make("b", score=-2.0, complexity=20.0))
     assert archive.axes[0].lo == 10.0 and archive.axes[0].hi == 20.0
-    first_spread = {tuple(c.cell or ()) for c in archive.members.values()}
-    assert len(first_spread) == 2
-
+    assert archive.members["a"].cell != archive.members["b"].cell
     archive.add(make("c", score=-3.0, complexity=100.0))
-    assert archive.axes[0].hi == 100.0
+    archive.add(make("d", score=-4.0, complexity=110.0))
+    assert archive.axes[0].hi == 110.0
     # a and b now share the bottom bin; the grid was re-placed, not appended to
     assert archive.members["a"].cell == archive.members["b"].cell
-    assert archive.members["c"].cell != archive.members["a"].cell
+    assert archive.members["c"].cell == archive.members["d"].cell != archive.members["a"].cell
     assert len(archive.cells) == 2
-    assert sum(c.occupants for c in archive.cells.values()) == 3
+    assert sum(c.occupants for c in archive.cells.values()) == 4
+
+
+def test_one_outlier_no_longer_squashes_an_auto_axis():
+    archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4),)))
+    for i, value in enumerate([1, 2, 3, 4, 5, 6, 7, 1000]):
+        archive.add(make(f"c{i}", score=float(i), complexity=value))
+    assert archive.axes[0].edges == [2.75, 4.5, 6.25]
+    assert len(archive.cells) == 4, "equal counts; equal width put seven in bin 0"
+    assert archive.axes[0].label(0) == "1..2.75" and archive.axes[0].label(3) == "6.25..1000"
+    assert archive.to_dict()["descriptors"][0]["edges"] == [2.75, 4.5, 6.25]
+
+
+def test_an_auto_axis_rebins_when_its_members_double():
+    archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4),)))
+    seen = []
+    for i in range(9):
+        archive.add(make(f"c{i}", score=float(i), complexity=float(i + 1)))
+        seen.append(list(archive.axes[0].edges))
+    assert seen[0] == [], "one member: everything is bin 0"
+    assert seen[1] == [1.25, 1.5, 1.75]            # 2 members
+    assert seen[2] == seen[1], "not at 3"
+    assert seen[3] == [1.75, 2.5, 3.25]            # 4 members
+    assert seen[4] == seen[5] == seen[6] == seen[3], "not at 5, 6 or 7"
+    assert seen[7] == [2.75, 4.5, 6.25]            # 8 members
+    assert seen[8] == seen[7]
+
+
+def test_an_auto_axis_with_one_distinct_value_puts_everyone_in_bin_0():
+    archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4),)))
+    for i in range(4):
+        archive.add(make(f"c{i}", score=float(i), complexity=5.0))
+    assert archive.axes[0].edges == []
+    assert set(archive.cells) == {(0,)}
+
+
+def test_a_rebin_keeps_the_elite_rule_and_an_update():
+    archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 2),)))
+    archive.noise_sd = 1.0
+    for cid, score, size in (("a", 1.0, 1.0), ("b", 1.5, 2.0), ("c", 0.0, 3.0), ("d", 5.0, 4.0)):
+        archive.add(make(cid, score=score, complexity=size))
+    assert archive.cells[tuple(archive.members["a"].cell)].elite_id == "a", "1.5 is within 1.0 + 1"
+    archive.update(make("b", score=3.0, complexity=2.0))
+    assert archive.cells[tuple(archive.members["a"].cell)].elite_id == "b"
+
+
+# -- parameter axes --------------------------------------------------------
+
+FLOAT01 = {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}
+
+
+def _tuning_config(tmp_path):
+    from evolvekit.config import build_config
+
+    (tmp_path / "solver.py").write_text("print('{\"cost\": 1}')\n", encoding="utf-8")
+    raw = {
+        "problem": {"parameters": {"a": FLOAT01, "b": FLOAT01, "c": FLOAT01}},
+        "evaluate": {
+            "stages": [
+                {"id": "static", "kind": "builtin-static"},
+                {"id": "full", "kind": "command", "kpis_from": "stdout", "command": "{python} solver.py {params}"},
+            ],
+            "score": {"objective": "cost", "direction": "minimize"},
+        },
+        "search": {"operators": {"param_local": 1.0}},
+    }
+    return build_config(raw, base_dir=tmp_path)
+
+
+def test_a_tuning_run_spreads_over_its_first_two_parameters(tmp_path):
+    config = _tuning_config(tmp_path)
+    assert [d.param for d in config.search.archive.descriptors] == ["a", "b"]
+    archive = Archive.from_config(config.search.archive, space=config.problem.parameters)
+    for i, (a, b) in enumerate([(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)] * 2):
+        archive.add(make(f"c{i}", score=float(i), params={"a": a, "b": b, "c": 0.5}))
+    assert len(archive.cells) == 4
+    assert archive.coord_for(make("q", score=0.0, params={"a": 0.3, "b": 0.6, "c": 0.5})) == (1, 2), \
+        "fixed quarters of the unit scale: 0.3 -> bin 1, 0.6 -> bin 2"
+    assert archive.occupancy() == "4/16 cells occupied (a[4] x b[4])"
+    assert archive.to_dict()["descriptors"][0]["param"] == "a"
+
+
+def test_a_parameter_axis_is_never_rebinned(tmp_path):
+    config = _tuning_config(tmp_path)
+    archive = Archive.from_config(config.search.archive, space=config.problem.parameters)
+    for i in range(8):
+        archive.add(make(f"c{i}", score=float(i), params={"a": 0.2 * i / 7, "b": 0.5, "c": 0.5}))
+    assert {tuple(c.cell)[0] for c in archive.members.values()} == {0}, \
+        "quantile bins would have spread them over a"
+    assert archive.axes[0].edges == []
+
+
+def test_a_parameter_axis_reads_the_parameters_own_scale():
+    from evolvekit.space import ParameterSpace
+
+    space = ParameterSpace.parse({
+        "rate": {"type": "float", "low": 0.001, "high": 1000.0, "log": True, "default": 1.0},
+        "mode": {"type": "choice", "choices": ["x", "y", "z"], "default": "x"},
+    })
+    rate = make("r", score=0.0, params={"rate": 1.0, "mode": "z"})
+    assert descriptor_value(rate, "rate", param="rate", space=space) == pytest.approx(0.5)
+    assert descriptor_value(rate, "mode", param="mode", space=space) == 1.0
+    assert descriptor_value(make("none", score=0.0), "rate", param="rate", space=space) == 0.0
+
+
+def test_the_grid_with_parameter_axes_rebuilds_from_run_records(tmp_path):
+    config = _tuning_config(tmp_path)
+    space = config.problem.parameters
+    original = Archive.from_config(config.search.archive, space=space)
+    rows = []
+    for i, (a, b) in enumerate([(0.1, 0.1), (0.9, 0.1), (0.6, 0.9)]):
+        candidate = make(f"c{i}", score=float(i), params={"a": a, "b": b, "c": 0.5})
+        original.add(candidate)
+        rows.append(candidate.to_record())
+    rebuilt = Archive.from_records(rows, config.search.archive, space=space)
+    assert set(rebuilt.cells) == set(original.cells) == {(0, 0), (3, 0), (2, 3)}
 
 
 def test_occupancy_reports_the_grid_shape():

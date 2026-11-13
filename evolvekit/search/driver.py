@@ -252,7 +252,9 @@ class Driver:
             )
             self.skeleton_source = skeleton
         self.archive: list[Candidate] = []
-        self.grid = Archive.from_config(config.search.archive, tree=self.repo is not None)
+        self.grid = Archive.from_config(
+            config.search.archive, tree=self.repo is not None, space=config.problem.parameters
+        )
         near_cfg = config.search.novelty.near
         self._embed_context: tuple[str, int] = ("startup", 0)
         self.novelty = NoveltyIndex(
@@ -616,7 +618,11 @@ class Driver:
             return 0
         self._refresh_noise()
         self.grid = Archive.from_records(
-            rows, self.config.search.archive, tree=self.repo is not None, noise_sd=self.stop_policy.noise_sd
+            rows,
+            self.config.search.archive,
+            tree=self.repo is not None,
+            noise_sd=self.stop_policy.noise_sd,
+            space=self.config.problem.parameters,
         )
         last_generation = 0
         for row in rows:

@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import math
 import random
+from bisect import bisect_right
 from dataclasses import dataclass, field
-from statistics import fmean, pstdev
+from statistics import fmean, pstdev, quantiles
 from typing import Any, Iterable, Sequence
 
 from evolvekit.candidate import Candidate
 from evolvekit.config import ArchiveConfig, DescriptorConfig
+from evolvekit.space import ParameterSpace
 
 __all__ = ["Archive", "Axis", "Cell", "Placement", "descriptor_value", "diff_complexity", "sigmoid"]
 
@@ -52,14 +54,34 @@ def sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def descriptor_value(candidate: Candidate, kpi: str, *, tree: bool = False) -> float:
+def descriptor_value(
+    candidate: Candidate,
+    kpi: str,
+    *,
+    tree: bool = False,
+    param: str | None = None,
+    space: ParameterSpace | None = None,
+) -> float:
     """The candidate's value on one descriptor axis.
 
     KPIs come from the evaluator. `complexity` is special only in that the
     candidate can compute it from its own block when no stage has run yet: the
     block's AST size for a skeleton, and for a tree problem (`tree`), where the
     block is a diff, the number of lines it adds and removes.
+
+    A `param` axis reads the candidate's configuration instead: where its value
+    sits on the parameter's own unit scale (`Parameter.to_unit`; a choice is its
+    index over `len - 1`), clamped to [0, 1]. 0.0 without params or a space.
     """
+    if param is not None:
+        found = next((p for p in space or () if p.name == param), None)
+        if found is None or not candidate.params or param not in candidate.params:
+            return 0.0
+        try:
+            unit = float(found.to_unit(candidate.params[param]))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 0.0
+        return min(1.0, max(0.0, unit)) if math.isfinite(unit) else 0.0
     value = candidate.kpis.get(kpi)
     if value is None and kpi == "complexity":
         value = float(diff_complexity(candidate.block) if tree else candidate.complexity)
@@ -72,20 +94,33 @@ def descriptor_value(candidate: Candidate, kpi: str, *, tree: bool = False) -> f
 
 @dataclass
 class Axis:
-    """One descriptor axis, with the range it has actually seen."""
+    """One descriptor axis.
+
+    An **auto** KPI axis bins by quantiles: `edges` are the `bins - 1` cut points
+    of the members' values at the last re-bin (`fit`), so each bin holds about
+    as many members and one outlier cannot squash the rest into one bin; `lo`
+    and `hi` only record the range seen. A fixed `range` axis, and a `param`
+    axis (its range is the parameter's unit scale, [0, 1]), are equal-width
+    bins and never re-bin.
+    """
 
     kpi: str
+    """The axis's name: the KPI, or for a `param` axis the parameter."""
     bins: int
     lo: float | None
     hi: float | None
     auto: bool
+    param: str | None = None
+    edges: list[float] = field(default_factory=list)
 
     @staticmethod
     def from_config(cfg: DescriptorConfig) -> "Axis":
-        return Axis(kpi=cfg.kpi, bins=cfg.bins, lo=cfg.lo, hi=cfg.hi, auto=cfg.auto)
+        return Axis(
+            kpi=cfg.name, bins=cfg.bins, lo=cfg.lo, hi=cfg.hi, auto=cfg.auto, param=cfg.param
+        )
 
     def observe(self, value: float) -> bool:
-        """Widen an auto axis. Returns True when the range moved."""
+        """Record the range an auto axis has seen. Returns True when it moved."""
         if not self.auto:
             return False
         lo = value if self.lo is None else min(self.lo, value)
@@ -94,7 +129,19 @@ class Axis:
         self.lo, self.hi = lo, hi
         return moved
 
+    def fit(self, values: Sequence[float]) -> None:
+        """New quantile edges for an auto axis; fewer than two distinct values
+        put every member in bin 0."""
+        if not self.auto:
+            return
+        if len(set(values)) < 2 or self.bins < 2:
+            self.edges = []
+            return
+        self.edges = list(quantiles(values, n=self.bins, method="inclusive"))
+
     def index(self, value: float) -> int:
+        if self.auto:
+            return max(0, min(self.bins - 1, bisect_right(self.edges, value)))
         lo = 0.0 if self.lo is None else self.lo
         hi = 0.0 if self.hi is None else self.hi
         if not hi > lo:
@@ -105,18 +152,28 @@ class Axis:
     def label(self, index: int) -> str:
         lo = 0.0 if self.lo is None else self.lo
         hi = 0.0 if self.hi is None else self.hi
+        if self.auto:
+            if not self.edges:
+                return f"{lo:g}" if not hi > lo else f"{lo:g}..{hi:g}"
+            start = lo if index <= 0 else self.edges[min(index, len(self.edges)) - 1]
+            end = hi if index >= len(self.edges) else self.edges[index]
+            return f"{start:g}..{end:g}"
         if not hi > lo:
             return f"{lo:g}"
         width = (hi - lo) / self.bins
         return f"{lo + index * width:g}..{lo + (index + 1) * width:g}"
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "kpi": self.kpi,
             "bins": self.bins,
             "range": [self.lo, self.hi],
             "auto": self.auto,
+            "edges": list(self.edges),
         }
+        if self.param is not None:
+            payload["param"] = self.param
+        return payload
 
 
 @dataclass
@@ -171,15 +228,23 @@ class Archive:
     """The sd of one finished candidate's fitness (`Noise.score_sd` at the final
     stage), set by the driver before each `add`. A challenger takes a cell only
     when it beats the elite by more than this (`displaces`); 0 is today's `>`."""
+    space: ParameterSpace | None = None
+    """`problem.parameters`, which a `param` axis reads its values against."""
+    rebinned_at: int = 0
+    """The member count at the last quantile re-bin of the auto axes; the next
+    comes when the count reaches `max(2, 2 * rebinned_at)` (2, 4, 8, ...)."""
 
     # -- construction ----------------------------------------------------
 
     @staticmethod
-    def from_config(config: ArchiveConfig, *, tree: bool = False) -> "Archive":
+    def from_config(
+        config: ArchiveConfig, *, tree: bool = False, space: ParameterSpace | None = None
+    ) -> "Archive":
         return Archive(
             axes=[Axis.from_config(d) for d in config.descriptors],
             top_k=config.top_k,
             tree=tree,
+            space=space,
         )
 
     @staticmethod
@@ -189,15 +254,17 @@ class Archive:
         *,
         tree: bool = False,
         noise_sd: float = 0.0,
+        space: ParameterSpace | None = None,
     ) -> "Archive":
         """Rebuild the grid from `runs.jsonl` -- the resume path.
 
         `archive.json` is a snapshot; the JSONL is the truth. Rebuilding from
         the log means a run that died between the last append and the last
-        snapshot still comes back consistent. The elite rule reads `noise_sd`,
-        the noise as it is now (as the stop policy's replay does).
+        snapshot still comes back consistent: the members arrive in the same
+        order, so the quantile re-bins fall at the same counts. The elite rule
+        reads `noise_sd`, the noise as it is now (as the stop policy's replay does).
         """
-        archive = Archive.from_config(config, tree=tree)
+        archive = Archive.from_config(config, tree=tree, space=space)
         archive.noise_sd = noise_sd
         for record in records:
             candidate = Candidate.from_record(record)
@@ -214,10 +281,11 @@ class Archive:
 
     # -- placement -------------------------------------------------------
 
+    def value_on(self, axis: Axis, candidate: Candidate) -> float:
+        return descriptor_value(candidate, axis.kpi, tree=self.tree, param=axis.param, space=self.space)
+
     def coord_for(self, candidate: Candidate) -> tuple[int, ...]:
-        return tuple(
-            axis.index(descriptor_value(candidate, axis.kpi, tree=self.tree)) for axis in self.axes
-        )
+        return tuple(axis.index(self.value_on(axis, candidate)) for axis in self.axes)
 
     def cell_label(self, coord: Sequence[int]) -> str:
         return " x ".join(
@@ -240,13 +308,13 @@ class Archive:
         if candidate.rejected or not candidate.competes or candidate.fitness is None:
             return Placement()
 
-        widened = False
         for axis in self.axes:
-            widened |= axis.observe(descriptor_value(candidate, axis.kpi, tree=self.tree))
+            axis.observe(self.value_on(axis, candidate))
         self.members[candidate.id] = candidate
-        if widened:
+        if self._rebin_due():
             # The re-bin places every member, this one included; doing the
             # normal insert afterwards would count it twice.
+            self._refit()
             self._rebin()
             coord = tuple(candidate.cell or ())
             cell = self.cells[coord]
@@ -278,16 +346,28 @@ class Archive:
     def update(self, candidate: Candidate) -> None:
         """A member's fitness changed (its runs pooled with a re-evaluation):
         every member is placed again with the elite rule (`_rebin`), as on a
-        resume that reads the pooled value from the start. Not a member: nothing."""
+        resume that reads the pooled value from the start; the quantile edges
+        stay where the last re-bin put them. Not a member: nothing."""
         if candidate.id not in self.members:
             return
         self.members[candidate.id] = candidate
         for axis in self.axes:
-            axis.observe(descriptor_value(candidate, axis.kpi, tree=self.tree))
+            axis.observe(self.value_on(axis, candidate))
         self._rebin()
 
+    def _rebin_due(self) -> bool:
+        """An auto axis re-bins each time the member count doubles: at 2, 4, 8, ..."""
+        return any(axis.auto for axis in self.axes) and len(self.members) >= max(2, 2 * self.rebinned_at)
+
+    def _refit(self) -> None:
+        """New quantile edges on every auto axis, from every member's value."""
+        members = sorted(self.members.values(), key=lambda c: c.id)
+        for axis in self.axes:
+            axis.fit([self.value_on(axis, member) for member in members])
+        self.rebinned_at = len(self.members)
+
     def _rebin(self) -> None:
-        """An auto axis widened; re-place everything the grid already holds."""
+        """Re-place everything the grid already holds (new edges, or a changed fitness)."""
         self.cells = {}
         for member in sorted(self.members.values(), key=lambda c: c.id):
             coord = self.coord_for(member)

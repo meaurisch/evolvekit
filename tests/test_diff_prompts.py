@@ -387,14 +387,15 @@ def test_two_diffs_of_different_sizes_land_in_different_cells(project):
     assert descriptor_value(b, "complexity", tree=True) == 6.0
     assert descriptor_value(seed, "complexity", tree=True) == 0.0
     archive = Archive.from_config(config, tree=True)
-    for c in (seed, a, b):
+    seed_again = make("s2", "")  # a 4th member: the quantile bins are cut again at 4 members
+    for c in (seed, seed_again, a, b):
         archive.add(c)
     assert len({tuple(c.cell) for c in (seed, a, b)}) == 3
     skeleton = Archive.from_config(config)
     for c in (make("a", small), make("b", large)):
         skeleton.add(c)
     assert len(skeleton.cells) == 1, "a skeleton problem keeps the block's AST complexity"
-    again = Archive.from_records([c.to_record() for c in (seed, a, b)], config, tree=True)
+    again = Archive.from_records([c.to_record() for c in (seed, seed_again, a, b)], config, tree=True)
     assert len(again.cells) == 3, "the rebuild on resume places them alike"
 
 

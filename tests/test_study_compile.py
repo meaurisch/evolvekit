@@ -14,7 +14,7 @@ from evolvekit.harness.compile import OPERATORS, OPERATORS_WITH_AI, compile_stud
 from evolvekit.harness.manifest import load_harness
 from evolvekit.harness.plan import Plan, make_plan
 from evolvekit.harness.study import Study
-from harness_toy import write_toy_harness
+from harness_toy import MANIFEST, write_toy_harness
 from test_study import APPLICATION, EXAMPLE, _study_folder, _with
 
 
@@ -163,3 +163,31 @@ def test_write_run_puts_the_config_the_runner_input_and_the_plan_in_the_run_dire
     assert build_config(config, base_dir=run_dir).final_stage.id == "full"
     assert json.loads((run_dir / "study-run.json").read_text())["harness"] == {"id": "toy", "version": "1.0.0"}
     assert json.loads((run_dir / "plan.json").read_text())["children"] == 6
+
+
+def test_a_settings_study_spreads_its_archive_over_two_tuned_settings_in_recommended_order(tmp_path):
+    manifest = json.loads(json.dumps(MANIFEST))
+    manifest["settings"]["threshold"]["recommended"] = 2
+    manifest["settings"]["factor"]["recommended"] = 1
+    ranked = load_harness(write_toy_harness(tmp_path / "h" / "toy", manifest=manifest))
+    assert ranked.recommended == ["factor", "threshold"]
+    config, _ = _compile(tmp_path, ranked)
+    assert config["search"]["archive"] == {"descriptors": [{"param": "factor", "bins": 4},
+                                                           {"param": "threshold", "bins": 4}]}
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    assert [d.param for d in build_config(config, base_dir=run_dir).search.archive.descriptors] == ["factor", "threshold"]
+
+
+def test_a_recommended_setting_comes_first_then_the_declared_order(tmp_path):
+    manifest = json.loads(json.dumps(MANIFEST))
+    manifest["settings"]["threshold"].pop("recommended")
+    ranked = load_harness(write_toy_harness(tmp_path / "h" / "toy", manifest=manifest))
+    config, _ = _compile(tmp_path, ranked)
+    assert [d["param"] for d in config["search"]["archive"]["descriptors"]] == ["factor", "threshold"]
+
+
+def test_without_recommended_settings_the_first_two_declared_become_the_axes(tmp_path, harness):
+    document = _with(vary__settings={"crash": {"fixed": False}}, constraints=[])
+    config, _ = _compile(tmp_path, harness, document)
+    assert [d["param"] for d in config["search"]["archive"]["descriptors"]] == ["a_values", "b_boost"]

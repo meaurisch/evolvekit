@@ -433,3 +433,77 @@ def test_an_explicit_stop_epsilon_is_kept_and_a_negative_one_refused(minimal_raw
     raw["stop"] = {"epsilon": -1}
     with pytest.raises(ConfigError, match="stop.epsilon: must be >= 0"):
         build_config(raw, base_dir=tmp_path)
+
+
+# -- parameter axes of the archive (A2.6a) ---------------------------------
+
+_FLOAT01 = {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}
+
+
+def _tuning_raw(tmp_path: Path, descriptors=None, names=("x", "y", "z")) -> dict:
+    (tmp_path / "solver.py").write_text("print('{\"cost\": 1}')\n", encoding="utf-8")
+    raw = {
+        "problem": {"parameters": {name: dict(_FLOAT01) for name in names}},
+        "evaluate": {
+            "stages": [
+                {"id": "static", "kind": "builtin-static"},
+                {"id": "full", "kind": "command", "kpis_from": "stdout", "command": "{python} solver.py {params}"},
+            ],
+            "score": {"objective": "cost", "direction": "minimize"},
+        },
+        "search": {"operators": {"param_local": 1.0}},
+    }
+    if descriptors is not None:
+        raw["search"]["archive"] = {"descriptors": descriptors}
+    return raw
+
+
+def test_a_parameter_axis_parses(tmp_path):
+    config = build(_tuning_raw(tmp_path, [{"param": "x"}]), tmp_path)
+    (axis,) = config.search.archive.descriptors
+    assert (axis.param, axis.bins, axis.lo, axis.hi, axis.auto) == ("x", 4, 0.0, 1.0, False)
+    assert config.search.archive.descriptors_given
+
+
+def test_a_parameter_axis_must_name_a_declared_parameter(tmp_path):
+    with pytest.raises(ConfigError, match=r"search\.archive\.descriptors\[0\]\.param: 'nope' is not a parameter; "
+                                          r"the parameters are \['x', 'y', 'z'\]"):
+        build(_tuning_raw(tmp_path, [{"param": "nope"}]), tmp_path)
+
+
+def test_a_parameter_axis_needs_a_declared_space(minimal_raw, tmp_path):
+    raw = copy.deepcopy(minimal_raw)
+    raw["search"] = {"archive": {"descriptors": [{"param": "x"}]}}
+    with pytest.raises(ConfigError, match=r"search\.archive\.descriptors\[0\]\.param: .*problem\.parameters"):
+        build(raw, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "descriptor, message",
+    [
+        ({"param": "x", "kpi": "cost"}, r"descriptors\[0\]: give one of `kpi` or `param`"),
+        ({"bins": 4}, r"descriptors\[0\]: give one of `kpi` or `param`"),
+        ({"param": "x", "range": [0, 1]}, r"descriptors\[0\]\.range: a parameter axis spans the parameter's range"),
+    ],
+)
+def test_a_descriptor_is_a_kpi_or_a_parameter(tmp_path, descriptor, message):
+    with pytest.raises(ConfigError, match=message):
+        build(_tuning_raw(tmp_path, [descriptor]), tmp_path)
+
+
+def test_an_explicit_descriptor_list_is_kept_as_given(tmp_path):
+    config = build(_tuning_raw(tmp_path, [{"kpi": "complexity", "bins": 3}, {"param": "z", "bins": 2}]), tmp_path)
+    assert [(d.kpi, d.param, d.bins) for d in config.search.archive.descriptors] == [("complexity", None, 3), ("", "z", 2)]
+
+
+def test_a_tuning_config_defaults_to_its_first_two_parameters(tmp_path):
+    config = build(_tuning_raw(tmp_path), tmp_path)
+    assert [(d.param, d.bins) for d in config.search.archive.descriptors] == [("x", 4), ("y", 4)]
+    assert not config.search.archive.descriptors_given
+    one = build(_tuning_raw(tmp_path, names=("x",)), tmp_path)
+    assert [d.param for d in one.search.archive.descriptors] == ["x"]
+
+
+def test_a_config_without_parameters_keeps_the_complexity_axis(minimal_raw, tmp_path):
+    config = build(minimal_raw, tmp_path)
+    assert [(d.kpi, d.param) for d in config.search.archive.descriptors] == [("complexity", None)]
