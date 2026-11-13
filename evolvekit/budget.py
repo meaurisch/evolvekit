@@ -151,6 +151,11 @@ class StopPolicy:
         self.config = config
         self.takes_big_steps = takes_big_steps
         self.best: float | None = None
+        """The run's best as of its last improvement: it moves only when a
+        generation beats it by more than `epsilon_now()` (no ratchet)."""
+        self.noise_sd: float = 0.0
+        """The sd of one finished candidate's fitness (`Noise.score_sd` at the
+        final stage): what the automatic epsilon reads. 0: no noise, today."""
         self.stagnant = 0
         self.big_steps_in_window = 0
         """Big steps tried since the last improvement: what `min_big_steps` counts."""
@@ -165,6 +170,14 @@ class StopPolicy:
     def note_big_step_applied(self) -> None:
         """A big step's response parsed and applied: a candidate exists."""
         self.big_steps_applied_in_window += 1
+
+    def epsilon_now(self) -> float:
+        """An explicit `stop.epsilon` as configured; else automatic:
+        `max(1e-6, 1e-9 * |best|, 0.5 * noise_sd)` -- with no noise, today's 1e-6."""
+        if self.config.epsilon is not None:
+            return self.config.epsilon
+        scale = abs(self.best) if self.best is not None else 0.0
+        return max(1e-6, 1e-9 * scale, 0.5 * self.noise_sd)
 
     @property
     def plateau(self) -> bool:
@@ -187,19 +200,23 @@ class StopPolicy:
             self.stagnant += 1
             return self._verdict(economics)
 
-        if self.best is None or best_score > self.best + self.config.epsilon:
-            self.best = max(best_score, self.best if self.best is not None else best_score)
+        if self.best is None or best_score > self.best + self.epsilon_now():
+            self.best = best_score
             self.stagnant = 0
             self.big_steps_in_window = 0
             self.big_steps_applied_in_window = 0
         else:
-            self.best = max(self.best, best_score)
+            # No ratchet: a step inside epsilon leaves the bar where it was, so
+            # slow steady progress adds up to an improvement.
             self.stagnant += 1
 
-        if self.config.target is not None and self.best >= self.config.target:
+        # The target is read from the generation's best, not the epsilon-gated
+        # one: a target reached by a step inside epsilon is reached.
+        reached = max(best_score, self.best)
+        if self.config.target is not None and reached >= self.config.target:
             return StopDecision(
                 True,
-                f"stop.target reached: {self.best:.6g} >= {self.config.target:.6g}",
+                f"stop.target reached: {reached:.6g} >= {self.config.target:.6g}",
                 self.stagnant,
                 self.plateau,
             )
@@ -245,7 +262,7 @@ class StopPolicy:
             if self.big_steps_in_window >= self.config.min_big_steps:
                 return StopDecision(
                     True,
-                    f"stop.patience reached: no improvement > {self.config.epsilon:g} "
+                    f"stop.patience reached: no improvement > {self.epsilon_now():.3g} "
                     f"for {self.stagnant} generation(s)",
                     self.stagnant,
                     self.plateau,

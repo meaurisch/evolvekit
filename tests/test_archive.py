@@ -20,6 +20,7 @@ def make(
     parent: str | None = None,
     rejected: bool = False,
     ranking: float | None = None,
+    replicates: int = 0,
 ) -> Candidate:
     return Candidate(
         id=cid,
@@ -32,6 +33,7 @@ def make(
         ranking_score=score if ranking is None else ranking,
         rejected=rejected,
         kpis={"complexity": complexity, "behaviour": behaviour},
+        replicates=replicates,
     )
 
 
@@ -75,6 +77,61 @@ def test_different_behaviour_opens_a_second_cell():
     archive.add(make("b", score=-9.0, complexity=10, behaviour=0.9))
     assert len(archive.cells) == 2
     assert {c.id for c in archive.elites()} == {"a", "b"}
+
+
+def test_an_equal_challenger_takes_the_cell_in_about_24_percent():
+    """Elite and challenger both N(0, 1) as fitness, noise_sd 1: P(N(0, 2) > 1) =
+    P(Z > 0.707) = 24.0 % (50 % with today's rule). 20 000 trials: SE 0.30 %; measured 24.0 %
+    (band of Decision 12)."""
+    rng, taken = random.Random(52), 0
+    for i in range(20_000):
+        archive = grid()
+        archive.noise_sd = 1.0
+        archive.add(make(f"e{i}", score=rng.gauss(0, 1), complexity=10))
+        taken += archive.add(make(f"c{i}", score=rng.gauss(0, 1), complexity=10)).displaced is not None
+    print(f"equal challenger took the cell: {100 * taken / 20_000:.2f} %")
+    assert 0.228 <= taken / 20_000 <= 0.252
+
+
+def test_a_challenger_within_the_noise_does_not_take_the_cell():
+    archive = grid()
+    archive.noise_sd = 1.0
+    archive.add(make("e", score=1.0))
+    assert archive.add(make("c", score=1.9)).displaced is None
+    assert archive.add(make("d", score=2.1)).displaced == "e"
+
+
+def test_more_replicates_take_the_cell_on_any_gain():
+    archive = grid()
+    archive.noise_sd = 1.0
+    archive.add(make("e", score=1.0, replicates=3))
+    assert archive.add(make("c", score=1.1, replicates=4)).displaced == "e"
+
+
+def test_unknown_replicates_read_as_equal():
+    archive = grid()
+    archive.noise_sd = 1.0
+    archive.add(make("e", score=1.0, replicates=0))
+    assert archive.add(make("c", score=1.1, replicates=4)).displaced is None
+    archive.add(make("f", score=2.5, replicates=3))
+    assert archive.add(make("g", score=2.6, replicates=0)).displaced is None
+
+
+def test_with_no_noise_the_elite_rule_is_strictly_greater():
+    archive = grid()
+    archive.add(make("e", score=1.0))
+    assert archive.add(make("tie", score=1.0)).displaced is None
+    assert archive.add(make("c", score=1.0 + 1e-12)).displaced == "e"
+
+
+def test_a_rebin_applies_the_noise_rule_in_id_order():
+    archive = Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 2),)))
+    archive.noise_sd = 1.0
+    archive.add(make("a", score=1.0, complexity=10.0))
+    archive.add(make("b", score=1.5, complexity=11.0))
+    archive.add(make("c", score=0.0, complexity=100.0))   # widens: a and b share the bottom bin
+    assert archive.members["a"].cell == archive.members["b"].cell
+    assert archive.cells[tuple(archive.members["a"].cell)].elite_id == "a", "1.5 is within 1.0 + 1"
 
 
 def test_rejected_candidates_are_never_placed():

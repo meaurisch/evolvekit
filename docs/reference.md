@@ -217,8 +217,8 @@ seed = the skeleton's EVOLVE-BLOCK
   ├─ economics: cumulative USD, best, USD since the last improvement,
   │             USD per unit of gain over a sliding window
   │
-  └─ stop on budget.max_usd / max_tokens / max_hours, stop.patience,
-     stop.target, stop.max_usd_since_improvement, stop.min_gain_per_usd,
+  └─ stop on budget.max_usd / max_tokens / max_hours, stop.patience
+     (flat: no gain > stop.epsilon), stop.target, stop.max_usd_since_improvement, stop.min_gain_per_usd,
      or a stop request
 ```
 
@@ -324,6 +324,17 @@ search:
 Each cell keeps one elite — the best candidate that landed in it — and the
 archive keeps a global top-k besides. A candidate only ever displaces the elite
 of its own cell, which is what stops a run collapsing onto a single lineage.
+
+*The elite rule.* A challenger takes its cell when its fitness beats the
+elite's by more than the noise of one finished candidate's score (`Noise.score_sd`
+at the final stage — see [Stochastic evaluators](#stochastic-evaluators-seeds-n)),
+or on any gain when its score is the mean of more runs than the elite's
+(`replicates` on the row; 0, a row written before it, counts as equal). With no
+noise estimate — a repeatable evaluator, or `seeds: 1` without `{seed}` — that is
+a strict `>`, as it always was. A challenger exactly as good as the elite, both
+measured with noise sd σ, takes the cell in about 24 % of trials (50 % without
+the margin). A re-bin after an auto axis widens applies the same rule, in id
+order; a resumed run rebuilds the grid with the noise as it is when it resumes.
 
 Choose the second axis for *behaviour*, not quality. The bin-packing example
 uses `mean_openness`: where the chosen bin sat between the tightest and the
@@ -807,7 +818,11 @@ estimate says so in its own section and is listed here:
   fixed looks;
 - promotion's noise band beside `top_k_per_generation`
   ([How it works](#how-it-works), *Promotion past a cheaper stage*): every
-  candidate within twice one candidate's score noise of the k-th, capped at `2k`.
+  candidate within twice one candidate's score noise of the k-th, capped at `2k`;
+- the automatic `stop.epsilon` ([Adaptive breadth](#adaptive-breadth),
+  *What counts as an improvement*): half one finished candidate's score noise;
+- the archive's elite rule ([The archive](#the-archive)): a challenger takes a
+  cell when it beats the elite by more than one finished candidate's score noise.
 
 ### One run per instance: `instances`, `workers`, `retries`
 
@@ -1193,6 +1208,31 @@ one good child per generation is enough and the rest of the budget is spent on
 also-rans — and it is the only way out of a plateau. `search.children_per_generation`
 is the starting point, clamped into `[min, max]`; without the block, the
 breadth is fixed and nothing is logged.
+
+*What counts as an improvement.* An improving generation is one whose best
+beats the run's best by more than `stop.epsilon`; every other generation is
+flat, for `adaptive_children` and for `stop.patience` alike. The run's best
+moves only on an improvement: a step inside epsilon leaves the bar where it was
+(no ratchet), so slow steady progress adds up: with an epsilon of 0.5, a best
+of 1.0, then 1.3 (flat), then 1.6 (an improvement over 1.0).
+
+```yaml
+stop:
+  epsilon: null      # the default (absent means the same): automatic
+  # epsilon: 0.001   # an explicit number is used as it is
+```
+
+Automatic is `max(1e-6, 1e-9 × |best|, half the noise of one finished
+candidate's score)`: with no noise estimate (see
+[Stochastic evaluators](#stochastic-evaluators-seeds-n)) it is `1e-6`, the old
+default. On a noisy final stage, a generation whose best is exactly as good as
+the run's best, both measured once with noise sd σ, reads as an improvement in
+about 36 % of generations instead of 50 %. On a resumed run the recorded
+generations are replayed with the noise as it is when the run resumes.
+`stop.target` is checked against the generation's best itself, not the gated
+best: a target reached by a step inside epsilon is reached. The patience stop
+says the epsilon it used: `stop.patience reached: no improvement > 0.25 for 5
+generation(s)`.
 
 ### Economics: USD per unit of improvement
 

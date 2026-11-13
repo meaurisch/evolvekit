@@ -1421,7 +1421,11 @@ class GainPerUsdRule:
 @dataclass(frozen=True)
 class StopConfig:
     patience: int = 5
-    epsilon: float = 1e-6
+    epsilon: float | None = None
+    """How far a generation's best must beat the run's best to count as an
+    improvement. `None` (`null` or absent, the default) is automatic:
+    `StopPolicy.epsilon_now`, half the noise of one finished candidate's score,
+    with floors `1e-6` and `1e-9 * |best|`."""
     target: float | None = None
     min_big_steps: int = 0
     max_usd_since_improvement: float | None = None
@@ -1450,8 +1454,10 @@ class StopConfig:
             },
             "stop",
         )
-        epsilon = _as_float(data.get("epsilon", 1e-6), "stop.epsilon")
-        if epsilon < 0:
+        epsilon = data.get("epsilon")
+        if epsilon is not None:
+            epsilon = _as_float(epsilon, "stop.epsilon")
+        if epsilon is not None and epsilon < 0:
             raise ConfigError(f"stop.epsilon: must be >= 0, got {epsilon}")
         target = data.get("target")
         max_usd = data.get("max_usd_since_improvement")

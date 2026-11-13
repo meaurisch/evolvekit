@@ -589,3 +589,75 @@ def test_a_candidate_clearly_worse_on_the_hold_out_is_still_kept_out_in_over_97_
     kept_out, literal = _equal_and_worse_veto_rates(tmp_path, -3.0)
     assert kept_out >= 0.97
     assert literal >= kept_out
+
+
+# -- improvement and elites on the paired scale (A2.4a, Decision 1) -------------
+
+
+def _param_candidate(config, cid, x, generation):
+    from evolvekit.candidate import Candidate, splice_block
+
+    block = config.problem.parameters.render_block({"x": x})
+    source = splice_block(config.problem.skeleton_source(), block, config.problem.block_start, config.problem.block_end)
+    return Candidate(id=cid, generation=generation, block=block, source=source, operator="param_lhs")
+
+
+def _placed(cid, fitness):
+    from evolvekit.candidate import Candidate
+
+    return Candidate(id=cid, generation=1, block="", source="", operator="x", score=fitness,
+                     ranking_score=fitness, kpis={"complexity": 10.0})
+
+
+def _one_cell():
+    from evolvekit.config import ArchiveConfig, DescriptorConfig
+    from evolvekit.search.archive import Archive
+
+    return Archive.from_config(ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4, 0.0, 40.0),)))
+
+
+@pytest.mark.parametrize("seeds", [1, 3])
+def test_on_a_repeatable_evaluator_a_small_real_gain_counts(tmp_path, seeds):
+    """cost = 1000·(1 + x) + 3·seed on one instance: across seeds the spread is
+    sigma_across (about 1.7 from the calibration at seeds: 1, 3 at seeds: 3); a child
+    0.5 · sigma_across cheaper than its parent is the same program on the same seeds
+    plus a constant. Paired, the noise is 0: the child is no twin, it is an
+    improvement, and it takes its parent's cell."""
+    from evolvekit.budget import StopPolicy
+    from evolvekit.config import StopConfig
+
+    config = _toy(tmp_path, "repeatable", seeds=seeds, instances=False)
+    cascade = _cascade(config, tmp_path)
+    parent = cascade.evaluate_generation([seed_candidate(config)])["g000-c0001"]
+    sigma = cascade.noise.sd_across("full", "cost")
+    assert sigma > 1.0, "the across-seed spread is measured"
+    child = cascade.evaluate_generation([_param_candidate(config, "c", -0.5 * sigma / 1000.0, 1)])["c"]
+    assert cascade.noise.repeatable("full") is True
+    assert child.behaviour_twin_id is None and child.competes
+    assert child.score > parent.score
+    policy = StopPolicy(StopConfig(patience=9, epsilon=None))
+    policy.noise_sd = cascade.noise.score_sd("full", config.evaluate.score, seeds)
+    assert policy.noise_sd == 0.0, "paired: the same seeds give the same offset"
+    policy.update(parent.score)
+    assert policy.update(child.score).stagnant_generations == 0
+    archive = _one_cell()
+    archive.noise_sd = policy.noise_sd
+    archive.add(_placed("p", parent.score))
+    assert archive.add(_placed("c", child.score)).displaced == "p"
+    # The across-seed noise would have called the same gain flat.
+    across = cascade.noise.sd_across("full", "cost") / math.sqrt(seeds)
+    assert child.score - parent.score < across
+
+
+def test_on_a_wall_clock_evaluator_the_same_gain_is_within_the_noise(tmp_path):
+    """cost = 1000·(1 + x) + gauss(0, 2) fresh each call, seeds 3: the stage is not
+    repeatable and every rule's margin is the across-seed one (the rates are those of
+    the seeded simulations of A2.1c, A2.2 and A2.4a)."""
+    config = _toy(tmp_path, "wall-clock", seeds=3, instances=False)
+    cascade = _cascade(config, tmp_path)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert cascade.noise.repeatable("full") is False
+    assert cascade.noise.sd("full", "cost") == pytest.approx(cascade.noise.sd_across("full", "cost"))
+    assert cascade.noise.sd("full", "cost") > 0
+    assert cascade.noise.score_sd("full", config.evaluate.score, 3) == pytest.approx(
+        cascade.noise.sd_across("full", "cost") / math.sqrt(3))

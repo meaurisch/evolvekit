@@ -417,3 +417,19 @@ def test_parent_top_k_is_refused_and_points_at_the_archive(minimal_raw, tmp_path
     raw["search"] = {"parent_top_k": 5}
     with pytest.raises(ConfigError, match=r"search\.parent_top_k.*search\.archive\.top_k"):
         build_config(raw, base_dir=tmp_path)
+
+
+@pytest.mark.parametrize("stop", [{}, {"epsilon": None}])
+def test_stop_epsilon_absent_or_null_is_automatic(minimal_raw, tmp_path, stop):
+    raw = copy.deepcopy(minimal_raw)
+    raw["stop"] = stop
+    assert build_config(raw, base_dir=tmp_path).stop.epsilon is None
+
+
+def test_an_explicit_stop_epsilon_is_kept_and_a_negative_one_refused(minimal_raw, tmp_path):
+    raw = copy.deepcopy(minimal_raw)
+    raw["stop"] = {"epsilon": 0.01}
+    assert build_config(raw, base_dir=tmp_path).stop.epsilon == 0.01
+    raw["stop"] = {"epsilon": -1}
+    with pytest.raises(ConfigError, match="stop.epsilon: must be >= 0"):
+        build_config(raw, base_dir=tmp_path)

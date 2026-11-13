@@ -167,6 +167,10 @@ class Archive:
     tree: bool = False
     """A tree problem: a block is a diff, and its `complexity` is its size
     (`diff_complexity`), so differently sized changes spread over the grid."""
+    noise_sd: float = 0.0
+    """The sd of one finished candidate's fitness (`Noise.score_sd` at the final
+    stage), set by the driver before each `add`. A challenger takes a cell only
+    when it beats the elite by more than this (`displaces`); 0 is today's `>`."""
 
     # -- construction ----------------------------------------------------
 
@@ -180,15 +184,21 @@ class Archive:
 
     @staticmethod
     def from_records(
-        records: Iterable[dict[str, Any]], config: ArchiveConfig, *, tree: bool = False
+        records: Iterable[dict[str, Any]],
+        config: ArchiveConfig,
+        *,
+        tree: bool = False,
+        noise_sd: float = 0.0,
     ) -> "Archive":
         """Rebuild the grid from `runs.jsonl` -- the resume path.
 
         `archive.json` is a snapshot; the JSONL is the truth. Rebuilding from
         the log means a run that died between the last append and the last
-        snapshot still comes back consistent.
+        snapshot still comes back consistent. The elite rule reads `noise_sd`,
+        the noise as it is now (as the stop policy's replay does).
         """
         archive = Archive.from_config(config, tree=tree)
+        archive.noise_sd = noise_sd
         for record in records:
             candidate = Candidate.from_record(record)
             if candidate.parent_id:
@@ -256,7 +266,7 @@ class Archive:
             )
             return Placement(coord=coord, inserted=True, became_elite=True)
         current.occupants += 1
-        if fitness > current.fitness:
+        if self.displaces(candidate, fitness, current):
             displaced = current.elite_id
             current.elite_id = candidate.id
             current.fitness = fitness
@@ -279,8 +289,19 @@ class Archive:
                 )
                 continue
             cell.occupants += 1
-            if fitness > cell.fitness:
+            if self.displaces(member, fitness, cell):
                 cell.elite_id, cell.fitness = member.id, fitness
+
+    def displaces(self, challenger: Candidate, fitness: float, cell: Cell) -> bool:
+        """The elite rule: the challenger takes the cell when it beats the elite
+        by more than `noise_sd`, or on any gain when its score is the mean of
+        more runs (`replicates`; 0, unknown, reads as equal to any)."""
+        if fitness > cell.fitness + self.noise_sd:
+            return True
+        elite = self.members.get(cell.elite_id)
+        mine = int(challenger.replicates or 0)
+        theirs = int(elite.replicates or 0) if elite is not None else 0
+        return mine > 0 and theirs > 0 and mine > theirs and fitness > cell.fitness
 
     # -- views -----------------------------------------------------------
 

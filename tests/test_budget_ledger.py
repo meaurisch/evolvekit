@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 
 import pytest
 
@@ -107,6 +108,73 @@ def test_min_big_steps_holds_the_plateau_open():
     assert held.stop is False and "required big step" in held.reason
     policy.note_big_step()
     assert policy.update(1.0).stop is True
+
+
+def test_slow_steady_progress_is_progress_without_the_ratchet():
+    policy = StopPolicy(StopConfig(patience=2, epsilon=0.5))
+    for value in (1.0, 1.3, 1.6):
+        decision = policy.update(value)
+    assert decision.stagnant_generations == 0 and policy.best == 1.6, "1.6 > 1.0 + 0.5"
+
+
+def test_a_sub_epsilon_step_does_not_move_the_best():
+    policy = StopPolicy(StopConfig(patience=9, epsilon=0.5))
+    policy.update(1.0)
+    policy.update(1.3)
+    assert policy.best == 1.0, "no ratchet: 1.3 is not 0.5 above 1.0"
+
+
+def test_the_automatic_epsilon_follows_the_noise():
+    policy = StopPolicy(StopConfig(patience=9, epsilon=None))
+    assert policy.epsilon_now() == 1e-6, "no noise: today's epsilon"
+    policy.noise_sd = 2.0
+    policy.update(100.0)
+    assert policy.epsilon_now() == pytest.approx(1.0)
+    assert policy.update(100.9).stagnant_generations == 1
+    assert policy.update(101.1).stagnant_generations == 0
+
+
+def test_the_automatic_epsilon_has_a_relative_floor_and_an_explicit_one_ignores_the_noise():
+    policy = StopPolicy(StopConfig(patience=9, epsilon=None))
+    policy.update(1e7)
+    assert policy.epsilon_now() == pytest.approx(1e-2), "1e-9 * |best|"
+    fixed = StopPolicy(StopConfig(patience=9, epsilon=0.25))
+    fixed.noise_sd = 10.0
+    assert fixed.epsilon_now() == 0.25
+
+
+def test_with_no_noise_the_automatic_epsilon_is_todays_default():
+    automatic = StopPolicy(StopConfig(patience=3, epsilon=None))
+    today = StopPolicy(StopConfig(patience=3, epsilon=1e-6))
+    for value in (1.0, 1.0 + 5e-7, 1.0 + 2e-6, 1.0 + 2e-6, 1.0 + 2e-6, 1.0 + 2e-6):
+        assert automatic.update(value) == today.update(value)
+
+
+def test_the_patience_reason_says_the_epsilon_used():
+    policy = StopPolicy(StopConfig(patience=1, epsilon=None))
+    policy.noise_sd = 0.5
+    policy.update(1.0)
+    decision = policy.update(1.0)
+    assert decision.stop and decision.reason == "stop.patience reached: no improvement > 0.25 for 1 generation(s)"
+
+
+def test_the_target_is_read_from_the_generations_best_not_the_gated_one():
+    policy = StopPolicy(StopConfig(patience=9, epsilon=0.5, target=1.2))
+    policy.update(1.0)
+    assert policy.update(1.3).stop is True, "1.3 >= 1.2, though 1.3 < 1.0 + 0.5"
+
+
+def test_an_equal_candidate_reads_as_an_improvement_over_one_draw_in_about_36_percent():
+    """x, b ~ N(0, 1), epsilon 0.5: P(N(0, 2) > 0.5) = P(Z > 0.354) = 36.2 %
+    (50 % with today's 1e-6). 20 000 trials: SE 0.34 %; measured 36.6 % (band of Decision 12)."""
+    rng, hits = random.Random(51), 0
+    for _ in range(20_000):
+        policy = StopPolicy(StopConfig(patience=9, epsilon=None))
+        policy.noise_sd = 1.0
+        policy.update(rng.gauss(0, 1))
+        hits += policy.update(rng.gauss(0, 1)).stagnant_generations == 0
+    print(f"equal candidate read as an improvement: {100 * hits / 20_000:.2f} %")
+    assert 0.345 <= hits / 20_000 <= 0.385
 
 
 def test_a_generation_with_no_score_counts_as_stagnant():

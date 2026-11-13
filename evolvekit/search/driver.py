@@ -533,8 +533,18 @@ class Driver:
             self._replayed_rows(self.ledger.runs()),
             self.ledger.usage(),
             window=self.config.stop.economics_window,
-            epsilon=self.config.stop.epsilon,
+            epsilon=self.stop_policy.epsilon_now(),
         )
+
+    def _refresh_noise(self) -> None:
+        """The sd of one finished candidate's score at the final stage, as the
+        run's noise estimate stands now (`Noise.score_sd`: paired on a
+        repeatable stage, so 0 at `seeds: 1`), handed to the two rules that
+        read it: the stop policy's automatic epsilon and the elite rule."""
+        final = self.config.final_stage
+        sd = self.cascade.noise.score_sd(final.id, self.config.evaluate.score, final.seeds)
+        self.stop_policy.noise_sd = sd
+        self.grid.noise_sd = sd
 
     def _archive_scores(self) -> list[float]:
         return [c.fitness for c in self.archive if _competes(c)]
@@ -572,7 +582,10 @@ class Driver:
         self.cascade.seed_public = seed_public(raw)
         if not rows:
             return 0
-        self.grid = Archive.from_records(rows, self.config.search.archive, tree=self.repo is not None)
+        self._refresh_noise()
+        self.grid = Archive.from_records(
+            rows, self.config.search.archive, tree=self.repo is not None, noise_sd=self.stop_policy.noise_sd
+        )
         last_generation = 0
         for row in rows:
             candidate = Candidate.from_record(row)
@@ -802,6 +815,8 @@ class Driver:
                 self.log(f"ABORT: {summary.stop_reason}")
                 return self._finalise(summary)
 
+        # The replay reads the noise as it is now (open question 12).
+        self._refresh_noise()
         decision = self._restore_stop_policy()
 
         for offset in range(1, total + 1):
@@ -833,6 +848,7 @@ class Driver:
                 break
 
             self._maybe_refresh_scratchpad(generation)
+            self._refresh_noise()
 
             began = self._generation_started(
                 generation, children=self.children_per_generation
@@ -1805,9 +1821,14 @@ class Driver:
             self._drop_trees(candidates)
         if any(result.abandoned for result in results.values()):
             return True
+        # The generation's outcomes have joined the estimate: the elite rule
+        # below and the stop policy after the round read it as it is now.
+        self._refresh_noise()
+        final = self.config.final_stage
         for candidate in candidates:
             result = results[candidate.id]
             self.results[candidate.id] = result
+            candidate.replicates = final.seeds if final.id in result.stages_reached else 0
             candidate.commit = result.commit
             candidate.score = result.score
             candidate.params = result.params
