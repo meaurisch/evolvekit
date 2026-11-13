@@ -345,22 +345,29 @@ class BehaviourIndex:
         *,
         exclude: str | None = None,
         before: int | None = None,
+        exact_digits: int | None = None,
     ) -> BehaviourVerdict:
         """The noise rule (Decision 2): among the entries `within` the margins
         whose stage score is at least the child's, the one with the highest
         score (ties: the first added). None: not a twin -- a child within the
         noise of everything but ahead of all of it is evaluated. `exclude`: the
         child's own id, should it already be in the index. `before`: the
-        child's round; only entries of earlier rounds are compared (Decision
-        15), so the order of evaluation inside a round decides nothing."""
+        child's round; entries of earlier rounds are compared within the
+        margins, those of its own round (Decision 15) only for numbers equal at
+        `exact_digits` (an exact duplicate is a twin in any order; with
+        `exact_digits` None, not at all), so the order of evaluation inside a
+        round decides nothing a margin would."""
         best_id: str | None = None
         best_score = -math.inf
         for cid, entry in self.values.get(stage_id, {}).items():
             if cid == exclude or entry.score < behaviour.score:
                 continue
-            if before is not None and self.generations.get(cid, before - 1) >= before:
-                continue
             if best_id is not None and entry.score <= best_score:
+                continue
+            same_round = before is not None and self.generations.get(cid, before - 1) >= before
+            if same_round:
+                if exact_digits is not None and within(behaviour, entry, {}, exact_digits):
+                    best_id, best_score = cid, entry.score
                 continue
             if within(behaviour, entry, margins, digits):
                 best_id, best_score = cid, entry.score

@@ -641,6 +641,17 @@ def test_a_near_equal_pair_of_one_round_is_not_twinned(tmp_path, order):
     assert results["b"].stages_reached == ["static", "proxy", "full"]
 
 
+@pytest.mark.parametrize("order", [("a", "b"), ("b", "a")])
+def test_an_identical_pair_of_one_round_is_twinned_by_the_exact_hash(tmp_path, order):
+    config = _proxy_then_full(tmp_path, {"top_k_per_generation": 2})
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.noise.observe("proxy", "z", _replicated("proxy", 4.0))
+    results = cascade.evaluate_generation([_gain(cid, 10.0) for cid in order])
+    first, second = order
+    assert results[first].behaviour_twin_id is None
+    assert results[second].behaviour_twin_id == first and results[second].stages_reached == ["static", "proxy"]
+
+
 def test_a_child_near_an_earlier_rounds_candidate_is_still_its_twin(tmp_path):
     config = _proxy_then_full(tmp_path, {"top_k_per_generation": 2})
     cascade = Cascade(config, work_dir=tmp_path / "work")

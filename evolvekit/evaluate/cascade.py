@@ -1025,8 +1025,11 @@ class Cascade:
                     **{k: self.noise.vector_cv(stage.id, k) for k in behaviour.vectors},
                 },
             )
+            # Earlier rounds within the noise; this round's only when every
+            # number is the same as measured (`keep` digits: an exact duplicate
+            # is a twin in any order, and `signature_digits` rounds nothing here).
             verdict = self.signatures.check_values(
-                stage.id, behaviour, margins, digits, exclude=candidate_id, before=generation
+                stage.id, behaviour, margins, digits, exclude=candidate_id, before=generation, exact_digits=keep
             )
         else:
             verdict = self.signatures.check(stage.id, signature)

@@ -1009,8 +1009,9 @@ noise twin, so which of them was evaluated first decides nothing (with
 parallel workers that order is arbitrary), and promotion's noise band sees
 every child of the round the rule kept. A round's children become targets for
 the next round's; a resumed run rebuilds the same targets from the rows'
-`generation`. (The exact hash below matches within a round too: an exact
-duplicate behaves alike in any order.)
+`generation`. Within a round a child is still the twin of one that reported the
+same numbers, as measured (nine digits): an exact duplicate behaves alike in
+any order.
 
 - `σ̂` is one run's noise of that measure (per case: that case's); where a
   case's is unknown — a calibration measured one case — the relative noise
