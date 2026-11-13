@@ -8,6 +8,9 @@ finishing them costs an hour of solver time to confirm what is already known.
 from __future__ import annotations
 
 import json
+import math
+import random
+import statistics
 from pathlib import Path
 
 import pytest
@@ -15,7 +18,9 @@ import pytest
 from evolvekit.candidate import SEED_OPERATOR, Candidate, splice_block
 from evolvekit.config import ConfigError, build_config
 from evolvekit.evaluate import Cascade
-from evolvekit.evaluate.fanout import Race
+from evolvekit.evaluate.fanout import Job, Race, _Board
+from evolvekit.evaluate.noise import Noise
+from evolvekit.evaluate.types import StageOutcome
 
 # cost = scale * (1 + x); every call leaves a file behind, so runs can be counted.
 SOLVER = r'''
@@ -74,6 +79,156 @@ def test_how_far_behind_is_measured_on_the_instances_both_have():
     assert higher_is_better.behind_pct({"a": 95.0}) == (1, pytest.approx(5.0))
 
 
+def test_the_race_reads_only_at_its_looks():
+    race = Race(objective="cost", minimize=True, incumbent={f"i{k}": 100.0 for k in range(10)},
+                after=4, margin_pct=1.0, instances=10)
+    assert race.looks == (4, 7), "after 4, then every ceil(10 / 4) = 3, never at 10 itself"
+    behind = {f"i{k}": 110.0 for k in range(5)}
+    assert race.decide(behind) is None, "5 is not a look"
+    assert race.decide({k: v for k, v in list(behind.items())[:4]}) is not None
+    assert Race(objective="cost", minimize=True, incumbent={}, after=5, margin_pct=1.0, instances=5).looks == ()
+    assert Race(objective="cost", minimize=True, incumbent={}, after=2, margin_pct=1.0, instances=5).looks == (2, 4)
+
+
+def test_the_margin_grows_with_the_noise_and_never_falls_below_margin_pct():
+    quiet = Race(objective="cost", minimize=True, incumbent={"a": 1.0}, after=1, margin_pct=1.0, cv=0.001, instances=4)
+    noisy = Race(objective="cost", minimize=True, incumbent={"a": 1.0}, after=1, margin_pct=1.0, cv=0.02, instances=4)
+    assert quiet.margin_at([0.5]) == 1.0 and noisy.margin_at([0.5]) == pytest.approx(4.0)
+
+
+def test_the_margin_knows_the_spread_between_cases_and_drops_it_at_the_end():
+    race = Race(objective="cost", minimize=True, incumbent={}, after=2, margin_pct=1.0, instances=10)
+    diffs = [0.03, -0.03, 0.03, -0.03]
+    s = statistics.stdev(diffs)
+    assert race.margin_at(diffs) == pytest.approx(200 * s / 2 * math.sqrt(1 - 4 / 10))
+    full = Race(objective="cost", minimize=True, incumbent={}, after=2, margin_pct=1.0, instances=4)
+    assert full.margin_at(diffs) == 1.0, "all four in: the factor is 0"
+
+
+def _settled(value: float) -> StageOutcome:
+    return StageOutcome(stage_id="full", ok=True, kpis={"cost": value})
+
+
+def test_a_look_is_read_once_per_candidate():
+    """Two workers: a seed-1 run that lands before the seed-0 pass is done leaves
+    `compared` at a look already read; no second verdict there."""
+    names = [f"i{k}" for k in range(10)]
+    race = Race(objective="cost", minimize=True, incumbent={n: 100.0 for n in names},
+                after=4, margin_pct=1.0, instances=10)
+    board = _Board([Job("c", Path("c.py"))], 10, [0, 1], race=race, names=names)
+    for k in range(4):  # 0.9 % behind on each: within the margin at look 4
+        assert board.settle("c", k, 0, names[k], _settled(100.9)) is None
+    # i0's seed 1 lands early: its mean is now 2 % behind, the four 1.175 % --
+    # out, were look 4 read again.
+    assert race.decide({"i0": 102.0, "i1": 100.9, "i2": 100.9, "i3": 100.9}) is not None
+    assert board.settle("c", 0, 1, "i0", _settled(103.1)) is None, "look 4 was read"
+    for k in (4, 5):
+        assert board.settle("c", k, 0, names[k], _settled(105.0)) is None, "5 and 6 are no looks"
+    assert board.settle("c", 6, 0, "i6", _settled(105.0)).startswith("raced out after 7 of 10 instances")
+    assert board.margin("c") == pytest.approx(race.margin_at(
+        [0.02, 0.009, 0.009, 0.009, 0.05, 0.05, 0.05]), abs=0.005)
+
+
+def _raced_out(race: Race, values: list[float]) -> bool:
+    """One candidate settling its runs one instance after another, through the
+    stage's own board: the rule as the stage applies it."""
+    names = [f"i{k}" for k in range(len(values))]
+    board = _Board([Job("c", Path("c.py"))], race.instances, [0], race=race, names=names)
+    return any(board.settle("c", k, 0, names[k], _settled(v)) is not None for k, v in enumerate(values))
+
+
+def _noisy(rng: random.Random, level: float, cv: float = 0.02, n: int = 10) -> list[float]:
+    return [level * (1 + rng.gauss(0, cv)) for _ in range(n)]
+
+
+def _race(incumbent: list[float], **rule) -> Race:
+    rule = {"after": 4, "margin_pct": 1.0, "cv": 0.02, **rule}
+    return Race(objective="cost", minimize=True, incumbent={f"i{k}": v for k, v in enumerate(incumbent)},
+                instances=len(incumbent), **rule)
+
+
+def test_an_equal_candidate_against_a_fresh_incumbent_is_raced_out_in_under_1_percent():
+    """10 instances, after 4 (looks 4, 7), one run per instance on both sides, cv 2 %:
+    margin at least 4 %; the mean ratio over 4 instances has sd 2.83/2 = 1.41 %:
+    z >= 2.83, 0.23 %, the second look adds about 0.01 %. The spread term can only
+    raise the margin. 20 000 trials: SE about 0.03 %."""
+    rng, trials = random.Random(21), 20_000
+    out = sum(_raced_out(_race(_noisy(rng, 100.0)), _noisy(rng, 100.0)) for _ in range(trials))
+    rate = out / trials
+    print(f"equal candidate, fresh incumbent: raced out {rate:.2%} (SE {math.sqrt(rate * (1 - rate) / trials):.2%})")
+    assert rate < 0.01
+
+
+def _best_of(rng: random.Random, count: int) -> list[float]:
+    return min((_noisy(rng, 100.0) for _ in range(count)), key=statistics.fmean)
+
+
+def test_an_equal_candidate_against_the_best_of_eight_is_raced_out_in_under_3_percent():
+    """The incumbent is the best of eight equal candidates by its mean over 10
+    instances: each of its values is biased by 1.42 * 2 % / sqrt(10) = 0.90 %.
+    Look 1: z = (4 - 0.90) / 1.41 = 2.19, about 1.4 % before the spread term. Printed
+    beside it: the best of 50 -- the docs' "about 5 % against the best of a long run"."""
+    rng, trials = random.Random(22), 20_000
+    rates = {}
+    for count in (8, 50):
+        out = sum(_raced_out(_race(_best_of(rng, count)), _noisy(rng, 100.0)) for _ in range(trials // 4 if count == 50 else trials))
+        rates[count] = out / (trials // 4 if count == 50 else trials)
+    se = math.sqrt(rates[8] * (1 - rates[8]) / trials)
+    print(f"equal candidate vs the best of 8: {rates[8]:.2%} (SE {se:.2%}); vs the best of 50: {rates[50]:.2%}")
+    assert rates[8] < 0.03
+
+
+def test_a_candidate_five_percent_behind_is_raced_out_in_over_80_percent():
+    """Behind 5 %, margin 4 %, sd 1.41 % at look 1: P(Z > -0.71) = 76 %; look 2 (sd 1.07 %)
+    brings it to about 88 % before the spread term, which can only lower it."""
+    rng, trials = random.Random(24), 20_000
+    out = sum(_raced_out(_race(_noisy(rng, 100.0)), _noisy(rng, 105.0)) for _ in range(trials))
+    rate = out / trials
+    print(f"five percent behind: raced out {rate:.2%} (SE {math.sqrt(rate * (1 - rate) / trials):.2%})")
+    assert rate > 0.80
+
+
+def test_a_candidate_trading_cases_and_not_behind_on_the_stages_cases_is_raced_out_in_under_10_percent():
+    """Decisions 5 and 14. Per-case effects N(0, 3 %) on 10 instances, no run noise
+    (cv 0), margin_pct 1, after 4 (looks 4, 7). The race asks whether a candidate is
+    behind on *this stage's* cases -- their mean is its score -- so the 10 cases are the
+    population and the spread term carries the factor sqrt(1 - m/n). The error is a
+    race-out of a candidate whose noise-free mean over all 10 cases is not behind
+    (about half the draws). Measured: 3.1 % of those (SE 0.27 %, 4017 of 8000 draws);
+    over all draws 19.1 % (SE 0.44 %), 92 % of those race-outs of candidates really
+    behind on the 10. Without the spread term the unconditional rate was 30.2 %."""
+    rng, trials = random.Random(23), 8000
+    out = level = level_out = 0
+    for _ in range(trials):
+        effects = [rng.gauss(0, 0.03) for _ in range(10)]
+        raced = _raced_out(_race([100.0] * 10, cv=0.0), [100.0 * (1 + e) for e in effects])
+        out += raced
+        if statistics.fmean(effects) <= 0:
+            level += 1
+            level_out += raced
+    rate, overall = level_out / level, out / trials
+    print(f"trading cases, not behind on the stage's cases: raced out {rate:.2%} "
+          f"(SE {math.sqrt(rate * (1 - rate) / level):.2%}, {level} draws); "
+          f"over all draws {overall:.2%} (SE {math.sqrt(overall * (1 - overall) / trials):.2%})")
+    assert rate < 0.10
+
+
+def test_an_instance_at_zero_is_left_out_of_the_relative_noise():
+    noise = Noise()
+    noise.observe("full", "a", StageOutcome(
+        stage_id="full", ok=True, kpis={"cost": 50.0}, kpi_var={"cost": 1.0}, runs=3, seed_list=(0, 1, 2),
+        vector_kpis={"cost_per_instance": [100.0, 0.0]}, vector_var={"cost_per_instance": [4.0, 1.0]}))
+    cv = noise.vector_cv("full", "cost_per_instance")
+    assert cv == pytest.approx(0.02), "sqrt(4 / 100**2): the instance at 0 has no ratio"
+    race = Race(objective="cost", minimize=True, incumbent={"a": 100.0, "z": 0.0}, after=1,
+                margin_pct=1.0, cv=cv, instances=3)
+    assert race.behind_pct({"a": 103.0, "z": 50.0}) == (1, pytest.approx(3.0)), "z is skipped"
+    assert race.decide({"a": 103.0, "z": 50.0}) is None, "3 % is inside twice the noise"
+    assert race.decide({"a": 105.0, "z": 0.0}).startswith("raced out after 1 of 3 instances: 5.00 %")
+    nothing = Race(objective="cost", minimize=True, incumbent={"z": 0.0}, after=1, margin_pct=1.0, instances=2)
+    assert nothing.decide({"z": 5.0}) is None, "nothing to compare on"
+
+
 # -- in a cascade ----------------------------------------------------------
 
 
@@ -92,6 +247,31 @@ def test_a_candidate_clearly_behind_is_stopped_and_its_other_instances_are_never
     )
     raced = [e for e in events if e["type"] == "raced_out"]
     assert len(raced) == 1 and raced[0]["candidate_id"] == "g001-c0002" and raced[0]["runs_done"] == 2
+
+
+def test_with_no_noise_the_rule_is_the_margin_alone(tmp_path):
+    """`seeds: 1` without `{seed}`: no noise. After 2 of five instances the looks
+    are 2 and 4; the two differences are equal, so the spread adds nothing and the
+    margin is `margin_pct` -- the rule as it read before, at its first look."""
+    config = _config(tmp_path, race={"after": 2, "margin_pct": 1.0})
+    events: list[dict] = []
+    cascade = Cascade(config, work_dir=tmp_path / "work", on_event=lambda t, **f: events.append({"type": t, **f}))
+    cascade.evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    events.clear()
+    slow = cascade.evaluate_generation([_candidate(config, "g001-c0002", 0.05)])["g001-c0002"]
+    assert slow.raced_out.endswith("5.00 % behind the best candidate so far on the same instances (margin 1 %)")
+    raced = next(e for e in events if e["type"] == "raced_out")
+    assert raced["looks"] == [2, 4] and raced["margin_pct"] == 1.0
+    started = next(e for e in events if e["type"] == "stage_started" and e["stage"] == "full")
+    assert started["race_looks"] == [2, 4]
+
+
+def test_a_stage_without_a_race_says_no_looks(tmp_path):
+    config = _config(tmp_path)
+    events: list[dict] = []
+    cascade = Cascade(config, work_dir=tmp_path / "work", on_event=lambda t, **f: events.append({"type": t, **f}))
+    cascade.evaluate_generation([_candidate(config, "g000-c0001", 0.0, seed=True)])
+    assert all("race_looks" not in e for e in events if e["type"] == "stage_started")
 
 
 def test_the_stage_reports_a_raced_out_candidate_apart_from_its_failures(tmp_path):

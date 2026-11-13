@@ -23,7 +23,7 @@ from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
 from evolvekit.config import DEFAULT_SIGNATURE_DIGITS, Config, PromoteRule, StageConfig
 from evolvekit.evaluate.cache import EvalCache
-from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
+from evolvekit.evaluate.fanout import Job, Race, per_instance_key, race_looks, run_instance_stage
 from evolvekit.evaluate.levels import Anchor, level_score, make_anchor
 from evolvekit.evaluate.noise import (
     NOISE_FILE,
@@ -532,6 +532,9 @@ class Cascade:
         generation -- a long stage is otherwise a progress bar with no length."""
         if self.on_event is not None and stage.kind == "command":
             instances = stage.private_instances if private else stage.instances
+            extra: dict[str, Any] = {}
+            if stage.race is not None and not private:
+                extra["race_looks"] = list(race_looks(stage.race.after, len(instances)))
             self.on_event(
                 "stage_started",
                 stage=stage.id,
@@ -539,6 +542,7 @@ class Cascade:
                 candidates=list(candidates),
                 runs_per_candidate=max(1, len(instances)) * stage.seeds,
                 workers=stage.workers,
+                **extra,
             )
         return time.perf_counter()
 
@@ -626,13 +630,18 @@ class Cascade:
         held = self.incumbent.get(stage.id)
         if stage.race is None or private or not held:
             return None  # nothing to race against yet: the first candidate through always finishes
+        objective = self.config.evaluate.score.objective
         return Race(
-            objective=self.config.evaluate.score.objective,
+            objective=objective,
             minimize=self.config.evaluate.score.direction == "minimize",
             incumbent={str(k): float(v) for k, v in held["values"].items()},
             after=stage.race.after,
             margin_pct=stage.race.margin_pct,
             exempt=frozenset(c.id for c in candidates if c.operator == SEED_OPERATOR),
+            # Raw per-instance values on both sides (decision 4); a ratio, so
+            # raw and percent of the seed agree.
+            cv=self.noise.vector_cv(stage.id, per_instance_key(objective)),
+            instances=len(stage.instances),
         )
 
     def _note_incumbent(self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome) -> None:

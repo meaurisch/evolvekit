@@ -89,7 +89,8 @@ live run is built from:
   | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
-  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
+  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
+  | `raced_out` | when a race stops a candidate | `candidate_id`, `stage`, `private`, `reason` (the sentence, with its margin), `runs_done`, `looks` (the stage's look counts) and `margin_pct` (the margin it was stopped by, percent, to two places) |
   | `noise_checked` | once per run, after the seed has passed the final stage and been [run again](#stochastic-evaluators-seeds-n) | `stage`, `instance` (the one the seed ran again on; `null` without instances), `repeatable`, `runs` (the seed's runs compared there) and `cv` (the objective's relative noise the search now reads; 0 on a repeatable stage at `seeds: 1`) |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
@@ -744,7 +745,10 @@ estimate says so in its own section and is listed here:
 - behaviour twins on a stage that is not repeatable
   ([The novelty filters](#the-novelty-filters--structural-near-and-behavioural),
   *Behavioural*): within the noise of an earlier candidate that scored at
-  least as well, instead of equal to nine digits.
+  least as well, instead of equal to nine digits;
+- the race's margin ([One run per instance](#one-run-per-instance-instances-workers-retries),
+  `race`): at least twice the objective's relative noise of one run, read at
+  fixed looks.
 
 ### One run per instance: `instances`, `workers`, `retries`
 
@@ -817,13 +821,31 @@ own, and the framework knows what it could not know before:
 - **A candidate that is clearly behind stops costing** (`race`, off unless
   configured). Every candidate is measured on the same instances in the same
   order, so after `after` of them a candidate can be compared with the best so
-  far *on exactly those*. More than `margin_pct` percent behind, and it is
-  raced out: its remaining runs are never started, it keeps the score of the
-  stage before, and it does not compete — the standing of a candidate that was
-  not promoted, not of one that failed. With ten-minute runs, `after: 4` of ten
+  far *on exactly those*. The race reads at fixed *looks*: after `after`
+  instances, then every quarter of them (⌈n/4⌉), never at the last one — with
+  `after: 4` of ten, after 4 and after 7 — and each look once per candidate, so
+  a later seed's run or a parallel worker landing in between never reads the
+  same look twice. Further behind than the margin at a look, and it is raced
+  out: its remaining runs are never started, it keeps the score of the stage
+  before, and it does not compete — the standing of a candidate that was not
+  promoted, not of one that failed. With ten-minute runs, `after: 4` of ten
   instances saves an hour of solver time per losing candidate. The margin is
-  the protection against noise: set it to a few times what two runs of one
-  configuration differ by. The baseline always finishes (it is the yardstick),
+  the largest of three: `margin_pct`; twice the run-to-run noise in percent
+  (the objective's relative noise from [the run's estimate](#stochastic-evaluators-seeds-n),
+  measured by the run — 0 without one, which leaves `margin_pct`); and twice
+  the standard error of the per-case differences seen so far, shrinking to
+  nothing as the last cases come in (the factor √(1 − m/n) over the m of n
+  instances compared). The race asks whether a candidate is behind *on this
+  stage's own cases* — their mean is its score — so those n cases are the whole
+  population. A candidate exactly as good as the incumbent is raced out in
+  under 1 % of runs against a fresh incumbent, rising to about 3 % against the
+  best of a long run (the best of 50; about 1.4 % against the best of eight),
+  with 2 % run noise. One that trades cases (per-case differences of 3 %, no
+  run noise) and is not behind on the mean over the stage's cases is raced out
+  in about 3 %; over all such candidates the rate is about 19 %, nearly all of
+  them really behind on the stage's cases. A candidate 5 % behind is stopped in
+  about 88 %. The reason names the margin it used, and the `raced_out` event
+  the `looks`. The baseline always finishes (it is the yardstick),
   so does the first candidate through a stage, and the best so far is kept in
   `work/incumbent.json` for a resumed run. `confirm` never races. `after` must be
   below the stage's number of instances — a candidate with nothing left to run

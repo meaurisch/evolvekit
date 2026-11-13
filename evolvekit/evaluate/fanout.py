@@ -29,13 +29,14 @@ readable.
 
 from __future__ import annotations
 
+import math
 import queue
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import fmean, variance
+from statistics import fmean, stdev, variance
 from typing import Mapping, Sequence
 
 from evolvekit.config import ConfigError, StageConfig
@@ -51,7 +52,7 @@ from evolvekit.evaluate.stages import (
 from evolvekit.evaluate.types import StageOutcome
 from evolvekit.stopping import AnyEvent
 
-__all__ = ["Job", "Race", "run_instance_stage", "per_instance_key"]
+__all__ = ["Job", "Race", "race_looks", "run_instance_stage", "per_instance_key"]
 
 
 @dataclass(frozen=True)
@@ -80,19 +81,79 @@ class Race:
     margin_pct: float
     exempt: frozenset[str] = frozenset()
     """Candidates that always finish: the baseline is a yardstick, not a contestant."""
+    cv: float = 0.0
+    """The objective's relative noise of one run on one instance, one side of
+    the comparison (`Noise.vector_cv`); 0 when unknown."""
+    instances: int = 0
+    """How many instances the stage has: where the looks fall."""
+
+    @property
+    def looks(self) -> tuple[int, ...]:
+        """After `after` compared instances, then every quarter of them, never at
+        the last: a candidate with nothing left to run cannot be raced out."""
+        return race_looks(self.after, self.instances)
+
+    def _diffs(self, mine: Mapping[str, float]) -> list[float]:
+        """Per instance both have (the incumbent's above 0): how far `mine` is
+        behind, as a fraction -- positive is worse, whatever the direction."""
+        sign = 1.0 if self.minimize else -1.0
+        return [
+            sign * (mine[name] / self.incumbent[name] - 1.0)
+            for name in mine
+            if name in self.incumbent and self.incumbent[name] > 0
+        ]
 
     def behind_pct(self, mine: Mapping[str, float]) -> tuple[int, float]:
         """On the instances both have a value for: how many, and how many
         percent worse `mine` is than the incumbent, averaged over them."""
-        ratios = [
-            mine[name] / self.incumbent[name]
-            for name in mine
-            if name in self.incumbent and self.incumbent[name] > 0
-        ]
-        if not ratios:
+        diffs = self._diffs(mine)
+        if not diffs:
             return 0, 0.0
-        relative = fmean(ratios) - 1.0
-        return len(ratios), 100.0 * (relative if self.minimize else -relative)
+        return len(diffs), 100.0 * fmean(diffs)
+
+    def margin_at(self, diffs: Sequence[float]) -> float:
+        """How far behind, in percent, a candidate may be at a look over
+        `diffs` (`_diffs`, fractions): the largest of `margin_pct`, twice the
+        run-to-run noise of the mean's ratio (`200·cv`: one side at
+        `cv`, the other at `cv`, a mean over m instances at `√2·cv/√m`,
+        so this is `√(2m)` sd of it, 2.8 at m = 4), and twice the standard
+        error of the cases' own spread, with the finite-population factor that
+        makes it 0 once every instance is in."""
+        m = len(diffs)
+        spread = 0.0
+        if m >= 2 and self.instances > 0:
+            spread = 200.0 * stdev(diffs) / math.sqrt(m) * math.sqrt(max(0.0, 1.0 - m / self.instances))
+        return max(self.margin_pct, 200.0 * self.cv, spread)
+
+    def judge(self, mine: Mapping[str, float]) -> tuple[str, float] | None:
+        """`decide`, with the margin it used (percent, to two places)."""
+        diffs = self._diffs(mine)
+        compared = len(diffs)
+        if compared not in self.looks:
+            return None
+        behind, margin = 100.0 * fmean(diffs), self.margin_at(diffs)
+        if behind <= margin:
+            return None
+        shown = round(margin, 2)
+        reason = (
+            f"raced out after {compared} of {self.instances} instances: {behind:.2f} % behind the best "
+            f"candidate so far on the same instances (margin {shown:g} %)"
+        )
+        return reason, shown
+
+    def decide(self, mine: Mapping[str, float]) -> str | None:
+        """The reason `mine` is raced out at this look; `None` when it is not
+        a look or `mine` is within the margin."""
+        verdict = self.judge(mine)
+        return None if verdict is None else verdict[0]
+
+
+def race_looks(after: int, instances: int) -> tuple[int, ...]:
+    """Where a race reads: after `after` instances, then every ceil(n / 4),
+    never at `n` itself."""
+    if after >= instances:
+        return ()
+    return tuple(range(after, instances, math.ceil(instances / 4)))
 
 
 def per_instance_key(kpi: str) -> str:
@@ -176,7 +237,13 @@ def run_instance_stage(
                     break
             verdict = board.settle(job.candidate_id, index, seed, names[index], outcome)
             if verdict is not None and job.observer is not None:
-                job.observer("raced_out", reason=verdict, runs_done=board.runs_done(job.candidate_id))
+                job.observer(
+                    "raced_out",
+                    reason=verdict,
+                    runs_done=board.runs_done(job.candidate_id),
+                    looks=list(race.looks) if race is not None else [],
+                    margin_pct=board.margin(job.candidate_id),
+                )
         finally:
             if cpus is not None and cpu is not None:
                 cpus.put(cpu)
@@ -262,6 +329,14 @@ class _Board:
         self._failure: dict[str, StageOutcome] = {}
         self._runs: dict[str, int] = {job.candidate_id: 0 for job in jobs}
         self._spent: dict[str, float] = {job.candidate_id: 0.0 for job in jobs}
+        self._looked: dict[str, int] = {}
+        """Per candidate, the last look the race read."""
+        self._margins: dict[str, float] = {}
+        """Per raced-out candidate, the margin it was raced out by (percent)."""
+
+    def margin(self, candidate_id: str) -> float | None:
+        with self._lock:
+            return self._margins.get(candidate_id)
 
     def failed(self, candidate_id: str) -> bool:
         with self._lock:
@@ -298,13 +373,18 @@ class _Board:
         for (index, _seed), done in self._done[candidate_id].items():
             if race.objective in done.kpis:
                 by_instance.setdefault(self._names[index], []).append(done.kpis[race.objective])
-        compared, behind = race.behind_pct({name: fmean(values) for name, values in by_instance.items()})
-        if compared < race.after or compared >= self._instances or behind <= race.margin_pct:
+        prefix = {name: fmean(values) for name, values in by_instance.items()}
+        compared, _ = race.behind_pct(prefix)
+        # One read per look: a later seed's run, or a parallel worker's, can
+        # land while `compared` still stands at a look already read -- a second
+        # read there is a second test of the same evidence.
+        if compared not in race.looks or compared >= self._instances or compared <= self._looked.get(candidate_id, 0):
             return None
-        reason = (
-            f"raced out after {compared} of {self._instances} instances: {behind:.2f} % behind the best "
-            f"candidate so far on the same instances (margin {race.margin_pct:g} %)"
-        )
+        self._looked[candidate_id] = compared
+        verdict = race.judge(prefix)
+        if verdict is None:
+            return None
+        reason, self._margins[candidate_id] = verdict
         # Kept where a failure is kept, so that its remaining runs are never
         # started -- but marked as what it is: nothing went wrong.
         self._failure[candidate_id] = StageOutcome(
