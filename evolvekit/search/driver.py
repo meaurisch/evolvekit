@@ -534,6 +534,17 @@ class Driver:
     def _archive_scores(self) -> list[float]:
         return [c.fitness for c in self.archive if _competes(c)]
 
+    def _archive_stage_scores(self) -> dict[str, list[float]]:
+        """Per command stage, the competing archive members' own score there:
+        what that stage's `promote.archive_percentile` compares a candidate
+        with (like with like). A member recorded without it is left out."""
+        members = [c for c in self.archive if _competes(c)]
+        return {
+            stage.id: [c.stage_scores[stage.id] for c in members if stage.id in c.stage_scores]
+            for stage in self.config.evaluate.stages
+            if stage.kind == "command"
+        }
+
     # -- resume ----------------------------------------------------------
 
     def _replayed_rows(self, raw: list[dict]) -> list[dict]:
@@ -1774,15 +1785,17 @@ class Driver:
             # A build installs one tree where the commands find it, so two
             # candidates cannot be evaluated at once: one after the other, in
             # order (a stage's `workers` still run one candidate's cases together).
-            prior = self._archive_scores()
+            prior, own = self._archive_scores(), self._archive_stage_scores()
             results: dict[str, EvalResult] = {}
             for candidate in candidates:
-                results.update(self.cascade.evaluate_generation([candidate], prior))
+                results.update(self.cascade.evaluate_generation([candidate], prior, stage_scores=own))
                 self._drop_trees([candidate])
                 if any(result.abandoned for result in results.values()):
                     return True
         else:
-            results = self.cascade.evaluate_generation(candidates, self._archive_scores())
+            results = self.cascade.evaluate_generation(
+                candidates, self._archive_scores(), stage_scores=self._archive_stage_scores()
+            )
             self._drop_trees(candidates)
         if any(result.abandoned for result in results.values()):
             return True

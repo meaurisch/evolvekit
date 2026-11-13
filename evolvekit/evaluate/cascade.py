@@ -172,20 +172,32 @@ def select_promoted(
     scored: Sequence[tuple[str, float]],
     rule: PromoteRule,
     archive_scores: Sequence[float] = (),
+    *,
+    band: float = 0.0,
 ) -> list[str]:
     """Apply one promote rule to `(candidate_id, score)` pairs.
 
     An empty rule promotes everything. When both sub-rules are set a candidate
     only needs to satisfy one, matching the proposal's `top_k … or score >= p`.
+
+    `band` is the stage's noise (twice one candidate's score sd): with
+    `top_k_per_generation = k`, every candidate within `band` of the k-th
+    score is promoted beside the top k, the two together capped at `2k` by
+    score (ties by id). The `archive_percentile` union is outside the cap.
+    A band of 0 -- no noise estimate -- is the top k exactly.
     """
     ids = [cid for cid, _ in scored]
     if rule.top_k_per_generation is None and rule.archive_percentile is None:
         return ids
 
     chosen: set[str] = set()
-    if rule.top_k_per_generation is not None:
+    k = rule.top_k_per_generation
+    if k is not None:
         ranked = sorted(scored, key=lambda item: (-item[1], item[0]))
-        chosen.update(cid for cid, _ in ranked[: rule.top_k_per_generation])
+        chosen.update(cid for cid, _ in ranked[:k])
+        if k > 0 and len(ranked) > k and math.isfinite(band) and band > 0:
+            floor = ranked[k - 1][1] - band
+            chosen.update(cid for cid, score in ranked[: 2 * k] if score >= floor)
     if rule.archive_percentile is not None:
         threshold = archive_threshold(archive_scores, rule.archive_percentile)
         if threshold is None:
@@ -281,9 +293,18 @@ class Cascade:
         self,
         candidates: Sequence[Candidate],
         archive_scores: Iterable[float] = (),
+        *,
+        stage_scores: Mapping[str, Sequence[float]] | None = None,
     ) -> dict[str, EvalResult]:
-        """Evaluate a whole generation; returns results keyed by candidate id."""
+        """Evaluate a whole generation; returns results keyed by candidate id.
+
+        A stage's `promote.archive_percentile` is read over `stage_scores[stage.id]`
+        -- the archive members' own scores at that stage -- when it has any,
+        else over `archive_scores` (their fitness: a caller from before stage
+        scores were handed over). Its top k is widened by the stage's noise
+        band (`select_promoted`), twice one candidate's score sd there."""
         prior = list(archive_scores)
+        own = stage_scores or {}
         results: dict[str, EvalResult] = {
             c.id: EvalResult(score=self.config.evaluate.failure_score) for c in candidates
         }
@@ -354,7 +375,9 @@ class Cascade:
                 break
 
             scored = [(cid, results[cid].score) for cid in survivors]
-            alive = select_promoted(scored, stage.promote, prior)
+            members = list(own.get(stage.id) or ()) or prior
+            band = 2.0 * self.noise.score_sd(stage.id, self.config.evaluate.score, stage.seeds)
+            alive = select_promoted(scored, stage.promote, members, band=band)
 
         for cid, candidate in by_id.items():
             # The last seed evaluated is the reference, as `leaderboard.seed_private`

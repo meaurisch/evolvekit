@@ -229,6 +229,25 @@ There is one LLM call per child and one attempt at applying its response — the
 single exception is the novelty re-prompt, bounded to one extra call, because
 v1's nested 3×3 retry was the largest single multiplier on its token bill.
 
+**Promotion past a cheaper stage.** A stage's `promote` rule takes
+`top_k_per_generation: k`, `archive_percentile: p`, or both (a candidate needs
+to pass one). `top_k_per_generation` promotes the generation's k best at that
+stage and, when the stage's noise is known
+([Stochastic evaluators](#stochastic-evaluators-seeds-n)), every candidate within a
+**noise band** of the k-th score: twice one candidate's score noise at that
+stage (`2 · score_sd`, a mean over the stage's `seeds`). The top k and the band
+together are capped at `2k`, by score (ties by id). With k = 2 of eight
+candidates, one truly one noise sd better than the other seven is left out
+about 18 % of the time (about 41 % with the top k alone). With no noise
+estimate — a stage of one run that is never calibrated, as a study's screen —
+the band is 0 and the rule is the top k exactly. `archive_percentile: p`
+promotes every candidate whose score at that stage is at least the p-th
+percentile of the competing archive members' **own scores at that stage**
+(like with like: a proxy score against proxy scores, not against the final
+fitness); members recorded without a score there are left out, and with none
+the members' fitness is used, as before. Whatever this promotes is promoted
+whatever the cap.
+
 **A finite score is not a comparable score.** A candidate *competes* — is
 ranked, archived, sampled as a parent, reported as `best` — only when it got
 through the final stage, hold-out included, without a failure. Four kinds of
@@ -748,7 +767,10 @@ estimate says so in its own section and is listed here:
   least as well, instead of equal to nine digits;
 - the race's margin ([One run per instance](#one-run-per-instance-instances-workers-retries),
   `race`): at least twice the objective's relative noise of one run, read at
-  fixed looks.
+  fixed looks;
+- promotion's noise band beside `top_k_per_generation`
+  ([How it works](#how-it-works), *Promotion past a cheaper stage*): every
+  candidate within twice one candidate's score noise of the k-th, capped at `2k`.
 
 ### One run per instance: `instances`, `workers`, `retries`
 
