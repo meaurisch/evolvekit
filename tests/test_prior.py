@@ -220,8 +220,10 @@ NO_PRIOR = ParameterSpace.parse({
 def test_no_prior_draws_as_before():
     """Without a prior a cube is the space's own hypercube: nothing more is drawn."""
     for seed in (0, 1, 7, 42):
-        rows = latin_rows(NO_PRIOR, 6, random.Random(seed))
-        assert [values for values, _ in rows] == NO_PRIOR.latin_hypercube(6, random.Random(seed))
+        ours, plain = random.Random(seed), random.Random(seed)
+        rows = latin_rows(NO_PRIOR, 6, ours)
+        assert [values for values, _ in rows] == NO_PRIOR.latin_hypercube(6, plain)
+        assert ours.getstate() == plain.getstate(), "not one number more drawn"
         assert all(names == [] for _, names in rows)
         child = param_lhs_typed(NO_PRIOR, seed_candidate(NO_PRIOR), row=rows[0][0], prior=rows[0][1])
         assert child.meta == {"params": rows[0][0]}

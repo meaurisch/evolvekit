@@ -405,6 +405,9 @@ of each are kept in `work/lhs.json` (`{"cubes": {"typed" | "params:<ranges as
 JSON>": {"K", "built", "next", "rows"}}}`, with `prior` beside `rows` when a
 parameter has one), so a resumed run hands out the rows the uninterrupted run
 would have; a run without the file builds a cube at its next `param_lhs` child.
+A cube is used up before a new one is built when only the run's size changes
+(generations, children, shares), and is built anew when a resumed run declares
+the space differently (names, types, ranges, scales, choices or priors).
 Building a cube takes one number from the run's random stream; a child takes
 none.
 
@@ -425,7 +428,9 @@ reached and that stage's score (on any scale: only the order counts, and they
 rank below every finished one); raced-out candidates and those kept out by the
 hold-out veto, one shared rank (whatever their screening score); and failed or
 gated candidates, one shared rank, the worst — so a region that kills the
-solver is not proposed again. Ties share the mean position. The siblings
+solver is not proposed again. Ties share the mean position. A candidate whose
+final stage was cut short with nothing wrong (a stop request, the time limit,
+the daily cap) is not an observation at all. The siblings
 already proposed in the same generation (by any operator) count as bad
 observations until they are evaluated (a "constant liar"), so several
 `param_tpe` children of one generation spread out instead of proposing the same

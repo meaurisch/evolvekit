@@ -1452,11 +1452,18 @@ class Driver:
         a whole cube's worth of such rows the last is handed out anyway (the
         static stage has the last word). When the rows run out a new cube is
         built from one draw of the run's generator -- the only number a
-        `param_lhs` child ever draws from it."""
+        `param_lhs` child ever draws from it.
+
+        A cube is kept until it is used up when only the run's size changes
+        (generations, children, shares); a typed cube records its space
+        (`"space"`: names, types, ranges, scales, choices, priors) and is built
+        anew when a resumed run declares the space differently."""
         space = self.config.problem.parameters
+        signature: str | None = None
         if space is not None:
             key, base, ok = "typed", dict(parent.params or space.defaults()), space.satisfies
             names = set(space.names)
+            signature = _space_signature(space)
 
             def build(size: int, rng: random.Random) -> tuple[list[dict], list[list[str]]]:
                 drawn = latin_rows(space, size, rng)
@@ -1475,12 +1482,17 @@ class Driver:
         passed = 0
         while True:
             cube = self._lhs.get(key)
-            if cube is not None and cube["rows"] and set(cube["rows"][0]) != names:
+            if cube is not None and (
+                (cube["rows"] and set(cube["rows"][0]) != names)
+                or (signature is not None and cube.get("space") != signature)
+            ):
                 cube = None  # a cube of another space: not this one's rows
             if cube is None or cube["next"] >= len(cube["rows"]):
                 size = self._lhs_size()
                 rows, priors = build(size, random.Random(self.rng.randrange(1 << 30)))
                 cube = {"K": size, "built": (cube or {}).get("built", 0) + 1, "next": 0, "rows": rows}
+                if signature is not None:
+                    cube["space"] = signature
                 if any(priors):
                     cube["prior"] = priors
                 self._lhs[key] = cube
@@ -1515,8 +1527,15 @@ class Driver:
         4. failed or gated: one shared rank, the worst -- a region not to
            propose in again.
 
-        Ties (inside a tier, or a whole tier 3 or 4) share the mean position."""
+        Ties (inside a tier, or a whole tier 3 or 4) share the mean position.
+
+        A candidate that reached the final stage without finishing it, and
+        without failing, being raced out, vetoed or gated (abandoned: a stop
+        request, the time limit, the daily cap), is no observation at all: its
+        stage was cut short for a reason that says nothing about it, and as a
+        failure it would steer the estimator away from a region on no evidence."""
         index = {stage.id: i for i, stage in enumerate(self.config.evaluate.stages)}
+        final = self.config.final_stage.id
         finished: list[tuple[float, Candidate]] = []
         screened: list[tuple[tuple[int, float], Candidate]] = []
         behind: list[Candidate] = []
@@ -1530,7 +1549,7 @@ class Driver:
                 behind.append(c)
             elif c.competes and c.fitness is not None:
                 finished.append((float(c.fitness), c))
-            elif c.stages_reached:
+            elif c.stages_reached and final not in c.stages_reached:
                 deepest = c.stages_reached[-1]
                 score = c.stage_scores.get(deepest, c.score)
                 if score is not None:
@@ -1836,6 +1855,13 @@ class Driver:
             if taken is None:  # the parent declares nothing to sweep: the operator says so
                 return param_lhs(parent, row={})
             row, prior = taken
+            if space is not None:
+                own = dict(parent.params or space.defaults())
+            else:
+                own = current_values(parent.block, set(declared_ranges(parent.block)))
+            if row == own:  # a whole cube's worth of rows equal the parent: a space of one point
+                return OperatorResult(operator="param_lhs", messages=[],
+                                      error="param_lhs found nothing to sweep: every sample equals the parent")
             if space is not None:
                 return param_lhs_typed(space, parent, row=row, prior=prior)
             return param_lhs(parent, row=row)
@@ -2246,6 +2272,17 @@ def screen_pairs(candidates: Sequence[Candidate], stage_id: str, later: str) -> 
         return finished
     floor = min((b for _, b in finished), default=0.0) - 1.0
     return finished + [(a, floor) for a in behind]
+
+
+def _space_signature(space) -> str:
+    """What a typed cube's rows depend on: each parameter's name, type, range,
+    scale, choices and prior (not its default, help or the constraints, which
+    are read when a row is handed out)."""
+    return json.dumps(
+        [{**{k: v for k, v in p.describe().items() if k not in ("default", "help")}, "prior": p.prior}
+         for p in space.parameters],
+        sort_keys=True, default=str,
+    )
 
 
 def _role_of(operator: str) -> str:

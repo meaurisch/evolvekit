@@ -175,8 +175,9 @@ def test_param_tpe_is_a_local_step_until_there_is_something_to_learn_from():
     assert later.mode == "param_tpe" and later.meta["observations"] == 30
 
 
-def _screening_driver(tmp_path, *, normalized: bool):
-    """A proxy stage on one input, then the full stage on three instances."""
+def _screening_driver(tmp_path, *, normalized: bool, middle: bool = False):
+    """A proxy stage on one input, then the full stage on three instances
+    (with `middle`, a second screen on two instances between them)."""
     from evolvekit.search.driver import Driver
 
     stage = {"kind": "command", "kpis_from": "stdout", "command": "{python} solver.py --instance {instance} {params}",
@@ -188,6 +189,7 @@ def _screening_driver(tmp_path, *, normalized: bool):
                 "stages": [
                     {"id": "static", "kind": "builtin-static"},
                     {"id": "proxy", **stage, "instances": ["small"]},
+                    *([{"id": "middle", **stage, "instances": ["small", "medium"]}] if middle else []),
                     {"id": "full", **stage, "instances": ["small", "medium", "large"]},
                 ],
                 "score": {"objective": "cost", "direction": "minimize"},
@@ -236,6 +238,34 @@ def test_observations_are_ranks_in_four_tiers(tmp_path, normalized):
     assert seen[50] == seen[60], "raced out and vetoed share one rank"
     assert seen[60] > seen[70] == seen[80], "failed and gated share the worst rank"
     assert seen[30] == -1.0 and seen[20] == -2.0 and seen[40] == -3.0, "a rank is minus the position"
+
+
+def test_a_deeper_screen_ranks_above_a_shallower_one_whatever_the_score(tmp_path):
+    driver = _screening_driver(tmp_path, normalized=False, middle=True)
+    space = driver.config.problem.parameters
+    driver.archive = [
+        _candidate(space, "g001-c0002", {**space.defaults(), "neighbours": 20}, score=99.0, competes=False,
+                   stages_reached=["static", "proxy"], stage_scores={"proxy": 99.0}),
+        _candidate(space, "g001-c0003", {**space.defaults(), "neighbours": 30}, score=-50.0, competes=False,
+                   stages_reached=["static", "proxy", "middle"], stage_scores={"proxy": 1.0, "middle": -50.0}),
+    ]
+    seen = {o.values["neighbours"]: o.fitness for o in driver._observations()}
+    assert seen[30] > seen[20], "reaching the second screen says more than a high score on the first"
+
+
+def test_an_abandoned_final_stage_is_no_observation(tmp_path):
+    """Reached the final stage, did not finish it, and nothing failed (a stop
+    request, the time limit, the daily cap): that says nothing about the
+    configuration, so the estimator is not told anything about it."""
+    driver = _screening_driver(tmp_path, normalized=False)
+    space = driver.config.problem.parameters
+    driver.archive = [
+        _candidate(space, "g001-c0002", {**space.defaults(), "neighbours": 20}, score=3.0, competes=True,
+                   stages_reached=["static", "proxy", "full"], stage_scores={"full": 3.0}),
+        _candidate(space, "g001-c0003", {**space.defaults(), "neighbours": 30}, score=8.0, competes=False,
+                   stages_reached=["static", "proxy", "full"], stage_scores={"proxy": 8.0}),
+    ]
+    assert {o.values["neighbours"] for o in driver._observations()} == {20}
 
 
 def test_tied_observations_share_the_mean_position(tmp_path):
@@ -387,6 +417,47 @@ def test_a_row_that_breaks_a_constraint_is_passed_over(tmp_path):
     assert all(space.satisfies(row) for row in handed)
     assert cube["next"] > 6, "some rows broke the constraint and were passed over"
     assert handed == [row for row in cube["rows"][: cube["next"]] if space.satisfies(row)]
+
+
+def test_a_row_equal_to_the_parent_is_passed_over(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=4, generations=4,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    space = driver.config.problem.parameters
+    driver._next_lhs_row(driver._seed_candidate())
+    rows = _lhs_state(tmp_path)["cubes"]["typed"]["rows"]
+    parent = _candidate(space, "g001-c0002", dict(rows[1]))
+    assert driver._next_lhs_row(parent) == rows[2]
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["next"] == 3
+
+
+def test_a_space_of_one_point_says_so_and_builds_no_extra_cube(tmp_path, monkeypatch):
+    """Every row equal to the parent (a space the parser cannot declare, so the
+    cube is made so): the child fails as it did before, and no second cube is built."""
+    import evolvekit.search.driver as driver_module
+
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=2, space={"x": (0.0, 1.0)})
+    defaults = driver.config.problem.parameters.defaults()
+    monkeypatch.setattr(driver_module, "latin_rows", lambda space, count, rng: [(dict(defaults), [])] * count)
+    result = driver._invoke("param_lhs", driver._seed_candidate(), [], "none", None, "g001-c0002")
+    assert not result.ok and "every sample equals the parent" in result.error
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert cube["built"] == 1 and cube["next"] == cube["K"] == 4
+
+
+def test_a_cube_is_built_anew_when_the_space_changes_and_kept_when_only_the_size_does(tmp_path):
+    """A resumed run whose space is declared differently (here a wider range)
+    does not take the old cube's rows; one whose run is only longer does."""
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 1.0)})
+    driver._next_lhs_row(driver._seed_candidate())
+    old = _lhs_state(tmp_path)["cubes"]["typed"]
+    longer = _driver(tmp_path, operators={"param_lhs": 1.0}, children=4, generations=9, space={"x": (0.0, 1.0)})
+    assert longer._next_lhs_row(longer._seed_candidate()) == old["rows"][1]
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["K"] == 8, "kept until it is used up"
+    wider = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 10.0)})
+    row = wider._next_lhs_row(wider._seed_candidate())
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert cube["rows"] != old["rows"] and cube["next"] == 1 and row == cube["rows"][0]
+    assert any(r["x"] > 1.0 for r in cube["rows"])
 
 
 def test_a_cube_of_rows_that_all_break_a_constraint_leaves_the_last_to_the_static_stage(tmp_path):
