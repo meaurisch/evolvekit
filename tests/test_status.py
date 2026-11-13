@@ -277,6 +277,30 @@ def test_every_stopping_criterion_reports_how_far_along_it_is(tmp_path):
     assert (limits["stop.patience"]["used"], limits["stop.patience"]["cap"]) == (2, 4)
 
 
+def _rising_by_less_than_the_noise(tmp_path, **finished):
+    run = RunDir(tmp_path)
+    run.event("run_started", 100, objective="cost", direction="minimize", stages=STAGES,
+              first_generation=1, generations_planned=5, resumed=False,
+              budget={"max_usd": 2.0}, stop={"patience": 4, "epsilon": None})
+    for generation, cost in enumerate((100.0, 99.8, 99.6)):   # each step 0.2, the noise epsilon 0.5
+        run.row(f"g00{generation}-c000{generation + 1}", generation, cost)
+    run.event("generation_finished", 10, generation=2, duration_s=5.0, **finished)
+    return {l["name"]: l for l in build_status(tmp_path, now=NOW)["health"]["limits"]}
+
+
+def test_the_flat_count_is_the_stop_policys_own_with_the_epsilon_it_used(tmp_path):
+    """The policy recorded 2 flat generations against epsilon 0.5 (no ratchet:
+    99.6 is 0.4 above 100.0); a reading of the series with epsilon 0 says 0."""
+    limits = _rising_by_less_than_the_noise(tmp_path, flat_generations=2, stop_epsilon=0.5)
+    assert limits["stop.patience"]["used"] == 2
+
+
+def test_a_run_from_before_the_recorded_flat_count_is_read_from_the_series(tmp_path):
+    """No `flat_generations` on the event: the series with the automatic
+    epsilon's floor (1e-6), where each 0.2 step is an improvement."""
+    assert _rising_by_less_than_the_noise(tmp_path)["stop.patience"]["used"] == 0
+
+
 # -- is it improving, and is that real? ------------------------------------
 
 

@@ -833,10 +833,21 @@ class _Run:
             limits.append({"name": "budget.max_full_evals_per_day", "used": used, "cap": budget["max_full_evals_per_day"], "unit": "today"})
         stop = self.described.get("stop") or {}
         if _number(stop.get("patience")) is not None:
-            limits.append({"name": "stop.patience", "used": self._flat_generations(float(stop.get("epsilon") or 0.0)), "cap": stop["patience"], "unit": "flat generations"})
+            limits.append({"name": "stop.patience", "used": self._flat_generations(stop.get("epsilon")), "cap": stop["patience"], "unit": "flat generations"})
         return limits
 
-    def _flat_generations(self, epsilon: float) -> int:
+    def _flat_generations(self, configured: Any) -> int:
+        """The stop policy's own flat count, from the last `generation_finished`
+        event (`flat_generations`, with the epsilon it used as `stop_epsilon`).
+        A run whose events predate it: the series read with the configured
+        epsilon, or the automatic one's floor (1e-6) when it is automatic."""
+        last = next((e for e in reversed(self.events) if e.get("type") == "generation_finished"), None)
+        recorded = None if last is None else last.get("flat_generations")
+        if isinstance(recorded, int) and not isinstance(recorded, bool):
+            return recorded
+        epsilon = _number(configured)
+        if epsilon is None:
+            epsilon = 1e-6
         flat = 0
         for point in series(self.rows, self.usage, window=DEFAULT_WINDOW, epsilon=epsilon):
             flat = 0 if point.improved else flat + 1

@@ -86,7 +86,7 @@ live run is built from:
   | `type` | When | Carries |
   |---|---|---|
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
-  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force) |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
@@ -1211,7 +1211,9 @@ breadth is fixed and nothing is logged.
 
 *What counts as an improvement.* An improving generation is one whose best
 beats the run's best by more than `stop.epsilon`; every other generation is
-flat, for `adaptive_children` and for `stop.patience` alike. The run's best
+flat, for `adaptive_children`, `stop.patience`, the economics series' "USD
+since improvement" (and so `stop.max_usd_since_improvement`) and `status`'s
+patience count alike. The run's best
 moves only on an improvement: a step inside epsilon leaves the bar where it was
 (no ratchet), so slow steady progress adds up: with an epsilon of 0.5, a best
 of 1.0, then 1.3 (flat), then 1.6 (an improvement over 1.0).
@@ -1227,7 +1229,10 @@ candidate's score)`: with no noise estimate (see
 [Stochastic evaluators](#stochastic-evaluators-seeds-n)) it is `1e-6`, the old
 default. On a noisy final stage, a generation whose best is exactly as good as
 the run's best, both measured once with noise sd σ, reads as an improvement in
-about 36 % of generations instead of 50 %. On a resumed run the recorded
+about 36 % of generations instead of 50 %. The noise is that of the public
+score: with `evaluate.holdout_penalty > 0` and a candidate whose hold-out falls
+short of its public score, its fitness also carries the hold-out's noise, so
+its real noise differs from the one this rule and the elite rule read. On a resumed run the recorded
 generations are replayed with the noise as it is when the run resumes.
 `stop.target` is checked against the generation's best itself, not the gated
 best: a target reached by a step inside epsilon is reached. The patience stop

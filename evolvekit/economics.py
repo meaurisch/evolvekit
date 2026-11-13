@@ -20,9 +20,10 @@ The four quantities per generation:
   embeddings and scratchpad refreshes included.
 * **best** -- the best *ranking* score (hold-out-aware) among all non-rejected
   candidates from that generation or earlier. Monotone by construction.
-* **USD since improvement** -- spend since the last generation whose best moved
-  by more than `epsilon`. This is the number that says "we have spent 40 cents
-  on nothing".
+* **USD since improvement** -- spend since the last improving generation: one
+  whose best beats the best as of the previous improvement by more than
+  `epsilon` (the stop policy's definition; no ratchet). This is the number that
+  says "we have spent 40 cents on nothing".
 * **gain per USD over a sliding window `W`** -- `(best[g] - best[g-W]) /
   (usd[g] - usd[g-W])`. A window rather than a single generation because one
   flat generation is normal and three in a row is a plateau.
@@ -142,6 +143,8 @@ def series(
 
     points: list[GenerationPoint] = []
     running_best: float | None = None
+    bar: float | None = None
+    """The best as of the last improvement: what a gain must beat by `epsilon`."""
     cumulative_usd = 0.0
     cumulative_calls = 0
     usd_at_last_improvement = 0.0
@@ -165,8 +168,11 @@ def series(
             improved = running_best is not None
         else:
             delta = 0.0 if running_best is None else running_best - previous_best
-            improved = delta > epsilon
+            # The stop policy's definition: against the best as of the last
+            # improvement, not the previous generation's (no ratchet).
+            improved = running_best is not None and (bar is None or running_best > bar + epsilon)
         if improved:
+            bar = running_best
             usd_at_last_improvement = cumulative_usd
 
         history = points[-width:]

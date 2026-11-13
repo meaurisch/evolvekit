@@ -7,6 +7,7 @@ that is (`v_d / 2`). With nothing to pool, every accessor says 0 -- today.
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import statistics
@@ -389,7 +390,7 @@ def toy_times(monkeypatch):
     monkeypatch.setattr(noise_module, "_median_index", ordered)
 
 
-def _toy(tmp_path, mode, *, seeds=1, placeholder=True, instances=True):
+def _toy(tmp_path, mode, *, seeds=1, placeholder=True, instances=True, span=0.5):
     from evolvekit.config import build_config
 
     (tmp_path / "toy.py").write_text(TOY, encoding="utf-8")
@@ -401,7 +402,7 @@ def _toy(tmp_path, mode, *, seeds=1, placeholder=True, instances=True):
         stage["instances"] = ["i1", "i2", "i3"]
     return build_config(
         {
-            "problem": {"parameters": {"x": {"type": "float", "low": -0.5, "high": 0.5, "default": 0.0}}},
+            "problem": {"parameters": {"x": {"type": "float", "low": -span, "high": span, "default": 0.0}}},
             "evaluate": {
                 "stages": [{"id": "static", "kind": "builtin-static"}, stage],
                 "score": {"objective": "cost", "direction": "minimize"},
@@ -661,3 +662,42 @@ def test_on_a_wall_clock_evaluator_the_same_gain_is_within_the_noise(tmp_path):
     assert cascade.noise.sd("full", "cost") > 0
     assert cascade.noise.score_sd("full", config.evaluate.score, 3) == pytest.approx(
         cascade.noise.sd_across("full", "cost") / math.sqrt(3))
+
+
+def _noise_is_handed_over(driver, config):
+    final = config.final_stage
+    expected = driver.cascade.noise.score_sd(final.id, config.evaluate.score, final.seeds)
+    assert expected > 0
+    assert driver.stop_policy.noise_sd == driver.grid.noise_sd == expected
+
+
+def test_a_noisy_run_hands_its_noise_to_the_stop_policy_and_the_archive_and_status_counts_as_it_does(tmp_path):
+    """A wall-clock toy whose parameter moves the cost by at most 0.2 (one run's
+    noise sd is 2, seeds 3): the automatic epsilon is about 0.6, of the order of
+    every gain. The noise reaches both rules after a round and after a resume, every
+    finished row says how many runs its score is the mean of, and `status`'s flat
+    count is the stop policy's (test_status pins that it is not a reading of the
+    series with epsilon 0)."""
+    from evolvekit.search.driver import Driver
+    from evolvekit.status import build_status
+
+    config = _toy(tmp_path, "wall-clock", seeds=3, instances=False, span=1e-4)
+    assert config.stop.epsilon is None
+    run_dir = tmp_path / "run"
+    driver = Driver(config, run_dir=run_dir)
+    driver.run(generations=3)
+    _noise_is_handed_over(driver, config)
+    assert driver.stop_policy.epsilon_now() == pytest.approx(0.5 * driver.stop_policy.noise_sd)
+    finished = [r for r in driver.ledger.runs() if "full" in (r.get("stages_reached") or [])]
+    assert finished and all(r["replicates"] == 3 for r in finished)
+    events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    last = [e for e in events if e["type"] == "generation_finished"][-1]
+    assert last["flat_generations"] == driver.stop_policy.stagnant
+    assert last["stop_epsilon"] == pytest.approx(driver.stop_policy.epsilon_now())
+    limits = {l["name"]: l for l in build_status(run_dir)["health"]["limits"]}
+    assert limits["stop.patience"]["used"] == driver.stop_policy.stagnant
+
+    resumed = Driver(config, run_dir=run_dir)
+    resumed.resume()
+    _noise_is_handed_over(resumed, config)
+    assert resumed.stop_policy.noise_sd == driver.stop_policy.noise_sd, "the estimate is read back"

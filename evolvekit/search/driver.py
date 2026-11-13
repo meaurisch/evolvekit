@@ -874,6 +874,12 @@ class Driver:
                     self._record(child)
             self._pending_path.unlink(missing_ok=True)
             summary.generations = offset
+            # The stop policy first, so the generation's event carries the
+            # flat count and the epsilon `status` reads.
+            best = self.best
+            points = self._economics()
+            point = points[-1] if points else None
+            decision = self.stop_policy.update(best.fitness if best else None, point)
             self._generation_finished(generation, began, children)
 
             if self._provider_is_dead():
@@ -885,10 +891,6 @@ class Driver:
                 self.log(f"ABORT: {summary.stop_reason}")
                 break
 
-            best = self.best
-            points = self._economics()
-            point = points[-1] if points else None
-            decision = self.stop_policy.update(best.fitness if best else None, point)
             self.log(
                 f"gen {generation:<2} {len(children)} child(ren)  "
                 f"best={_fmt(best.fitness if best else None)}  "
@@ -1128,6 +1130,8 @@ class Driver:
             best_id=best.id if best else None,
             best_fitness=best.fitness if best else None,
             spent_usd=self.budget.state.usd,
+            flat_generations=self.stop_policy.stagnant,
+            stop_epsilon=self.stop_policy.epsilon_now(),
         )
         self._snapshot_archive()
 
