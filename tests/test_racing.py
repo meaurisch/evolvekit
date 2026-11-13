@@ -86,8 +86,19 @@ def test_the_race_reads_only_at_its_looks():
     behind = {f"i{k}": 110.0 for k in range(5)}
     assert race.decide(behind) is None, "5 is not a look"
     assert race.decide({k: v for k, v in list(behind.items())[:4]}) is not None
-    assert Race(objective="cost", minimize=True, incumbent={}, after=5, margin_pct=1.0, instances=5).looks == ()
-    assert Race(objective="cost", minimize=True, incumbent={}, after=2, margin_pct=1.0, instances=5).looks == (2, 4)
+    assert Race(objective="cost", minimize=True, incumbent=_flat(5), after=5, margin_pct=1.0, instances=5).looks == ()
+    assert Race(objective="cost", minimize=True, incumbent=_flat(5), after=2, margin_pct=1.0, instances=5).looks == (2, 4)
+
+
+def _flat(n: int) -> dict[str, float]:
+    return {f"i{k}": 100.0 for k in range(n)}
+
+
+def test_a_race_not_told_the_stages_instances_counts_the_incumbents():
+    """`instances` left out is not "never race": n is the incumbent's count."""
+    race = Race(objective="cost", minimize=True, incumbent=_flat(10), after=4, margin_pct=1.0)
+    assert race.population == 10 and race.looks == (4, 7)
+    assert race.decide({f"i{k}": 110.0 for k in range(4)}).startswith("raced out after 4 of 10 instances")
 
 
 def test_the_margin_grows_with_the_noise_and_never_falls_below_margin_pct():
@@ -97,11 +108,11 @@ def test_the_margin_grows_with_the_noise_and_never_falls_below_margin_pct():
 
 
 def test_the_margin_knows_the_spread_between_cases_and_drops_it_at_the_end():
-    race = Race(objective="cost", minimize=True, incumbent={}, after=2, margin_pct=1.0, instances=10)
+    race = Race(objective="cost", minimize=True, incumbent=_flat(10), after=2, margin_pct=1.0, instances=10)
     diffs = [0.03, -0.03, 0.03, -0.03]
     s = statistics.stdev(diffs)
     assert race.margin_at(diffs) == pytest.approx(200 * s / 2 * math.sqrt(1 - 4 / 10))
-    full = Race(objective="cost", minimize=True, incumbent={}, after=2, margin_pct=1.0, instances=4)
+    full = Race(objective="cost", minimize=True, incumbent=_flat(4), after=2, margin_pct=1.0, instances=4)
     assert full.margin_at(diffs) == 1.0, "all four in: the factor is 0"
 
 
@@ -167,7 +178,7 @@ def test_an_equal_candidate_against_the_best_of_eight_is_raced_out_in_under_3_pe
     """The incumbent is the best of eight equal candidates by its mean over 10
     instances: each of its values is biased by 1.42 * 2 % / sqrt(10) = 0.90 %.
     Look 1: z = (4 - 0.90) / 1.41 = 2.19, about 1.4 % before the spread term. Printed
-    beside it: the best of 50 -- the docs' "about 5 % against the best of a long run"."""
+    beside it: the best of 50 -- the docs' "about 3 % against the best of a long run"."""
     rng, trials = random.Random(22), 20_000
     rates = {}
     for count in (8, 50):
@@ -220,13 +231,31 @@ def test_an_instance_at_zero_is_left_out_of_the_relative_noise():
         vector_kpis={"cost_per_instance": [100.0, 0.0]}, vector_var={"cost_per_instance": [4.0, 1.0]}))
     cv = noise.vector_cv("full", "cost_per_instance")
     assert cv == pytest.approx(0.02), "sqrt(4 / 100**2): the instance at 0 has no ratio"
-    race = Race(objective="cost", minimize=True, incumbent={"a": 100.0, "z": 0.0}, after=1,
+    race = Race(objective="cost", minimize=True, incumbent={"a": 100.0, "b": 100.0, "z": 0.0}, after=1,
                 margin_pct=1.0, cv=cv, instances=3)
     assert race.behind_pct({"a": 103.0, "z": 50.0}) == (1, pytest.approx(3.0)), "z is skipped"
     assert race.decide({"a": 103.0, "z": 50.0}) is None, "3 % is inside twice the noise"
     assert race.decide({"a": 105.0, "z": 0.0}).startswith("raced out after 1 of 3 instances: 5.00 %")
     nothing = Race(objective="cost", minimize=True, incumbent={"z": 0.0}, after=1, margin_pct=1.0, instances=2)
     assert nothing.decide({"z": 5.0}) is None, "nothing to compare on"
+
+
+def test_an_instance_at_zero_is_not_counted_in_the_races_population():
+    """Five instances, the incumbent at 0 on one: the race compares on four, so n
+    is 4 -- its looks are after 2 and 3 (with n = 5, the look at 4 would read
+    every comparable case with the factor still above 0), and with all four in
+    the factor is 0."""
+    incumbent = {**_flat(4), "i4": 0.0}
+    race = Race(objective="cost", minimize=True, incumbent=incumbent, after=2, margin_pct=1.0, instances=5)
+    assert race.population == 4 and race.looks == (2, 3)
+    diffs = [0.03, -0.03, 0.03, -0.03]
+    assert race.margin_at(diffs) == 1.0, "all four comparable cases in: the factor is 0"
+    three = {"i0": 103.0, "i1": 101.0, "i2": 105.0, "i4": 50.0}
+    s = statistics.stdev([0.03, 0.01, 0.05])
+    assert race.margin_at([0.03, 0.01, 0.05]) == pytest.approx(200 * s / math.sqrt(3) * math.sqrt(1 / 4))
+    assert race.decide(three).startswith("raced out after 3 of 5 instances: 3.00 % behind"), (
+        "the last look, 3 of the 4, is read: 3 % behind, margin 1.15 %"
+    )
 
 
 # -- in a cascade ----------------------------------------------------------

@@ -85,13 +85,22 @@ class Race:
     """The objective's relative noise of one run on one instance, one side of
     the comparison (`Noise.vector_cv`); 0 when unknown."""
     instances: int = 0
-    """How many instances the stage has: where the looks fall."""
+    """How many instances the stage has, for the reason sentence; 0 (not
+    given) falls back to the incumbent's count."""
+
+    @property
+    def population(self) -> int:
+        """The n the race reads over: the instances it can compare on, those
+        where the incumbent is above 0 (no ratio at 0), never more than the
+        stage has. So `compared` can reach n, and the finite-population factor 0."""
+        positive = sum(1 for value in self.incumbent.values() if value > 0)
+        return min(self.instances, positive) if self.instances > 0 else positive
 
     @property
     def looks(self) -> tuple[int, ...]:
         """After `after` compared instances, then every quarter of them, never at
         the last: a candidate with nothing left to run cannot be raced out."""
-        return race_looks(self.after, self.instances)
+        return race_looks(self.after, self.population)
 
     def _diffs(self, mine: Mapping[str, float]) -> list[float]:
         """Per instance both have (the incumbent's above 0): how far `mine` is
@@ -119,10 +128,10 @@ class Race:
         so this is `√(2m)` sd of it, 2.8 at m = 4), and twice the standard
         error of the cases' own spread, with the finite-population factor that
         makes it 0 once every instance is in."""
-        m = len(diffs)
+        m, n = len(diffs), self.population
         spread = 0.0
-        if m >= 2 and self.instances > 0:
-            spread = 200.0 * stdev(diffs) / math.sqrt(m) * math.sqrt(max(0.0, 1.0 - m / self.instances))
+        if m >= 2 and n > 0:
+            spread = 200.0 * stdev(diffs) / math.sqrt(m) * math.sqrt(max(0.0, 1.0 - m / n))
         return max(self.margin_pct, 200.0 * self.cv, spread)
 
     def judge(self, mine: Mapping[str, float]) -> tuple[str, float] | None:
@@ -136,7 +145,8 @@ class Race:
             return None
         shown = round(margin, 2)
         reason = (
-            f"raced out after {compared} of {self.instances} instances: {behind:.2f} % behind the best "
+            f"raced out after {compared} of {self.instances or self.population} instances: "
+            f"{behind:.2f} % behind the best "
             f"candidate so far on the same instances (margin {shown:g} %)"
         )
         return reason, shown

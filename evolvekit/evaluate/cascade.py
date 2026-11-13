@@ -534,7 +534,11 @@ class Cascade:
             instances = stage.private_instances if private else stage.instances
             extra: dict[str, Any] = {}
             if stage.race is not None and not private:
-                extra["race_looks"] = list(race_looks(stage.race.after, len(instances)))
+                # The race's own n (`Race.population`): the instances the
+                # incumbent is above 0 on, once there is one.
+                held = (self.incumbent.get(stage.id) or {}).get("values") or {}
+                n = sum(1 for v in held.values() if float(v) > 0) if held else len(instances)
+                extra["race_looks"] = list(race_looks(stage.race.after, min(n, len(instances))))
             self.on_event(
                 "stage_started",
                 stage=stage.id,
