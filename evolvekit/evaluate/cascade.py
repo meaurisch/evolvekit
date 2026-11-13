@@ -359,7 +359,7 @@ class Cascade:
                 # A candidate that behaved exactly like one already evaluated
                 # at this stage keeps its score, but buys nothing further: no
                 # deeper stage, no hold-out run, no archive entry.
-                if self._note_behaviour(results[cid], outcome, stage, cid):
+                if self._note_behaviour(results[cid], outcome, stage, cid, generation=by_id[cid].generation):
                     continue
                 # So does one that broke a gate: not a failure, not a contender.
                 if self._gate(results[cid], outcome, stage):
@@ -948,6 +948,8 @@ class Cascade:
         outcome: StageOutcome,
         stage: StageConfig,
         candidate_id: str,
+        *,
+        generation: int | None = None,
     ) -> bool:
         """Fingerprint what the candidate did at `stage`. True == twin.
 
@@ -959,8 +961,10 @@ class Cascade:
 
         Two rules (`evaluate/signature.py`): on a stage that is not repeatable
         and has a noise estimate (`noise.sd` of the objective > 0), the child
-        is a twin of the best earlier candidate it is within the noise of on
-        every compared number, among those that scored at least as well. On a
+        is a twin of the best candidate of an earlier round (`generation`:
+        never one of its own round, whose order of evaluation is arbitrary,
+        Decision 15) it is within the noise of on every compared number,
+        among those that scored at least as well. On a
         repeatable stage, and with no noise, the 9-digit hash. Either way the
         candidate's hash and numbers are kept, so the seed is a target in both.
         """
@@ -1005,7 +1009,7 @@ class Cascade:
             result.behaviour_signatures[stage.id] = signature
         result.behaviour_values[stage.id] = kept.to_json()
         if skip:
-            self.signatures.add(candidate_id, stage.id, signature, kept)
+            self.signatures.add(candidate_id, stage.id, signature, kept, generation=generation)
             return False
         if noisy:
             margins = twin_margins(
@@ -1022,12 +1026,12 @@ class Cascade:
                 },
             )
             verdict = self.signatures.check_values(
-                stage.id, behaviour, margins, digits, exclude=candidate_id
+                stage.id, behaviour, margins, digits, exclude=candidate_id, before=generation
             )
         else:
             verdict = self.signatures.check(stage.id, signature)
         if not verdict.duplicate or verdict.twin_id == candidate_id:
-            self.signatures.add(candidate_id, stage.id, signature, kept)
+            self.signatures.add(candidate_id, stage.id, signature, kept, generation=generation)
             return False
         result.behaviour_twin_id = verdict.twin_id
         result.rejected = True

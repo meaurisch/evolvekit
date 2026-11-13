@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from evolvekit.candidate import Candidate
-from evolvekit.evaluate.types import StageOutcome
 from evolvekit.config import (
     PenaltyConfig,
     PromoteRule,
@@ -34,6 +33,7 @@ from evolvekit.evaluate import (
     select_promoted,
     static_checks,
 )
+from evolvekit.evaluate.types import StageOutcome
 
 MINIMIZE = ScoreConfig(objective="excess", direction="minimize", weights={"excess": 1.0})
 MAXIMIZE = ScoreConfig(objective="gain", direction="maximize", weights={"gain": 1.0})
@@ -368,11 +368,13 @@ def test_the_cap_does_not_hold_back_what_the_percentile_promotes():
     assert "x0" not in chosen, "below the percentile and outside the cap"
 
 
-def test_a_candidate_one_noise_sd_better_is_left_out_in_under_20_percent():
+def test_a_candidate_one_noise_sd_better_is_left_out_in_under_22_percent():
     """8 candidates, scores with sd 1 (one candidate's), k = 2, band 2, cap 4; one
-    candidate truly 1 better. Left out with the band and the cap when 4 of the 7
-    others measure above it (or 3 do and it is more than 2 below the 2nd):
-    E_x[P(Bin(7, Φ(-x)) >= 4)], x ~ N(1, 1), about 18 %. Today (top 2) it is left
+    candidate truly 1 better. With the band and the cap it is left out when 4 or
+    more of the 7 others measure above it (the cap), or when 2 or 3 do and it is
+    more than 2 below the 2nd score (the band). The first term alone is
+    E_x[P(Bin(7, Φ(-x)) >= 4)], x ~ N(1, 1) = 18.2 %; the second adds little:
+    about 18 %. Today (top 2) it is left
     out when 2 of the 7 do: about 41 %. Measured through `select_promoted` (20 000
     seeded draws): see the printed rates; the bands sit outside 2 SE of both."""
     rng, rule = random.Random(31), PromoteRule(top_k_per_generation=2)
@@ -612,16 +614,42 @@ def test_a_screen_of_one_run_has_no_band_even_when_the_final_stage_is_noisy(tmp_
     assert results["b"].stages_reached == ["static", "proxy"]
 
 
-def test_a_candidate_within_the_stages_noise_of_the_kth_is_promoted(tmp_path):
+@pytest.mark.parametrize("order", [("a", "b", "c"), ("c", "b", "a")])
+def test_a_candidate_within_the_stages_noise_of_the_kth_is_promoted(tmp_path, order):
+    """One measure, no other to tell them apart: the twin margin (2·sd at one
+    run) equals the band, yet b is not a's noise twin -- they are of the same
+    round (Decision 15) -- whichever of them is evaluated first."""
     config = _proxy_then_full(tmp_path, {"top_k_per_generation": 1})
     cascade = Cascade(config, work_dir=tmp_path / "work")
     cascade.noise.observe("proxy", "z", _replicated("proxy", 4.0))  # one run's sd 2: band 4
-    # `shape` (exact, no noise of its own) tells them apart: none is a noise twin of another.
-    results = cascade.evaluate_generation(
-        [_gain("a", 10.0, shape=1), _gain("b", 7.0, shape=2), _gain("c", 5.0, shape=3)]
-    )
+    gains = {"a": 10.0, "b": 7.0, "c": 5.0}
+    results = cascade.evaluate_generation([_gain(cid, gains[cid]) for cid in order])
+    assert all(r.behaviour_twin_id is None for r in results.values())
+    assert results["a"].stages_reached == ["static", "proxy", "full"]
     assert results["b"].stages_reached == ["static", "proxy", "full"], "7 is within 4 of 10"
     assert results["c"].stages_reached == ["static", "proxy"], "5 is not"
+
+
+@pytest.mark.parametrize("order", [("a", "b"), ("b", "a")])
+def test_a_near_equal_pair_of_one_round_is_not_twinned(tmp_path, order):
+    config = _proxy_then_full(tmp_path, {"top_k_per_generation": 2})
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.noise.observe("proxy", "z", _replicated("proxy", 4.0))
+    gains = {"a": 10.0, "b": 9.99}
+    results = cascade.evaluate_generation([_gain(cid, gains[cid]) for cid in order])
+    assert results["a"].behaviour_twin_id is None and results["b"].behaviour_twin_id is None
+    assert results["b"].stages_reached == ["static", "proxy", "full"]
+
+
+def test_a_child_near_an_earlier_rounds_candidate_is_still_its_twin(tmp_path):
+    config = _proxy_then_full(tmp_path, {"top_k_per_generation": 2})
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.noise.observe("proxy", "z", _replicated("proxy", 4.0))
+    cascade.evaluate_generation([_gain("a", 10.0)])  # round 1
+    later = _gain("b", 9.99)
+    later.generation = 2
+    result = cascade.evaluate_generation([later])["b"]
+    assert result.behaviour_twin_id == "a" and result.stages_reached == ["static", "proxy"]
 
 
 def test_the_archive_percentile_compares_the_stages_own_scores(tmp_path):
@@ -667,6 +695,17 @@ def test_the_driver_hands_the_cascade_each_stages_own_archive_scores(tmp_path):
         raise Seen
 
     driver.cascade.evaluate_generation = capture
+    with pytest.raises(Seen):
+        driver._evaluate_and_record([_gain("c", 50.0)], generation=1)
+    assert seen == [{"archive_scores": [1000.0, 1000.0], "stage_scores": {"proxy": [40.0], "full": [1000.0, 1001.0]}}]
+
+    # A tree problem with a build evaluates one candidate at a time: each call
+    # gets the same stage scores.
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    driver.config = replace(driver.config, problem=replace(driver.config.problem, tree=SimpleNamespace(build="make")))
+    seen.clear()
     with pytest.raises(Seen):
         driver._evaluate_and_record([_gain("c", 50.0)], generation=1)
     assert seen == [{"archive_scores": [1000.0, 1000.0], "stage_scores": {"proxy": [40.0], "full": [1000.0, 1001.0]}}]

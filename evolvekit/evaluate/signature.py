@@ -322,6 +322,10 @@ class BehaviourIndex:
     """Per stage, per candidate in the order they were added, what the noise
     rule compares (`check_values`). Empty for a candidate from a run written
     before it: that one is a twin target by its hash only."""
+    generations: dict[str, int] = field(default_factory=dict)
+    """Per candidate, the generation (round) it was evaluated in, when known:
+    the noise rule compares a child only with earlier rounds' entries
+    (Decision 15). An entry of unknown round counts as earlier."""
 
     def check(self, stage_id: str, signature: str) -> BehaviourVerdict:
         if not signature:
@@ -340,16 +344,21 @@ class BehaviourIndex:
         digits: int,
         *,
         exclude: str | None = None,
+        before: int | None = None,
     ) -> BehaviourVerdict:
         """The noise rule (Decision 2): among the entries `within` the margins
         whose stage score is at least the child's, the one with the highest
         score (ties: the first added). None: not a twin -- a child within the
         noise of everything but ahead of all of it is evaluated. `exclude`: the
-        child's own id, should it already be in the index."""
+        child's own id, should it already be in the index. `before`: the
+        child's round; only entries of earlier rounds are compared (Decision
+        15), so the order of evaluation inside a round decides nothing."""
         best_id: str | None = None
         best_score = -math.inf
         for cid, entry in self.values.get(stage_id, {}).items():
             if cid == exclude or entry.score < behaviour.score:
+                continue
+            if before is not None and self.generations.get(cid, before - 1) >= before:
                 continue
             if best_id is not None and entry.score <= best_score:
                 continue
@@ -358,10 +367,19 @@ class BehaviourIndex:
         return BehaviourVerdict(stage_id=stage_id, twin_id=best_id)
 
     def add(
-        self, candidate_id: str, stage_id: str, signature: str, behaviour: Behaviour | None = None
+        self,
+        candidate_id: str,
+        stage_id: str,
+        signature: str,
+        behaviour: Behaviour | None = None,
+        *,
+        generation: int | None = None,
     ) -> None:
         """Remember `signature` as first produced by `candidate_id`, and what
-        it did (`behaviour`), the latest for that id."""
+        it did (`behaviour`), the latest for that id, evaluated in round
+        `generation` (when given)."""
+        if generation is not None:
+            self.generations[candidate_id] = int(generation)
         if signature:
             self.by_key.setdefault((stage_id, signature), candidate_id)
         if behaviour is not None:

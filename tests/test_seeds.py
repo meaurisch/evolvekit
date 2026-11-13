@@ -272,9 +272,9 @@ def _cascade_config(minimal_raw, tmp_path, command, seeds):
     return build_config(minimal_raw, base_dir=tmp_path)
 
 
-def _candidate(cid: str, tail: str) -> Candidate:
+def _candidate(cid: str, tail: str, generation: int = 1) -> Candidate:
     block = f"def f():\n    return 1  # {tail}\n"
-    return Candidate(id=cid, generation=1, block=block, source=block, operator="diff")
+    return Candidate(id=cid, generation=generation, block=block, source=block, operator="diff")
 
 
 def test_a_noisy_evaluator_still_catches_a_behavioural_twin(minimal_raw, tmp_path):
@@ -298,7 +298,7 @@ def test_a_noisy_evaluator_still_catches_a_behavioural_twin(minimal_raw, tmp_pat
 
     cascade = Cascade(config, work_dir=tmp_path / "work")
     first = cascade.evaluate_generation([_candidate("a", "one way")])
-    second = cascade.evaluate_generation([_candidate("b", "another way")])
+    second = cascade.evaluate_generation([_candidate("b", "another way", generation=2)])  # a later round
 
     assert not first["a"].rejected
     assert second["b"].rejected

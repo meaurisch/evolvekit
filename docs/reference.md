@@ -238,7 +238,11 @@ stage and, when the stage's noise is known
 stage (`2 · score_sd`, a mean over the stage's `seeds`). The top k and the band
 together are capped at `2k`, by score (ties by id). With k = 2 of eight
 candidates, one truly one noise sd better than the other seven is left out
-about 18 % of the time (about 41 % with the top k alone). With no noise
+about 18 % of the time (about 41 % with the top k alone). The behaviour-twin
+rule compares a child only with earlier rounds
+([The novelty filters](#the-novelty-filters--structural-near-and-behavioural)),
+so it does not empty the band: a child just below the k-th of its own round is
+not that candidate's twin. With no noise
 estimate — a stage of one run that is never calibrated, as a study's screen —
 the band is 0 and the rule is the top k exactly. `archive_percentile: p`
 promotes every candidate whose score at that stage is at least the p-th
@@ -763,7 +767,7 @@ estimate says so in its own section and is listed here:
 - the hold-out veto's margin ([The hold-out penalty](#the-hold-out-penalty));
 - behaviour twins on a stage that is not repeatable
   ([The novelty filters](#the-novelty-filters--structural-near-and-behavioural),
-  *Behavioural*): within the noise of an earlier candidate that scored at
+  *Behavioural*): within the noise of a candidate of an earlier round that scored at
   least as well, instead of equal to nine digits;
 - the race's margin ([One run per instance](#one-run-per-instance-instances-workers-retries),
   `race`): at least twice the objective's relative noise of one run, read at
@@ -999,7 +1003,14 @@ least as well at the stage. It is then a twin *of the best such* (ties: the
 first seen). A child within the noise of everything it resembles but ahead of
 all of it is evaluated: on a noisy stage that is the only way to find out
 whether it is better, so a child is stopped only when it measures no better
-than something already paid for.
+than something already paid for. A child is compared only with candidates of
+**earlier rounds**: two children of the same round are never each other's
+noise twin, so which of them was evaluated first decides nothing (with
+parallel workers that order is arbitrary), and promotion's noise band sees
+every child of the round the rule kept. A round's children become targets for
+the next round's; a resumed run rebuilds the same targets from the rows'
+`generation`. (The exact hash below matches within a round too: an exact
+duplicate behaves alike in any order.)
 
 - `σ̂` is one run's noise of that measure (per case: that case's); where a
   case's is unknown — a calibration measured one case — the relative noise

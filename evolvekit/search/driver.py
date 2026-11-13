@@ -584,13 +584,13 @@ class Driver:
             caught_at = candidate.stages_reached[-1] if candidate.behaviour_twin_id and candidate.stages_reached else None
             for stage_id, signature in (candidate.behaviour_signatures or {}).items():
                 if stage_id != caught_at:
-                    self.behaviour.add(candidate.id, stage_id, signature)
+                    self.behaviour.add(candidate.id, stage_id, signature, generation=int(candidate.generation))
             # The numbers the noise rule compares, with the stage score. A row
             # from before them is a target by its hash only.
             for stage_id, raw_values in (candidate.behaviour_values or {}).items():
                 values = Behaviour.from_json(raw_values)
                 if values is not None and stage_id != caught_at:
-                    self.behaviour.add(candidate.id, stage_id, "", values)
+                    self.behaviour.add(candidate.id, stage_id, "", values, generation=int(candidate.generation))
             if candidate.novelty == "behavioural":
                 self._remember_dead_end(candidate)
             last_generation = max(last_generation, int(candidate.generation))
@@ -913,6 +913,7 @@ class Driver:
         }
         for entries in self.behaviour.values.values():
             entries.pop(candidate_id, None)
+        self.behaviour.generations.pop(candidate_id, None)
 
     # -- a generation that was interrupted -------------------------------
 

@@ -223,9 +223,9 @@ def _twin_pair() -> list[Candidate]:
     ]
 
 
-def candidate(cid: str, body: str) -> Candidate:
+def candidate(cid: str, body: str, *, generation: int = 0) -> Candidate:
     source = SKELETON.replace("def rule():\n    return 1", body)
-    return Candidate(id=cid, generation=0, block=body, source=source, operator="rewrite")
+    return Candidate(id=cid, generation=generation, block=body, source=source, operator="rewrite")
 
 
 def test_a_twin_is_stopped_at_the_stage_that_caught_it(two_stage_config, tmp_path):
@@ -671,8 +671,10 @@ def _seed() -> Candidate:
     return Candidate(id="seed", generation=0, block=body, source=SKELETON, operator=SEED_OPERATOR)
 
 
-def _offset(cid: str, offset: str, *, written: str = "1") -> Candidate:
-    return candidate(cid, f"def rule():\n    return {written}  # offset={offset}")
+def _offset(cid: str, offset: str, *, written: str = "1", generation: int = 1) -> Candidate:
+    """A child of a later round than the seed's: the noise rule compares a
+    child with earlier rounds only (Decision 15)."""
+    return candidate(cid, f"def rule():\n    return {written}  # offset={offset}", generation=generation)
 
 
 def _after_the_seed(tmp_path: Path, script_text: str, child: Candidate, **kw):
@@ -765,7 +767,7 @@ def test_behavioural_auto_checks_a_stochastic_stage_once_it_knows_the_noise(stoc
     cascade = Cascade(auto_config, work_dir=tmp_path / "work")
     cascade.evaluate_generation([_seed()])
     assert cascade.noise.repeatable("full") is True
-    child = cascade.evaluate_generation([candidate("child", "def rule():\n    return 1 * 1")])["child"]
+    child = cascade.evaluate_generation([candidate("child", "def rule():\n    return 1 * 1", generation=1)])["child"]
     assert child.behaviour_twin_id == "seed"
 
     _, noisy = _after_the_seed(tmp_path / "wall", WALL_CLOCK, _offset("child", "-0.001"), behavioural="auto")
@@ -833,3 +835,4 @@ def test_a_resumed_run_rebuilds_the_index_the_live_run_built(tmp_path):
     assert set(live.behaviour.values["full"]) == {r["id"] for r in rows if not r.get("behaviour_twin_id")}
     assert resumed.behaviour.by_key == live.behaviour.by_key
     assert resumed.behaviour.values == live.behaviour.values
+    assert resumed.behaviour.generations == live.behaviour.generations, "the rounds the noise rule reads"
