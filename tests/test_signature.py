@@ -493,7 +493,7 @@ def test_a_true_twin_is_caught_in_about_84_percent():
     """One noisy number, seeds 1, sd 1: the difference is N(0, 2), the margin 2:
     P(|Z| <= sqrt 2) = erf(1) = 84.27 %. 20 000 trials: SE 0.26 %."""
     rng, caught = random.Random(11), 0
-    margins = {"cost": 2.0}
+    margins = twin_margins(Behaviour({"cost": 0.0}, {}), {"cost": 1.0}, {}, seeds=1)  # 2.0
     for _ in range(20_000):
         caught += within(Behaviour({"cost": rng.gauss(0, 1)}, {}), Behaviour({"cost": rng.gauss(0, 1)}, {}), margins, 9)
     print(f"true twin caught: {caught / 20_000:.2%}")
@@ -504,7 +504,7 @@ def test_a_real_gain_of_twice_the_margin_is_called_a_twin_in_about_8_percent():
     """Difference N(4, 2), margin 2: Phi(-sqrt 2) - Phi(-3 sqrt 2) = 7.87 %.
     20 000 trials: SE 0.19 %; measured 7.60 % (seed 15), so the band is [7.0, 8.8] %."""
     rng, caught = random.Random(15), 0
-    margins = {"cost": 2.0}
+    margins = twin_margins(Behaviour({"cost": 0.0}, {}), {"cost": 1.0}, {}, seeds=1)  # 2.0
     for _ in range(20_000):
         caught += within(Behaviour({"cost": rng.gauss(0, 1)}, {}), Behaviour({"cost": rng.gauss(4, 1)}, {}), margins, 9)
     print(f"a gain of four noise sd called a twin: {caught / 20_000:.2%}")
@@ -535,7 +535,7 @@ def test_a_twin_is_only_of_an_earlier_candidate_that_scored_at_least_as_well():
     index = BehaviourIndex()
     index.add("lo", "full", "h1", Behaviour({"cost": 100.0}, {}, score=-100.0))
     index.add("hi", "full", "h2", Behaviour({"cost": 99.0}, {}, score=-99.0))
-    margins = {"cost": 2.0}
+    margins = twin_margins(Behaviour({"cost": 0.0}, {}), {"cost": 1.0}, {}, seeds=1)  # 2.0
     assert index.check_values("full", Behaviour({"cost": 99.5}, {}, score=-99.5), margins, 9).twin_id == "hi"
     assert index.check_values("full", Behaviour({"cost": 98.5}, {}, score=-98.5), margins, 9).twin_id is None
     assert index.check_values("proxy", Behaviour({"cost": 99.5}, {}, score=-99.5), margins, 9).twin_id is None
@@ -632,7 +632,13 @@ pathlib.Path(out).write_text(json.dumps({"kpis": {"value": value}}), encoding="u
 """
 
 
-def _noise_config(tmp_path: Path, script_text: str, *, behavioural: str = "on"):
+QUIET_WALL_CLOCK = WALL_CLOCK.replace("(0.01 if seed % 2 == 0 else -0.01)", "(0.001 if seed % 2 == 0 else -0.001)")
+"""The same, ten times quieter: one run's sd about 0.0014, a margin about 0.002."""
+assert QUIET_WALL_CLOCK != WALL_CLOCK
+
+
+def _noise_config(tmp_path: Path, script_text: str, *, behavioural: str = "on", digits: int | None = None,
+                  direction: str | None = None):
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "skeleton.py").write_text(SKELETON, encoding="utf-8")
     script = tmp_path / "evaluator.py"
@@ -653,6 +659,10 @@ def _noise_config(tmp_path: Path, script_text: str, *, behavioural: str = "on"):
             "strong": {"provider": "fake", "model": "b", "options": {"responses": ["x"]}},
         },
     }
+    if digits is not None:
+        raw["evaluate"]["signature_digits"] = digits
+    if direction is not None:
+        raw["evaluate"]["score"]["direction"] = direction
     return build_config(raw, base_dir=tmp_path)
 
 
@@ -692,6 +702,33 @@ def test_a_child_beyond_the_noise_is_evaluated_further(tmp_path):
     _, result = _after_the_seed(tmp_path, WALL_CLOCK, _offset("child", "-0.1"))
     assert result.behaviour_twin_id is None
     assert result.competes
+
+
+def test_on_a_minimising_goal_at_least_as_good_means_at_most_as_high(tmp_path):
+    """`direction: minimize`: the score is `-value`, so a child whose value is
+    higher than the seed's within the noise did no better and is its twin, and
+    one lower within the noise is ahead and is evaluated."""
+    _, worse = _after_the_seed(tmp_path / "worse", WALL_CLOCK, _offset("child", "0.001"), direction="minimize")
+    assert worse.behaviour_twin_id == "seed"
+    _, better = _after_the_seed(tmp_path / "better", WALL_CLOCK, _offset("child", "-0.001"), direction="minimize")
+    assert better.behaviour_twin_id is None
+    assert better.competes
+
+
+def test_the_noise_rule_compares_the_numbers_not_a_coarse_rounding_of_them(tmp_path):
+    """`signature_digits: 3` rounds the numbers compared exactly, not the
+    noisy ones: 0.004 apart under a margin of about 0.002 is two candidates,
+    though at three digits both read 3.00. What is kept has nine digits."""
+    config = _noise_config(tmp_path, QUIET_WALL_CLOCK, digits=3)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([candidate("first", "def rule():\n    return 1")])
+    assert cascade.noise.repeatable("full") is None and cascade.noise.sd("full", "value") > 0
+    apart = cascade.evaluate_generation([_offset("apart", "-0.004")])["apart"]
+    assert apart.behaviour_twin_id is None
+    assert round_significant(apart.kpis["value"], 3) == round_significant(3.0, 3), "what three digits would see"
+    assert apart.behaviour_values["full"]["kpis"]["value"] == pytest.approx(2.996, abs=1e-6)
+    close = cascade.evaluate_generation([_offset("close", "-0.001")])["close"]
+    assert close.behaviour_twin_id == "first", "the noise rule is the one in force"
 
 
 def test_on_a_repeatable_stage_twins_are_exact_at_nine_digits(tmp_path):
@@ -761,5 +798,38 @@ def test_a_resumed_run_compares_with_the_values_its_rows_kept(two_stage_config, 
     assert verdict.twin_id == "seed"
     assert index.values["full"]["seed"].score == 3.0
     assert "twin" not in index.values["full"], "a twin was not a target where it was caught"
+    assert index.check("full", "h-twin").twin_id is None, "nor was its hash"
     assert "legacy" not in index.values["full"]
     assert index.check("full", "h-legacy").twin_id == "legacy"
+
+
+def test_a_resumed_run_rebuilds_the_index_the_live_run_built(tmp_path):
+    """Two generations of a run on a wall-clock stage -- a child ahead of the
+    seed within its noise, then one no better than it (a noise twin, whose hash
+    is its own) -- and the run resumed from its rows: the same hashes, the same
+    compared numbers and scores."""
+    from evolvekit.providers.fake import FakeProvider
+    from evolvekit.search.driver import Driver
+
+    config = _noise_config(tmp_path, WALL_CLOCK)
+    config = replace(
+        config,
+        search=replace(
+            config.search, generations=2, children_per_generation=1, adaptive_children=None,
+            big_step_every=99, scratchpad_every=0, inspirations=0, operators={"rewrite": 1.0},
+        ),
+        stop=replace(config.stop, patience=99),
+    )
+    blocks = ['def rule():\n    return "offset=0.001" and 1\n', 'def rule():\n    return "offset=-0.001" and 1\n']
+    provider = FakeProvider([f"```python\n{b}```" for b in blocks], cycle=True)
+    live = Driver(config, run_dir=tmp_path / "run", providers={"small": provider, "strong": provider})
+    live.run()
+    rows = live.ledger.runs()
+    assert any(r.get("behaviour_twin_id") for r in rows), "the second child is a noise twin"
+
+    resumed = Driver(config, run_dir=tmp_path / "run",
+                     providers={"small": FakeProvider(["x"]), "strong": FakeProvider(["x"])})
+    resumed.resume()
+    assert set(live.behaviour.values["full"]) == {r["id"] for r in rows if not r.get("behaviour_twin_id")}
+    assert resumed.behaviour.by_key == live.behaviour.by_key
+    assert resumed.behaviour.values == live.behaviour.values

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
-from evolvekit.config import Config, PromoteRule, StageConfig
+from evolvekit.config import DEFAULT_SIGNATURE_DIGITS, Config, PromoteRule, StageConfig
 from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
 from evolvekit.evaluate.levels import Anchor, level_score, make_anchor
@@ -948,10 +948,17 @@ class Cascade:
             outcome, ignore=evaluate.signature_ignore, per_instance=stage.fans_out, objective=objective
         )
         digits = evaluate.signature_digits
-        behaviour = Behaviour(
-            {k: round_significant(v, digits) for k, v in seen.kpis.items()},
-            {k: [round_significant(x, digits) for x in v] for k, v in seen.vectors.items()},
-            float(result.stage_scores.get(stage.id, result.score)),
+        score = float(result.stage_scores.get(stage.id, result.score))
+        # Compared as measured: `within` rounds (at `signature_digits`) only the
+        # numbers it compares exactly. Kept at nine digits at least, whatever
+        # `signature_digits` says, so that what a later child is compared with
+        # -- live or after a resume -- is the number, not a coarse rounding of it.
+        behaviour = Behaviour(seen.kpis, seen.vectors, score)
+        keep = max(DEFAULT_SIGNATURE_DIGITS, digits)
+        kept = Behaviour(
+            {k: round_significant(v, keep) for k, v in seen.kpis.items()},
+            {k: [round_significant(x, keep) for x in v] for k, v in seen.vectors.items()},
+            score,
         )
         if not signature and not (behaviour.kpis or behaviour.vectors):
             return False
@@ -960,9 +967,9 @@ class Cascade:
         noisy = noisy and bool(behaviour.kpis or behaviour.vectors)
         if signature:
             result.behaviour_signatures[stage.id] = signature
-        result.behaviour_values[stage.id] = behaviour.to_json()
+        result.behaviour_values[stage.id] = kept.to_json()
         if skip:
-            self.signatures.add(candidate_id, stage.id, signature, behaviour)
+            self.signatures.add(candidate_id, stage.id, signature, kept)
             return False
         if noisy:
             margins = twin_margins(
@@ -984,7 +991,7 @@ class Cascade:
         else:
             verdict = self.signatures.check(stage.id, signature)
         if not verdict.duplicate or verdict.twin_id == candidate_id:
-            self.signatures.add(candidate_id, stage.id, signature, behaviour)
+            self.signatures.add(candidate_id, stage.id, signature, kept)
             return False
         result.behaviour_twin_id = verdict.twin_id
         result.rejected = True

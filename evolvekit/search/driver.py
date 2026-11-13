@@ -566,16 +566,16 @@ class Driver:
             if not candidate.rejected:
                 self._embed_context = (candidate.id, int(candidate.generation))
                 self.novelty.add(candidate.id, candidate.block, parent_block=self._parent_block(candidate))
-            # Signatures come back even for a rejected twin: it is the *first*
-            # id per signature that matters, and dropping it would let the same
-            # behaviour be paid for again after a resume.
-            for stage_id, signature in (candidate.behaviour_signatures or {}).items():
-                self.behaviour.add(candidate.id, stage_id, signature)
-            # The numbers the noise rule compares, with the stage score. A twin's
-            # at the stage that caught it never became a target in the run that
-            # wrote the row, so they do not become one now. A row from before
-            # them is a target by its hash only.
+            # A twin's hash and numbers at the stage that caught it never became
+            # a target in the run that wrote the row, so they do not become one
+            # now (a noise twin's hash is its own, and would). At its earlier
+            # stages it was added like anyone else.
             caught_at = candidate.stages_reached[-1] if candidate.behaviour_twin_id and candidate.stages_reached else None
+            for stage_id, signature in (candidate.behaviour_signatures or {}).items():
+                if stage_id != caught_at:
+                    self.behaviour.add(candidate.id, stage_id, signature)
+            # The numbers the noise rule compares, with the stage score. A row
+            # from before them is a target by its hash only.
             for stage_id, raw_values in (candidate.behaviour_values or {}).items():
                 values = Behaviour.from_json(raw_values)
                 if values is not None and stage_id != caught_at:
@@ -900,6 +900,8 @@ class Driver:
         self.behaviour.by_key = {
             key: owner for key, owner in self.behaviour.by_key.items() if owner != candidate_id
         }
+        for entries in self.behaviour.values.values():
+            entries.pop(candidate_id, None)
 
     # -- a generation that was interrupted -------------------------------
 
