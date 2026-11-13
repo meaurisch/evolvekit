@@ -6,6 +6,8 @@ candidate has a score at both, so after each round the run reads the rank
 correlation ρ (`stats.spearman`) over every candidate that has both, the
 seed included, cumulative over the run:
 
+* `k` at or above the round's number of children (adaptive breadth can shrink
+  it): switched off, before any ρ is read -- promoting every child is no screen;
 * with fewer than `MIN_PAIRS` pairs, or no ρ (a side that does not vary),
   nothing changes;
 * ρ < 0 at `CONTRARY_ROUNDS` checks running: the screen is **switched off**
@@ -101,7 +103,20 @@ class ScreenControl:
         return said
 
     def _check(self, generation: int, pairs: Sequence[tuple[float, float]]) -> str | None:
-        if self.off or len(pairs) < MIN_PAIRS:
+        if self.off:
+            return None
+        if self.k >= self.cap:
+            # Decision 10, whatever the correlation: the round's children have
+            # shrunk to k (adaptive breadth), and promoting every child is no screen.
+            self.off = True
+            said = (
+                f"screening off for the rest of the run: it promotes {self.k} a round and the round has "
+                f"{self.cap} children ({len(pairs)} candidates through both stages; it would promote every child)"
+            )
+            self.history.append({"generation": int(generation), "n": len(pairs), "rho": None, "k": self.k,
+                                 "off": True, "said": said})
+            return said
+        if len(pairs) < MIN_PAIRS:
             return None
         rho = spearman([float(a) for a, _ in pairs], [float(b) for _, b in pairs])
         if rho is None:

@@ -13,14 +13,16 @@ import json
 import math
 import random
 import sys
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from evolvekit.candidate import Candidate
 from evolvekit.config import ConfigError, PromoteRule, build_config
 from evolvekit.events import read_events
-from evolvekit.search.driver import Driver
+from evolvekit.search.driver import Driver, adapting_stages, screen_pairs
 from evolvekit.search.screening import SCREENING_FILE, ScreenControl
 
 WEAK = [(float(i), float((4 * i) % 9)) for i in range(9)]  # rho = 0.100 (Decision 12)
@@ -88,6 +90,37 @@ def test_a_screen_whose_k_reaches_the_cap_is_switched_off(tmp_path):
     assert control.history[-1]["said"].endswith("it would promote every child)")
 
 
+def test_a_round_shrunk_to_k_children_switches_the_screen_off_before_any_rho():
+    """Adaptive breadth can shrink the round to k children: top k of k is no
+    screen, whatever the correlation and however few pairs there are."""
+    control = ScreenControl("screen", k=3, cap=6, path=None)
+    agreeing = [(float(i), float(i)) for i in range(4)]
+    assert control.after_round(1, agreeing) is None
+    control.cap = 3
+    said = control.after_round(2, agreeing)
+    assert control.off and said.startswith("screening off for the rest of the run")
+    assert said.endswith("it would promote every child)")
+    assert control.history[-1] == {"generation": 2, "n": 4, "rho": None, "k": 3, "off": True, "said": said}
+
+
+def test_a_candidate_raced_out_at_the_next_stage_ranks_last_there():
+    def candidate(cid, screen, full=None, raced=None):
+        scores = {"screen": screen, **({"full": full} if full is not None else {})}
+        return Candidate(id=cid, generation=1, block="", source="", operator="param_lhs",
+                         stage_scores=scores, raced_out=raced)
+
+    archive = [candidate("a", 1.0, -5.0), candidate("b", 2.0, -4.0), candidate("c", 3.0, raced="behind"),
+               candidate("d", 4.0, raced="behind"), candidate("e", 5.0)]  # e: not promoted, no race
+    assert screen_pairs(archive, "screen", "full") == [(1.0, -5.0), (2.0, -4.0), (3.0, -6.0), (4.0, -6.0)]
+
+
+def test_no_controller_when_candidates_are_built_one_at_a_time(tmp_path):
+    config = build_config(_raw(tmp_path), base_dir=tmp_path)
+    assert [s.id for s, _ in adapting_stages(config)] == ["screen"]
+    built = replace(config, problem=replace(config.problem, tree=SimpleNamespace(build="make")))
+    assert adapting_stages(built) == []
+
+
 def test_a_missing_or_foreign_file_starts_from_the_configured_k(tmp_path):
     path = tmp_path / "screening.json"
     assert (ScreenControl.load(path, "screen", 2, 6).k, ScreenControl.load(path, "screen", 2, 6).off) == (2, False)
@@ -118,8 +151,8 @@ def _run(rng, rho0, rounds=10, children=6):
 
 def test_a_screen_that_agrees_is_switched_off_in_under_5_percent_of_runs():
     """rho 0.8 before selection; within the promoted top third it is about 0.65
-    (range restriction; measured Spearman 0.64). Measured off 0.95 % (SE 0.22 %).
-    Also printed: how often k grows (measured 14.3 %)."""
+    (range restriction; measured Spearman 0.64). Measured through this code, seed
+    41: off 1.1 % (SE 0.23 %). Also printed: how often k grows (13.8 %, SE 0.77 %)."""
     rng = random.Random(41)
     runs = [_run(rng, 0.8) for _ in range(2000)]
     off = sum(c.off for c, _ in runs) / 2000
@@ -129,7 +162,8 @@ def test_a_screen_that_agrees_is_switched_off_in_under_5_percent_of_runs():
 
 def test_a_screen_that_does_not_predict_grows_k_in_over_85_percent_of_runs():
     """rho 0: rho-hat < 0.2 with probability about 0.7 at each check from round 4 on;
-    measured 90.8 % (SE 0.65 %), so the bound is 85 % (Decision 12)."""
+    measured through this code, seed 42: 90.6 % (SE 0.65 %), so the bound is 85 %
+    (Decision 12)."""
     rng = random.Random(42)
     grew = sum(g for _, g in (_run(rng, 0.0) for _ in range(2000))) / 2000
     print(f"unrelated screen: k grew {grew:.1%}")

@@ -1846,16 +1846,14 @@ class Driver:
     # -- screening (search/screening.py) ----------------------------------
 
     def _screen_controls(self) -> dict[str, ScreenControl]:
-        stages = self.config.evaluate.stages
         path = self.ledger.run_dir / "work" / SCREENING_FILE
-        controls: dict[str, ScreenControl] = {}
-        for stage, later in zip(stages, stages[1:]):
-            k = stage.promote.top_k_per_generation
-            if stage.promote.adapt and k is not None and stage.kind == "command" and later.kind == "command":
-                controls[stage.id] = ScreenControl.load(
-                    path, stage.id, k, self.children_per_generation, later=later.id
-                )
-        return controls
+        return {
+            stage.id: ScreenControl.load(
+                path, stage.id, int(stage.promote.top_k_per_generation or 0), self.children_per_generation,
+                later=later.id,
+            )
+            for stage, later in adapting_stages(self.config)
+        }
 
     def _apply_screens(self) -> None:
         for stage_id, control in self.screens.items():
@@ -1870,12 +1868,7 @@ class Driver:
         for stage_id, control in self.screens.items():
             if control.off:
                 continue
-            pairs = [
-                (float(c.stage_scores[stage_id]), float(c.stage_scores[control.later]))
-                for c in self.archive
-                if not c.rejected and not c.last_failure
-                and stage_id in c.stage_scores and control.later in c.stage_scores
-            ]
+            pairs = screen_pairs(self.archive, stage_id, control.later)
             control.cap = self.children_per_generation
             said = control.after_round(generation, pairs)
             self._apply_screens()
@@ -1936,6 +1929,44 @@ class Driver:
         self.archive.append(candidate)
         self.by_id[candidate.id] = candidate
         self.ledger.record_run(candidate.to_record())
+
+
+def adapting_stages(config: Config) -> list[tuple]:
+    """`(stage, next stage)` for every command stage with `promote.adapt` and a
+    top k whose next stage is a command stage: what gets a screening controller.
+    None with `problem.tree.build`: candidates are then evaluated one at a
+    time, so a round's top k is of one."""
+    tree = config.problem.tree
+    if tree is not None and tree.build:
+        return []
+    stages = config.evaluate.stages
+    return [
+        (stage, later)
+        for stage, later in zip(stages, stages[1:])
+        if stage.promote.adapt and stage.promote.top_k_per_generation is not None
+        and stage.kind == "command" and later.kind == "command"
+    ]
+
+
+def screen_pairs(candidates: Sequence[Candidate], stage_id: str, later: str) -> list[tuple[float, float]]:
+    """`(score at stage_id, score at later)` over every candidate scored at
+    `stage_id`, not rejected and not failed. One raced out at `later` was
+    judged behind there: it ranks last at `later` (one value below every
+    finished score, ties among them), rather than leaving the pairs -- else a
+    race would hide exactly the screen's mistakes."""
+    finished: list[tuple[float, float]] = []
+    behind: list[float] = []
+    for c in candidates:
+        if c.rejected or c.last_failure or stage_id not in c.stage_scores:
+            continue
+        if later in c.stage_scores:
+            finished.append((float(c.stage_scores[stage_id]), float(c.stage_scores[later])))
+        elif c.raced_out:
+            behind.append(float(c.stage_scores[stage_id]))
+    if not behind:
+        return finished
+    floor = min((b for _, b in finished), default=0.0) - 1.0
+    return finished + [(a, floor) for a in behind]
 
 
 def _role_of(operator: str) -> str:
