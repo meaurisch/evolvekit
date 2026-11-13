@@ -15,6 +15,7 @@ import json
 import math
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from statistics import fmean, quantiles
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
@@ -276,6 +277,13 @@ class Cascade:
         self.seed_public: float | None = None
         """The same seed's public score, set and rebuilt with `seed_private`:
         what `holdout_margin` rescales the public run's noise by."""
+        self.promote_k: dict[str, int] = {}
+        """Per stage, the `top_k_per_generation` the run has moved it to
+        (`search/screening.py`, a stage with `promote.adapt`); a stage not
+        here promotes its configured k."""
+        self.skipped: set[str] = set()
+        """Stages passed over (a screen switched off): their candidates go
+        straight to the next stage, with no score of their own there."""
         self._trees: dict[str, Tree] = {}
         """Per candidate, its worktree (`problem.tree`): made by `_materialise`."""
         self._tree_errors: dict[str, str] = {}
@@ -327,6 +335,8 @@ class Cascade:
                 for cid in alive:
                     results[cid].abandoned = "the run was stopped before this candidate finished"
                 break
+            if stage.id in self.skipped and index < len(stages) - 1:
+                continue  # a screen switched off: everyone goes on to the next stage
             survivors: list[str] = []
             began = self._stage_started(stage, alive, private=False)
             outcomes = (
@@ -377,7 +387,10 @@ class Cascade:
             scored = [(cid, results[cid].score) for cid in survivors]
             members = list(own.get(stage.id) or ()) or prior
             band = 2.0 * self.noise.score_sd(stage.id, self.config.evaluate.score, stage.seeds)
-            alive = select_promoted(scored, stage.promote, members, band=band)
+            rule = stage.promote
+            if stage.id in self.promote_k and rule.top_k_per_generation is not None:
+                rule = replace(rule, top_k_per_generation=self.promote_k[stage.id])
+            alive = select_promoted(scored, rule, members, band=band)
 
         for cid, candidate in by_id.items():
             # The last seed evaluated is the reference, as `leaderboard.seed_private`

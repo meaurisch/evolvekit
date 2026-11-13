@@ -858,6 +858,18 @@ def test_whether_the_cheap_stage_predicts_the_expensive_one_can_be_read_off(tmp_
     assert "range is restricted" in screening["why"]
 
 
+def test_the_rank_correlation_is_the_one_in_stats():
+    """`status` reads the agreement with `stats.spearman`, the function the
+    screening controller reads it with: average ranks for ties, `None` when a
+    side does not vary or there are fewer than three points."""
+    from evolvekit import stats, status
+
+    assert status._spearman is stats.spearman and status._ranks is stats.ranks
+    assert stats.ranks([3.0, 1.0, 3.0, 2.0]) == [3.5, 1.0, 3.5, 2.0]
+    assert stats.spearman([1.0, 2.0, 3.0, 4.0], [10.0, 30.0, 20.0, 40.0]) == pytest.approx(0.8)
+    assert stats.spearman([1.0, 1.0, 1.0], [1.0, 2.0, 3.0]) is None and stats.spearman([1.0, 2.0], [2.0, 1.0]) is None
+
+
 # -- progress.noise ----------------------------------------------------------
 
 

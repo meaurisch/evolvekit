@@ -24,6 +24,7 @@ from typing import Any, Hashable, Mapping, Sequence
 __all__ = [
     "t_cdf", "wilcoxon_signed_rank", "paired_summary", "per_instance_means",
     "log_gain", "pct_from_log", "margin_log", "Posterior", "posterior_mean_t", "holm",
+    "ranks", "spearman",
 ]
 
 # Two-sided 95 % critical values of Student's t, by degrees of freedom.
@@ -319,3 +320,32 @@ def holm(pvalues: Mapping[str, float], alpha: float) -> dict[str, bool]:
             break
         passed[key] = True
     return passed
+
+
+def ranks(values: Sequence[float]) -> list[float]:
+    """1-based ranks, ties sharing their average rank."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    out = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        shared = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            out[order[k]] = shared
+        i = j + 1
+    return out
+
+
+def spearman(xs: Sequence[float], ys: Sequence[float]) -> float | None:
+    """Rank correlation. `None` when either side does not vary (or with fewer
+    than three points). What `status` reports as the screen's agreement and
+    the screening controller (`search/screening.py`) acts on."""
+    if len(xs) < 3 or len(set(xs)) < 2 or len(set(ys)) < 2:
+        return None
+    rx, ry = ranks(xs), ranks(ys)
+    mx, my = fmean(rx), fmean(ry)
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    den = math.sqrt(sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry))
+    return num / den if den else None

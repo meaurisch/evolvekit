@@ -252,6 +252,38 @@ fitness); members recorded without a score there are left out, and with none
 the members' fitness is used, as before. Whatever this promotes is promoted
 whatever the cap.
 
+**A screen that checks itself: `promote.adapt`.** With
+`promote: {top_k_per_generation: 2, adapt: true}` (a config error without
+`top_k_per_generation`) on a command stage followed by another command stage,
+the run checks after every round whether the cheaper stage still ranks
+candidates as the next one does: the Spearman rank correlation ρ between the
+two stages' scores, over every candidate that has both (the seed included, not
+rejected, not failed), cumulative over the run. With fewer than 8 such
+candidates, or no ρ (a side that does not vary), nothing changes. Otherwise:
+
+- ρ < 0 at two checks running: the stage is **switched off** for the rest of
+  the run — passed over, its candidates go straight to the next stage, with no
+  score of their own at it;
+- else ρ < 0.2: `k` grows by one (one more promoted a round), up to the
+  round's children; when `k` would reach them — every child promoted, no screen
+  left — the stage is switched off instead.
+
+The run log says each change in a sentence (`screening promotes 3 a round from
+now on: it agrees with the full stage only weakly (rho = 0.10 over 9
+candidates)`, `screening off for the rest of the run: …`), and `events.jsonl`
+has `screening_changed` with `stage`, `k`, `off`, `rho` and `n`. The state is
+`work/screening.json` (`stage`, `k`, `off`, `below_zero` — consecutive checks
+with ρ < 0 — and `history`, one entry per check: `generation`, `n`, `rho`, `k`,
+`off`, `said`), saved after every check; a resumed run keeps its `k` and its
+off, and a run from before the file starts from the configured `k`. ρ is over
+promoted candidates only, the best by the screen, so the range is restricted
+and ρ reads low: a screen whose scores correlate 0.8 with the next stage's
+shows about 0.65. The thresholds allow for that: in a seeded simulation of ten
+rounds of six children, an agreeing screen (0.8) is switched off in about 1 %
+of runs, and one that does not predict the next stage at all grows `k` in about
+91 %. A longer round after `k` grows shows in the next pace line, which is
+re-planned from the measured round durations. A study's screen sets `adapt`.
+
 **A finite score is not a comparable score.** A candidate *competes* — is
 ranked, archived, sampled as a parent, reported as `best` — only when it got
 through the final stage, hold-out included, without a failure. Four kinds of
@@ -2043,6 +2075,20 @@ stops `wait` and `watch`, never the run.
   the hours buy fewer than three rounds it says so, with three concrete ways
   out: fewer cases, a shorter time limit, or more hours.
   `plan: {auto: false, children: 4, generations: 6}` overrides it.
+- **The screen.** With six or more training cases and a time limit of at
+  least 10 s, each round first runs every combination on a few cases at a
+  quarter of the time limit, and only the best two go on to every case. After
+  each round the study checks that bet: does the short run put the
+  combinations in the same order as the full one? When it agrees only weakly,
+  one more combination a round goes on to every case; when it disagrees two
+  rounds running, or would send every combination on anyway, the screen is
+  switched off and every combination runs on every case for the rest of the
+  study. The run log says each change in a sentence. The order is compared
+  over the combinations that went on only, so the agreement reads low; in a
+  simulation of ten rounds, a short run that agrees well was switched off
+  about 1 % of the time, and one that says nothing about the full run sent
+  more on about 91 % of the time
+  ([`promote.adapt`](#how-it-works), *A screen that checks itself*).
 - **The run** is an ordinary run directory, `runs/<id>/`, with
   `study-run.json` (what the harness's runner reads), a copy of `study.yaml`
   as it was when the run started (its results and any later final check

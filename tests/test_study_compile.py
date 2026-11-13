@@ -75,7 +75,7 @@ def test_a_screen_runs_first_when_the_plan_says_so(tmp_path, harness):
     plan = make_plan(training=9, test=1, runs_per_case=2, time_limit_s=20, overhead_s=1, hours=3, workers=3, pin_cpus=[2, 4, 6])
     config, _ = _compile(tmp_path, harness, document, plan)
     screen = config["evaluate"]["stages"][1]
-    assert screen["id"] == "screen" and screen["promote"] == {"top_k_per_generation": 2}
+    assert screen["id"] == "screen" and screen["promote"] == {"top_k_per_generation": 2, "adapt": True}
     assert len(screen["instances"]) == plan.screen_cases == 3 and screen["command"].endswith("--time-limit 5")
     assert screen["timeout"] == 5 * 1.5 + 30
 

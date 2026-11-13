@@ -70,6 +70,7 @@ from evolvekit.search.operators import (
 )
 from evolvekit.search.params import has_params
 from evolvekit.search.scratchpad import Scratchpad
+from evolvekit.search.screening import SCREENING_FILE, ScreenControl
 from evolvekit.search.tuning import Observation
 from evolvekit.stopping import RunStop, active_seconds, ai_seconds
 
@@ -205,6 +206,10 @@ class Driver:
         )
         self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
         self.breadth = AdaptiveBreadth.from_config(config.search)
+        self.screens: dict[str, ScreenControl] = self._screen_controls()
+        """Per stage with `promote.adapt` before a command stage, its screening
+        controller (`search/screening.py`), restored from `work/screening.json`."""
+        self._apply_screens()
         self._log_sink = log or (lambda _msg: None)
         self._providers = providers or {}
 
@@ -1835,7 +1840,51 @@ class Driver:
             if not candidate.rejected:
                 self.novelty.add(candidate.id, candidate.block, parent_block=self._parent_block(candidate))
             self._record(candidate)
+        self._check_screens(generation)
         return False
+
+    # -- screening (search/screening.py) ----------------------------------
+
+    def _screen_controls(self) -> dict[str, ScreenControl]:
+        stages = self.config.evaluate.stages
+        path = self.ledger.run_dir / "work" / SCREENING_FILE
+        controls: dict[str, ScreenControl] = {}
+        for stage, later in zip(stages, stages[1:]):
+            k = stage.promote.top_k_per_generation
+            if stage.promote.adapt and k is not None and stage.kind == "command" and later.kind == "command":
+                controls[stage.id] = ScreenControl.load(
+                    path, stage.id, k, self.children_per_generation, later=later.id
+                )
+        return controls
+
+    def _apply_screens(self) -> None:
+        for stage_id, control in self.screens.items():
+            self.cascade.promote_k[stage_id] = control.k
+            if control.off:
+                self.cascade.skipped.add(stage_id)
+
+    def _check_screens(self, generation: int) -> None:
+        """After a recorded round: each adapting stage's check over every
+        candidate scored at it and at the next stage (the seed included, as
+        `status`'s screening agreement counts them), cumulative over the run."""
+        for stage_id, control in self.screens.items():
+            if control.off:
+                continue
+            pairs = [
+                (float(c.stage_scores[stage_id]), float(c.stage_scores[control.later]))
+                for c in self.archive
+                if not c.rejected and not c.last_failure
+                and stage_id in c.stage_scores and control.later in c.stage_scores
+            ]
+            control.cap = self.children_per_generation
+            said = control.after_round(generation, pairs)
+            self._apply_screens()
+            if said is None:
+                continue
+            self.log(f"        {said}")
+            last = control.history[-1]
+            self.events.emit("screening_changed", stage=stage_id, k=control.k, off=control.off,
+                             rho=last["rho"], n=last["n"])
 
     def _drop_trees(self, candidates: Sequence[Candidate]) -> None:
         """Each candidate's tree, removed once its evaluation has finished: no

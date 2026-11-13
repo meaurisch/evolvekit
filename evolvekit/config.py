@@ -410,13 +410,17 @@ class PromoteRule:
 
     top_k_per_generation: int | None = None
     archive_percentile: float | None = None
+    adapt: bool = False
+    """Let the run move `top_k_per_generation` (`search/screening.py`): one more
+    a round while this stage agrees only weakly with the next, and the stage
+    passed over once it disagrees. A study's screen sets it."""
 
     @staticmethod
     def parse(raw: Any, path: str) -> "PromoteRule":
         data = _as_mapping(raw, path)
         if not data:
             return PromoteRule()
-        _reject_unknown(data, {"top_k_per_generation", "archive_percentile"}, path)
+        _reject_unknown(data, {"top_k_per_generation", "archive_percentile", "adapt"}, path)
         top_k = data.get("top_k_per_generation")
         percentile = data.get("archive_percentile")
         if top_k is None and percentile is None:
@@ -435,7 +439,12 @@ class PromoteRule:
                 if percentile is None
                 else _as_float(percentile, f"{path}.archive_percentile")
             ),
+            adapt=_as_flag(data.get("adapt", False), f"{path}.adapt"),
         )
+        if rule.adapt and rule.top_k_per_generation is None:
+            raise ConfigError(
+                f"{path}.adapt: adapts `top_k_per_generation`, which this rule does not set"
+            )
         if rule.archive_percentile is not None and not (
             0.0 <= rule.archive_percentile <= 100.0
         ):

@@ -51,7 +51,7 @@ from evolvekit.leaderboard import competes, fitness_of, rank, replay_veto
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
-from evolvekit.stats import log_gain, paired_summary, pct_from_log, per_instance_means
+from evolvekit.stats import log_gain, paired_summary, pct_from_log, per_instance_means, ranks, spearman
 
 __all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
 
@@ -179,30 +179,8 @@ def _spread(values: Sequence[float]) -> dict[str, Any]:
     return {"n": n, "mean": mean, "sd": sd, "sem": sd / math.sqrt(n)}
 
 
-def _ranks(values: Sequence[float]) -> list[float]:
-    order = sorted(range(len(values)), key=lambda i: values[i])
-    ranks = [0.0] * len(values)
-    i = 0
-    while i < len(order):
-        j = i
-        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
-            j += 1
-        shared = (i + j) / 2.0 + 1.0
-        for k in range(i, j + 1):
-            ranks[order[k]] = shared
-        i = j + 1
-    return ranks
-
-
-def _spearman(xs: Sequence[float], ys: Sequence[float]) -> float | None:
-    """Rank correlation. `None` when either side does not vary."""
-    if len(xs) < 3 or len(set(xs)) < 2 or len(set(ys)) < 2:
-        return None
-    rx, ry = _ranks(xs), _ranks(ys)
-    mx, my = fmean(rx), fmean(ry)
-    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
-    den = math.sqrt(sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry))
-    return num / den if den else None
+# The rank correlation lives in `stats`, which the screening controller reads too.
+_ranks, _spearman = ranks, spearman
 
 
 def _correlation_ratio(groups: Sequence[Any], ys: Sequence[float]) -> float | None:

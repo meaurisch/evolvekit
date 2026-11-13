@@ -326,7 +326,7 @@ def compile_study(
             "command": command(plan.screen_time_limit_s),
             "instances": [f"{up}/{case}" for case in screened],
             "timeout": timeout(plan.screen_time_limit_s),
-            "promote": {"top_k_per_generation": 2},
+            "promote": {"top_k_per_generation": 2, "adapt": True},  # the run adapts k (search/screening.py)
         })
     stages.append({"id": "full", **shared, "command": command(time_limit), "instances": cases,
                    "timeout": timeout(time_limit)})
