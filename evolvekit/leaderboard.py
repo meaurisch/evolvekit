@@ -33,6 +33,7 @@ __all__ = [
     "read_reevaluations",
     "read_rows",
     "run_holdout_penalty",
+    "view_rows",
     "rank",
     "render_markdown",
     "render_html",
@@ -167,12 +168,26 @@ def read_rows(
     count rows). Without `reevaluations.jsonl` this is `replay_veto` of
     `runs.jsonl`, as every view read it before."""
     directory = Path(run_dir)
-    rows = list(read_jsonl(directory / "runs.jsonl"))
+    raw = list(read_jsonl(directory / "runs.jsonl"))
     extra = read_reevaluations(directory)
+    penalty = 0.0
     if extra:
         penalty = run_holdout_penalty(directory) if holdout_penalty is None else holdout_penalty
-        rows = pool_rows(rows, extra, holdout_penalty=penalty)
-    return replay_veto(rows) if veto else rows
+    return view_rows(raw, extra, holdout_penalty=penalty, veto=veto)
+
+
+def view_rows(
+    raw: Sequence[dict[str, Any]],
+    reevaluations: Sequence[Mapping[str, Any]],
+    *,
+    holdout_penalty: float = 0.0,
+    veto: bool = True,
+) -> list[dict[str, Any]]:
+    """`read_rows` over rows already read: pooled, then the veto replayed
+    against the seed's private score **as written** (`raw`): a starting point
+    re-evaluated as the best never moves the reference."""
+    rows = pool_rows(raw, reevaluations, holdout_penalty=holdout_penalty)
+    return replay_veto(rows, reference=seed_private(raw)) if veto else rows
 
 
 def fitness_of(row: Mapping[str, Any]) -> float | None:
@@ -221,12 +236,18 @@ def _replayed_veto(row: Mapping[str, Any], reference: float | None) -> str | Non
     return veto_reason(reference, margin)
 
 
-def replay_veto(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+_FROM_ROWS = object()
+
+
+def replay_veto(rows: Sequence[dict[str, Any]], *, reference: Any = _FROM_ROWS) -> list[dict[str, Any]]:
     """`rows` with the hold-out veto applied as a resumed run applies it: a row
     written before the veto existed whose private score is below the seed's
     gets `competes: false` and its `veto`. Every view that ranks or counts goes
-    through this, so no view names a candidate the search keeps out."""
-    reference = seed_private(rows)
+    through this, so no view names a candidate the search keeps out.
+    `reference`: the seed's private score to judge by (`view_rows` passes the
+    unpooled seed row's); by default `seed_private(rows)`."""
+    if reference is _FROM_ROWS:
+        reference = seed_private(rows)
     result = []
     for row in rows:
         veto = _replayed_veto(row, reference)
@@ -401,13 +422,19 @@ def render_markdown(
     limit: int = 20,
     usage: Sequence[dict[str, Any]] | None = None,
     window: int = DEFAULT_WINDOW,
+    *,
+    reevaluations: Sequence[Mapping[str, Any]] = (),
+    holdout_penalty: float = 0.0,
 ) -> str:
     """A leaderboard that fits in a terminal.
 
     `usage` is optional: pass `ledger.usage()` to get the economics table as
-    well. Without it the board is exactly the Phase B one.
+    well. Without it the board is exactly the Phase B one. With
+    `reevaluations`, `rows` are the rows as written: the board ranks them
+    pooled (`view_rows`) and the economics table is the search's own series.
     """
-    rows = replay_veto(rows)
+    written = replay_veto(rows)
+    rows = view_rows(rows, reevaluations, holdout_penalty=holdout_penalty) if reevaluations else written
     top = rank(rows, limit)
     kept_out = _kept_out_lines(rows)
     if not top:
@@ -462,7 +489,8 @@ def render_markdown(
             "may not generalise."
         )
     if usage is not None:
-        economics = render_economics(series(rows, usage, window=window))
+        economics = render_economics(series(written, usage, window=window, reevaluations=reevaluations,
+                                            holdout_penalty=holdout_penalty))
         if economics:
             lines.append(economics)
     return "\n".join(lines)
@@ -734,9 +762,14 @@ def render_html(
     archive: Mapping[str, Any] | None = None,
     usage: Sequence[dict[str, Any]] | None = None,
     window: int = DEFAULT_WINDOW,
+    *,
+    reevaluations: Sequence[Mapping[str, Any]] = (),
+    holdout_penalty: float = 0.0,
 ) -> str:
-    """Self-contained dashboard: no CDN, no fetch, works from file://."""
-    rows = replay_veto(rows)
+    """Self-contained dashboard: no CDN, no fetch, works from file://.
+    `reevaluations`: as `render_markdown`."""
+    written = replay_veto(rows)
+    rows = view_rows(rows, reevaluations, holdout_penalty=holdout_penalty) if reevaluations else written
     top = rank(rows, limit)
     scores = [fitness_of(r) or 0.0 for r in top]
     best = max(scores) if scores else None
@@ -798,7 +831,8 @@ def render_html(
         or '<tr><td colspan="14">No scored candidates yet.</td></tr>',
         grid=_grid_html(archive),
         economics=(
-            economics_svg(series(rows, usage, window=window))
+            economics_svg(series(written, usage, window=window, reevaluations=reevaluations,
+                                 holdout_penalty=holdout_penalty))
             if usage is not None
             else ""
         ),

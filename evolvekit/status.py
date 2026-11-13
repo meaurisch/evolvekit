@@ -47,7 +47,15 @@ from evolvekit.economics import DEFAULT_WINDOW, series
 from evolvekit.evaluate.levels import K as LEVEL_STEPS
 from evolvekit.evaluate.noise import NOISE_FILE, Noise
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
-from evolvekit.leaderboard import competes, fitness_of, rank, read_rows
+from evolvekit.leaderboard import (
+    competes,
+    fitness_of,
+    rank,
+    read_reevaluations,
+    read_rows,
+    run_holdout_penalty,
+    view_rows,
+)
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
@@ -100,11 +108,17 @@ def build_status(
         return document
 
     # Pooled with the best's re-evaluations, and the hold-out veto as a resumed
-    # run applies it: no view names a candidate the search keeps out.
-    rows = read_rows(directory)
+    # run applies it: no view names a candidate the search keeps out. The
+    # rounds read the rows as written, with each re-evaluation from its round on.
+    raw = list(read_jsonl(directory / "runs.jsonl"))
+    reevaluations = read_reevaluations(directory)
+    penalty = run_holdout_penalty(directory) if reevaluations else 0.0
+    rows = view_rows(raw, reevaluations, holdout_penalty=penalty)
     usage = list(read_jsonl(directory / "usage.jsonl"))
     events = read_events(directory)
-    run = _Run(directory, rows, usage, events, moment)
+    run = _Run(directory, rows, usage, events, moment,
+               written=view_rows(raw, []) if reevaluations else rows,
+               reevaluations=reevaluations, holdout_penalty=penalty)
 
     sections: tuple[tuple[str, Callable[[], Any]], ...] = (
         ("objective", run.objective),
@@ -331,9 +345,19 @@ class _Run:
         usage: list[dict[str, Any]],
         events: list[dict[str, Any]],
         now: datetime,
+        *,
+        written: list[dict[str, Any]] | None = None,
+        reevaluations: Sequence[Mapping[str, Any]] = (),
+        holdout_penalty: float = 0.0,
     ) -> None:
         self.directory = directory
         self.rows = rows
+        """Pooled with the best's re-evaluations (`leaderboard.view_rows`)."""
+        self.written = rows if written is None else written
+        """The rows as written (the veto replayed), which the rounds read."""
+        self.reevaluations = list(reevaluations)
+        self.holdout_penalty = holdout_penalty
+        self._as_of: dict[int, list[dict[str, Any]]] = {}
         self.usage = usage
         self.events = events
         self.now = now
@@ -849,9 +873,26 @@ class _Run:
         if epsilon is None:
             epsilon = 1e-6
         flat = 0
-        for point in series(self.rows, self.usage, window=DEFAULT_WINDOW, epsilon=epsilon):
+        for point in self._series(epsilon):
             flat = 0 if point.improved else flat + 1
         return flat
+
+    def _series(self, epsilon: float) -> list[Any]:
+        """The economics series the search's stop policy reads (`economics.series`):
+        the rows as written, each re-evaluation of the best from its round on."""
+        return series(self.written, self.usage, window=DEFAULT_WINDOW, epsilon=epsilon,
+                      reevaluations=self.reevaluations, holdout_penalty=self.holdout_penalty)
+
+    def _rows_as_of(self, generation: int) -> list[dict[str, Any]]:
+        """The rows as they stood at the end of round `generation`: pooled with
+        the re-evaluations made up to it (earlier rounds keep their values)."""
+        count = sum(1 for e in self.reevaluations if _round_of(e) <= generation)
+        if count == len(self.reevaluations):
+            return self.rows
+        if count not in self._as_of:
+            self._as_of[count] = view_rows(self.written, self.reevaluations[:count],
+                                           holdout_penalty=self.holdout_penalty)
+        return self._as_of[count]
 
     # -- progress ----------------------------------------------------------
 
@@ -1024,11 +1065,23 @@ class _Run:
         running: Mapping[str, Any] | None = None
         generations = sorted({int(r.get("generation", 0)) for r in self.rows if isinstance(r.get("generation"), int)})
         for generation in generations:
-            for row in self.rows:
-                if row.get("generation") != generation or not competes(row) or fitness_of(row) is None:
-                    continue
-                if running is None or fitness_of(row) > fitness_of(running):
-                    running = row
+            if self.reevaluations:
+                # As the search saw it at the end of the round: its best among
+                # the rows of this round or earlier, pooled as of then.
+                running = None
+                for row in self._rows_as_of(generation):
+                    if not isinstance(row.get("generation"), int) or row["generation"] > generation:
+                        continue
+                    if not competes(row) or fitness_of(row) is None:
+                        continue
+                    if running is None or fitness_of(row) > fitness_of(running):
+                        running = row
+            else:
+                for row in self.rows:
+                    if row.get("generation") != generation or not competes(row) or fitness_of(row) is None:
+                        continue
+                    if running is None or fitness_of(row) > fitness_of(running):
+                        running = row
             measured = self._measured(running)
             per_generation.append(
                 {
@@ -2060,3 +2113,10 @@ def render_text(document: Mapping[str, Any]) -> str:
     for error in document.get("errors") or []:
         lines.append(f"view error   : {error}")
     return "\n".join(lines)
+
+
+def _round_of(entry: Mapping[str, Any]) -> int:
+    try:
+        return int(entry.get("generation") or 0)
+    except (TypeError, ValueError):
+        return 0

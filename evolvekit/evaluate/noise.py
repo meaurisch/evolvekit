@@ -316,7 +316,15 @@ class Noise:
         `seeds: 1` has no runs of its own here, and its one run was selected as
         the best of many -- paired with a fresh one, it would overstate the
         noise -- so it adds nothing. The paired entries stay: the seed never ran
-        on a re-evaluation's seed. A failed outcome adds nothing."""
+        on a re-evaluation's seed. A failed outcome adds nothing.
+
+        A limit, kept: at `seeds > 1` the entry's mean is selected too (the
+        best's mean of n runs measured high), so the merged variance overstates
+        the noise a little: for the best of 8 equal candidates at `seeds: 3`
+        the merged entry's variance is about 11 % high (its sd about 5 %) --
+        the earlier runs' own variance is unbiased (a normal sample's variance
+        does not depend on its mean), the new run's distance to the lucky mean
+        is not: E[(x - mean)²] = σ²(1 + (1.42² + 0.34)/3)."""
         if not outcome.ok or outcome.raced_out or outcome.abandoned:
             return
         stage = self._stages.get(key)

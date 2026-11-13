@@ -163,7 +163,7 @@ def test_the_archive_re_places_its_members_with_the_pooled_value():
     assert archive.elites()[0].id == other.id and archive.best.id == other.id
 
 
-def test_a_lucky_best_that_regresses_lowers_the_bar_but_not_the_patience():
+def test_a_reevaluation_moves_the_bar_both_ways_and_is_never_progress():
     from evolvekit.budget import StopPolicy
     from evolvekit.config import StopConfig
 
@@ -171,12 +171,53 @@ def test_a_lucky_best_that_regresses_lowers_the_bar_but_not_the_patience():
     policy.update(10.0)
     policy.update(12.0)
     policy.update(12.0)
+    policy.note_big_step()
+    policy.note_big_step_applied()
     assert (policy.best, policy.stagnant) == (12.0, 1)
     policy.rebase(11.0)
-    assert (policy.best, policy.stagnant) == (11.0, 1)
+    assert (policy.best, policy.stagnant) == (11.0, 1), "a lucky best regressed: the bar comes down"
     policy.rebase(13.0)
-    assert policy.best == 11.0, "rebase only ever lowers the bar"
-    assert policy.update(11.5).stagnant_generations == 0, "11.5 beats the lowered bar"
+    assert (policy.best, policy.stagnant) == (13.0, 1), "an unlucky one: the bar goes up"
+    assert (policy.big_steps_in_window, policy.big_steps_applied_in_window) == (1, 1)
+    assert policy.update(13.0).stagnant_generations == 2, "the pooled best measured again is a flat round"
+    assert policy.update(13.5).stagnant_generations == 0, "a real gain over the pooled bar"
+
+
+def _rows(*specs):
+    return [{"id": cid, "generation": g, "operator": "human-seed" if g == 0 else "param_lhs", "score": s,
+             "ranking_score": s, "public_score": s, "competes": True, "kpis": {}} for cid, g, s in specs]
+
+
+def test_a_best_pooled_down_delays_nothing_retroactively():
+    """A (12, round 1) is an improvement; run again at round 3 it pools to 10.5.
+    Round 1 keeps its improvement and its 12; round 3 ends with the pooled best
+    of every row so far (C's 11) as best and bar, without an improvement; a
+    later gain is judged against that bar."""
+    from evolvekit.economics import series
+
+    rows = _rows(("s", 0, 10.0), ("A", 1, 12.0), ("C", 2, 11.0), ("D", 3, 10.8), ("E", 4, 11.3), ("F", 5, 11.6))
+    extra = [{"id": "A", "generation": 3, "prior_runs": 1, "kpis": {}, "score": 9.0}]
+    points = {p.generation: p for p in series(rows, epsilon=0.5, reevaluations=extra)}
+    assert points[1].improved and points[1].best == 12.0, "earlier rounds keep their values"
+    assert not points[2].improved and points[2].best == 12.0
+    assert not points[3].improved and points[3].rebased
+    assert (points[3].measured_best, points[3].best) == (12.0, 11.0)
+    assert not points[4].improved, "11.3 does not clear the bar 11 by epsilon 0.5"
+    assert points[5].improved and points[5].best == 11.6
+    assert [p.best for p in series(rows, epsilon=0.5)][3] == 12.0, "without the file: today"
+
+
+def test_a_best_pooled_up_does_not_cancel_an_earlier_real_improvement():
+    from evolvekit.economics import series
+
+    rows = _rows(("s", 0, 10.0), ("A", 1, 11.0), ("B", 2, 10.5), ("C", 3, 12.2))
+    extra = [{"id": "A", "generation": 2, "prior_runs": 1, "kpis": {}, "score": 13.0}]
+    points = {p.generation: p for p in series(rows, [{"generation": 2, "usd": 1.0}], epsilon=0.5,
+                                              reevaluations=extra)}
+    assert points[1].improved and points[1].best == 11.0
+    assert not points[2].improved and points[2].best == 12.0, "pooled up: not a gain"
+    assert points[2].usd_since_improvement == 1.0, "the spend since round 1's improvement goes on counting"
+    assert not points[3].improved, "12.2 does not clear the pooled bar 12 by 0.5"
 
 
 # -- the key ------------------------------------------------------------------
@@ -217,10 +258,10 @@ print(json.dumps({"value": 10.0 + (1.0 if a.x > 0.5 else 0.0) + a.seed / 1000.0}
 '''
 
 
-def _toy(tmp_path, every=2, max_full_evals_per_day=1000):
+def _toy(tmp_path, every=2, max_full_evals_per_day=1000, toy=TOY, holdout=False):
     from evolvekit.config import build_config
 
-    (tmp_path / "toy.py").write_text(TOY, encoding="utf-8")
+    (tmp_path / "toy.py").write_text(toy, encoding="utf-8")
     raw = {
         "problem": {"parameters": {"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.0}}},
         "evaluate": {
@@ -232,7 +273,44 @@ def _toy(tmp_path, every=2, max_full_evals_per_day=1000):
         "search": {"operators": {"param_lhs": 1.0}, "reevaluate_best_every": every},
         "budget": {"max_full_evals_per_day": max_full_evals_per_day},
     }
+    if holdout:
+        raw["evaluate"]["stages"][1]["private_inputs"] = ["held"]
     return build_config(raw, base_dir=tmp_path)
+
+
+def test_the_starting_point_run_again_never_moves_the_veto_reference(tmp_path):
+    """Every child is worse than the starting point here, so the seed is the best
+    and is run again; its pooled values must not move the hold-out veto's
+    reference (its private score as written) or the margin's (its public
+    score as written), live, on resume, or in any view."""
+    from evolvekit.leaderboard import seed_private, seed_public
+    from evolvekit.ledger import read_jsonl
+    from evolvekit.search.driver import Driver
+
+    config = _toy(tmp_path, toy=TOY.replace("10.0 + (1.0", "10.0 - (1.0"), holdout=True)
+    run_dir = tmp_path / "run"
+    driver = Driver(config, run_dir=run_dir)
+    driver.run(generations=2)
+    (done,) = _reevaluations(run_dir)
+    assert driver.best.operator == "human-seed" and done["id"] == driver.best.id
+    raw = list(read_jsonl(run_dir / "runs.jsonl"))
+    assert (seed_public(raw), seed_private(raw)) == (pytest.approx(10.0), pytest.approx(10.0))
+    assert driver.cascade.seed_public == pytest.approx(10.0) and driver.cascade.seed_private == pytest.approx(10.0)
+    resumed = Driver(config, run_dir=run_dir)
+    resumed.resume()
+    assert (resumed.cascade.seed_public, resumed.cascade.seed_private) == (pytest.approx(10.0), pytest.approx(10.0))
+
+    viewed = read_rows(run_dir)
+    seed_row = next(r for r in viewed if r["operator"] == "human-seed")
+    assert seed_row["score"] == pytest.approx(11.0) and seed_row["private_score"] == pytest.approx(10.0)
+    # A row from before the veto, a hold-out of 10.5: below the pooled public 11, not below
+    # the reference 10 as written -- it is not kept out.
+    legacy = {"id": "g009-c0099", "generation": 2, "operator": "param_lhs", "score": 10.5,
+              "public_score": 10.5, "private_score": 10.5}
+    from evolvekit.leaderboard import view_rows
+
+    (judged,) = [r for r in view_rows([*raw, legacy], [done]) if r["id"] == legacy["id"]]
+    assert "veto" not in judged
 
 
 def _reevaluations(run_dir):
@@ -259,19 +337,33 @@ def test_every_n_generations_the_best_runs_again_on_a_fresh_seed(tmp_path):
     best = driver.best
     assert best.score == pytest.approx(pooled) and best.fitness == pytest.approx(pooled) and best.replicates == 3
     assert driver.grid.best.fitness == pytest.approx(pooled)
-    assert driver.stop_policy.best == pytest.approx(pooled), "the bar came down to the pooled best"
+    assert driver.stop_policy.best == pytest.approx(pooled), "the bar is the pooled best"
+
+    finished = {e["generation"]: e for e in (json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines())
+                if e["type"] == "generation_finished"}
+    assert finished[4]["best_fitness"] == pytest.approx(pooled)
+    # Rounds 2 and 4 ended with the best run again (pooled up: 11 -> 12 -> 12.33):
+    # never progress, so their flat count goes on from the round before.
+    assert best.generation == 1, "the toy's one competing child is bred in round 1"
+    assert finished[1]["flat_generations"] == 0
+    for g in (2, 3, 4):
+        assert finished[g]["flat_generations"] == finished[g - 1]["flat_generations"] + 1, g
+    assert driver.stop_policy.stagnant == 3
 
     status = build_status(run_dir)
     assert status["progress"]["best"]["score"] == pytest.approx(pooled)
     assert status["best"]["replicates"] == 3 and status["best"]["kpis"]["value"] == pytest.approx(pooled)
-    assert status["progress"]["series"][-1]["best_fitness"] == pytest.approx(pooled)
-    rows = read_rows(run_dir)
-    assert series(rows, list(read_jsonl(run_dir / "usage.jsonl")))[-1].best == pytest.approx(pooled)
+    by_round = {p["generation"]: p["best_fitness"] for p in status["progress"]["series"]}
+    assert by_round[1] == pytest.approx(11.0), "earlier rounds keep the value they had"
+    assert by_round[2] == by_round[3] == pytest.approx(12.0) and by_round[4] == pytest.approx(pooled)
+    limits = {item["name"]: item for item in status["health"]["limits"]}
+    assert limits["stop.patience"]["used"] == 3
+    usage = list(read_jsonl(run_dir / "usage.jsonl"))
+    shared = series(replay_veto(list(read_jsonl(run_dir / "runs.jsonl"))), usage, reevaluations=done)
+    assert [p.best for p in shared] == [p.best for p in driver._economics()], "one series: the driver's and status's"
+    assert [p.improved for p in shared] == [True, True, False, False, False]
     raw = {r["id"]: r for r in read_jsonl(run_dir / "runs.jsonl")}
     assert raw[best.id]["score"] == pytest.approx(11.0), "runs.jsonl keeps the row as it was written"
-    finished = [e for e in (json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines())
-                if e["type"] == "generation_finished"]
-    assert finished[-1]["best_fitness"] == pytest.approx(pooled)
 
 
 def test_a_resumed_run_reads_its_reevaluations_back(tmp_path):

@@ -58,7 +58,6 @@ from evolvekit.evaluate.fanout import Job, run_instance_stage
 from evolvekit.evaluate.stages import Configuration, on_tree, restore_build, run_build_stage, run_static_stage
 from evolvekit.events import EventLog, Heartbeat
 from evolvekit.leaderboard import rank, read_reevaluations, read_rows
-from evolvekit.ledger import read_jsonl
 from evolvekit.lock import run_lock
 from evolvekit.stats import _betainc, _t95, paired_summary, t_cdf, wilcoxon_signed_rank  # noqa: F401  (re-exported: importers below)
 from evolvekit.stats import holm, log_gain, margin_log, pct_from_log, posterior_mean_t
@@ -449,7 +448,7 @@ def _find(rows: list[dict[str, Any]], spec: str, option: str) -> dict[str, Any]:
     other_dir = Path(other)
     if not (other_dir / "runs.jsonl").is_file():
         raise ValueError(f"{option}: {other_dir} holds no run (there is no runs.jsonl in it)")
-    row = next((r for r in read_jsonl(other_dir / "runs.jsonl") if str(r.get("id")) == cid), None)
+    row = next((r for r in read_rows(other_dir, veto=False) if str(r.get("id")) == cid), None)
     if row is None:
         raise ValueError(f"{option}: {other_dir} holds no candidate {cid!r}")
     return {**row, "id": f"{cid}@{other_dir.resolve().name}", "_id": cid, "_run_dir": str(other_dir.resolve())}

@@ -427,11 +427,15 @@ class Cascade:
     def _stopping(self) -> bool:
         return self.stop is not None and self.stop.is_set()
 
-    def reevaluate(self, candidate: Candidate, seed: int) -> StageOutcome | None:
+    def reevaluate(
+        self, candidate: Candidate, seed: int, *, earlier_kpis: Mapping[str, float] | None = None
+    ) -> StageOutcome | None:
         """Run `candidate` once more at the final stage, public inputs only, on
         `seed` (`search.reevaluate_best_every`): normalised against the run's
-        reference and scored as `_absorb` scores, the score of this run alone in
-        `outcome.score`. No generation's results, no race, no incumbent, no
+        reference and scored as `_absorb` scores -- over `earlier_kpis` (the
+        candidate's measures as first written, never its pooled ones; its own
+        `kpis` without them) with this run's on top -- the score of this run
+        alone in `outcome.score`. No generation's results, no race, no incumbent, no
         behaviour index and no noise entry are touched (the driver pools the
         run, `Noise.pool`); no `eval_*` events (it is not a candidate of the
         search), and the cache is used (a resumed run re-reads a run it made).
@@ -469,7 +473,8 @@ class Cascade:
             self._normalise(final, candidate, outcome, private=False)
             if not outcome.ok:
                 return outcome
-        kpis = {**candidate.kpis, **outcome.kpis}  # as `_absorb` scores: earlier stages' measures too
+        written = candidate.kpis if earlier_kpis is None else earlier_kpis
+        kpis = {**written, **outcome.kpis}  # as `_absorb` scores: earlier stages' measures too
         if self.config.evaluate.score.levels:
             outcome.score = self._level_score(final.id, kpis, outcome.vector_kpis)
         else:

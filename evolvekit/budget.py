@@ -181,10 +181,12 @@ class StopPolicy:
 
     def rebase(self, best: float | None) -> None:
         """The best was measured again and pooled (`search.reevaluate_best_every`):
-        a lucky best that regresses lowers the bar a real improvement has to
-        clear. Only ever down, and the patience count is left as it is."""
+        the bar a real improvement has to clear is the pooled best, down (a
+        lucky best regressed) or up (an unlucky one). A re-evaluation is never
+        search progress: the flat count and the big-step counts are left as
+        they are."""
         if best is not None and self.best is not None:
-            self.best = min(self.best, float(best))
+            self.best = float(best)
 
     @property
     def plateau(self) -> bool:

@@ -537,13 +537,17 @@ class Driver:
         Rebuilt from the two logs rather than accumulated, for the same reason
         the archive is: the logs are the record, and a series that drifts from
         them would be worse than no series. Read as the replay reads them
-        (`_replayed_rows`), so the stop rules see the order the archive has.
+        (`_replayed_rows`), so the stop rules see the order the archive has --
+        the rows as written, with the best's re-evaluations as of the round
+        each was made in (`economics.series`, the series `status` reads).
         """
         return series(
-            self._replayed_rows(self.ledger.runs()),
+            self._replayed_rows(self.ledger.runs(), []),
             self.ledger.usage(),
             window=self.config.stop.economics_window,
             epsilon=self.stop_policy.epsilon_now(),
+            reevaluations=self._reevaluations,
+            holdout_penalty=self.config.evaluate.holdout_penalty,
         )
 
     def _refresh_noise(self) -> None:
@@ -891,13 +895,20 @@ class Driver:
                     self._record(child)
             self._pending_path.unlink(missing_ok=True)
             summary.generations = offset
-            self._reevaluate_best(generation)
+            # The round is judged by what its own candidates measured; a
+            # re-evaluation of the best at its end is never progress: it only
+            # moves the bar to the pooled best (`StopPolicy.rebase`).
+            # (A float, taken now: the re-evaluation pools the best in place.)
+            measured = self.best.fitness if self.best is not None else None
+            rebased = self._reevaluate_best(generation)
             # The stop policy first, so the generation's event carries the
             # flat count and the epsilon `status` reads.
-            best = self.best
             points = self._economics()
             point = points[-1] if points else None
-            decision = self.stop_policy.update(best.fitness if best else None, point)
+            decision = self.stop_policy.update(measured, point)
+            best = self.best
+            if rebased and best is not None:
+                self.stop_policy.rebase(best.fitness)
             self._generation_finished(generation, began, children)
 
             if self._provider_is_dead():
@@ -935,20 +946,21 @@ class Driver:
 
     # -- re-evaluating the best (search.reevaluate_best_every) ------------
 
-    def _reevaluate_best(self, generation: int) -> None:
+    def _reevaluate_best(self, generation: int) -> bool:
         """After round `generation` is recorded, every `reevaluate_best_every`
         rounds: the archive's best runs once more at the final stage on seed
         `REEVALUATION_SEED_BASE + k` (k: the run's re-evaluations so far), the
         run goes to `reevaluations.jsonl`, and its runs are pooled everywhere --
-        the candidate, the noise (`Noise.pool`), the archive (`Archive.update`),
-        the stop policy's bar (`StopPolicy.rebase`). Skipped, with a line in the
-        log, when the daily cap or the time left says no."""
+        the candidate, the noise (`Noise.pool`), the archive (`Archive.update`);
+        the caller moves the stop policy's bar (`StopPolicy.rebase`) once the
+        round is judged. Skipped, with a line in the log, when the daily cap or
+        the time left says no. True when a re-evaluation was made."""
         every = self.config.search.reevaluate_best_every
         if every <= 0 or generation < 1 or generation % every:
-            return
+            return False
         best = self.best
         if best is None:
-            return
+            return False
         final = self.config.final_stage
         seed = REEVALUATION_SEED_BASE + len(self._reevaluations)
         why = None
@@ -960,12 +972,16 @@ class Driver:
             why = self.run_stop.reason
         elif left is not None and needed is not None and left < needed:
             why = f"{left:.0f} s of the run's time is left, less than one run of it ({needed:.0f} s)"
-        outcome = None if why else self.cascade.reevaluate(best, seed)
+        # Scored over the measures as first written: the earlier stages' are in
+        # the row, and this run's replace the final stage's.
+        written = next((r for r in reversed(self.ledger.runs()) if r.get("id") == best.id), None)
+        outcome = None if why else self.cascade.reevaluate(
+            best, seed, earlier_kpis=dict((written or {}).get("kpis") or best.kpis))
         if outcome is None or not outcome.ok or outcome.abandoned or outcome.score is None:
             if why is None:
                 why = (outcome.failure if outcome is not None and outcome.failure else "the run was stopped")
             self.log(f"gen {generation:<2} the best {best.id} was not run again on seed {seed}: {why}")
-            return
+            return False
         prior = int(best.replicates or 0) or final.seeds
         entry = {
             "id": best.id,
@@ -991,12 +1007,11 @@ class Driver:
         best.replicates = int(pooled["replicates"])
         self._refresh_noise()
         self.grid.update(best)
-        now = self.best
-        self.stop_policy.rebase(now.fitness if now else None)
         self.log(
             f"gen {generation:<2} the best {best.id} run again on seed {seed}: {_fmt(float(outcome.score))}; "
             f"the mean of its {best.replicates} runs is {_fmt(best.fitness)} (was {_fmt(was)})"
         )
+        return True
 
     def _reevaluation_s(self) -> float | None:
         """How long one run of the final stage takes: the seed's final stage
@@ -1188,46 +1203,17 @@ class Driver:
             if not failed:
                 applied.add(int(c.generation))
         decision = StopDecision(False)
-        points = self._economics()
-        as_of = self._points_as_of(points)
-        rebased = {int(entry.get("generation") or 0) for entry in self._reevaluations}
-        for point in points:
-            # The point as the live run saw it: pooled with the re-evaluations
-            # made up to its generation, and the bar rebased where one was made.
-            seen = as_of(point.generation)
+        for point in self._economics():
             if point.generation in tried:
                 self.stop_policy.note_big_step()
             if point.generation in applied:
                 self.stop_policy.note_big_step_applied()
-            if point.generation in rebased:
-                self.stop_policy.rebase(seen.best)
-            decision = self.stop_policy.update(seen.best, seen)
+            # As live: the round by its own candidates, then the bar moved to
+            # the pooled best where the best was re-evaluated at its end.
+            decision = self.stop_policy.update(point.measured_best, point)
+            if point.rebased:
+                self.stop_policy.rebase(point.best)
         return decision
-
-    def _points_as_of(self, points: list[GenerationPoint]) -> Callable[[int], GenerationPoint]:
-        """For the replay of the stop policy: generation g's point as of the end
-        of generation g -- the series pooled with the re-evaluations made up to
-        g, which is what the live run read then. Without re-evaluations, the
-        series itself."""
-        if not self._reevaluations:
-            by_generation = {p.generation: p for p in points}
-            return lambda generation: by_generation[generation]
-        raw, usage = self.ledger.runs(), self.ledger.usage()
-        epsilon = self.stop_policy.epsilon_now()
-        made = [int(entry.get("generation") or 0) for entry in self._reevaluations]
-        prefixes: dict[int, dict[int, GenerationPoint]] = {}
-
-        def as_of(generation: int) -> GenerationPoint:
-            count = sum(1 for g in made if g <= generation)
-            if count not in prefixes:
-                rows = self._replayed_rows(raw, self._reevaluations[:count])
-                prefixes[count] = {
-                    p.generation: p
-                    for p in series(rows, usage, window=self.config.stop.economics_window, epsilon=epsilon)
-                }
-            return prefixes[count][generation]
-
-        return as_of
 
     # -- generation internals -------------------------------------------
 

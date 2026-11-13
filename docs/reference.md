@@ -842,17 +842,29 @@ the public score follows, the ranking score is recomputed with
 `replicates` counts the runs (`n + 1`). After three re-evaluations the lucky
 lead above is a quarter of what it was (a seeded simulation: 0.35 run-sd). Every
 view reads the pooled value — the archive (every member re-placed by the elite
-rule, where `replicates` counts), the run's best, the stop policy (a best that
-regresses lowers the bar an improvement has to clear, without resetting
-`stop.patience`), the economics series, `status`, the leaderboard, `export`,
-`confirm --candidates best|top:N`, a study's exports and final check, and the
-app. `runs.jsonl` keeps the row as it was written; each re-evaluation is one
+rule, where `replicates` counts), the run's best, `status`, the leaderboard,
+`export`, `confirm --candidates best|top:N`, a study's exports and final check,
+and the app. **A re-evaluation is never search progress.** The round it was
+made in is judged by what its own candidates measured; then the stop policy's
+bar becomes the pooled best, down (a lucky best regressed: a real gain has to
+clear the lower bar) or up (an unlucky one), with `stop.patience`'s flat count
+and the big-step counts left as they are. The economics series (and so the
+stop rules, `status`'s rounds and the dashboard) reads it the same way: from
+the round a re-evaluation was made in, the best is the pooled value, not an
+improvement either way, and earlier rounds keep the values they had. The hold-out
+veto's reference stays the starting point's hold-out score as first written,
+even when the starting point is the best that is run again. The Study page's
+*Tries* view draws each try from its own evaluator runs, so a re-evaluated best
+shows there with its first measurement. `runs.jsonl` keeps the row as it was written; each re-evaluation is one
 row of `reevaluations.jsonl` beside it (`id`, `generation`, `seed`, `stage`,
 `prior_runs` — the n above —, `kpis` and `score` of the new run alone,
 normalised against the run's reference like any other, and `at`), read back on
 resume. The new run joins the candidate's own runs in the noise estimate when it
 has some (`seeds > 1`); at `seeds: 1` it adds nothing there (its first run was
-selected as the best, and paired with a fresh one would overstate the noise).
+selected as the best, and paired with a fresh one would overstate the noise —
+about 1.7 times the variance for the best of eight). A limit: at `seeds > 1` the
+merged entry overstates it a little too, since the best's mean was selected
+(about 11 % in the variance, 5 % in the sd, for the best of eight at `seeds: 3`).
 
 What it costs: one final-stage run per N rounds, counted against
 `budget.max_full_evals_per_day`; skipped, with a line in the run log (`the best

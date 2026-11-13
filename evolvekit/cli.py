@@ -27,8 +27,11 @@ from evolvekit.leaderboard import (
     novelty_counts,
     rank,
     render_html,
-    render_markdown,
+    read_reevaluations,
     read_rows,
+    render_markdown,
+    run_holdout_penalty,
+    view_rows,
     unfinished_count,
     vetoed_count,
 )
@@ -637,10 +640,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     print()
     print(
         render_markdown(
-            read_rows(driver.ledger.run_dir, holdout_penalty=config.evaluate.holdout_penalty),
+            driver.ledger.runs(),
             limit=10,
             usage=driver.ledger.usage(),
             window=config.stop.economics_window,
+            reevaluations=read_reevaluations(driver.ledger.run_dir),
+            holdout_penalty=config.evaluate.holdout_penalty,
         )
     )
     print()
@@ -901,6 +906,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     rows = read_rows(ledger.run_dir)
     if not rows:
         return 0
+    reevaluations = read_reevaluations(ledger.run_dir)
+    penalty = run_holdout_penalty(ledger.run_dir) if reevaluations else 0.0
     print()
     totals = ledger.totals()
     ranked = rank(rows, 1)
@@ -942,7 +949,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"tokens       : {int(totals['input_tokens'])} in / {int(totals['output_tokens'])} out")
     print(f"spend        : ${totals['usd']:.4f}")
     window = archive.get("economics_window", DEFAULT_WINDOW)
-    points = series(rows, ledger.usage(), window=window)
+    points = series(view_rows(ledger.runs(), []), ledger.usage(), window=window,
+                    reevaluations=reevaluations, holdout_penalty=penalty)
     if points:
         print()
         print(format_series(points))
@@ -951,17 +959,21 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_leaderboard(args: argparse.Namespace) -> int:
     ledger = Ledger(args.run_dir)
-    rows = read_rows(ledger.run_dir)
+    rows = ledger.runs()
+    reevaluations = read_reevaluations(ledger.run_dir)
+    penalty = run_holdout_penalty(ledger.run_dir) if reevaluations else 0.0
     usage = ledger.usage()
     archive = ledger.read_archive()
-    print(render_markdown(rows, limit=args.limit, usage=usage))
+    print(render_markdown(rows, limit=args.limit, usage=usage, reevaluations=reevaluations,
+                          holdout_penalty=penalty))
     if archive.get("occupancy"):
         print(f"\narchive: {archive['occupancy']}")
     if args.html:
         path = Path(args.html)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            render_html(rows, archive=archive), encoding="utf-8", newline="\n"
+            render_html(rows, archive=archive, reevaluations=reevaluations, holdout_penalty=penalty),
+            encoding="utf-8", newline="\n"
         )
         print(f"\nwrote {path.resolve()}")
     return 0
