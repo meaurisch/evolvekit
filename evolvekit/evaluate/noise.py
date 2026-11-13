@@ -307,6 +307,49 @@ class Noise:
         if not is_seed and stage.get("seed"):
             self._pair(stage, candidate_id, outcome)
 
+    def pool(self, key: str, candidate_id: str, outcome: "StageOutcome") -> None:
+        """One more run of a candidate already observed (the best run again,
+        `search.reevaluate_best_every`), merged into its across entries at stage
+        `key` (Welford: `n + 1` runs, the mean moved by `(x - mean)/(n + 1)`,
+        `M2 += (x - mean)(x - mean')`), per KPI and per vector element, in the
+        units the entry has. Only into entries that exist: a candidate of
+        `seeds: 1` has no runs of its own here, and its one run was selected as
+        the best of many -- paired with a fresh one, it would overstate the
+        noise -- so it adds nothing. The paired entries stay: the seed never ran
+        on a re-evaluation's seed. A failed outcome adds nothing."""
+        if not outcome.ok or outcome.raced_out or outcome.abandoned:
+            return
+        stage = self._stages.get(key)
+        if stage is None:
+            return
+
+        def merged(mean: float, var: float, runs: int, x: float) -> tuple[float, float, int]:
+            delta = x - mean
+            new_mean = mean + delta / (runs + 1)
+            m2 = var * (runs - 1) + delta * (x - new_mean)
+            return new_mean, max(0.0, m2 / runs), runs + 1
+
+        for kpi, entry in stage["kpis"].items():
+            own = entry["across"].get(candidate_id)
+            x = outcome.kpis.get(kpi)
+            if own is None or own["runs"] < 2 or own["mean"] is None or x is None or not math.isfinite(x):
+                continue
+            mean, var, runs = merged(own["mean"], own["var"], own["runs"], float(x))
+            entry["across"][candidate_id] = {"runs": runs, "mean": mean, "var": var}
+        for name, entry in stage["vectors"].items():
+            elements = entry["across"].get(candidate_id)
+            values = outcome.vector_kpis.get(name)
+            if elements is None or values is None or len(values) != len(elements):
+                continue
+            joined = []
+            for element, x in zip(elements, values):
+                if element is None or element[0] is None or element[2] < 2 or not math.isfinite(x):
+                    joined.append(element)
+                    continue
+                mean, var, runs = merged(element[0], element[1], element[2], float(x))
+                joined.append([mean, var, runs])
+            entry["across"][candidate_id] = joined
+
     def _pair(self, stage: dict[str, Any], candidate_id: str, outcome: "StageOutcome") -> None:
         """The paired entries: differences to the seed's run on the same seed."""
         reference = stage["seed"]

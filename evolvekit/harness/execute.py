@@ -60,7 +60,7 @@ from evolvekit.harness.manifest import Harness, load_harness
 from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS, Plan, make_plan
 from evolvekit.harness.sql import schema_database, sql_problem
 from evolvekit.harness.study import Study, load_study, load_study_file, require_valid, resolve_kpi
-from evolvekit.leaderboard import rank
+from evolvekit.leaderboard import rank, read_rows
 from evolvekit.ledger import _atomic_write, read_jsonl
 from evolvekit.stopping import STOP_REQUEST, RunStop
 
@@ -680,7 +680,7 @@ def write_group_exports(root: str | Path, run_dir: str | Path, document: dict[st
         settings, source = dict(today), "today"
         folder = dirs.get(name)
         if decision == "use" and folder is not None:
-            best = _best_of(read_job(folder) or {}, list(read_jsonl(folder / "runs.jsonl")))
+            best = _best_of(read_job(folder) or {}, read_rows(folder))
             if best is not None:
                 settings, source = {**today, **(best.get("params") or {})}, "found"
         out["groups"][name] = {"cases": cases, "decision": decision, "settings": settings, "from": source}
@@ -1159,7 +1159,7 @@ def export_path(run_dir: str | Path, name: str, case: str | None = None) -> Path
 
 
 def _best_values(run_dir: Path) -> dict[str, Any]:
-    best = rank(list(read_jsonl(run_dir / "runs.jsonl")), 1)
+    best = rank(read_rows(run_dir), 1)
     if not best:
         raise HarnessError(f"runs/{run_dir.name}: the run has no result to export yet")
     return dict(best[0].get("params") or {})
@@ -1249,7 +1249,7 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
         _write_exports(run_dir, log, up)
         job.finish("done", final={"skipped": "no cases were held back, so there is no final check"})
         return
-    rows = list(read_jsonl(run_dir / "runs.jsonl"))
+    rows = read_rows(run_dir)
     best = rank(rows, 1)
     if not best or best[0].get("operator") == "human-seed":
         if best:

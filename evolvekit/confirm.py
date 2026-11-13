@@ -57,7 +57,7 @@ from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, run_instance_stage
 from evolvekit.evaluate.stages import Configuration, on_tree, restore_build, run_build_stage, run_static_stage
 from evolvekit.events import EventLog, Heartbeat
-from evolvekit.leaderboard import rank
+from evolvekit.leaderboard import rank, read_reevaluations, read_rows
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import run_lock
 from evolvekit.stats import _betainc, _t95, paired_summary, t_cdf, wilcoxon_signed_rank  # noqa: F401  (re-exported: importers below)
@@ -487,6 +487,17 @@ def _disambiguate(rows: Sequence[dict[str, Any]]) -> None:
         row["id"] = name(row)
 
 
+def selected_seeds(run_dir: Path, stage: StageConfig) -> set[int]:
+    """The seeds the search selected on at `stage`: its own `0 .. seeds-1`,
+    and every seed the best was re-evaluated on (`reevaluations.jsonl`)."""
+    seeds = set(range(stage.seeds))
+    for entry in read_reevaluations(run_dir):
+        seed = entry.get("seed")
+        if isinstance(seed, int) and not isinstance(seed, bool) and entry.get("stage", stage.id) == stage.id:
+            seeds.add(seed)
+    return seeds
+
+
 def _select(rows: list[dict[str, Any]], wanted: str) -> list[dict[str, Any]]:
     """`best`, `top:N`, or a comma-separated list of candidate ids (`_find`)."""
     if wanted == "best" or wanted.startswith("top:"):
@@ -545,7 +556,9 @@ def confirm(
     `family`: the candidates are a choice among several (a bake-off), so each
     pays for it (`apply_holm`); `candidates="top:N"` with N > 1 always is."""
     run_dir = Path(run_dir)
-    rows = list(read_jsonl(run_dir / "runs.jsonl"))
+    # Pooled with the best's re-evaluations (the ranking `_select` reads); the
+    # veto is `rank`'s, as before.
+    rows = read_rows(run_dir, holdout_penalty=config.evaluate.holdout_penalty, veto=False)
     if against is not None:
         seed_row = _find(rows, against.strip(), "--against")
     else:
@@ -569,7 +582,7 @@ def confirm(
         )
     if "{seed}" not in stage.command:
         raise ConfigError(f"stage {stage.id!r}: the command has no {{seed}} placeholder, so every seed would be the same run")
-    searched = set(range(stage.seeds))
+    searched = selected_seeds(run_dir, stage)
     reused = sorted(searched & set(seeds))
     if reused and instances is None:
         log(f"warning: seed(s) {reused} are the ones the search selected on; a confirmation on them is not one")

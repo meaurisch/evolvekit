@@ -1700,6 +1700,9 @@ class SearchConfig:
     novelty_retry: bool = True
     novelty: NoveltyConfig = field(default_factory=NoveltyConfig)
     adaptive_children: AdaptiveChildrenConfig | None = None
+    reevaluate_best_every: int = 0
+    """Every N rounds the archive's best runs once more at the final stage on a
+    fresh seed, and its runs are pooled (`leaderboard.read_rows`); 0 is off."""
 
     @property
     def llm_operators(self) -> list[str]:
@@ -1743,6 +1746,7 @@ class SearchConfig:
             "novelty_retry",
             "novelty",
             "adaptive_children",
+            "reevaluate_best_every",
         }
         if "parent_top_k" in data:
             raise ConfigError(
@@ -1800,6 +1804,9 @@ class SearchConfig:
             adaptive_children=AdaptiveChildrenConfig.parse(
                 data.get("adaptive_children")
             ),
+            reevaluate_best_every=_as_int(
+                data.get("reevaluate_best_every", 0), "search.reevaluate_best_every", minimum=0
+            ),
         )
 
 
@@ -1851,6 +1858,7 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
     _check_embedding_route(config)
     _check_parameter_placeholders(config)
     _check_typed_operators(config)
+    _check_reevaluation(config)
     if config.evaluate.score.levels and config.stop.target is not None:
         raise ConfigError(
             "stop.target: cannot be combined with evaluate.score.levels -- the combined score "
@@ -1981,6 +1989,25 @@ def _check_typed_operators(config: Config) -> None:
                 "config declares none. Add `problem.parameters` (name, type, range, default "
                 "of what may be tuned), or use `param_lhs` with a `# PARAMS:` line"
             )
+
+
+def _check_reevaluation(config: Config) -> None:
+    """`search.reevaluate_best_every` runs the best again on a fresh seed: the
+    final stage has to be a command that takes one. Not on a source tree: the
+    best's tree is gone by then, and a build would have to run again."""
+    if config.search.reevaluate_best_every <= 0:
+        return
+    final = config.final_stage
+    if final.kind != "command" or "{seed}" not in final.command:
+        raise ConfigError(
+            "search.reevaluate_best_every: runs the best again at the final stage on a fresh seed, so the "
+            f"final stage ({final.id!r}) has to be a command with a {{seed}} placeholder; add {{seed}} to "
+            "its command or set reevaluate_best_every: 0"
+        )
+    if config.problem.tree is not None:
+        raise ConfigError(
+            "search.reevaluate_best_every: does not work on a source tree (problem.tree) yet; set it to 0"
+        )
 
 
 def _check_parameter_placeholders(config: Config) -> None:

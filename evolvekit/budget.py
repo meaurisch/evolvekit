@@ -179,6 +179,13 @@ class StopPolicy:
         scale = abs(self.best) if self.best is not None else 0.0
         return max(1e-6, 1e-9 * scale, 0.5 * self.noise_sd)
 
+    def rebase(self, best: float | None) -> None:
+        """The best was measured again and pooled (`search.reevaluate_best_every`):
+        a lucky best that regresses lowers the bar a real improvement has to
+        clear. Only ever down, and the patience count is left as it is."""
+        if best is not None and self.best is not None:
+            self.best = min(self.best, float(best))
+
     @property
     def plateau(self) -> bool:
         """Half-patience: escalate to the strong model before giving up."""

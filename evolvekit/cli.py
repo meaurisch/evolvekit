@@ -28,7 +28,7 @@ from evolvekit.leaderboard import (
     rank,
     render_html,
     render_markdown,
-    replay_veto,
+    read_rows,
     unfinished_count,
     vetoed_count,
 )
@@ -637,7 +637,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print()
     print(
         render_markdown(
-            driver.ledger.runs(),
+            read_rows(driver.ledger.run_dir, holdout_penalty=config.evaluate.holdout_penalty),
             limit=10,
             usage=driver.ledger.usage(),
             window=config.stop.economics_window,
@@ -898,7 +898,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1 if state == "missing" else 0
 
     ledger = Ledger(args.run_dir)
-    rows = replay_veto(ledger.runs())
+    rows = read_rows(ledger.run_dir)
     if not rows:
         return 0
     print()
@@ -951,7 +951,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_leaderboard(args: argparse.Namespace) -> int:
     ledger = Ledger(args.run_dir)
-    rows = ledger.runs()
+    rows = read_rows(ledger.run_dir)
     usage = ledger.usage()
     archive = ledger.read_archive()
     print(render_markdown(rows, limit=args.limit, usage=usage))
@@ -991,12 +991,9 @@ def cmd_confirm(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    from evolvekit.leaderboard import rank
-    from evolvekit.ledger import read_jsonl
-
     if not Path(args.run_dir).is_dir():
         raise ValueError(f"there is no run directory at {args.run_dir}")
-    rows = list(read_jsonl(Path(args.run_dir) / "runs.jsonl"))
+    rows = read_rows(Path(args.run_dir))
     if args.candidate == "best":
         ranked = rank(rows, 1)
         if not ranked:

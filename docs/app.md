@@ -731,7 +731,8 @@ group folder's dashboard is at `/studies/{name}/runs/{run}/groups/{folder}/dashb
 document, `docs/reference.md` "Watching a run", whose `progress.noise` is how
 much one run of a combination varies at the final stage: `stage`,
 `repeatable`, `source`, and per measure `sd`, `sd_across` and `cv`, with
-`runs_per_candidate`). Managing studies: `DELETE
+`runs_per_candidate`, and whose `best.replicates` is how many runs at the final
+stage the best's values are the mean of). Managing studies: `DELETE
 /api/studies/{name}` moves one to the trash (409 while it runs or waits) and
 `POST /api/trash/{entry}/restore` brings it back; `POST
 /api/studies/{name}/duplicate` with `{name}` copies the setup and the cases;

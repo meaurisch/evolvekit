@@ -19,11 +19,20 @@ from __future__ import annotations
 
 import html
 import json
+import math
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from evolvekit.economics import DEFAULT_WINDOW, GenerationPoint, series
+from evolvekit.ledger import read_jsonl
 
 __all__ = [
+    "REEVALUATIONS",
+    "REEVALUATION_SEED_BASE",
+    "pool_rows",
+    "read_reevaluations",
+    "read_rows",
+    "run_holdout_penalty",
     "rank",
     "render_markdown",
     "render_html",
@@ -42,6 +51,128 @@ __all__ = [
 ]
 
 HOLDOUT_FLAG = "!"
+
+REEVALUATIONS = "reevaluations.jsonl"
+"""One row per re-evaluation of the best (`search.reevaluate_best_every`),
+beside `runs.jsonl`: `{"id", "generation", "seed", "stage", "prior_runs",
+"kpis", "score", "at"}`. Every view reads `runs.jsonl` pooled with it
+(`read_rows`)."""
+REEVALUATION_SEED_BASE = 2000
+"""The k-th re-evaluation of a run (from 0) runs on seed `2000 + k`: above the
+final check's `CHECK_SEEDS` (1001 ... 1012), so the search never selects on
+the seeds the final check judges on."""
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _pooled(row: dict[str, Any], extra: Sequence[Mapping[str, Any]], holdout_penalty: float) -> dict[str, Any]:
+    from evolvekit.evaluate.scoring import ranking_score  # here: `evaluate` imports this module
+
+    kpis = dict(row.get("kpis") or {})
+    score = float(row["score"])
+    replicates = None
+    for entry in extra:
+        n = entry.get("prior_runs")
+        new_score = _finite(entry.get("score"))
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1 or new_score is None:
+            continue  # a malformed row pools nothing
+        for name, value in (entry.get("kpis") or {}).items():
+            new, old = _finite(value), _finite(kpis.get(name))
+            if new is not None and old is not None:
+                kpis[name] = (n * old + new) / (n + 1)
+        score = (n * score + new_score) / (n + 1)
+        replicates = n + 1
+    if replicates is None:
+        return row
+    pooled = {**row, "kpis": kpis, "score": score, "replicates": replicates}
+    if row.get("public_score") is not None:
+        pooled["public_score"] = score
+    public, private = pooled.get("public_score"), row.get("private_score")
+    pooled["ranking_score"] = ranking_score(
+        score, None if public is None else float(public), None if private is None else float(private),
+        holdout_penalty,
+    )
+    if public is not None and private is not None:
+        pooled["generalization_gap"] = float(public) - float(private)
+    return pooled
+
+
+def pool_rows(
+    rows: Sequence[dict[str, Any]],
+    reevaluations: Sequence[Mapping[str, Any]],
+    *,
+    holdout_penalty: float = 0.0,
+) -> list[dict[str, Any]]:
+    """`rows` with each re-evaluated row's runs pooled, in file order: with
+    `n = prior_runs`, every KPI both carry and the score become
+    `(n·old + new) / (n + 1)`, the public score follows the score,
+    `replicates` is `n + 1`, and the ranking score is recomputed from the
+    pooled score with `holdout_penalty` (`scoring.ranking_score`; the private
+    score is never re-run). The pooled score is the mean of the runs' scores,
+    not the score of the pooled KPIs. The veto is the caller's, after this
+    (`read_rows`). Rows without a re-evaluation are returned as they are."""
+    if not reevaluations:
+        return list(rows)
+    by_id: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in reevaluations:
+        if entry.get("id") is not None:
+            by_id.setdefault(str(entry["id"]), []).append(entry)
+    result = []
+    for row in rows:
+        extra = by_id.get(str(row.get("id")))
+        if not extra or _finite(row.get("score")) is None:
+            result.append(row)
+            continue
+        result.append(_pooled(row, extra, holdout_penalty))
+    return result
+
+
+def read_reevaluations(run_dir: str | Path) -> list[dict[str, Any]]:
+    """`reevaluations.jsonl`, oldest first; none for a run without the file."""
+    return [row for row in read_jsonl(Path(run_dir) / REEVALUATIONS) if isinstance(row, dict)]
+
+
+def run_holdout_penalty(run_dir: str | Path) -> float:
+    """The run's `evaluate.holdout_penalty`: from the compiled `evolvekit.yaml`
+    in the run directory (a study's run), else the config the last session
+    started from (`run_started`'s `config_path`), else 0."""
+    from evolvekit.config import load_config
+
+    directory = Path(run_dir)
+    paths = [directory / "evolvekit.yaml"]
+    started = [e for e in read_jsonl(directory / "events.jsonl") if e.get("type") == "run_started"]
+    if started and started[-1].get("config_path"):
+        paths.append(Path(str(started[-1]["config_path"])))
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            return float(load_config(path).evaluate.holdout_penalty)
+        except Exception:  # noqa: BLE001 - a config that no longer loads: try the next
+            continue
+    return 0.0
+
+
+def read_rows(
+    run_dir: str | Path, *, holdout_penalty: float | None = None, veto: bool = True
+) -> list[dict[str, Any]]:
+    """The run's rows as every view ranks them: `runs.jsonl`, pooled with its
+    re-evaluations (`pool_rows`, the ranking score recomputed with
+    `holdout_penalty`, the run's own when not given), then the hold-out veto
+    replayed (`replay_veto`; `veto=False` leaves it out, for readers that
+    count rows). Without `reevaluations.jsonl` this is `replay_veto` of
+    `runs.jsonl`, as every view read it before."""
+    directory = Path(run_dir)
+    rows = list(read_jsonl(directory / "runs.jsonl"))
+    extra = read_reevaluations(directory)
+    if extra:
+        penalty = run_holdout_penalty(directory) if holdout_penalty is None else holdout_penalty
+        rows = pool_rows(rows, extra, holdout_penalty=penalty)
+    return replay_veto(rows) if veto else rows
 
 
 def fitness_of(row: Mapping[str, Any]) -> float | None:

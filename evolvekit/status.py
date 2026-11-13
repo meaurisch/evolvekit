@@ -47,7 +47,7 @@ from evolvekit.economics import DEFAULT_WINDOW, series
 from evolvekit.evaluate.levels import K as LEVEL_STEPS
 from evolvekit.evaluate.noise import NOISE_FILE, Noise
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
-from evolvekit.leaderboard import competes, fitness_of, rank, replay_veto
+from evolvekit.leaderboard import competes, fitness_of, rank, read_rows
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
@@ -99,9 +99,9 @@ def build_status(
         }
         return document
 
-    # The hold-out veto as a resumed run applies it: no view names a candidate
-    # the search keeps out.
-    rows = replay_veto(list(read_jsonl(directory / "runs.jsonl")))
+    # Pooled with the best's re-evaluations, and the hold-out veto as a resumed
+    # run applies it: no view names a candidate the search keeps out.
+    rows = read_rows(directory)
     usage = list(read_jsonl(directory / "usage.jsonl"))
     events = read_events(directory)
     run = _Run(directory, rows, usage, events, moment)
@@ -1374,6 +1374,7 @@ class _Run:
             "is_seed": bool(self.seed) and row.get("id") == self.seed.get("id"),
             "kpis": row.get("kpis") or {},
             "kpi_cv": row.get("kpi_cv") or {},
+            "replicates": int(row.get("replicates") or 0),
             "public_score": _number(row.get("public_score")),
             "private_score": _number(row.get("private_score")),
             "generalization_gap": _number(row.get("generalization_gap")),
@@ -1835,7 +1836,7 @@ def candidate_details(
     a time re-read `runs.jsonl` and the event log per candidate, which grew
     quadratically -- about 35 minutes for a run of 2,900 candidates."""
     directory = Path(run_dir)
-    rows = {str(r.get("id")): r for r in replay_veto(list(read_jsonl(directory / "runs.jsonl")))}
+    rows = {str(r.get("id")): r for r in read_rows(directory)}
     seed = next((r for r in reversed(list(rows.values())) if r.get("operator") == SEED_OPERATOR), None)
     events = read_events(directory)
     finished: dict[str, list[dict[str, Any]]] = {}

@@ -60,7 +60,9 @@ and the budget against those measurements — see
 [Before you spend anything](#before-you-spend-anything-preflight).
 
 A run directory holds `runs.jsonl` (one row per candidate, with lineage, cell
-and novelty verdict), `usage.jsonl` (one row per LLM call, with tokens and
+and novelty verdict), `reevaluations.jsonl` (with
+[`search.reevaluate_best_every`](#stochastic-evaluators-seeds-n): one row per
+extra run of the best, pooled into its row by every reader), `usage.jsonl` (one row per LLM call, with tokens and
 USD), `archive.json` (the MAP-Elites grid: cells, elites, children counts and
 lineage), `scratchpad.md` (the running notes), `.lock` (the owning pid) and
 `traces/<candidate-id>.json` (the exact messages sent and the response
@@ -121,7 +123,7 @@ interrupted or dead.
 |---|---|
 | `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
 | `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero (the search's own reading, not `confirm`'s rule, which is a chance of a gain) — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. `noise` is the run's [noise estimate](#stochastic-evaluators-seeds-n) at the final `stage` (`work/noise.json`): `repeatable` (`null` until measured), `source` (`replicates`, `calibration`, `paired` or `none`: where `sd` came from), and per measure `sd` (the noise of one run, one side of a comparison, that the search reads), `sd_across` (the across-seed estimate, always), `cv` (relative), with `runs_per_candidate` (the stage's `seeds`); `source: none` with empty maps when nothing was measured. |
-| `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
+| `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, `replicates` (how many final-stage runs its values are the mean of: the stage's `seeds`, plus one per [re-evaluation](#stochastic-evaluators-seeds-n); 0 for a row written before it), and each declared parameter's value beside its default. |
 | `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
 | `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
 | `failures` | Every failed evaluator run, newest first, with its stage, seed, hold-out flag, exit status, duration, **command line**, stderr tail and the path of the full log; plus responses that could not be applied and candidates the static stage refused. |
@@ -823,6 +825,42 @@ estimate says so in its own section and is listed here:
   *What counts as an improvement*): half one finished candidate's score noise;
 - the archive's elite rule ([The archive](#the-archive)): a challenger takes a
   cell when it beats the elite by more than one finished candidate's score noise.
+
+**Re-evaluating the best: `search.reevaluate_best_every`.** The best of a
+noisy run is selected *because* it measured high, so part of its lead is luck:
+the best of eight equal candidates, one run each, measures about 1.4 run-sd
+above the truth. With `search.reevaluate_best_every: N` (default `0`, off),
+after every N-th round the archive's best runs **once more at the final
+stage**, on the public inputs only (no hold-out run, no race), on a fresh seed:
+`2000 + k`, k the run's re-evaluations so far — never one of the final
+check's seeds (1001 … 1012) and never one the search runs a candidate on. Its
+runs are then pooled: with n the runs its value stood for (the stage's `seeds`
+at first), every measure and the score become `(n · old + new) / (n + 1)` (the
+score is the mean of the runs' scores, not the score of the pooled measures),
+the public score follows, the ranking score is recomputed with
+`evaluate.holdout_penalty`, the hold-out veto is applied after, and the row's
+`replicates` counts the runs (`n + 1`). After three re-evaluations the lucky
+lead above is a quarter of what it was (a seeded simulation: 0.35 run-sd). Every
+view reads the pooled value — the archive (every member re-placed by the elite
+rule, where `replicates` counts), the run's best, the stop policy (a best that
+regresses lowers the bar an improvement has to clear, without resetting
+`stop.patience`), the economics series, `status`, the leaderboard, `export`,
+`confirm --candidates best|top:N`, a study's exports and final check, and the
+app. `runs.jsonl` keeps the row as it was written; each re-evaluation is one
+row of `reevaluations.jsonl` beside it (`id`, `generation`, `seed`, `stage`,
+`prior_runs` — the n above —, `kpis` and `score` of the new run alone,
+normalised against the run's reference like any other, and `at`), read back on
+resume. The new run joins the candidate's own runs in the noise estimate when it
+has some (`seeds > 1`); at `seeds: 1` it adds nothing there (its first run was
+selected as the best, and paired with a fresh one would overstate the noise).
+
+What it costs: one final-stage run per N rounds, counted against
+`budget.max_full_evals_per_day`; skipped, with a line in the run log (`the best
+… was not run again on seed …: why`), when the cap is reached, the run is
+stopping, or less of `budget.max_hours` is left than one run of the seed took.
+It needs a final command stage with `{seed}` (a config error otherwise) and is
+not available on a source tree (`problem.tree`). `confirm` warns when it is
+given one of the seeds a best was re-evaluated on, as for the search's own.
 
 ### One run per instance: `instances`, `workers`, `retries`
 

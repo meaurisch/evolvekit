@@ -275,6 +275,17 @@ class Archive:
             )
         return Placement(coord=coord, inserted=True)
 
+    def update(self, candidate: Candidate) -> None:
+        """A member's fitness changed (its runs pooled with a re-evaluation):
+        every member is placed again with the elite rule (`_rebin`), as on a
+        resume that reads the pooled value from the start. Not a member: nothing."""
+        if candidate.id not in self.members:
+            return
+        self.members[candidate.id] = candidate
+        for axis in self.axes:
+            axis.observe(descriptor_value(candidate, axis.kpi, tree=self.tree))
+        self._rebin()
+
     def _rebin(self) -> None:
         """An auto axis widened; re-place everything the grid already holds."""
         self.cells = {}

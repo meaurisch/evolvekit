@@ -427,6 +427,55 @@ class Cascade:
     def _stopping(self) -> bool:
         return self.stop is not None and self.stop.is_set()
 
+    def reevaluate(self, candidate: Candidate, seed: int) -> StageOutcome | None:
+        """Run `candidate` once more at the final stage, public inputs only, on
+        `seed` (`search.reevaluate_best_every`): normalised against the run's
+        reference and scored as `_absorb` scores, the score of this run alone in
+        `outcome.score`. No generation's results, no race, no incumbent, no
+        behaviour index and no noise entry are touched (the driver pools the
+        run, `Noise.pool`); no `eval_*` events (it is not a candidate of the
+        search), and the cache is used (a resumed run re-reads a run it made).
+        Counted against `budget.max_full_evals_per_day` when it starts. `None`
+        when it does not start: the cap says no, or the run is stopping."""
+        final = self.config.final_stage
+        if final.kind != "command" or self._stopping():
+            return None
+        if self.budget is not None:
+            if not self.budget.check_full_eval().allowed:
+                return None
+            self.budget.record_full_eval()
+        path = self._materialise(candidate)
+        space = self.config.problem.parameters
+        if candidate.params is not None and space is not None and candidate.id not in self._configurations:
+            self._configure(candidate.id, path, dict(candidate.params))  # a resumed run's best
+        out = self.work_dir / "stage_out" / "reevaluate"
+        if final.fans_out:
+            job = Job(candidate_id=candidate.id, candidate_path=path,
+                      configuration=self._configurations.get(candidate.id), **self._on_tree(candidate.id))
+            outcome = run_instance_stage(
+                [job], final, out_dir=out, cwd=self.config.base_dir,
+                required_kpis=self.config.evaluate.required_kpis, cache=self.cache, seeds=(seed,), stop=self.stop,
+            )[candidate.id]
+        else:
+            outcome = run_command_stage(
+                path, final, inputs=final.inputs, out_path=out / f"{candidate.id}.{final.id}.{seed}.json",
+                cwd=self.config.base_dir, required_kpis=self.config.evaluate.required_kpis,
+                configuration=self._configurations.get(candidate.id), cache=self.cache, cancel=self.stop,
+                seeds=(seed,), **self._on_tree(candidate.id),
+            )
+        if not outcome.ok or outcome.abandoned:
+            return outcome
+        if final.fans_out:  # as `_run_instances`: only a per-instance stage is normalised
+            self._normalise(final, candidate, outcome, private=False)
+            if not outcome.ok:
+                return outcome
+        kpis = {**candidate.kpis, **outcome.kpis}  # as `_absorb` scores: earlier stages' measures too
+        if self.config.evaluate.score.levels:
+            outcome.score = self._level_score(final.id, kpis, outcome.vector_kpis)
+        else:
+            outcome.score, _, _ = compute_score(kpis, self.config.evaluate.score, self.config.evaluate.penalties)
+        return outcome
+
     # -- levels ----------------------------------------------------------
 
     def _level_score(

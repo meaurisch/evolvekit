@@ -27,6 +27,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -48,7 +49,13 @@ from evolvekit.evaluate.signature import Behaviour, BehaviourIndex
 from evolvekit.evaluate.stages import restore_build
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
-from evolvekit.leaderboard import seed_private, seed_public
+from evolvekit.leaderboard import (
+    REEVALUATION_SEED_BASE,
+    pool_rows,
+    read_reevaluations,
+    seed_private,
+    seed_public,
+)
 from evolvekit.ledger import Ledger
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration, big_step_reason
@@ -171,6 +178,9 @@ class Driver:
         self.config = config
         self.allow_changed_problem = allow_changed_problem
         self.ledger = Ledger(run_dir)
+        self._reevaluations: list[dict] = read_reevaluations(self.ledger.run_dir)
+        """`reevaluations.jsonl` (`search.reevaluate_best_every`): every reading
+        of `runs.jsonl` here is pooled with it (`_replayed_rows`)."""
         self.budget = BudgetGuard(config.budget)
         # `min_big_steps` holds a plateau open until the strong model has been
         # tried. A run without a model has no big step to wait for, and would
@@ -562,12 +572,19 @@ class Driver:
 
     # -- resume ----------------------------------------------------------
 
-    def _replayed_rows(self, raw: list[dict]) -> list[dict]:
-        """`runs.jsonl` rows judged by today's rules: `competes` settled, the
-        hold-out veto applied against the seed's private score, and the ranking
-        score recomputed with this run's λ."""
+    def _replayed_rows(self, raw: list[dict], reevaluations: Sequence[dict] | None = None) -> list[dict]:
+        """`runs.jsonl` rows judged by today's rules: pooled with the run's
+        re-evaluations (`leaderboard.pool_rows`; `reevaluations`, the run's
+        when not given), `competes` settled, the hold-out veto applied against
+        the seed's private score, and the ranking score recomputed with this
+        run's λ. Pooling comes first, as in `leaderboard.read_rows`; the veto
+        reads the private score only, which pooling and λ leave alone."""
         reference = seed_private(raw)
-        return [self._rerank(self._settle_competes(row, reference)) for row in raw]
+        pooled = pool_rows(
+            raw, self._reevaluations if reevaluations is None else reevaluations,
+            holdout_penalty=self.config.evaluate.holdout_penalty,
+        )
+        return [self._rerank(self._settle_competes(row, reference)) for row in pooled]
 
     def resume(self) -> int:
         """Rebuild the archive from `runs.jsonl`. Returns the last generation.
@@ -874,6 +891,7 @@ class Driver:
                     self._record(child)
             self._pending_path.unlink(missing_ok=True)
             summary.generations = offset
+            self._reevaluate_best(generation)
             # The stop policy first, so the generation's event carries the
             # flat count and the epsilon `status` reads.
             best = self.best
@@ -914,6 +932,78 @@ class Driver:
                 break
 
         return self._finalise(summary)
+
+    # -- re-evaluating the best (search.reevaluate_best_every) ------------
+
+    def _reevaluate_best(self, generation: int) -> None:
+        """After round `generation` is recorded, every `reevaluate_best_every`
+        rounds: the archive's best runs once more at the final stage on seed
+        `REEVALUATION_SEED_BASE + k` (k: the run's re-evaluations so far), the
+        run goes to `reevaluations.jsonl`, and its runs are pooled everywhere --
+        the candidate, the noise (`Noise.pool`), the archive (`Archive.update`),
+        the stop policy's bar (`StopPolicy.rebase`). Skipped, with a line in the
+        log, when the daily cap or the time left says no."""
+        every = self.config.search.reevaluate_best_every
+        if every <= 0 or generation < 1 or generation % every:
+            return
+        best = self.best
+        if best is None:
+            return
+        final = self.config.final_stage
+        seed = REEVALUATION_SEED_BASE + len(self._reevaluations)
+        why = None
+        capped = self.budget.check_full_eval()
+        left, needed = self.run_stop.left_s(), self._reevaluation_s()
+        if not capped.allowed:
+            why = capped.reason
+        elif self.run_stop.poll() is not None:
+            why = self.run_stop.reason
+        elif left is not None and needed is not None and left < needed:
+            why = f"{left:.0f} s of the run's time is left, less than one run of it ({needed:.0f} s)"
+        outcome = None if why else self.cascade.reevaluate(best, seed)
+        if outcome is None or not outcome.ok or outcome.abandoned or outcome.score is None:
+            if why is None:
+                why = (outcome.failure if outcome is not None and outcome.failure else "the run was stopped")
+            self.log(f"gen {generation:<2} the best {best.id} was not run again on seed {seed}: {why}")
+            return
+        prior = int(best.replicates or 0) or final.seeds
+        entry = {
+            "id": best.id,
+            "generation": generation,
+            "seed": seed,
+            "stage": final.id,
+            "prior_runs": prior,
+            "kpis": dict(outcome.kpis),
+            "score": float(outcome.score),
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        self.ledger.record_reevaluation(entry)
+        self._reevaluations.append(entry)
+        self.cascade.noise.pool(final.id, best.id, outcome)
+        self.cascade.noise.save()
+        was = best.fitness
+        (pooled,) = pool_rows([best.to_record()], [entry], holdout_penalty=self.config.evaluate.holdout_penalty)
+        best.kpis = dict(pooled["kpis"])
+        best.score = pooled["score"]
+        best.public_score = pooled.get("public_score")
+        best.ranking_score = pooled["ranking_score"]
+        best.generalization_gap = pooled.get("generalization_gap")
+        best.replicates = int(pooled["replicates"])
+        self._refresh_noise()
+        self.grid.update(best)
+        now = self.best
+        self.stop_policy.rebase(now.fitness if now else None)
+        self.log(
+            f"gen {generation:<2} the best {best.id} run again on seed {seed}: {_fmt(float(outcome.score))}; "
+            f"the mean of its {best.replicates} runs is {_fmt(best.fitness)} (was {_fmt(was)})"
+        )
+
+    def _reevaluation_s(self) -> float | None:
+        """How long one run of the final stage takes: the seed's final stage
+        over its seeds; `None` before the seed has passed it."""
+        final = self.config.final_stage
+        spent = self._seed_stages.get(final.id)
+        return None if spent is None else spent / max(1, final.seeds)
 
     def _recorded_seed(self) -> Candidate | None:
         """The seed as last evaluated: a seed evaluated again after an abort is
@@ -1058,6 +1148,12 @@ class Driver:
             day = str(row.get("created_at") or "")[:10]
             if day and (final in (row.get("stages_reached") or []) or ran_and_failed):
                 self.budget.record_full_eval(day)
+        # A re-evaluation of the best is a full evaluation too, on the day it ran
+        # (one that failed wrote no row, and is not counted: a small undercount).
+        for entry in self._reevaluations:
+            day = str(entry.get("at") or "")[:10]
+            if day:
+                self.budget.record_full_eval(day)
 
     def _restore_stop_policy(self) -> StopDecision:
         """Replay the recorded generations through the stop policy.
@@ -1092,13 +1188,46 @@ class Driver:
             if not failed:
                 applied.add(int(c.generation))
         decision = StopDecision(False)
-        for point in self._economics():
+        points = self._economics()
+        as_of = self._points_as_of(points)
+        rebased = {int(entry.get("generation") or 0) for entry in self._reevaluations}
+        for point in points:
+            # The point as the live run saw it: pooled with the re-evaluations
+            # made up to its generation, and the bar rebased where one was made.
+            seen = as_of(point.generation)
             if point.generation in tried:
                 self.stop_policy.note_big_step()
             if point.generation in applied:
                 self.stop_policy.note_big_step_applied()
-            decision = self.stop_policy.update(point.best, point)
+            if point.generation in rebased:
+                self.stop_policy.rebase(seen.best)
+            decision = self.stop_policy.update(seen.best, seen)
         return decision
+
+    def _points_as_of(self, points: list[GenerationPoint]) -> Callable[[int], GenerationPoint]:
+        """For the replay of the stop policy: generation g's point as of the end
+        of generation g -- the series pooled with the re-evaluations made up to
+        g, which is what the live run read then. Without re-evaluations, the
+        series itself."""
+        if not self._reevaluations:
+            by_generation = {p.generation: p for p in points}
+            return lambda generation: by_generation[generation]
+        raw, usage = self.ledger.runs(), self.ledger.usage()
+        epsilon = self.stop_policy.epsilon_now()
+        made = [int(entry.get("generation") or 0) for entry in self._reevaluations]
+        prefixes: dict[int, dict[int, GenerationPoint]] = {}
+
+        def as_of(generation: int) -> GenerationPoint:
+            count = sum(1 for g in made if g <= generation)
+            if count not in prefixes:
+                rows = self._replayed_rows(raw, self._reevaluations[:count])
+                prefixes[count] = {
+                    p.generation: p
+                    for p in series(rows, usage, window=self.config.stop.economics_window, epsilon=epsilon)
+                }
+            return prefixes[count][generation]
+
+        return as_of
 
     # -- generation internals -------------------------------------------
 
