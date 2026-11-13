@@ -418,10 +418,26 @@ evenly and never looks at a score — the right first move and the wrong tenth
 one. `param_local` starts from one of the best four configurations (the best
 most often, not always: on a noisy objective the single best is partly luck)
 and moves one parameter twice as often as two, two twice as often as three; an
-integer moves by at least one, a boolean flips. `param_cross` tries gains
+integer moves by at least one, a boolean flips. A step from the starting point
+first moves each parameter that has a `prior` to the prior's value, with the
+prior's weight as its chance (the record's `prior` names them), and steps from
+there. `param_cross` tries gains
 together that were found separately. `param_tpe` is a Tree-structured Parzen
 Estimator: it models, parameter by parameter, where good configurations are
-dense relative to bad ones and proposes where that ratio is highest. It reads
+dense relative to bad ones and proposes where that ratio is highest. The good
+set is the best tenth of the observations, rounded up, at least 2 and at most
+25 (Optuna's split); a number's density is one Gaussian per observation on the
+parameter's own 0..1 scale, each as wide as the larger gap to its neighbours
+(the ends of the range count as neighbours), kept between 0.02 and 0.5, cut to
+the range and renormalised so no mass is lost at an end, plus the range itself
+as one more observation spread evenly. Of the 48 candidates it rates, 24 are
+drawn from the good density and 24 evenly from the whole box, so the ratio can
+find a region the good set has not reached; the best ratio is proposed. A
+parameter's [`prior`](#studies-over-time) is part of both densities: a prior of
+weight *w* adds 4*w* observations at its value (a bump 0.1 wide on the unit
+scale, for a bool or a choice 4*w* counts on the value) beside the range's
+one, so it pulls the proposals towards an earlier winner without ruling out
+any value. It reads
 **ranks**, not scores, in four tiers, best first: finished candidates by
 fitness; candidates screened out by a cheaper stage, by the deepest stage they
 reached and that stage's score (on any scale: only the order counts, and they
@@ -2619,7 +2635,11 @@ measure. Each run then draws a share of its combinations around each tuned
 setting's winner: a prior of weight one half, which halves again with every
 other study finished since that winner and is dropped below 0.05 or once four
 have. It is only a prior — it never stops the search from trying any value in
-range, and a bool or a choice is drawn as the winner itself. `study new` says
+range, and a bool or a choice is drawn as the winner itself. The prior also
+acts on the rest of the search: `param_tpe` counts it as 4 × its weight
+observations at the winner's value in both its densities, and a `param_local`
+step from the starting point starts from the winner's value, with the prior's
+weight as its chance ([Operators](#operators)). `study new` says
 what it did on stderr, and `study.yaml` records it as `warm: {from, run, at,
 ranked}`. The warm start changes the starting point the final check compares
 with: the result is judged against the winner's values, not the settings in

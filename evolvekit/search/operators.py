@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from evolvekit.candidate import Candidate, splice_block
+from evolvekit.candidate import SEED_OPERATOR, Candidate, splice_block
 from evolvekit.config import Config
 from evolvekit.diffs import DiffError, apply_response
 from evolvekit.evaluate.types import EvalResult
@@ -378,10 +378,24 @@ def param_local(space: ParameterSpace, parent: Candidate, *, seed: int) -> Opera
     """A neighbour of the parent's configuration: one to three parameters moved
     a little (`ParameterSpace.perturb`). The exploiting half of a model-free
     search -- most of what can be won from a mature solver's defaults is next
-    to them. Drawn again while it breaks a constraint (`ParameterSpace.draw`)."""
+    to them. Drawn again while it breaks a constraint (`ParameterSpace.draw`).
+
+    From the starting point, each parameter with a `prior` starts, with the
+    prior's weight as its chance, from the prior's value instead, and the step
+    is taken from there (`meta["prior"]` names those parameters): the first
+    local steps look near an earlier study's winner as well as near the
+    starting point. From any other parent, and without a prior, nothing more is
+    drawn."""
     base = dict(parent.params or space.defaults())
     rng = random.Random(seed)
-    return _rendered(space, space.draw(lambda: space.perturb(base, rng)), "param_local")
+    started: list[str] = []
+    if parent.operator == SEED_OPERATOR:
+        for parameter in space.parameters:
+            if parameter.prior is not None and rng.random() < parameter.prior[1]:
+                base[parameter.name] = parameter.prior[0]
+                started.append(parameter.name)
+    child = space.draw(lambda: space.perturb(base, rng))
+    return _rendered(space, child, "param_local", **({"prior": started} if started else {}))
 
 
 def param_cross(

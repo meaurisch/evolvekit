@@ -17,8 +17,9 @@ import pytest
 from evolvekit.candidate import Candidate
 from evolvekit.config import ConfigError, build_config
 from evolvekit.search.operators import param_cross, param_local, param_tpe
-from evolvekit.search.tuning import MIN_OBSERVATIONS, Observation, propose_tpe
-from evolvekit.space import ParameterSpace
+from evolvekit.search import tuning
+from evolvekit.search.tuning import MIN_OBSERVATIONS, Observation, _bandwidths, _Density, n_good, propose_tpe
+from evolvekit.space import Parameter, ParameterSpace
 from tests.test_params import sweepable_project  # noqa: F401  (a fixture)
 
 
@@ -129,6 +130,64 @@ def _history(space: ParameterSpace, count: int, seed: int) -> list[Observation]:
     return [Observation(v, _fitness(v)) for v in space.latin_hypercube(count, rng)]
 
 
+def _float(name: str) -> Parameter:
+    return ParameterSpace.parse({name: {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}}).parameters[0]
+
+
+def test_the_good_share_is_a_tenth_up_to_twenty_five():
+    assert [n_good(n) for n in (8, 20, 21, 100, 400)] == [2, 2, 3, 10, 25]
+
+
+def test_each_point_has_the_larger_of_its_two_gaps_as_its_bandwidth():
+    # sorted with the sentinels: 0, 0.1, 0.4, 0.5, 1
+    assert _bandwidths([0.5, 0.1, 0.4]) == pytest.approx([0.5, 0.3, 0.3]), "0.5: gaps 0.1 and 0.5; 0.1: 0.1 and 0.3; 0.4: 0.3 and 0.1"
+    assert _bandwidths([0.30, 0.31]) == pytest.approx([0.3, 0.5]), "0.31's gap to 1 is 0.69, clipped to 0.5"
+    assert _bandwidths([0.5, 0.5]) == pytest.approx([0.5, 0.5]), "a duplicate's zero gap loses to its other side"
+    assert _bandwidths([0.0, 0.01, 0.02]) == pytest.approx([0.02, 0.02, 0.5]), "gaps of 0.01 are clipped up to 0.02"
+
+
+def test_a_truncated_density_integrates_to_one():
+    """The pdf and the sampler describe one distribution: a point at the edge
+    keeps all its mass inside [0, 1]."""
+    density = _Density(_float("x"), [Observation({"x": 0.0}, 1.0), Observation({"x": 0.02}, 1.0)])
+    grid = [(i + 0.5) / 2000 for i in range(2000)]
+    assert sum(density.pdf(u) for u in grid) / 2000 == pytest.approx(1.0, abs=0.01)
+
+
+def test_the_sampler_draws_the_density_the_pdf_describes():
+    """A histogram of 20 000 draws matches the pdf's mass, bin by bin (ten bins
+    of 0.1), with points at the edge where the truncation matters most. A
+    bin's share has SE at most 0.0035; each must lie within 0.015 (4 SE)."""
+    density = _Density(_float("x"), [Observation({"x": u}, 1.0) for u in (0.0, 0.05, 0.9)])
+    rng = random.Random(4)
+    draws = [density.sample(rng) for _ in range(20_000)]
+    for b in range(10):
+        share = sum(b / 10 <= d < (b + 1) / 10 or (b == 9 and d == 1.0) for d in draws) / len(draws)
+        mass = sum(density.pdf(b / 10 + (i + 0.5) / 1000) for i in range(100)) / 1000
+        assert abs(share - mass) < 0.015, (b, share, mass)
+
+
+def test_half_the_candidates_come_from_the_box(monkeypatch):
+    calls = {"good": 0, "box": 0}
+
+    def sample(self, rng):
+        calls["good"] += 1
+        return rng.random()
+
+    plain = Parameter.from_unit
+
+    def from_unit(self, unit):
+        calls["box"] += 1
+        return plain(self, unit)
+
+    space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}})
+    history = [Observation({"x": (i + 0.5) / 30}, float(i % 7)) for i in range(30)]
+    monkeypatch.setattr(_Density, "sample", sample)
+    monkeypatch.setattr(Parameter, "from_unit", from_unit)
+    assert propose_tpe(space, history, random.Random(3)) is not None
+    assert calls == {"good": tuning.FROM_GOOD, "box": tuning.FROM_PRIOR} == {"good": 24, "box": 24}
+
+
 def test_too_few_observations_is_nothing_to_estimate_from():
     space = _wide_space()
     assert propose_tpe(space, _history(space, MIN_OBSERVATIONS - 1, 1), random.Random(1)) is None
@@ -136,15 +195,22 @@ def test_too_few_observations_is_nothing_to_estimate_from():
 
 
 def test_the_estimator_finds_the_four_parameters_that_matter_among_twenty_eight():
+    """Over five histories of 40, 40 proposals each. With a tenth of 40 as the
+    good set (four configurations), one history can hold two greedy starts
+    among its best four (seed 7 does), and the estimator then rightly stops
+    avoiding greedy there; pooled, measured 194 of 200 proposals with the
+    boolean off and 178 of 200 not greedy."""
     space = _wide_space()
-    history = _history(space, 40, seed=7)
-    rng = random.Random(11)
-    proposals = [propose_tpe(space, history, rng) for _ in range(40)]
-    sampled = space.latin_hypercube(40, random.Random(12))
+    proposals = []
+    for history_seed in (1, 2, 3, 4, 7):
+        history = _history(space, 40, seed=history_seed)
+        rng = random.Random(11)
+        proposals += [propose_tpe(space, history, rng) for _ in range(40)]
+    sampled = space.latin_hypercube(200, random.Random(12))
     assert all(space.validate(p)[1] == [] for p in proposals)
     assert fmean(map(_fitness, proposals)) > fmean(map(_fitness, sampled)) + 1.0
-    assert sum(1 for p in proposals if not p["exhaustive"]) >= 30, "it has learnt what the boolean costs"
-    assert sum(1 for p in proposals if p["init"] != "greedy") >= 30
+    assert sum(1 for p in proposals if not p["exhaustive"]) >= 160, "it has learnt what the boolean costs"
+    assert sum(1 for p in proposals if p["init"] != "greedy") >= 160
 
 
 def test_it_never_proposes_what_has_already_been_evaluated():
@@ -287,7 +353,10 @@ def test_siblings_proposed_this_generation_push_tpe_away():
     lower and the next proposal lands further from it. Same observations, same
     rng seed, with and without the sibling taken: over 200 seeds the mean
     distance from the sibling grows. (Before, `taken` only excluded the exact
-    point, and the two proposals were the same.)"""
+    point, and the two proposals were the same.) Half the candidates come
+    from the box (A2.5b), so proposals already spread more without the liar:
+    measured 0.212 without, 0.259 with it taken, a paired difference of 0.046
+    (SE 0.009); asserted above 0.02."""
     space = _wide_space(0)
     history = _history(space, 30, seed=7)
     plain, liar = [], []
@@ -297,7 +366,7 @@ def test_siblings_proposed_this_generation_push_tpe_away():
         pushed = propose_tpe(space, history, random.Random(10_000 + s), taken=[sibling])
         liar.append(space.distance(pushed, sibling))
     print(f"mean distance from the sibling: {fmean(plain):.4f} without, {fmean(liar):.4f} with it taken")
-    assert fmean(liar) > fmean(plain) + 0.05, "measured: 0.145 without, 0.252 with it taken"
+    assert fmean(liar) > fmean(plain) + 0.02, "measured: 0.212 without, 0.259 with it taken"
 
 
 def test_a_taken_configuration_does_not_count_towards_the_good_set():

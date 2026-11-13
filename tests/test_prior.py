@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import random
 import shutil
+from dataclasses import replace
+from statistics import fmean
 
 import pytest
 import yaml
@@ -20,7 +22,8 @@ from evolvekit.harness.library import BUILT_IN
 from evolvekit.harness.manifest import Setting, load_harness
 from evolvekit.harness.plan import Plan
 from evolvekit.harness.study import SettingChoice, Study, load_study, save_study
-from evolvekit.search.operators import latin_rows, param_lhs_typed
+from evolvekit.search.operators import latin_rows, param_lhs_typed, param_local
+from evolvekit.search.tuning import Observation, _Density, propose_tpe
 from evolvekit.space import ParameterSpace, SpaceError
 
 
@@ -242,6 +245,90 @@ def test_prior_is_not_part_of_the_cache_key():
     with_prior = ParameterSpace.parse({"n": {"type": "int", "low": 2, "high": 30, "default": 8, "prior": {"value": 12, "weight": 0.5}}})
     assert plain.render_block({"n": 9}) == with_prior.render_block({"n": 9})
     assert plain.describe() == with_prior.describe()
+
+
+# -- priors beyond the sweep: the estimator and the first local steps (Q18) ----
+
+UNIT = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.2}})
+
+
+def _with_prior(space: ParameterSpace, value, weight: float) -> ParameterSpace:
+    """`space` with a prior on its one parameter. Built rather than parsed, so a
+    weight of one can be tried: a declaration refuses it, the density does not."""
+    return ParameterSpace((replace(space.parameters[0], prior=(value, weight)),))
+
+
+def test_a_numeric_prior_adds_four_weights_of_a_narrow_gaussian_to_the_uniform():
+    """No observations: the density is the prior part alone, (U + 4w G) / (1 + 4w).
+    At w 0.5 and the prior's own value 0.8: G(0.8) = phi(0) / (0.1 Z),
+    Z = Phi(2) - Phi(-8) = 0.97725, so G = 4.0822 and the pdf (1 + 2 G) / 3 = 3.0548.
+    It integrates to one, the narrow Gaussian renormalised inside [0, 1]."""
+    density = _Density(_with_prior(UNIT, 0.8, 0.5).parameters[0], [])
+    assert density.pdf(0.8) == pytest.approx(3.0548, abs=1e-3)
+    assert density.pdf(0.0) == pytest.approx(1 / 3, abs=1e-6), "eight bandwidths from the prior: the uniform's share alone"
+    edge = _Density(_with_prior(UNIT, 1.0, 0.5).parameters[0], [Observation({"x": 0.9}, 1.0)])
+    assert sum(edge.pdf((i + 0.5) / 4000) for i in range(4000)) / 4000 == pytest.approx(1.0, abs=0.005)
+
+
+def test_a_choice_prior_is_four_weights_of_pseudo_counts_on_its_value():
+    """A bool with a prior on True at w 0.5 and no observations: 1/2 on each value from
+    the uniform part, 4 x 0.5 = 2 more on True; total W = 3, so True has 5/6."""
+    flag = ParameterSpace.parse({"on": {"type": "bool", "default": False, "prior": {"value": True, "weight": 0.5}}})
+    density = _Density(flag.parameters[0], [])
+    assert (density.pdf(False), density.pdf(True)) == pytest.approx((1 / 6, 5 / 6))
+    plain = _Density(ParameterSpace.parse({"on": {"type": "bool", "default": False}}).parameters[0],
+                     [Observation({"on": True}, 1.0)])
+    assert (plain.pdf(False), plain.pdf(True)) == pytest.approx((1 / 4, 3 / 4)), "without a prior, as before"
+
+
+def test_a_prior_pulls_tpe_towards_its_value():
+    """Same observations, flat around the box; a prior at 0.8 with weight 1: over
+    200 seeds the mean proposal moves towards 0.8 by at least 0.1 on the unit scale.
+    Flat: each seed has its own history, 30 stratified points with scores drawn at
+    random, so no side of the box is better on average. Measured: 0.481 without the
+    prior, 0.698 with it, a paired shift of 0.217 (SE 0.021); at weight 0.5, 0.114."""
+    pulled = _with_prior(UNIT, 0.8, 1.0)
+    plain, near = [], []
+    for s in range(200):
+        rng = random.Random(s)
+        history = [Observation({"x": (i + rng.random()) / 30}, rng.random()) for i in range(30)]
+        plain.append(propose_tpe(UNIT, history, random.Random(10_000 + s))["x"])
+        near.append(propose_tpe(pulled, history, random.Random(10_000 + s))["x"])
+    print(f"mean proposal: {fmean(plain):.3f} without the prior, {fmean(near):.3f} with it at 0.8")
+    assert fmean(near) >= fmean(plain) + 0.1
+
+
+def test_a_local_step_from_the_seed_starts_at_the_prior_value_at_its_weight():
+    """Decision 11: one parameter, default 0.2, prior value 0.8, weight w = 0.5, 4000 seeds;
+    "near" = within one step (0.15) of the prior value. Expected share
+    w * 0.68 + (1 - w) * plain: 0.68 = P(|N(0, 0.15)| <= 0.15) is a step from the prior
+    value landing near it (a step past 1 is clamped onto 1, 0.2 away: not near), and
+    plain = P(N(0, 0.15) >= 0.45) = 0.0013, the share of plain steps from 0.2 that land
+    near 0.8. So about 34.2 %; measured 35.0 % (SE 0.75 points), plain 0.18 %;
+    assert 0.30 <= share <= 0.40."""
+    def near(space) -> float:
+        start = seed_candidate(space)
+        return sum(abs(param_local(space, start, seed=s).meta["params"]["x"] - 0.8) <= 0.15 for s in range(4000)) / 4000
+
+    share, plain = near(_with_prior(UNIT, 0.8, 0.5)), near(UNIT)
+    print(f"near the prior: {share:.1%} from the seed with the prior, {plain:.2%} plain")
+    assert 0.30 <= share <= 0.40
+
+
+def test_a_local_step_from_another_parent_ignores_the_prior():
+    space = _with_prior(UNIT, 0.8, 0.5)
+    parent = Candidate(id="g001-c0001", generation=1, block=space.render_block({"x": 0.2}), source="",
+                       operator="param_lhs", params={"x": 0.2})
+    for s in range(50):
+        assert param_local(space, parent, seed=s).meta == {"params": space.perturb({"x": 0.2}, random.Random(s))}
+        unpriored = param_local(UNIT, seed_candidate(UNIT), seed=s)
+        assert unpriored.meta == {"params": UNIT.perturb({"x": 0.2}, random.Random(s))}, "no prior: nothing more drawn"
+
+
+def test_a_local_step_that_starts_at_the_prior_says_so():
+    space = _with_prior(UNIT, 0.8, 0.5)
+    started = [param_local(space, seed_candidate(space), seed=s).meta for s in range(200)]
+    assert 70 <= sum(m.get("prior") == ["x"] for m in started) <= 130, "about half, at w 0.5"
 
 
 @pytest.mark.parametrize("prior, words", [
