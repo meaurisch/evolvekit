@@ -281,7 +281,26 @@ def test_a_choice_prior_is_four_weights_of_pseudo_counts_on_its_value():
     assert (plain.pdf(False), plain.pdf(True)) == pytest.approx((1 / 4, 3 / 4)), "without a prior, as before"
 
 
-def test_a_prior_pulls_tpe_towards_its_value():
+@pytest.mark.parametrize("raw, value", [
+    ({"type": "float", "low": 1.0, "high": 10_000.0, "default": 10.0, "log": True}, 1000.0),
+    ({"type": "int", "low": 2, "high": 30, "default": 8}, 12),
+])
+def test_a_log_or_int_prior_peaks_at_its_value_on_the_unit_scale(raw, value):
+    """The bump sits at `to_unit(value)` (0.75 for 1000 on a log 1..10 000; 10/28 for
+    12 on 2..30), not at the raw value's place in the range."""
+    parameter = ParameterSpace.parse({"p": {**raw, "prior": {"value": value, "weight": 0.5}}}).parameters[0]
+    density = _Density(parameter, [])
+    values = [parameter.from_unit(i / 1000) for i in range(1001)]
+    peak = max(values, key=density.pdf)
+    assert abs(parameter.to_unit(peak) - parameter.to_unit(value)) <= 0.001
+    assert density.pdf(value) == pytest.approx(density.pdf(peak), rel=1e-4)
+    assert density.pdf(value) > 2.5, "about (1 + 2 x 4) / 3 at its centre"
+    raw_place = (value - raw["low"]) / (raw["high"] - raw["low"])
+    if raw.get("log"):
+        assert density.pdf(parameter.from_unit(raw_place)) < 0.5, "the raw value's place in the range is far off"
+
+
+def test_a_prior_pulls_tpe_towards_its_value_by_at_least_a_tenth():
     """Same observations, flat around the box; a prior at 0.8 with weight 1: over
     200 seeds the mean proposal moves towards 0.8 by at least 0.1 on the unit scale.
     Flat: each seed has its own history, 30 stratified points with scores drawn at
@@ -305,7 +324,9 @@ def test_a_local_step_from_the_seed_starts_at_the_prior_value_at_its_weight():
     value landing near it (a step past 1 is clamped onto 1, 0.2 away: not near), and
     plain = P(N(0, 0.15) >= 0.45) = 0.0013, the share of plain steps from 0.2 that land
     near 0.8. So about 34.2 %; measured 35.0 % (SE 0.75 points), plain 0.18 %;
-    assert 0.30 <= share <= 0.40."""
+    assert 0.30 <= share <= 0.40. When A2.6c reflects a step at the end of the range
+    instead of clamping it, 0.68 becomes 0.73 (a step of 0.25..0.55 past 0.8 comes
+    back near it) and the share about 36.6 %: re-measure this test then."""
     def near(space) -> float:
         start = seed_candidate(space)
         return sum(abs(param_local(space, start, seed=s).meta["params"]["x"] - 0.8) <= 0.15 for s in range(4000)) / 4000

@@ -2639,7 +2639,10 @@ range, and a bool or a choice is drawn as the winner itself. The prior also
 acts on the rest of the search: `param_tpe` counts it as 4 × its weight
 observations at the winner's value in both its densities, and a `param_local`
 step from the starting point starts from the winner's value, with the prior's
-weight as its chance ([Operators](#operators)). `study new` says
+weight as its chance ([Operators](#operators)). That start matters only when
+the starting point differs from the prior's value: a warm start already puts
+each tuned setting at the winner, so there it changes nothing, while
+`param_tpe`'s prior still acts. `study new` says
 what it did on stderr, and `study.yaml` records it as `warm: {from, run, at,
 ranked}`. The warm start changes the starting point the final check compares
 with: the result is judged against the winner's values, not the settings in
