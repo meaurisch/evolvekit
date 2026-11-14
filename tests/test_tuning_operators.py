@@ -719,6 +719,21 @@ def test_a_gain_inside_the_noise_is_not_a_success(tmp_path):
     assert quiet.step_scale == pytest.approx(0.15 * 1.2 ** 2.4)
 
 
+def test_the_success_margin_widens_with_an_estimated_noise(tmp_path):
+    """Decision 17b: the margin is the elite rule's, `Archive.margin`: on a noise
+    estimated with 2 df it is 1.22 noise sd (Student's t at the 24 % tail), so a
+    gain of 1.1 sd is no success; with the noise known (infinite df) it is."""
+    estimated, parent = _step_driver(tmp_path)
+    estimated.grid.noise_sd, estimated.grid.noise_df = 1.0, 2.0
+    assert estimated.grid.margin == pytest.approx(1.219, abs=1e-3)
+    estimated._adapt_step(1, _local_children(estimated, parent, 1, [11.1, 11.1, 11.1]))
+    assert estimated.step_scale == pytest.approx(0.15 * 1.2 ** -0.6)
+    known, known_parent = _step_driver(tmp_path / "known")
+    known.grid.noise_sd = 1.0
+    known._adapt_step(1, _local_children(known, known_parent, 1, [11.1, 11.1, 11.1]))
+    assert known.step_scale == pytest.approx(0.15 * 1.2 ** 2.4)
+
+
 def test_the_step_balances_at_one_success_in_five_however_many_children_a_round_has(tmp_path, monkeypatch):
     """Decision 16, seeded simulation of `_adapt_step` itself: each local child improves
     with chance p, 1-3 local children a round, 3000 rounds each from 0.15 (no limit is

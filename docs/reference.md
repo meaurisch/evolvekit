@@ -93,7 +93,7 @@ live run is built from:
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
   | `raced_out` | when a race stops a candidate | `candidate_id`, `stage`, `private`, `reason` (the sentence, with its margin), `runs_done`, `looks` (the stage's look counts) and `margin_pct` (the margin it was stopped by, percent, to two places) |
-  | `noise_checked` | once per run, after the seed has passed the final stage and been [run again](#stochastic-evaluators-seeds-n) | `stage`, `instance` (the one the seed ran again on; `null` without instances), `repeatable`, `runs` (the seed's runs compared there) and `cv` (the objective's relative noise the search now reads; 0 on a repeatable stage at `seeds: 1`) |
+  | `noise_checked` | once per run and per command stage with `{seed}`, after the seed has passed that stage and been [run again](#stochastic-evaluators-seeds-n) | `stage`, `instance` (the one the seed ran again on; `null` without instances), `repeatable`, `runs` (the seed's runs compared there) and `cv` (the objective's relative noise the search now reads; 0 on a repeatable stage at `seeds: 1`) |
   | `screening_changed` | when a stage with [`promote.adapt`](#how-it-works) changes after a round (*A screen that checks itself*) | `stage`, `k` (how many it promotes a round from now on), `off` (passed over for the rest of the run), `rho` (the rank correlation read; `null` when the cap alone switched it off before one could be read) and `n` (the candidates it was read over) |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
@@ -242,9 +242,14 @@ stage and, when the stage's noise is known
 ([Stochastic evaluators](#stochastic-evaluators-seeds-n)), every candidate within a
 **noise band** of the k-th score: twice one candidate's score noise at that
 stage (`2 · score_sd`, a mean over the stage's `seeds`). The top k and the band
-together are capped at `2k`, by score (ties by id). With k = 2 of eight
-candidates, one truly one noise sd better than the other seven is left out
-about 18 % of the time (about 41 % with the top k alone). The behaviour-twin
+together are capped at `2k`, by score (ties by id). A candidate exactly as
+good as the k-th falls below the band in about 8 % of rounds, whether the
+noise is well measured or rests on the seed's three runs: the band's normal
+quantile becomes Student's t at the estimate's degrees of freedom (on a
+calibration's two, the band is 1.57 times as wide). With k = 2 of eight
+candidates and the noise well measured, one truly one noise sd better than the
+other seven is left out about 18 % of the time (about 41 % with the top k
+alone). The behaviour-twin
 rule compares a child only with earlier rounds
 ([The novelty filters](#the-novelty-filters--structural-near-and-behavioural)),
 so it does not empty the band: a child just below the k-th of its own round is
@@ -378,7 +383,9 @@ or on any gain when its score is the mean of more runs than the elite's
 noise estimate — a repeatable evaluator, or `seeds: 1` without `{seed}` — that is
 a strict `>`, as it always was. A challenger exactly as good as the elite, both
 measured with noise sd σ, takes the cell in about 24 % of trials (50 % without
-the margin). A re-bin of the auto axes applies the same rule, in id
+the margin), whether σ is well measured or estimated from the seed's three
+runs: the margin's normal quantile becomes Student's t at the estimate's
+degrees of freedom (1.22 σ̂ on a calibration's two). A re-bin of the auto axes applies the same rule, in id
 order; a resumed run rebuilds the grid with the noise as it is when it resumes.
 
 *Parent selection: `search.selection_temperature`.* Each generation's parents
@@ -898,8 +905,9 @@ pool (per element for a per-instance list, in that list's own units; under
 abandoned contributes nothing. The file is saved after every generation and read
 back on resume; a run written before it starts with no noise.
 
-*Is the evaluator repeatable?* Once per run, after the seed has passed the
-final stage, and only when that stage's command has a `{seed}`: the seed is run
+*Is the evaluator repeatable?* Once per run and per command stage, after the
+seed has passed that stage, and only when the stage's command has a `{seed}`
+(a screen as well as the final stage): the seed is run
 **once more on seed 0**, with the cache bypassed (a lookup would read the first
 run back), on the instance whose seed run took the median time (without
 `instances`, on the whole input set). If every measure equals the first run to
@@ -907,12 +915,18 @@ run back), on the instance whose seed run took the median time (without
 time, left out), the stage is *repeatable*: same program, same seed, same
 numbers. Every candidate runs on the same seeds, so on such a stage what matters
 is how far two candidates' *difference* on matching seeds moves, not how far
-the seeds spread: the noise a comparison reads is the **paired** one — for
-each candidate with two or more seeds, the variance of its per-seed differences
-to the seed's run on the same seed, pooled, and halved to be the noise of one
-side. At `seeds: 1` that is 0: a repeatable evaluator is compared exactly, as
-before. On a stage that is not repeatable (a wall-clock solver) the noise is the
-across-seed one.
+the seeds spread: the noise a comparison reads is the **paired** one — the
+two-way (candidate × seed) residual over every candidate that ran the stage's
+seeds, the seed's own runs included: each run minus its candidate's mean,
+minus that seed's mean over the candidates, plus the grand mean, with
+(C − 1)(S − 1) degrees of freedom for C candidates on S seeds. That is the
+noise of one side (half the residual variance of a difference); every
+candidate's own level and every seed's own effect drop out, so the estimate
+sharpens as candidates come in (`work/noise.json` keeps each candidate's
+per-seed runs; a file written before them keeps its differences to the seed,
+which still count). At `seeds: 1` it is 0: a repeatable evaluator is compared
+exactly, as before. On a stage that is not repeatable (a wall-clock solver)
+the noise is the across-seed one.
 
 *When nothing replicates* (`seeds: 1`, not repeatable): the same check also
 runs the seed on **seed 1**, one more run in all, and the three runs of the
@@ -924,19 +938,29 @@ freedom, so a calibrated noise is quoted to **one significant digit** ("about
 on a repeatable stage it is measured and reported (`sd_across`) but never read.
 The extra runs are not evaluations of the search (no `eval_started` /
 `eval_finished`, not cached, not counted against `budget.max_full_evals_per_day`); the run logs one
-line (`noise: the seed run again on i2: one run varies by about 2 % (the
-search's comparisons allow for it)`, or `… the evaluator gives the same numbers
-for the same seed (comparisons are paired by seed)`) and the event log one
+line per stage (`noise: the seed run again on i2: one run varies by about 2 %
+(the search's comparisons allow for it)`, or `… the evaluator gives the same
+numbers for the same seed (comparisons are paired by seed)`; for a stage before
+the final one, `noise at stage <id>: …`) and the event log one
 `noise_checked`. A failed extra run is logged and leaves the stage unmeasured.
+Until a stage's repeatability is measured, its behaviour twins are compared by
+the exact fingerprint: a screen that is deterministic per seed has an
+across-seed spread that is the seeds', not noise.
 
 *No `{seed}`*: with `seeds: 1` nothing is run again and the noise is 0 —
 every comparison is made as if the evaluator were exact, which is how every
 rule read before this estimate existed. (`seeds > 1` without `{seed}` is a
 config error, above.)
 
-Limits: the estimate is read as it is from the first candidates on — two
-degrees of freedom after a calibration — with no minimum of evidence before it
-counts. It is shown by `status` (`progress.noise`) and
+*Few degrees of freedom.* The estimate is read as it is from the first
+candidates on — two degrees of freedom after a calibration, or from the seed's
+own runs at `seeds: 3` — and every rule that reads it allows for how little
+that is: its normal quantile becomes Student's t at the same tail probability,
+with the estimate's degrees of freedom (across seeds Σ(nᵢ − 1) over the
+candidates pooled; paired (C − 1)(S − 1); a calibration 2). Each rate quoted
+below then holds whether the noise rests on three runs or three hundred: an
+equal candidate is kept out by the veto in about 8 % either way, not 15 %, and
+a true twin is caught in about 84 %, not 70 %. It is shown by `status` (`progress.noise`) and
 [`preflight`](#before-you-spend-anything-preflight). Each rule that reads the
 estimate says so in its own section and is listed here:
 
@@ -1091,8 +1115,17 @@ own, and the framework knows what it could not know before:
   nothing as the last cases come in (the factor √(1 − m/n) over the m of n
   instances compared). The race asks whether a candidate is behind *on this
   stage's own cases* — their mean is its score — so those n cases are the whole
-  population. A candidate exactly as good as the incumbent is raced out in
-  under 1 % of runs against a fresh incumbent, rising to about 3 % against the
+  population. At `seeds > 1` a candidate's first cases are its seed-0 runs,
+  and they are compared with the incumbent's own values **on the same seeds**
+  (`work/incumbent.json` keeps them per seed), so on a repeatable evaluator the
+  seed's own effect is the same on both sides and the paired noise is the right
+  one; an incumbent file from before that keeps only its means over its S
+  seeds, and the race then reads the across-seed noise scaled by
+  √((1 + 1/S)/2). The noise term is widened to Student's t at the estimate's
+  degrees of freedom. A candidate exactly as good as the incumbent is raced out in
+  under 1 % of runs against a fresh incumbent — whether the run noise is well
+  measured or calibrated from the seed's three runs, and on a repeatable
+  evaluator at `seeds: 3` — rising to about 3 % against the
   best of a long run (the best of 50; about 1.4 % against the best of eight),
   with 2 % run noise. One that trades cases (per-case differences of 3 %, no
   run noise) and is not behind on the mean over the stage's cases is raced out
@@ -1220,7 +1253,8 @@ scalars is unaffected.
 solver that stopped a microsecond later, and the eighth digit has moved — and
 fewer digits are no answer either: three significant digits call two
 candidates 0.3 % apart twins under a 0.1 % noise, and 1.5 % apart novel under a
-2 % one. So on a stage whose evaluator is **not repeatable** and that has a
+2 % one. So on a stage whose evaluator was measured **not repeatable** (the
+seed run again) and that has a
 [noise estimate](#stochastic-evaluators-seeds-n) (`work/noise.json`), a child is
 a twin of an earlier candidate when every measure the evaluator reports — per
 case on a stage with `instances` (the `<kpi>_per_instance` values, in the
@@ -1246,15 +1280,21 @@ any order.
   times the value. A measure with no noise (a `vehicles` count beside a noisy
   `cost`) must be equal at `signature_digits`; one missing on either side, or
   a list of another length, is never a twin.
-- `c` is √2 for one noisy number (the margin is then `2·σ̂/√seeds`) and grows
-  with their count (about 2.4 for ten), so that a true twin is caught about
-  **84 %** of the time however many cases the stage has; at `2·σ̂` per case,
-  ten cases would catch one 18 % of the time.
+- `c` is √2 for one noisy number with a well-measured σ̂ (the margin is then
+  `2·σ̂/√seeds`) and grows with their count (about 2.4 for ten), so that a true
+  twin is caught at least about **84 %** of the time however many cases the
+  stage has; at `2·σ̂` per case, ten cases would catch one 18 % of the time.
+  σ̂ is estimated, so `c` is Student's t quantile at the same probability with
+  σ̂'s degrees of freedom: one number is then caught in about 84 % on a
+  calibration's two degrees of freedom too, and ten cases whose noise is one
+  calibrated estimate in about 94 % (measures whose noise is one estimate
+  miss together, which is why the catch is *at least* 84 %).
 - A real difference of four noise sd (twice the margin) is still called a twin
-  about **8 %** of the time.
+  about **8 %** of the time when σ̂ is well measured (more often on few
+  degrees of freedom, where the margin is wider).
 - Where many earlier candidates sit close together, a child truly one run-sd
   better than all of them is evaluated about 95 % of the time at `seeds: 3`
-  (about 84 % at `seeds: 1`). When those candidates' own scores are noisy, the
+  (about 84 % at `seeds: 1`), with the noise well measured. When those candidates' own scores are noisy, the
   luckiest of them can measure above a better child, which then counts as its
   twin far more often; that is selection on measured scores, not this rule.
 
@@ -1272,7 +1312,8 @@ three-digit rounding this replaces, is a config error.
 none. `auto` does not check a stage with `seeds > 1` while it says nothing a
 twin could be judged by — its noise is still 0 and it is not known to be
 repeatable — but keeps what each candidate did there, so the check starts,
-seed included, once the seed run again or the runs' spread has said.
+seed included, once the seed run again or the runs' spread has said; the noise
+rule itself waits for the seed run again to find the stage not repeatable.
 
 That last filter exists because of the 2026-08-22/23 run: five paid children
 were monotone re-expressions of best fit — `-(b - item) ** 1.01`, `item - b`
@@ -1319,7 +1360,10 @@ margin, which are judged by the literal rule). The `!` flag follows the same
 margin.
 
 With the margin, a candidate exactly as good as the seed is kept out in about
-8 % of cases; without a noise estimate (σ̂ = 0, an evaluator with neither
+8 % of cases, whether σ̂ is well measured or rests on the seed's three runs
+(the margin's normal quantile is Student's t at σ̂'s degrees of freedom: on a
+calibration's two, 1.57 times `2 · σ̂/√seeds`; with the normal one it was
+15 %); without a noise estimate (σ̂ = 0, an evaluator with neither
 `seeds: N` nor `{seed}`) the comparison is literal, and on a hold-out that
 varies from run to run about half of them are. The 8 % is an average over runs:
 the seed's hold-out score is one draw, so in one run the rate for an equal
@@ -1409,7 +1453,9 @@ candidate's score)`: with no noise estimate (see
 [Stochastic evaluators](#stochastic-evaluators-seeds-n)) it is `1e-6`, the old
 default. On a noisy final stage, a generation whose best is exactly as good as
 the run's best, both measured once with noise sd σ, reads as an improvement in
-about 36 % of generations instead of 50 %. The noise is that of the public
+about 36 % of generations instead of 50 %, whether σ is well measured or
+estimated from the seed's three runs (the half is widened to Student's t at the
+estimate's degrees of freedom: 0.58 σ̂ on a calibration's two). The noise is that of the public
 score: with `evaluate.holdout_penalty > 0` and a candidate whose hold-out falls
 short of its public score, its fitness also carries the hold-out's noise, so
 its real noise differs from the one this rule and the elite rule read. On a resumed run the recorded

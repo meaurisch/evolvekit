@@ -58,6 +58,7 @@ from evolvekit.evaluate.stages import (
 from evolvekit.evaluate.types import EvalResult, StageOutcome
 from evolvekit.leaderboard import veto_reason
 from evolvekit.ledger import _atomic_write
+from evolvekit.stats import t_scale
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
     from evolvekit.tree import Repo, Tree
@@ -154,6 +155,18 @@ def race_warnings(config: Config) -> list[str]:
                 "instances, or remove `race`"
             )
     return warnings
+
+
+def _incumbent_by_seed(held: Mapping[str, Any]) -> dict[int, dict[str, float]]:
+    """`incumbent.json`'s per-seed values of one stage, `{seed: {instance:
+    value}}`; empty for a file from before they were kept, or a broken entry."""
+    raw = held.get("by_seed")
+    if not isinstance(raw, dict):
+        return {}
+    try:
+        return {int(seed): {str(k): float(v) for k, v in row.items()} for seed, row in raw.items()}
+    except (TypeError, ValueError, AttributeError):
+        return {}
 
 
 def archive_threshold(scores: Sequence[float], percentile: float) -> float | None:
@@ -386,7 +399,7 @@ class Cascade:
 
             scored = [(cid, results[cid].score) for cid in survivors]
             members = list(own.get(stage.id) or ()) or prior
-            band = 2.0 * self.noise.score_sd(stage.id, self.config.evaluate.score, stage.seeds)
+            band = self._noise_margin(stage.id, stage.seeds)
             rule = stage.promote
             if stage.id in self.promote_k and rule.top_k_per_generation is not None:
                 rule = replace(rule, top_k_per_generation=self.promote_k[stage.id])
@@ -721,10 +734,27 @@ class Cascade:
         return payload if isinstance(payload, dict) else {}
 
     def _race_for(self, stage: StageConfig, candidates: Sequence[Candidate], *, private: bool) -> Race | None:
+        """The stage's race against its incumbent (Decision 17a): a
+        challenger's prefix is compared with the incumbent's values on the same
+        seeds (`by_seed`), so the noise is that of one run on each side --
+        paired on a repeatable stage, across seeds otherwise. An incumbent file
+        from before the per-seed values were kept has only the means over the
+        incumbent's S seeds: a one-seed prefix against such a mean differs by
+        `cv_across² · (1 + 1/S)` at most (exactly, on a stage that is not
+        repeatable), so the across cv is scaled to the one side that gives
+        the same difference, `cv_across · √((1 + 1/S)/2)` -- 1 at `seeds: 1`."""
         held = self.incumbent.get(stage.id)
         if stage.race is None or private or not held:
             return None  # nothing to race against yet: the first candidate through always finishes
         objective = self.config.evaluate.score.objective
+        name = per_instance_key(objective)
+        by_seed = _incumbent_by_seed(held)
+        if stage.seeds > 1 and not all(seed in by_seed for seed in range(stage.seeds)):
+            by_seed = {}
+            cv = self.noise.vector_cv(stage.id, name, across=True) * math.sqrt((1.0 + 1.0 / stage.seeds) / 2.0)
+            df = self.noise.vector_cv_df(stage.id, name, across=True)
+        else:
+            cv, df = self.noise.vector_cv(stage.id, name), self.noise.vector_cv_df(stage.id, name)
         return Race(
             objective=objective,
             minimize=self.config.evaluate.score.direction == "minimize",
@@ -734,8 +764,10 @@ class Cascade:
             exempt=frozenset(c.id for c in candidates if c.operator == SEED_OPERATOR),
             # Raw per-instance values on both sides (decision 4); a ratio, so
             # raw and percent of the seed agree.
-            cv=self.noise.vector_cv(stage.id, per_instance_key(objective)),
+            cv=cv,
             instances=len(stage.instances),
+            df=df,
+            by_seed=by_seed,
         )
 
     def _note_incumbent(self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome) -> None:
@@ -754,7 +786,15 @@ class Cascade:
             score < held["score"] if self.config.evaluate.score.direction == "minimize" else score > held["score"]
         )
         if better:
-            self.incumbent[stage.id] = {"id": candidate.id, "score": score, "values": values}
+            held = {"id": candidate.id, "score": score, "values": values}
+            rows = outcome.seed_vectors.get(per_instance_key(objective)) or []
+            if len(rows) == len(outcome.seed_list) and all(len(r) == len(outcome.instance_names) for r in rows):
+                # Its own values per seed, what a challenger's prefix on the
+                # same seeds is compared with (Decision 17a).
+                held["by_seed"] = {
+                    str(seed): dict(zip(outcome.instance_names, row)) for seed, row in zip(outcome.seed_list, rows)
+                }
+            self.incumbent[stage.id] = held
             # Atomically: half a file reads back as "nothing to race against",
             # and a resumed run would quietly stop racing.
             _atomic_write(self.work_dir / "incumbent.json", json.dumps(self.incumbent, indent=2, sort_keys=True) + "\n")
@@ -862,17 +902,33 @@ class Cascade:
         non-zero and of one sign: across a change of sign the ratio says
         nothing about scale. Else 0, the literal rule; always 0 with
         `score.levels`. On a repeatable stage both estimates are the paired
-        ones, 0 at `seeds: 1`."""
+        ones, 0 at `seeds: 1`.
+
+        `σ_priv` is estimated: with its degrees of freedom the margin's normal
+        quantile becomes Student's t (`_noise_margin`), so an equal candidate
+        is kept out in about 8 % at any df -- not 15 % on a calibration's 2."""
         final, score = self.config.final_stage, self.config.evaluate.score
         if score.levels:
             return 0.0
         private_key = f"{final.id}/private"
         if self.noise.read_known(private_key):
-            return 2.0 * self.noise.score_sd(private_key, score, final.seeds)
+            return self._noise_margin(private_key, final.seeds)
         public, private = self.seed_public, self.seed_private
         if public is None or private is None or public == 0 or private == 0 or (public > 0) != (private > 0):
             return 0.0
-        return 2.0 * self.noise.score_sd(final.id, score, final.seeds) * abs(private / public)
+        return self._noise_margin(final.id, final.seeds) * abs(private / public)
+
+    def _noise_margin(self, key: str, seeds: int) -> float:
+        """`2 · score_sd` at `key`, widened to Student's t at the estimate's
+        degrees of freedom: two equal candidates' scores differ by `√2 ·
+        score_sd` sd, so the margin is `z = √2` sd of the difference
+        (`stats.t_scale(√2, score_df)`, 1.57 at 2 df, 1 at infinite df). What
+        the hold-out veto and the promotion band read."""
+        score = self.config.evaluate.score
+        sd = self.noise.score_sd(key, score, seeds)
+        if sd <= 0:
+            return 0.0
+        return 2.0 * sd * t_scale(math.sqrt(2.0), self.noise.score_df(key, score))
 
     def _note_noise(
         self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome, *, private: bool
@@ -884,67 +940,78 @@ class Cascade:
         self.noise.observe(key, candidate.id, outcome, is_seed=candidate.operator == SEED_OPERATOR)
 
     def _check_noise(self, seed: Candidate, paths: dict[str, Path], results: dict[str, EvalResult]) -> None:
-        """The seed run again at the final stage, once per run (`evaluate/noise.py`):
-        seed 0 once more with the cache bypassed -- a lookup would read the
-        first run back and call every evaluator repeatable -- and, at
-        `seeds: 1`, seed 1, on the instance whose seed run took the median
-        time. It says whether the stage is repeatable and, where nothing
-        replicates, calibrates the noise. Not counted against
-        `budget.max_full_evals_per_day`: it is a measurement, not a candidate."""
-        final = self.config.final_stage
-        if final.kind != "command" or self.noise.repeatable(final.id) is not None or self._stopping():
-            return
+        """The seed run again at every command stage it reached, once per run
+        and stage (`evaluate/noise.py`, Decision 17d): seed 0 once more with
+        the cache bypassed -- a lookup would read the first run back and call
+        every evaluator repeatable -- and, at `seeds: 1`, seed 1, on the
+        instance whose seed run took the median time. It says whether the
+        stage is repeatable and, where nothing replicates, calibrates the
+        noise. Until a stage's repeatability is measured its twin rule is the
+        exact hash. Not counted against `budget.max_full_evals_per_day`: it
+        is a measurement, not a candidate."""
         result = results[seed.id]
-        if result.abandoned or final.id not in result.stages_reached:
+        if result.abandoned:
             return
-        if not measurable(final):
-            if final.seeds > 1:
+        for stage in self.config.evaluate.stages:
+            if self._stopping():
+                return
+            if stage.kind != "command" or self.noise.repeatable(stage.id) is not None:
+                continue
+            if stage.id in result.stages_reached:
+                self._check_stage_noise(stage, seed, paths[seed.id], result)
+
+    def _check_stage_noise(self, stage: StageConfig, seed: Candidate, path: Path, result: EvalResult) -> None:
+        """`_check_noise` at one stage; the log line names the stage when it
+        is not the final one."""
+        said_where = "noise" if stage.id == self.config.final_stage.id else f"noise at stage {stage.id}"
+        if not measurable(stage):
+            if stage.seeds > 1:
                 # Defensive: `config.py` refuses `seeds > 1` without `{seed}`, so
                 # this is not reached through a config. Such runs would be
                 # repeats of one command: whatever differs between them is noise.
-                for key in (final.id, f"{final.id}/private"):
+                for key in (stage.id, f"{stage.id}/private"):
                     self.noise.set_repeatable(key, False)
             return  # seeds: 1 and no {seed}: nothing to measure, σ̂ = 0 as before
         first = next(
-            (o for o in result.outcomes if o.stage_id == final.id and not o.private and o.ok), None
+            (o for o in result.outcomes if o.stage_id == stage.id and not o.private and o.ok), None
         )
         if first is None:
             return
-        where = self._check_where(final, first)
+        where = self._check_where(stage, first)
         left = self.time_left() if self.time_left is not None else None
-        needed = run_duration(final, first)
+        needed = run_duration(stage, first)
         if left is not None and left < needed:
             self._say(
-                f"noise: the seed was not run again{where}: {left:.0f} s of the run's time is left, "
+                f"{said_where}: the seed was not run again{where}: {left:.0f} s of the run's time is left, "
                 f"less than one of its runs ({needed:.0f} s); the noise stays unmeasured"
             )
             return
         try:
-            extra = self._run_again(final, seed, paths[seed.id], first)
+            extra = self._run_again(stage, seed, path, first)
         except Exception as exc:  # noqa: BLE001 - a measurement must not end the run
-            self._say(f"noise: the seed could not be run again{where} ({exc}); the noise stays unmeasured")
+            self._say(f"{said_where}: the seed could not be run again{where} ({exc}); the noise stays unmeasured")
             return
         check = None
         if extra.ok and not extra.abandoned:
             check = record_check(
-                self.noise, final.id, final, first, extra,
+                self.noise, stage.id, stage, first, extra,
                 objective=self.config.evaluate.score.objective,
                 digits=self.config.evaluate.signature_digits,
                 ignore=self.config.evaluate.signature_ignore,
             )
         if check is None:
             why = extra.failure or ("it was stopped" if extra.abandoned else "its measures could not be compared")
-            self._say(f"noise: the seed could not be run again{where} ({why}); the noise stays unmeasured")
+            self._say(f"{said_where}: the seed could not be run again{where} ({why}); the noise stays unmeasured")
             return
-        cv = self.noise.cv(final.id, self.config.evaluate.score.objective)
+        cv = self.noise.cv(stage.id, self.config.evaluate.score.objective)
         if self.on_event is not None:
-            self.on_event("noise_checked", stage=final.id, instance=check.instance,
+            self.on_event("noise_checked", stage=stage.id, instance=check.instance,
                           repeatable=check.repeatable, runs=check.runs, cv=cv)
         if check.repeatable:
             said = "the evaluator gives the same numbers for the same seed (comparisons are paired by seed)"
         else:
             said = f"one run varies by about {about_pct(cv)} % (the search's comparisons allow for it)"
-        self._say(f"noise: the seed run again{where}: {said}")
+        self._say(f"{said_where}: the seed run again{where}: {said}")
 
     def _run_again(self, final: StageConfig, seed: Candidate, path: Path, first: StageOutcome) -> StageOutcome:
         """The extra runs of `_check_noise`: no cache, no observer (they are
@@ -1026,13 +1093,15 @@ class Cascade:
         `auto` does not check a stochastic stage while it knows neither a noise
         nor that the stage is repeatable, but keeps what it saw.
 
-        Two rules (`evaluate/signature.py`): on a stage that is not repeatable
-        and has a noise estimate (`noise.sd` of the objective > 0), the child
+        Two rules (`evaluate/signature.py`): on a stage measured not to be
+        repeatable (the seed run again, Decision 17d) that has a noise
+        estimate (`noise.sd` of the objective > 0), the child
         is a twin of the best candidate of an earlier round (`generation`:
         never one of its own round, whose order of evaluation is arbitrary,
         Decision 15) it is within the noise of on every compared number,
-        among those that scored at least as well. On a
-        repeatable stage, and with no noise, the 9-digit hash. Either way the
+        among those that scored at least as well. On a repeatable stage, one
+        whose repeatability is not measured yet, and with no noise, the
+        9-digit hash. Either way the
         candidate's hash and numbers are kept, so the seed is a target in both.
         """
         if stage.kind != "command" or outcome.private:
@@ -1043,7 +1112,10 @@ class Cascade:
         evaluate = self.config.evaluate
         objective = evaluate.score.objective
         repeatable = self.noise.repeatable(stage.id)
-        noisy = repeatable is not True and self.noise.sd(stage.id, objective) > 0
+        # The noise rule only where the stage is known not to repeat
+        # (Decision 17d): an unmeasured stage may be deterministic per seed,
+        # where the across-seed spread is the seed's, not noise.
+        noisy = repeatable is False and self.noise.sd(stage.id, objective) > 0
         skip = mode == "auto" and stage.stochastic and repeatable is not True and not noisy
         signature = behaviour_signature(
             outcome.kpis,
@@ -1090,6 +1162,15 @@ class Cascade:
                 cvs={
                     **{k: self.noise.cv(stage.id, k) for k in behaviour.kpis},
                     **{k: self.noise.vector_cv(stage.id, k) for k in behaviour.vectors},
+                },
+                dfs={k: self.noise.df(stage.id, k) for k in behaviour.kpis},
+                vector_dfs={
+                    k: [self.noise.vector_df(stage.id, k, i) for i in range(len(v))]
+                    for k, v in behaviour.vectors.items()
+                },
+                cv_dfs={
+                    **{k: self.noise.cv_df(stage.id, k) for k in behaviour.kpis},
+                    **{k: self.noise.vector_cv_df(stage.id, k) for k in behaviour.vectors},
                 },
             )
             # Earlier rounds within the noise; this round's only when every

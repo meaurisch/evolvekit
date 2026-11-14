@@ -34,7 +34,7 @@ import queue
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import fmean, stdev, variance
 from typing import Mapping, Sequence
@@ -50,6 +50,7 @@ from evolvekit.evaluate.stages import (
     _run_once,
 )
 from evolvekit.evaluate.types import StageOutcome
+from evolvekit.stats import t_scale
 from evolvekit.stopping import AnyEvent
 
 __all__ = ["Job", "Race", "race_looks", "run_instance_stage", "per_instance_key"]
@@ -87,6 +88,30 @@ class Race:
     instances: int = 0
     """How many instances the stage has, for the reason sentence; 0 (not
     given) falls back to the incumbent's count."""
+    df: float = math.inf
+    """The degrees of freedom `cv` is estimated on (`Noise.vector_cv_df`):
+    the noise term's normal quantile widens to Student's t at them
+    (Decision 17b). Infinite: a known cv, the normal rule."""
+    by_seed: Mapping[int, Mapping[str, float]] = field(default_factory=dict)
+    """The incumbent's own values per seed and instance (Decision 17a). A
+    challenger's prefix is compared with the incumbent's values **on the
+    seeds the prefix ran** (`against`), so on a repeatable stage the seed's
+    effect cancels and the paired `cv` is the right noise. Empty (a file
+    from before it): the challenger is compared with `incumbent`, the means
+    over all the incumbent's seeds, and `cv` must allow for that."""
+
+    def against(self, seeds: Mapping[str, Sequence[int]]) -> dict[str, float]:
+        """What a prefix that ran `seeds[name]` on each instance is compared
+        with: the incumbent's mean over those same seeds where `by_seed` has
+        them all, else its mean over all its seeds (`incumbent`)."""
+        out: dict[str, float] = {}
+        for name, ran in seeds.items():
+            values = [self.by_seed.get(seed, {}).get(name) for seed in ran]
+            if self.by_seed and ran and all(v is not None for v in values):
+                out[name] = fmean(v for v in values if v is not None)
+            elif name in self.incumbent:
+                out[name] = self.incumbent[name]
+        return out
 
     @property
     def population(self) -> int:
@@ -102,20 +127,23 @@ class Race:
         the last: a candidate with nothing left to run cannot be raced out."""
         return race_looks(self.after, self.population)
 
-    def _diffs(self, mine: Mapping[str, float]) -> list[float]:
+    def _diffs(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> list[float]:
         """Per instance both have (the incumbent's above 0): how far `mine` is
-        behind, as a fraction -- positive is worse, whatever the direction."""
+        behind, as a fraction -- positive is worse, whatever the direction.
+        `against` is what the incumbent reached on the prefix's own seeds
+        (`against()`); `None`, its means (`incumbent`)."""
         sign = 1.0 if self.minimize else -1.0
+        reference = self.incumbent if against is None else against
         return [
-            sign * (mine[name] / self.incumbent[name] - 1.0)
+            sign * (mine[name] / reference[name] - 1.0)
             for name in mine
-            if name in self.incumbent and self.incumbent[name] > 0
+            if name in self.incumbent and self.incumbent[name] > 0 and name in reference and reference[name] > 0
         ]
 
-    def behind_pct(self, mine: Mapping[str, float]) -> tuple[int, float]:
+    def behind_pct(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> tuple[int, float]:
         """On the instances both have a value for: how many, and how many
         percent worse `mine` is than the incumbent, averaged over them."""
-        diffs = self._diffs(mine)
+        diffs = self._diffs(mine, against)
         if not diffs:
             return 0, 0.0
         return len(diffs), 100.0 * fmean(diffs)
@@ -125,18 +153,23 @@ class Race:
         `diffs` (`_diffs`, fractions): the largest of `margin_pct`, twice the
         run-to-run noise of the mean's ratio (`200·cv`: one side at
         `cv`, the other at `cv`, a mean over m instances at `√2·cv/√m`,
-        so this is `√(2m)` sd of it, 2.8 at m = 4), and twice the standard
-        error of the cases' own spread, with the finite-population factor that
-        makes it 0 once every instance is in."""
+        so this is `z = √(2m)` sd of it, 2.8 at m = 4; with `cv` estimated
+        on `df` degrees of freedom it is widened by `stats.t_scale(z, df)`,
+        so that it is crossed as rarely as at a known cv), and twice the
+        standard error of the cases' own spread, with the finite-population
+        factor that makes it 0 once every instance is in."""
         m, n = len(diffs), self.population
         spread = 0.0
         if m >= 2 and n > 0:
             spread = 200.0 * stdev(diffs) / math.sqrt(m) * math.sqrt(max(0.0, 1.0 - m / n))
-        return max(self.margin_pct, 200.0 * self.cv, spread)
+        noise = 200.0 * self.cv
+        if noise > 0 and m >= 1:
+            noise *= t_scale(math.sqrt(2.0 * m), self.df)
+        return max(self.margin_pct, noise, spread)
 
-    def judge(self, mine: Mapping[str, float]) -> tuple[str, float] | None:
+    def judge(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> tuple[str, float] | None:
         """`decide`, with the margin it used (percent, to two places)."""
-        diffs = self._diffs(mine)
+        diffs = self._diffs(mine, against)
         compared = len(diffs)
         if compared not in self.looks:
             return None
@@ -151,10 +184,10 @@ class Race:
         )
         return reason, shown
 
-    def decide(self, mine: Mapping[str, float]) -> str | None:
+    def decide(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> str | None:
         """The reason `mine` is raced out at this look; `None` when it is not
         a look or `mine` is within the margin."""
-        verdict = self.judge(mine)
+        verdict = self.judge(mine, against)
         return None if verdict is None else verdict[0]
 
 
@@ -380,18 +413,24 @@ class _Board:
         if race is None or candidate_id in race.exempt or candidate_id in self._failure:
             return None
         by_instance: dict[str, list[float]] = {}
-        for (index, _seed), done in self._done[candidate_id].items():
+        seeds_of: dict[str, list[int]] = {}
+        for (index, seed), done in self._done[candidate_id].items():
             if race.objective in done.kpis:
                 by_instance.setdefault(self._names[index], []).append(done.kpis[race.objective])
+                seeds_of.setdefault(self._names[index], []).append(seed)
         prefix = {name: fmean(values) for name, values in by_instance.items()}
-        compared, _ = race.behind_pct(prefix)
+        # The incumbent on the prefix's own seeds (Decision 17a): units run seed
+        # by seed, so every look reads seed 0, and on a repeatable stage the
+        # seed's effect is then the same on both sides.
+        against = race.against(seeds_of)
+        compared, _ = race.behind_pct(prefix, against)
         # One read per look: a later seed's run, or a parallel worker's, can
         # land while `compared` still stands at a look already read -- a second
         # read there is a second test of the same evidence.
         if compared not in race.looks or compared >= self._instances or compared <= self._looked.get(candidate_id, 0):
             return None
         self._looked[candidate_id] = compared
-        verdict = race.judge(prefix)
+        verdict = race.judge(prefix, against)
         if verdict is None:
             return None
         reason, self._margins[candidate_id] = verdict

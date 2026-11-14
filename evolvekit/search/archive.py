@@ -34,8 +34,13 @@ from typing import Any, Iterable, Sequence
 from evolvekit.candidate import Candidate
 from evolvekit.config import ArchiveConfig, DescriptorConfig
 from evolvekit.space import Parameter, ParameterSpace
+from evolvekit.stats import t_scale
 
 __all__ = ["Archive", "Axis", "Cell", "Placement", "cut_points", "descriptor_value", "diff_complexity", "sigmoid", "was_evaluated"]
+
+ELITE_Z = 1.0 / math.sqrt(2.0)
+"""The elite rule's margin in sd of the difference of two equal candidates:
+one side's sd, cleared by an equal challenger in about 24 %."""
 
 
 def diff_complexity(diff: str) -> int:
@@ -314,6 +319,9 @@ class Archive:
     """The sd of one finished candidate's fitness (`Noise.score_sd` at the final
     stage), set by the driver before each `add`. A challenger takes a cell only
     when it beats the elite by more than this (`displaces`); 0 is today's `>`."""
+    noise_df: float = math.inf
+    """The degrees of freedom behind `noise_sd` (`Noise.score_df`), which widen
+    the elite rule's margin to Student's t (`margin`, Decision 17b)."""
     space: ParameterSpace | None = None
     """`problem.parameters`, which a `param` axis reads its values against."""
     rebinned_at: int = 0
@@ -351,6 +359,7 @@ class Archive:
         *,
         tree: bool = False,
         noise_sd: float = 0.0,
+        noise_df: float = math.inf,
         space: ParameterSpace | None = None,
         temperature: float = 1.0,
     ) -> "Archive":
@@ -368,7 +377,7 @@ class Archive:
         generation's children that was evaluated (`was_evaluated`) counts.
         """
         archive = Archive.from_config(config, tree=tree, space=space, temperature=temperature)
-        archive.noise_sd = noise_sd
+        archive.noise_sd, archive.noise_df = noise_sd, noise_df
         blocks: dict[str, str] = {}
         generation = 0
         for record in records:
@@ -517,11 +526,23 @@ class Archive:
             if self.displaces(member, fitness, cell):
                 cell.elite_id, cell.fitness = member.id, fitness
 
+    @property
+    def margin(self) -> float:
+        """How far a challenger must beat an elite: `noise_sd`, one side's sd.
+        Two equal candidates' difference has sd `√2 · noise_sd`, so an equal
+        challenger clears it with P(Z > 1/√2), about 24 %; estimated on
+        `noise_df` degrees of freedom it is widened by `stats.t_scale(1/√2,
+        df)` so the 24 % holds at any df. 0 with no noise: today's `>`."""
+        if self.noise_sd <= 0:
+            return 0.0
+        return self.noise_sd * t_scale(ELITE_Z, self.noise_df)
+
     def displaces(self, challenger: Candidate, fitness: float, cell: Cell) -> bool:
         """The elite rule: the challenger takes the cell when it beats the elite
-        by more than `noise_sd`, or on any gain when its score is the mean of
-        more runs (`replicates`; 0, unknown, reads as equal to any)."""
-        if fitness > cell.fitness + self.noise_sd:
+        by more than `margin` (`noise_sd`, widened for its df), or on any gain
+        when its score is the mean of more runs (`replicates`; 0, unknown,
+        reads as equal to any)."""
+        if fitness > cell.fitness + self.margin:
             return True
         elite = self.members.get(cell.elite_id)
         mine = int(challenger.replicates or 0)

@@ -656,6 +656,7 @@ def test_a_child_near_an_earlier_rounds_candidate_is_still_its_twin(tmp_path):
     config = _proxy_then_full(tmp_path, {"top_k_per_generation": 2})
     cascade = Cascade(config, work_dir=tmp_path / "work")
     cascade.noise.observe("proxy", "z", _replicated("proxy", 4.0))
+    cascade.noise.set_repeatable("proxy", False)  # as the seed run again finds it: the noise rule (17d)
     cascade.evaluate_generation([_gain("a", 10.0)])  # round 1
     later = _gain("b", 9.99)
     later.generation = 2

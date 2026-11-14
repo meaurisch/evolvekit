@@ -720,11 +720,14 @@ def test_on_a_minimising_goal_at_least_as_good_means_at_most_as_high(tmp_path):
 def test_the_noise_rule_compares_the_numbers_not_a_coarse_rounding_of_them(tmp_path):
     """`signature_digits: 3` rounds the numbers compared exactly, not the
     noisy ones: 0.004 apart under a margin of about 0.002 is two candidates,
-    though at three digits both read 3.00. What is kept has nine digits."""
+    though at three digits both read 3.00. What is kept has nine digits.
+    `first` is no seed, so nothing ran it again: the stage is marked as the
+    check would find it (until it is measured, the rule is the hash, 17d)."""
     config = _noise_config(tmp_path, QUIET_WALL_CLOCK, digits=3)
     cascade = Cascade(config, work_dir=tmp_path / "work")
     cascade.evaluate_generation([candidate("first", "def rule():\n    return 1")])
-    assert cascade.noise.repeatable("full") is None and cascade.noise.sd("full", "value") > 0
+    cascade.noise.set_repeatable("full", False)
+    assert cascade.noise.sd("full", "value") > 0
     apart = cascade.evaluate_generation([_offset("apart", "-0.004")])["apart"]
     assert apart.behaviour_twin_id is None
     assert round_significant(apart.kpis["value"], 3) == round_significant(3.0, 3), "what three digits would see"

@@ -577,11 +577,14 @@ class Driver:
         """The sd of one finished candidate's score at the final stage, as the
         run's noise estimate stands now (`Noise.score_sd`: paired on a
         repeatable stage, so 0 at `seeds: 1`), handed to the two rules that
-        read it: the stop policy's automatic epsilon and the elite rule."""
+        read it: the stop policy's automatic epsilon and the elite rule, with
+        the degrees of freedom it rests on (`Noise.score_df`), which widen
+        each rule's normal quantile to Student's t (Decision 17b)."""
         final = self.config.final_stage
         sd = self.cascade.noise.score_sd(final.id, self.config.evaluate.score, final.seeds)
-        self.stop_policy.noise_sd = sd
-        self.grid.noise_sd = sd
+        df = self.cascade.noise.score_df(final.id, self.config.evaluate.score)
+        self.stop_policy.noise_sd, self.stop_policy.noise_df = sd, df
+        self.grid.noise_sd, self.grid.noise_df = sd, df
 
     def _archive_scores(self) -> list[float]:
         return [c.fitness for c in self.archive if _competes(c)]
@@ -632,6 +635,7 @@ class Driver:
             self.config.search.archive,
             tree=self.repo is not None,
             noise_sd=self.stop_policy.noise_sd,
+            noise_df=self.stop_policy.noise_df,
             space=self.config.problem.parameters,
             temperature=self.config.search.selection_temperature,
         )
@@ -1467,7 +1471,7 @@ class Driver:
         """The 1/5 rule per trial (Decision 16), once per recorded round: of the
         round's local steps (`_local_trials`), `improved` are those that compete
         with a fitness above their parent's by more than the elite rule's noise
-        margin (`grid.noise_sd`; 0 with no noise estimate), and the step is
+        margin (`grid.margin`; 0 with no noise estimate), and the step is
         multiplied by `1.2 ** (improved - 0.2 * tried)`, within `STEP_LIMITS`.
         That balances at a success rate of exactly 20 % however many local
         children a round has (a threshold on each round's share would settle at
@@ -1478,7 +1482,7 @@ class Driver:
         trials = self._local_trials(children)
         if not trials:
             return
-        margin = self.grid.noise_sd
+        margin = self.grid.margin
         improved = sum(
             1 for child, parent in trials
             if _competes(child) and child.fitness > parent.fitness + margin  # type: ignore[operator]

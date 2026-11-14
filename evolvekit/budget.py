@@ -16,11 +16,13 @@ Two independent objects:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
 from evolvekit.config import BudgetConfig, StopConfig
 from evolvekit.economics import GenerationPoint
+from evolvekit.stats import t_scale
 
 __all__ = ["AI_USED_UP", "FIRST_CALL_USD", "BudgetGuard", "BudgetState", "StopPolicy", "StopDecision"]
 
@@ -144,6 +146,11 @@ class StopDecision:
     driver's cue to spend a big step before the run is allowed to die."""
 
 
+EPSILON_Z = 0.5 / math.sqrt(2.0)
+"""The automatic epsilon's margin in sd of the difference of two equal
+candidates: half a one-side sd, crossed in about 36 %."""
+
+
 class StopPolicy:
     """Patience / epsilon / target over the archive-best score."""
 
@@ -156,6 +163,9 @@ class StopPolicy:
         self.noise_sd: float = 0.0
         """The sd of one finished candidate's fitness (`Noise.score_sd` at the
         final stage): what the automatic epsilon reads. 0: no noise, today."""
+        self.noise_df: float = math.inf
+        """The degrees of freedom behind `noise_sd` (`Noise.score_df`): the
+        epsilon's normal quantile widens to Student's t at them (Decision 17b)."""
         self.stagnant = 0
         self.big_steps_in_window = 0
         """Big steps tried since the last improvement: what `min_big_steps` counts."""
@@ -173,11 +183,20 @@ class StopPolicy:
 
     def epsilon_now(self) -> float:
         """An explicit `stop.epsilon` as configured; else automatic:
-        `max(1e-6, 1e-9 * |best|, 0.5 * noise_sd)` -- with no noise, today's 1e-6."""
+        `max(1e-6, 1e-9 * |best|, 0.5 * noise_sd)` -- with no noise, today's 1e-6.
+
+        Half a noise sd is a normal quantile: the difference of two equal
+        candidates has sd `√2 · noise_sd`, and it exceeds `0.5 · noise_sd` with
+        P(Z > 0.5/√2), about 36 %. With `noise_sd` estimated on `noise_df`
+        degrees of freedom the half is widened by `stats.t_scale(0.5/√2, df)`,
+        so the 36 % holds at any df (exactly 0.5 at infinite df)."""
         if self.config.epsilon is not None:
             return self.config.epsilon
         scale = abs(self.best) if self.best is not None else 0.0
-        return max(1e-6, 1e-9 * scale, 0.5 * self.noise_sd)
+        half = 0.5 * self.noise_sd
+        if half > 0:
+            half *= t_scale(EPSILON_Z, self.noise_df)
+        return max(1e-6, 1e-9 * scale, half)
 
     def rebase(self, best: float | None) -> None:
         """The best was measured again and pooled (`search.reevaluate_best_every`):

@@ -136,8 +136,9 @@ def test_on_a_repeatable_stage_vectors_are_paired_per_element():
     d0 = [c[0] - s[0] for c, s in zip(child_rows, seed_rows)]
     assert noise.vector_sd("full", "cost_per_instance", 0) == pytest.approx(math.sqrt(statistics.variance(d0) / 2))
     assert noise.vector_sd("full", "cost_per_instance", 1) == pytest.approx(0.0, abs=1e-12), "a constant shift"
+    grand = statistics.fmean([r[0] for r in seed_rows + child_rows])
     assert noise.vector_cv("full", "cost_per_instance") == pytest.approx(
-        math.sqrt(statistics.variance(d0) / 2 / 100.0**2 / 2)), "per element over the seed's mean, element 1 is 0"
+        math.sqrt(statistics.variance(d0) / 2 / grand**2 / 2)), "per element over its cells' mean, element 1 is 0"
 
 
 def test_on_a_repeatable_stage_one_seed_has_no_noise():
@@ -146,6 +147,114 @@ def test_on_a_repeatable_stage_one_seed_has_no_noise():
     noise.observe("full", "a", _out({"cost": 99.0}, runs=1, seed_runs={"cost": [99.0]}))
     noise.set_repeatable("full", True)
     assert noise.sd("full", "cost") == 0.0, "seeds: 1 on a repeatable evaluator is today's behaviour"
+
+
+def _additive(rng, candidates, seeds=(0, 1, 2), *, spread=3.0, seed_effect=5.0):
+    """x(c, s) = f_c + g_s + e(c, s), e of sd 1, on a repeatable stage (Decision 17c):
+    candidate 0 is the seed."""
+    g = [rng.gauss(0, seed_effect) for _ in seeds]
+    noise = Noise()
+    noise.set_repeatable("full", True)
+    rows = []
+    for c in range(candidates):
+        f = rng.gauss(0, spread) if c else 0.0
+        xs = [f + g[j] + rng.gauss(0, 1) for j in range(len(seeds))]
+        rows.append(xs)
+        noise.observe("full", f"c{c}", _out({"cost": statistics.fmean(xs)}, kpi_var={"cost": statistics.variance(xs)},
+                                           seed_runs={"cost": xs}), is_seed=(c == 0))
+    return noise, rows
+
+
+def test_the_paired_noise_is_the_two_way_residual_with_its_df():
+    """Each run minus its candidate's mean minus its seed's mean plus the grand
+    mean; SS / ((C - 1)(S - 1)) is one side's variance."""
+    noise, rows = _additive(random.Random(1), 6)
+    row_means = [statistics.fmean(r) for r in rows]
+    col_means = [statistics.fmean(c) for c in zip(*rows)]
+    grand = statistics.fmean(row_means)
+    ss = sum((x - row_means[i] - col_means[j] + grand) ** 2 for i, r in enumerate(rows) for j, x in enumerate(r))
+    assert noise.sd("full", "cost") == pytest.approx(math.sqrt(ss / (5 * 2)))
+    assert noise.df("full", "cost") == 10
+    assert noise.score_df("full", _score()) == 10
+
+
+def test_the_paired_variance_is_unbiased_within_3_percent_over_4000_tables():
+    """x = f(c) + g(s) + e, e of variance 1, 5 candidates (the seed among them) at
+    seeds: 3: E[SS] = (C - 1)(S - 1)·σ², so the mean estimate is 1. One table has
+    8 df (relative sd 0.5): over 4000, SE 0.8 %, and 3 % is nearly 4 SE away."""
+    rng = random.Random(20261114)
+    total = sum(_additive(rng, 5)[0].sd("full", "cost") ** 2 for _ in range(4000))
+    ratio = total / 4000
+    print(f"paired variance / truth over 4000 tables: {ratio:.4f}")
+    assert ratio == pytest.approx(1.0, abs=0.03)
+
+
+def test_the_paired_sd_over_200_candidates_is_within_7_percent_of_the_truth_in_90_percent_of_runs():
+    """rev_a2_paired_floor's setup (statistician round 1): the difference to the
+    seed's run shared the seed's own interaction term, so its 5-95 % range over
+    runs was [0.72, 1.46] whatever the candidates. Pooled two-way, 400 df: about
+    [0.95, 1.06] measured (200 runs here)."""
+    rng = random.Random(3)
+    estimates = sorted(_additive(rng, 201)[0].sd("full", "cost") for _ in range(200))
+    low, high = estimates[10], estimates[189]
+    print(f"paired sd, 5-95 % of 200 runs: [{low:.3f}, {high:.3f}] (truth 1)")
+    assert 0.93 <= low and high <= 1.07
+
+
+def test_a_file_from_before_the_per_seed_runs_still_reads_its_differences(tmp_path):
+    """Schema 1 kept each candidate's differences to the seed (`paired`: v_d with its
+    df) and the seed's runs: each v_d / 2 is still one side's variance, and the
+    seed's runs become its row of the two-way table, which a new candidate joins."""
+    path = tmp_path / "noise.json"
+    path.write_text(json.dumps({"schema": 1, "stages": {"full": {
+        "repeatable": True,
+        "kpis": {"cost": {"across": {"a": {"runs": 3, "mean": 99.0, "var": 16.0}},
+                          "paired": {"a": {"df": 2, "var": 0.04}, "b": {"df": 2, "var": 0.08}}}},
+        "vectors": {},
+        "seed": {"seeds": [0, 1, 2], "kpis": {"cost": [100.0, 104.0, 96.0]}, "vectors": {}}}}}), encoding="utf-8")
+    noise = Noise.load(path)
+    assert noise.sd("full", "cost") == pytest.approx(math.sqrt((2 * 0.02 + 2 * 0.04) / 4))
+    assert noise.df("full", "cost") == 4
+    noise.observe("full", "c", _runs([99.0, 103.0, 95.4]))
+    d = [-1.0, -1.0, -0.6]
+    ss = (len(d) - 1) * statistics.variance(d) / 2  # two rows: SS = Σ(d - d̄)² / 2
+    assert noise.df("full", "cost") == 6
+    assert noise.sd("full", "cost") ** 2 == pytest.approx((ss + 2 * 0.02 + 2 * 0.04) / 6)
+    noise.save()
+    assert Noise.load(path).sd("full", "cost") == pytest.approx(noise.sd("full", "cost")), "read back the same"
+
+
+def _score(weights=None):
+    from evolvekit.config import ScoreConfig
+
+    return ScoreConfig(objective="cost", direction="minimize", weights=weights or {"cost": 1.0})
+
+
+def test_every_estimate_says_its_degrees_of_freedom():
+    """Decision 17b: across Σ(nᵢ - 1); calibration 2; nothing estimated is inf."""
+    noise = Noise()
+    assert noise.df("full", "cost") == math.inf and noise.cv_df("full", "cost") == math.inf
+    noise.observe("full", "a", _out({"cost": 10.0}, kpi_var={"cost": 4.0}, runs=3))
+    noise.observe("full", "b", _out({"cost": 12.0}, kpi_var={"cost": 2.0}, runs=5))
+    assert noise.df("full", "cost") == 2 + 4
+    assert noise.cv_df("full", "cost") == 6
+    calibrated = Noise()
+    calibrated.calibrate("full", {"cost": [100.0, 102.0, 98.0]}, instance=1, instances=3,
+                         seed_means={"cost": [50.0, 100.0, 200.0]})
+    assert calibrated.df("full", "cost") == 2
+    assert calibrated.vector_df("full", "cost_per_instance", 1) == 2
+    assert calibrated.vector_df("full", "cost_per_instance", 0) == math.inf, "unknown element"
+    assert calibrated.cv_df("full", "cost") == calibrated.vector_cv_df("full", "cost_per_instance") == 2
+
+
+def test_a_weighted_score_has_the_welch_satterthwaite_df():
+    noise = Noise()
+    noise.observe("full", "a", _out({"cost": 10.0, "time": 5.0}, kpi_var={"cost": 4.0, "time": 1.0}, runs=3))
+    noise.observe("full", "b", _out({"cost": 10.0, "time": 5.0}, kpi_var={"cost": 4.0}, runs=5))
+    a_cost, a_time = 4.0 * 4.0, 0.25 * 1.0  # w² sd²: cost (w 2) on 6 df, time (w 0.5) on 2 df
+    expected = (a_cost + a_time) ** 2 / (a_cost**2 / 6 + a_time**2 / 2)
+    assert noise.score_df("full", _score({"cost": 2.0, "time": 0.5})) == pytest.approx(expected)
+    assert Noise().score_df("full", _score()) == math.inf
 
 
 def test_repeatability_and_both_estimates_survive_a_resume(tmp_path):
@@ -214,7 +323,8 @@ def test_the_relative_noise_of_a_stage_without_instances_uses_its_scalars():
     paired.observe("full", "a", _runs([99.0, 103.2, 95.4]))
     paired.set_repeatable("full", True)
     v_d = statistics.variance([-1.0, -0.8, -0.6])
-    assert paired.cv("full", "cost") == pytest.approx(math.sqrt(v_d / 2 / 100.0**2))
+    grand = statistics.fmean([100.0, 104.0, 96.0, 99.0, 103.2, 95.4])
+    assert paired.cv("full", "cost") == pytest.approx(math.sqrt(v_d / 2 / grand**2))
 
 
 def test_a_score_by_levels_has_no_summed_noise():
@@ -456,6 +566,51 @@ def test_the_check_runs_seed_0_again_on_the_median_instance_and_finds_it_repeata
     assert json_of(tmp_path / "work" / "noise.json")["stages"]["full"]["repeatable"] is True, "saved"
 
 
+def _with_proxy(config, mode, *, placeholder=True):
+    """`config` with a proxy stage before `full`: the same toy on instance i1 only,
+    without instances of its own."""
+    import dataclasses
+
+    seed = " --seed {seed}" if placeholder else ""
+    proxy = dataclasses.replace(
+        config.final_stage, id="proxy", instances=(), private_instances=(),
+        command="{python} toy.py --instance i1 --mode " + mode + seed + " {params}",
+    )
+    stages = config.evaluate.stages
+    return dataclasses.replace(
+        config, evaluate=dataclasses.replace(config.evaluate, stages=(stages[0], proxy, *stages[1:]))
+    )
+
+
+def test_every_command_stage_with_a_seed_placeholder_is_checked_once(tmp_path):
+    """Decision 17d: the seed run again at each command stage it reached, not only
+    the final one: a proxy that is deterministic per seed is measured repeatable,
+    so its comparisons are paired and its twins exact."""
+    config = _with_proxy(_toy(tmp_path, "repeatable", seeds=1), "repeatable")
+    events, lines = [], []
+    cascade = _cascade(config, tmp_path, events=events, lines=lines)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert cascade.noise.repeatable("proxy") is True and cascade.noise.repeatable("full") is True
+    checked = [e["stage"] for e in events if e["type"] == "noise_checked"]
+    assert checked == ["proxy", "full"]
+    assert lines[0] == ("noise at stage proxy: the seed run again: the evaluator gives the same numbers for the "
+                        "same seed (comparisons are paired by seed)")
+    assert lines[1].startswith("noise: the seed run again on i2: ")
+    cascade.evaluate_generation([_param_candidate(config, "c", 0.1, 1)])
+    assert [e["stage"] for e in events if e["type"] == "noise_checked"] == checked, "once per run and stage"
+
+
+def test_a_proxy_without_a_seed_placeholder_stays_unmeasured_and_compares_twins_exactly(tmp_path):
+    """A proxy with no {seed} at seeds: 1 has nothing to measure: repeatability
+    unknown, and until it is known the twin rule is the 9-digit hash."""
+    config = _with_proxy(_toy(tmp_path, "wall-clock", seeds=1), "wall-clock", placeholder=False)
+    events = []
+    cascade = _cascade(config, tmp_path, events=events)
+    cascade.evaluate_generation([seed_candidate(config)])
+    assert cascade.noise.repeatable("proxy") is None
+    assert [e["stage"] for e in events if e["type"] == "noise_checked"] == ["full"]
+
+
 def test_a_wall_clock_evaluator_is_not_repeatable_and_is_calibrated(tmp_path):
     config = _toy(tmp_path, "wall-clock", seeds=1)
     lines = []
@@ -669,6 +824,8 @@ def _noise_is_handed_over(driver, config):
     expected = driver.cascade.noise.score_sd(final.id, config.evaluate.score, final.seeds)
     assert expected > 0
     assert driver.stop_policy.noise_sd == driver.grid.noise_sd == expected
+    df = driver.cascade.noise.score_df(final.id, config.evaluate.score)
+    assert math.isfinite(df) and driver.stop_policy.noise_df == driver.grid.noise_df == df
 
 
 def test_a_noisy_run_hands_its_noise_to_the_stop_policy_and_the_archive_and_status_counts_as_it_does(tmp_path):
@@ -687,7 +844,12 @@ def test_a_noisy_run_hands_its_noise_to_the_stop_policy_and_the_archive_and_stat
     driver = Driver(config, run_dir=run_dir)
     driver.run(generations=3)
     _noise_is_handed_over(driver, config)
-    assert driver.stop_policy.epsilon_now() == pytest.approx(0.5 * driver.stop_policy.noise_sd)
+    from evolvekit.budget import EPSILON_Z
+    from evolvekit.stats import t_scale
+
+    widened = t_scale(EPSILON_Z, driver.stop_policy.noise_df)
+    assert widened > 1.0, "the noise is estimated: Student's t, not the normal"
+    assert driver.stop_policy.epsilon_now() == pytest.approx(0.5 * driver.stop_policy.noise_sd * widened)
     finished = [r for r in driver.ledger.runs() if "full" in (r.get("stages_reached") or [])]
     assert finished and all(r["replicates"] == 3 for r in finished)
     events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]

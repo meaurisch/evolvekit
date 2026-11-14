@@ -48,8 +48,12 @@ on a stage that is *not repeatable* and has a noise estimate
   difference of two means of `seeds` runs, and `c_m` (`spread_factor`) is
   chosen so that a true twin -- all m noisy numbers off by noise only -- is
   within on every one with probability erf(1), about 84 %, however many
-  numbers there are (`c_1 = √2`: the design's `2·σ̂/√seeds`). A number with no
-  noise known is compared exactly, at `signature_digits`.
+  numbers there are (`c_1 = √2`: the design's `2·σ̂/√seeds`). σ̂ is estimated
+  (2 degrees of freedom from a calibration), so `c_m` is Student's t quantile
+  at the same probability with σ̂'s df (`stats.t_scale`, Decision 17b): one
+  number is then caught in 84 % at any df, and m numbers whose σ̂ share one
+  estimate in at least about 84 % (their misses are positively correlated).
+  A number with no noise known is compared exactly, at `signature_digits`.
 * A child within the margins of an earlier candidate is its twin only when
   that candidate's stage score is at least the child's (`check_values`): it
   behaves like something already seen that did at least as well, and is "of"
@@ -70,6 +74,8 @@ import math
 from dataclasses import dataclass, field
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
+
+from evolvekit.stats import t_scale
 
 if TYPE_CHECKING:  # annotations only: this module stays a leaf
     from evolvekit.evaluate.types import StageOutcome
@@ -236,14 +242,16 @@ def spread_factor(m: int) -> float:
     return NormalDist().inv_cdf((1.0 + ERF1 ** (1.0 / m)) / 2.0)
 
 
-def _noise_of(value: float, sd: float | None, cv: float | None) -> float:
-    """One number's one-run noise: its own when known and > 0, else the
-    relative noise times its size, else 0 (exact)."""
+def _noise_of(
+    value: float, sd: float | None, cv: float | None, sd_df: float = math.inf, cv_df: float = math.inf
+) -> tuple[float, float]:
+    """One number's one-run noise and the df it is estimated on: its own when
+    known and > 0, else the relative noise times its size, else 0 (exact)."""
     if sd is not None and sd > 0:
-        return float(sd)
+        return float(sd), float(sd_df)
     if cv is not None and cv > 0:
-        return float(cv) * abs(float(value))
-    return 0.0
+        return float(cv) * abs(float(value)), float(cv_df)
+    return 0.0, math.inf
 
 
 def twin_margins(
@@ -253,25 +261,48 @@ def twin_margins(
     seeds: int,
     *,
     cvs: Mapping[str, float] = {},
+    dfs: Mapping[str, float] = {},
+    vector_dfs: Mapping[str, Sequence[float]] = {},
+    cv_dfs: Mapping[str, float] = {},
 ) -> dict[str, float | list[float]]:
     """Per compared number, how far another candidate's may lie and still be
     the same behaviour: `c_m · σ̂ · √(2/seeds)`, m the count of numbers with a
     σ̂ > 0. σ̂ is `sds[k]` for a scalar and `vector_sds[key][i]` for an element;
     where that is 0 or unknown but `cvs[key]` is known, `cv · |value|` (a
     calibration measured one instance; the others are known relatively).
-    A number with no σ̂ at all gets 0.0: compared exactly."""
-    noise: dict[str, float | list[float]] = {}
+    A number with no σ̂ at all gets 0.0: compared exactly.
+
+    `dfs`, `vector_dfs` and `cv_dfs` are the degrees of freedom of those
+    estimates (`Noise.df`, `vector_df`, `cv_df`; missing: infinite, a known
+    σ): `c_m` becomes Student's t quantile at the same probability with the
+    number's own df, `c_m · stats.t_scale(c_m, df)`, which is `c_m` itself at
+    infinite df."""
+    noise: dict[str, tuple[float, float] | list[tuple[float, float]]] = {}
     for k, value in behaviour.kpis.items():
-        noise[k] = _noise_of(value, sds.get(k), cvs.get(k))
+        noise[k] = _noise_of(value, sds.get(k), cvs.get(k), dfs.get(k, math.inf), cv_dfs.get(k, math.inf))
     for k, values in behaviour.vectors.items():
         known = list(vector_sds.get(k) or [])
+        known_df = list(vector_dfs.get(k) or [])
         noise[k] = [
-            _noise_of(v, known[i] if i < len(known) else None, cvs.get(k)) for i, v in enumerate(values)
+            _noise_of(
+                v,
+                known[i] if i < len(known) else None,
+                cvs.get(k),
+                known_df[i] if i < len(known_df) else math.inf,
+                cv_dfs.get(k, math.inf),
+            )
+            for i, v in enumerate(values)
         ]
-    m = sum(1 for s in noise.values() for x in (s if isinstance(s, list) else [s]) if x > 0)
-    scale = spread_factor(m) * math.sqrt(2.0 / max(1, int(seeds)))
+    m = sum(1 for s in noise.values() for x, _ in (s if isinstance(s, list) else [s]) if x > 0)
+    c_m = spread_factor(m)
+    per_seeds = math.sqrt(2.0 / max(1, int(seeds)))
+
+    def margin(number: tuple[float, float]) -> float:
+        sd, df = number
+        return c_m * t_scale(c_m, df) * per_seeds * sd if sd > 0 else 0.0
+
     return {
-        k: [scale * x for x in s] if isinstance(s, list) else scale * s
+        k: [margin(x) for x in s] if isinstance(s, list) else margin(s)
         for k, s in noise.items()
     }
 

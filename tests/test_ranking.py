@@ -30,6 +30,7 @@ from evolvekit.config import ConfigError, LevelConfig, build_config, load_config
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage
 from evolvekit.evaluate.scoring import ranking_score
 from evolvekit.evaluate.types import StageOutcome
+from evolvekit.stats import t_scale
 from evolvekit.leaderboard import (
     competes,
     fitness_of,
@@ -332,18 +333,23 @@ def test_with_no_noise_the_veto_is_the_literal_rule(mirror_project, tmp_path):
     assert results["hi"].holdout_margin == 0.0 and results["lo"].holdout_margin == 0.0
 
 
+T1 = t_scale(2**0.5, 1)
+"""The margin's widening to Student's t when its sd rests on two runs (1 df):
+2.80 (Decision 17b). The fixtures below observe `runs=2`."""
+
+
 def test_a_hold_out_below_the_seed_within_the_noise_margin_competes(mirror_project, tmp_path):
     config = load_config(mirror_project)
     cascade = Cascade(config, work_dir=tmp_path / "work")
     cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])
     cascade.noise.observe("full/private", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": -1.0},
                                                             kpi_var={"value": 0.25}, runs=2))
-    # margin = 2 * 0.5 / sqrt(1) = 1.0 (seeds: 1): -1.5 is above -1 - 1
-    result = cascade.evaluate_generation([_value_candidate("hi", 1.5)])["hi"]
-    assert result.competes is True and result.holdout_margin == pytest.approx(1.0)
-    worse = cascade.evaluate_generation([_value_candidate("far", 2.5)])["far"]
+    # margin = 2 * 0.5 / sqrt(1) * T1 = 2.8 (seeds: 1): -3.5 is above -1 - 2.8
+    result = cascade.evaluate_generation([_value_candidate("hi", 3.5)])["hi"]
+    assert result.competes is True and result.holdout_margin == pytest.approx(1.0 * T1)
+    worse = cascade.evaluate_generation([_value_candidate("far", 4.0)])["far"]
     assert worse.competes is False
-    assert worse.veto == "holdout below the seed's -1 by more than its noise margin 1"
+    assert worse.veto == "holdout below the seed's -1 by more than its noise margin 2.8"
 
 
 def test_the_public_noise_is_not_rescaled_across_a_change_of_sign(mirror_project, tmp_path):
@@ -366,12 +372,12 @@ def test_without_a_hold_out_estimate_the_public_noise_is_rescaled_to_the_hold_ou
     cascade.noise.observe("full", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": 1.0},
                                                     kpi_var={"value": 0.25}, runs=2))
     cascade.seed_public, cascade.seed_private = 2.0, 1.0
-    assert cascade.holdout_margin() == pytest.approx(2 * 0.5 * 0.5)
+    assert cascade.holdout_margin() == pytest.approx(2 * 0.5 * 0.5 * T1)
     cascade.seed_public = 0.0
     assert cascade.holdout_margin() == 0.0, "a public score of 0: no rescale"
     cascade.noise.observe("full/private", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": 1.0},
                                                             kpi_var={"value": 0.04}, runs=2))
-    assert cascade.holdout_margin() == pytest.approx(0.4), "the hold-out's own estimate comes first"
+    assert cascade.holdout_margin() == pytest.approx(0.4 * T1), "the hold-out's own estimate comes first"
 
 
 def test_a_repeatable_hold_out_uses_its_own_noise_only_when_it_is_paired(mirror_project, tmp_path):
@@ -386,7 +392,7 @@ def test_a_repeatable_hold_out_uses_its_own_noise_only_when_it_is_paired(mirror_
     cascade.noise.set_repeatable("full/private", True)
     cascade.noise.observe("full/private", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": 1.0},
                                                             kpi_var={"value": 0.04}, runs=2))
-    assert cascade.holdout_margin() == pytest.approx(2 * 0.5 * 0.5), "across only: the rescaled public noise"
+    assert cascade.holdout_margin() == pytest.approx(2 * 0.5 * 0.5 * T1), "across only: the rescaled public noise"
 
     def paired(values):
         return StageOutcome(stage_id="full", ok=True, kpis={"value": sum(values) / 2},
@@ -394,8 +400,9 @@ def test_a_repeatable_hold_out_uses_its_own_noise_only_when_it_is_paired(mirror_
 
     cascade.noise.observe("full/private", "s", paired([1.0, 3.0]), is_seed=True)
     cascade.noise.observe("full/private", "y", paired([1.2, 2.8]))
-    # d = (0.2, -0.2): var_d = 0.08, one side 0.04, sd 0.2, margin 0.4
-    assert cascade.holdout_margin() == pytest.approx(0.4), "paired data: the hold-out's own estimate"
+    # Two candidates on two seeds: the two-way residual is var_d / 2 with 1 df.
+    # d = (0.2, -0.2): var_d = 0.08, one side 0.04, sd 0.2, margin 0.4 * T1
+    assert cascade.holdout_margin() == pytest.approx(0.4 * T1), "paired data: the hold-out's own estimate"
 
 
 def test_with_a_score_by_levels_the_margin_is_zero(mirror_project, tmp_path):
@@ -403,7 +410,7 @@ def test_with_a_score_by_levels_the_margin_is_zero(mirror_project, tmp_path):
     cascade = Cascade(config, work_dir=tmp_path / "work")
     cascade.noise.observe("full/private", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": -1.0},
                                                             kpi_var={"value": 0.25}, runs=2))
-    assert cascade.holdout_margin() == pytest.approx(1.0)
+    assert cascade.holdout_margin() == pytest.approx(1.0 * T1)
     levels = (LevelConfig(kpi="value", direction="maximize", tolerance=0.1),
               LevelConfig(kpi="value", direction="maximize"))
     score = replace(config.evaluate.score, levels=levels)
