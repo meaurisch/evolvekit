@@ -253,7 +253,8 @@ class Driver:
             self.skeleton_source = skeleton
         self.archive: list[Candidate] = []
         self.grid = Archive.from_config(
-            config.search.archive, tree=self.repo is not None, space=config.problem.parameters
+            config.search.archive, tree=self.repo is not None, space=config.problem.parameters,
+            temperature=config.search.selection_temperature,
         )
         near_cfg = config.search.novelty.near
         self._embed_context: tuple[str, int] = ("startup", 0)
@@ -623,6 +624,7 @@ class Driver:
             tree=self.repo is not None,
             noise_sd=self.stop_policy.noise_sd,
             space=self.config.problem.parameters,
+            temperature=self.config.search.selection_temperature,
         )
         last_generation = 0
         for row in rows:
@@ -891,11 +893,19 @@ class Driver:
             began = self._generation_started(
                 generation, children=self.children_per_generation
             )
+            # Last generation's pressure on its parents counts half now
+            # (`Archive.from_records` replays the same on resume).
+            self.grid.decay()
             children = self._adopt_pending(generation)
             if children is None:
                 children = self._breed(generation, plateau=decision.plateau)
                 self._write_pending(generation, children)
             viable = [c for c in children if not c.rejected]
+            for child in viable:
+                # Handed to the cascade: a refused or failed child cost its
+                # parent nothing and does not make it less attractive.
+                if child.parent_id:
+                    self.grid.note_evaluated(child.parent_id)
             if self._evaluate_and_record(viable, generation=generation):
                 # Stopped in the middle: nothing of this generation is
                 # recorded, and `pending.json` keeps its children for the

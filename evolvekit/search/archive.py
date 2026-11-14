@@ -11,10 +11,12 @@ Two things live here that Phase A had no home for:
 * **Diversity pressure.** A candidate only displaces the elite of its own cell,
   so a run cannot collapse onto one lineage the way Phase A's "best-so-far or a
   random top-5" did.
-* **Parent sampling.** ShinkaEvolve's `sigmoid(z(fitness)) x 1/(1 + children)`:
-  good elites are preferred, and every child drawn from a parent makes that
-  parent a little less attractive. The z-score keeps the sigmoid meaningful
-  whatever units the objective happens to be in.
+* **Parent sampling.** ShinkaEvolve's `sigmoid(z(fitness) / tau) x 1/(1 + c)`:
+  good elites are preferred (`tau`, `search.selection_temperature`, sets how
+  hard), and every evaluated child of a parent makes that parent a little less
+  attractive for a while -- `c`, its `pressure`, halves every generation. The
+  z-score keeps the sigmoid meaningful whatever units the objective is in.
+  Inspirations are drawn by the sigmoid alone.
 
 Fitness here is always the *ranking* score (public minus the hold-out penalty),
 never the raw public score.
@@ -33,7 +35,7 @@ from evolvekit.candidate import Candidate
 from evolvekit.config import ArchiveConfig, DescriptorConfig
 from evolvekit.space import Parameter, ParameterSpace
 
-__all__ = ["Archive", "Axis", "Cell", "Placement", "cut_points", "descriptor_value", "diff_complexity", "sigmoid"]
+__all__ = ["Archive", "Axis", "Cell", "Placement", "cut_points", "descriptor_value", "diff_complexity", "sigmoid", "was_evaluated"]
 
 
 def diff_complexity(diff: str) -> int:
@@ -52,6 +54,21 @@ def sigmoid(x: float) -> float:
     if x > 60.0:
         return 1.0
     return 1.0 / (1.0 + math.exp(-x))
+
+
+def was_evaluated(candidate: Candidate, parent_block: str | None) -> bool:
+    """Was this recorded child handed to the cascade? Not when the novelty
+    filter refused it first (`no_op`, `duplicate`), and not when its proposal
+    failed to apply -- the row `_breed_one` writes for that is rejected, has no
+    novelty verdict, and carries its parent's block (a missing parent: counted
+    as evaluated, as the stop policy's replay counts it applied). A static-stage
+    reject and a behavioural twin were evaluated."""
+    if not candidate.rejected:
+        return True
+    if candidate.novelty in ("no_op", "duplicate"):
+        return False
+    failed_apply = candidate.novelty is None and parent_block is not None and candidate.block == parent_block
+    return not failed_apply
 
 
 def descriptor_value(
@@ -274,6 +291,13 @@ class Archive:
     cells: dict[tuple[int, ...], Cell] = field(default_factory=dict)
     members: dict[str, Candidate] = field(default_factory=dict)
     children: dict[str, int] = field(default_factory=dict)
+    """Every mutation attempt per parent, failed applies and duplicates
+    included: what the views show. Parent sampling reads `pressure`."""
+    pressure: dict[str, float] = field(default_factory=dict)
+    """Per parent, its children handed to the cascade (`note_evaluated`), each
+    worth half as much a generation later (`decay`): the `c` of `weights`."""
+    temperature: float = 1.0
+    """`search.selection_temperature`: the `tau` of `weights`."""
     no_ops: int = 0
     duplicates: int = 0
     near_duplicates: int = 0
@@ -303,13 +327,18 @@ class Archive:
 
     @staticmethod
     def from_config(
-        config: ArchiveConfig, *, tree: bool = False, space: ParameterSpace | None = None
+        config: ArchiveConfig,
+        *,
+        tree: bool = False,
+        space: ParameterSpace | None = None,
+        temperature: float = 1.0,
     ) -> "Archive":
         return Archive(
             axes=[Axis.from_config(d, space) for d in config.descriptors],
             top_k=config.top_k,
             tree=tree,
             space=space,
+            temperature=temperature,
         )
 
     @staticmethod
@@ -320,6 +349,7 @@ class Archive:
         tree: bool = False,
         noise_sd: float = 0.0,
         space: ParameterSpace | None = None,
+        temperature: float = 1.0,
     ) -> "Archive":
         """Rebuild the grid from `runs.jsonl` -- the resume path.
 
@@ -328,13 +358,27 @@ class Archive:
         snapshot still comes back consistent: the members arrive in the same
         order, so the quantile re-bins fall at the same counts. The elite rule
         reads `noise_sd`, the noise as it is now (as the stop policy's replay does).
+
+        The pressure is replayed as the live driver built it: each rise of the
+        rows' `generation` decays it once per generation stepped (the driver
+        decays at the start of every generation from 1 on), then each of the
+        generation's children that was evaluated (`was_evaluated`) counts.
         """
-        archive = Archive.from_config(config, tree=tree, space=space)
+        archive = Archive.from_config(config, tree=tree, space=space, temperature=temperature)
         archive.noise_sd = noise_sd
+        blocks: dict[str, str] = {}
+        generation = 0
         for record in records:
             candidate = Candidate.from_record(record)
+            blocks.setdefault(candidate.id, candidate.block)
+            current = int(candidate.generation or 0)
+            for _ in range(max(0, current - generation)):
+                archive.decay()
+            generation = max(generation, current)
             if candidate.parent_id:
                 archive.note_child(candidate.parent_id)
+                if was_evaluated(candidate, blocks.get(candidate.parent_id)):
+                    archive.note_evaluated(candidate.parent_id)
             if candidate.novelty == "no_op":
                 archive.no_ops += 1
             elif candidate.novelty == "duplicate":
@@ -358,8 +402,18 @@ class Archive:
         )
 
     def note_child(self, parent_id: str) -> None:
-        """One more mutation attempt spent on `parent_id`."""
+        """One more mutation attempt spent on `parent_id` (the views' count)."""
         self.children[parent_id] = self.children.get(parent_id, 0) + 1
+
+    def note_evaluated(self, parent_id: str) -> None:
+        """A child of `parent_id` was handed to the cascade: one more unit of
+        the pressure that makes the parent less attractive."""
+        self.pressure[parent_id] = self.pressure.get(parent_id, 0.0) + 1.0
+
+    def decay(self) -> None:
+        """A new generation: every parent's pressure halves."""
+        for parent_id in self.pressure:
+            self.pressure[parent_id] *= 0.5
 
     def add(self, candidate: Candidate) -> Placement:
         """Offer a candidate to the grid.
@@ -516,8 +570,9 @@ class Archive:
 
     # -- sampling --------------------------------------------------------
 
-    def weights(self, pool: Sequence[Candidate]) -> list[float]:
-        """`sigmoid(z(fitness)) x 1/(1 + children)`, never zero."""
+    def weights(self, pool: Sequence[Candidate], *, pressure: bool = True) -> list[float]:
+        """`sigmoid(z(fitness) / tau) x 1/(1 + c)`, never zero; `c` is the
+        candidate's `pressure`, left out with `pressure=False`."""
         if not pool:
             return []
         values = [float(c.fitness or 0.0) for c in pool]
@@ -526,8 +581,8 @@ class Archive:
         weights = []
         for candidate, value in zip(pool, values):
             z = 0.0 if spread <= 0 else (value - mean) / spread
-            used = self.children.get(candidate.id, 0)
-            weights.append(max(1e-6, sigmoid(z) / (1.0 + used)))
+            used = self.pressure.get(candidate.id, 0.0) if pressure else 0.0
+            weights.append(max(1e-6, sigmoid(z / self.temperature) / (1.0 + used)))
         return weights
 
     def sample_parents(self, count: int, rng: random.Random) -> list[Candidate]:
@@ -553,7 +608,7 @@ class Archive:
         ]
         if not pool:
             return []
-        weights = self.weights(pool)
+        weights = self.weights(pool, pressure=False)
         chosen: list[Candidate] = []
         for _ in range(min(count, len(pool))):
             pick = rng.choices(pool, weights=weights, k=1)[0]

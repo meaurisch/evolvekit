@@ -192,8 +192,11 @@ seed = the skeleton's EVOLVE-BLOCK
   │
   ├─ generation g       C children; C adapts on stagnation (optional)
   │    sample P parents from the archive's elites
-  │                  weight = sigmoid(z(fitness)) × 1/(1 + children)
+  │                  weight = sigmoid(z(fitness)/τ) × 1/(1 + c)
+  │                  τ = search.selection_temperature (default 1)
+  │                  c = the parent's evaluated children, halved every generation
   │    draw 1 to `search.inspirations` (default 2) elites from *other* cells
+  │                  weight = sigmoid(z(fitness)/τ), without the 1/(1 + c)
   │
   │    operators   diff (SEARCH/REPLACE) · rewrite · crossover → small model
   │                big_step, every K gens or on plateau        → strong model
@@ -377,6 +380,24 @@ a strict `>`, as it always was. A challenger exactly as good as the elite, both
 measured with noise sd σ, takes the cell in about 24 % of trials (50 % without
 the margin). A re-bin of the auto axes applies the same rule, in id
 order; a resumed run rebuilds the grid with the noise as it is when it resumes.
+
+*Parent selection: `search.selection_temperature`.* Each generation's parents
+are drawn from the elites with weight `sigmoid(z(fitness)/τ) × 1/(1 + c)`: `z`
+is the elite's fitness as a z-score over the elites, `τ` is
+`search.selection_temperature` (default `1`; any number > 0 — below 1 the
+fitter elites are drawn harder, `0.25` turns the 0.27 : 0.73 of `z = ∓1` into
+0.02 : 0.98; above 1 softer), and `c` is the parent's **pressure**: one for each
+of its children that was handed to the cascade, halved at the start of every
+generation, so a parent that has just been used a lot rests for a while and
+then recovers. A child the novelty filter refused before evaluation (no-op,
+duplicate) or whose proposal did not apply costs its parent nothing; a child
+rejected by the static stage or caught as a behavioural twin was evaluated and
+counts. Inspirations are drawn by `sigmoid(z(fitness)/τ)` alone, without the
+`1/(1 + c)`. `archive.json`'s `children` (and each cell's) still counts every
+attempt, failed applies and duplicates included. A resumed run replays the
+pressure from `runs.jsonl` — halved once per generation, then the generation's
+evaluated children — so it is what the uninterrupted run had. The weight is
+never below 10⁻⁶.
 
 Choose the second axis for *behaviour*, not quality. The bin-packing example
 uses `mean_openness`: where the chosen bin sat between the tightest and the

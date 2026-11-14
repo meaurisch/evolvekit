@@ -412,6 +412,21 @@ def test_the_base_example_declares_the_phase_b_search(example_config_path):
     ]
 
 
+def test_selection_temperature_defaults_to_one(minimal_raw, tmp_path):
+    assert build(minimal_raw, tmp_path).search.selection_temperature == 1.0
+    raw = copy.deepcopy(minimal_raw)
+    raw["search"] = {"selection_temperature": 0.25}
+    assert build(raw, tmp_path).search.selection_temperature == 0.25
+
+
+@pytest.mark.parametrize("value", [0, -1, "hot"])
+def test_selection_temperature_must_be_a_positive_number(minimal_raw, tmp_path, value):
+    raw = copy.deepcopy(minimal_raw)
+    raw["search"] = {"selection_temperature": value}
+    with pytest.raises(ConfigError, match=r"search\.selection_temperature"):
+        build(raw, tmp_path)
+
+
 def test_parent_top_k_is_refused_and_points_at_the_archive(minimal_raw, tmp_path):
     raw = copy.deepcopy(minimal_raw)
     raw["search"] = {"parent_top_k": 5}

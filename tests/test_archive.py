@@ -380,6 +380,23 @@ def test_the_grid_with_parameter_axes_rebuilds_from_run_records(tmp_path):
     assert set(rebuilt.cells) == set(original.cells) == {(0, 0), (3, 0), (2, 3)}
 
 
+def test_a_resumed_run_rebuilds_the_pressure_the_live_run_had(tmp_path):
+    from dataclasses import replace
+
+    from evolvekit.search.driver import Driver
+
+    config = _tuning_config(tmp_path)
+    config = replace(config, search=replace(config.search, children_per_generation=3, generations=2,
+                                                         selection_temperature=0.5))
+    live = Driver(config, run_dir=tmp_path / "run", log=lambda m: None)
+    live.run()
+    assert live.grid.pressure, "the children were handed to the cascade"
+    resumed = Driver(config, run_dir=tmp_path / "run", log=lambda m: None)
+    resumed.resume()
+    assert resumed.grid.pressure == pytest.approx(live.grid.pressure)
+    assert resumed.grid.temperature == live.grid.temperature == 0.5
+
+
 def test_occupancy_reports_the_grid_shape():
     archive = grid(bins=4)
     archive.add(make("a", score=-1.0, complexity=10.0, behaviour=0.1))
@@ -404,10 +421,106 @@ def test_weights_prefer_fitter_parents_and_punish_used_ones():
     assert before["fit"] > before["unfit"]
 
     for _ in range(9):
-        archive.note_child("fit")
+        archive.note_evaluated("fit")
     after = dict(zip((c.id for c in pool), archive.weights(pool)))
     assert after["fit"] == pytest.approx(before["fit"] / 10.0)
     assert after["fit"] < after["unfit"], "10 children did not cool the hot parent"
+
+
+def _two_elites(temperature: float = 1.0) -> Archive:
+    """Two elites in two cells, `a` the fitter (z = +1, `b` z = -1)."""
+    archive = grid()
+    archive.temperature = temperature
+    archive.add(make("a", score=-1.0, behaviour=0.1))
+    archive.add(make("b", score=-9.0, behaviour=0.9))
+    return archive
+
+
+def ratio(weights: list[float]) -> float:
+    return weights[0] / weights[1]
+
+
+def test_a_failed_apply_or_a_duplicate_does_not_make_a_parent_less_attractive():
+    archive = _two_elites()
+    before = archive.weights(archive.elites())
+    archive.note_child("a")                       # counted for the record only
+    assert archive.weights(archive.elites()) == before
+    assert archive.children == {"a": 1}
+    archive.note_evaluated("a")
+    assert archive.weights(archive.elites())[0] < before[0]
+
+
+def test_the_pressure_halves_every_generation():
+    archive = _two_elites()
+    archive.note_evaluated("a")
+    archive.note_evaluated("a")
+    archive.decay()
+    assert archive.pressure["a"] == pytest.approx(1.0)
+    archive.decay()
+    assert archive.weights(archive.elites())[0] == pytest.approx(sigmoid(1.0) / 1.5)
+
+
+def test_at_temperature_one_the_weight_is_todays_sigmoid():
+    archive = _two_elites()
+    assert archive.weights(archive.elites()) == [pytest.approx(sigmoid(1.0)), pytest.approx(sigmoid(-1.0))]
+
+
+def test_a_lower_temperature_selects_harder():
+    hot, cold = _two_elites(temperature=1.0), _two_elites(temperature=0.25)
+    assert ratio(cold.weights(cold.elites())) > ratio(hot.weights(hot.elites()))
+    assert ratio(cold.weights(cold.elites())) == pytest.approx(sigmoid(4.0) / sigmoid(-4.0))
+
+
+def test_inspirations_are_drawn_without_the_pressure():
+    archive = grid()
+    for i in range(4):
+        archive.add(make(f"c{i}", score=-float(i), behaviour=i / 4.0))
+    parent = archive.members["c3"]
+    draws = [[p.id for p in archive.sample_inspirations(parent, 2, random.Random(s))] for s in range(40)]
+    pool = archive.elites()
+    plain = archive.weights(pool)
+    for _ in range(50):
+        archive.note_evaluated("c0")
+    assert archive.weights(pool, pressure=False) == plain
+    assert archive.weights(pool)[0] < plain[0], "parents still feel it"
+    again = [[p.id for p in archive.sample_inspirations(parent, 2, random.Random(s))] for s in range(40)]
+    assert again == draws
+
+
+def _row(cid: str, generation: int, *, parent: str | None = None, rejected: bool = False,
+         novelty: str | None = None, block: str = "def f():\n    return 2\n") -> dict:
+    candidate = make(cid, score=-1.0, parent=parent, rejected=rejected)
+    candidate.generation = generation
+    candidate.novelty = novelty
+    candidate.block = block
+    return candidate.to_record()
+
+
+def test_the_pressure_rebuilds_from_the_records_as_it_was_live():
+    seed_block = "def f():\n    return 1\n"
+    rows = [
+        _row("s", 0, block=seed_block),
+        _row("c1", 1, parent="s"),                                         # evaluated
+        _row("c2", 1, parent="s", rejected=True, novelty="duplicate"),     # never evaluated
+        _row("c3", 1, parent="s", rejected=True, novelty="no_op", block=seed_block),
+        _row("c4", 1, parent="s", rejected=True, block=seed_block),        # a failed apply
+        _row("c5", 1, parent="s", rejected=True, novelty="behavioural"),   # caught in the cascade
+        _row("c6", 1, parent="s", rejected=True),                          # a static-stage reject
+        _row("c7", 3, parent="s"),                                         # generation 2 bred nothing
+    ]
+    config = ArchiveConfig(descriptors=(
+        DescriptorConfig("complexity", 4, 0.0, 40.0), DescriptorConfig("behaviour", 4, 0.0, 1.0)))
+
+    live = Archive.from_config(config)
+    for generation, evaluated in ((1, 3), (2, 0), (3, 1)):
+        live.decay()
+        for _ in range(evaluated):
+            live.note_evaluated("s")
+
+    rebuilt = Archive.from_records(rows, config)
+    assert rebuilt.pressure == pytest.approx(live.pressure)
+    assert rebuilt.pressure["s"] == pytest.approx(3 / 4 + 1)
+    assert rebuilt.children == {"s": 7}, "the views still count every attempt"
 
 
 def test_sampling_is_seeded_and_stays_inside_the_elites():

@@ -1767,6 +1767,9 @@ class SearchConfig:
     reevaluate_best_every: int = 0
     """Every N rounds the archive's best runs once more at the final stage on a
     fresh seed, and its runs are pooled (`leaderboard.read_rows`); 0 is off."""
+    selection_temperature: float = 1.0
+    """tau in the archive's parent weight `sigmoid(z(fitness) / tau) / (1 + c)`:
+    below 1 the fitter elites are drawn harder, above 1 softer; > 0."""
 
     @property
     def llm_operators(self) -> list[str]:
@@ -1811,6 +1814,7 @@ class SearchConfig:
             "novelty",
             "adaptive_children",
             "reevaluate_best_every",
+            "selection_temperature",
         }
         if "parent_top_k" in data:
             raise ConfigError(
@@ -1837,6 +1841,9 @@ class SearchConfig:
             raise ConfigError(
                 "search.operators: at least one operator must have a share > 0"
             )
+        temperature = _as_float(data.get("selection_temperature", 1.0), "search.selection_temperature")
+        if not 0.0 < temperature < float("inf"):
+            raise ConfigError(f"search.selection_temperature: must be > 0, got {temperature:g}")
         return SearchConfig(
             children_per_generation=_as_int(
                 data.get("children_per_generation", 4),
@@ -1871,6 +1878,7 @@ class SearchConfig:
             reevaluate_best_every=_as_int(
                 data.get("reevaluate_best_every", 0), "search.reevaluate_best_every", minimum=0
             ),
+            selection_temperature=temperature,
         )
 
 
