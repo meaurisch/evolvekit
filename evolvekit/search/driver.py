@@ -864,7 +864,7 @@ class Driver:
                     "run is resumed"
                 )
                 return self._finalise(summary)
-            self._generation_finished(0, began, [seed], breed_s=0.0,
+            self._generation_finished(0, began, [seed], breed_s=0.0, adopted=False,
                                       round_best=self.best.fitness if self.best is not None else None)
             summary.seed_score = seed.score
             summary.candidates += 1
@@ -938,9 +938,8 @@ class Driver:
             if children is None:
                 children = self._breed(generation, plateau=decision.plateau)
                 self._write_pending(generation, children)
-            # The round's writing time: what the plan re-estimates the AI's seconds from. 0 marks an
-            # adopted round only (`plan.replan`), so a written one says at least a millisecond.
-            breed_s = 0.0 if adopted else max(0.001, round(time.perf_counter() - bred_at, 3))
+            # The round's writing time: what the plan re-estimates the AI's seconds from (0 for an adopted round).
+            breed_s = 0.0 if adopted else round(time.perf_counter() - bred_at, 3)
             viable = [c for c in children if not c.rejected]
             for child in viable:
                 # Handed to the cascade: a refused or failed child cost its
@@ -982,7 +981,8 @@ class Driver:
                 self.stop_policy.rebase(best.fitness)
             # The breadth moves before the event, which says where it ended.
             change = self.breadth.update(decision.stagnant_generations == 0) if self.breadth is not None else None
-            self._generation_finished(generation, began, children, breed_s=breed_s, round_best=measured)
+            self._generation_finished(generation, began, children, breed_s=breed_s, adopted=adopted,
+                                      round_best=measured)
 
             if self._provider_is_dead():
                 summary.stop_reason = (
@@ -1343,11 +1343,12 @@ class Driver:
 
     def _generation_finished(
         self, generation: int, began: float, children: Sequence[Candidate], *,
-        breed_s: float, round_best: float | None,
+        breed_s: float, adopted: bool, round_best: float | None,
     ) -> None:
         """`round_best`: the best as the round measured it, before a
         re-evaluation pooled it (`best_fitness` is after); `breed_s`: the
-        round's writing time, 0 for an adopted round."""
+        round's writing time, 0 for an adopted round; `adopted`: its children
+        were written by an earlier session (`pending.json`)."""
         best = self.best
         duration = round(time.perf_counter() - began, 3)
         self._durations[generation] = duration
@@ -1364,6 +1365,7 @@ class Driver:
             stop_epsilon=self.stop_policy.epsilon_now(),
             round_best=round_best,
             breed_s=breed_s,
+            adopted=adopted,
             noise_sd=self.stop_policy.noise_sd,
             tpe_ratio=None,
             breadth_at_ceiling=(self.breadth.current >= self.breadth.config.max) if self.breadth is not None else None,

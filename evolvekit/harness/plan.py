@@ -228,6 +228,8 @@ class RoundRecord:
     breadth_at_ceiling: bool | None
     legacy: bool
     """The event is from before A4 (it has no `round_best`)."""
+    adopted: bool = False
+    """The round's children were written by an earlier session (`pending.json`): no writing time measured."""
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,7 @@ def round_records(events: Iterable[Mapping[str, Any]]) -> list[RoundRecord]:
             best=best, rebased=fitness if fitness is not None and fitness != best else None,
             noise_sd=_number(event.get("noise_sd")) or 0.0, tpe_ratio=_number(event.get("tpe_ratio")),
             breadth_at_ceiling=ceiling if isinstance(ceiling, bool) else None, legacy=legacy,
+            adopted=event.get("adopted") is True,
         ))
     return records
 
@@ -273,14 +276,14 @@ def round_records(events: Iterable[Mapping[str, Any]]) -> list[RoundRecord]:
 def replan(plan: Plan, measured: Measured) -> Plan:
     """`plan` with the rounds done, the rounds left and the measured round (the
     module docstring); unchanged before the first round. An adopted round (its
-    children written by an earlier session: no writing time, children) and a
+    children written by an earlier session, `adopted`) and a
     round from before A4 paid no measured AI time, so they stay out of the AI's
     seconds per child; their evaluation counts."""
     rounds = [r for r in measured.records if r.generation >= 1]
     if not rounds:
         return plan
     eval_s = statistics.median(r.duration_s - r.breed_s for r in rounds)
-    paid = [r for r in rounds if not r.legacy and not (r.breed_s == 0.0 and r.children > 0)]
+    paid = [r for r in rounds if not (r.legacy or r.adopted)]
     children = sum(r.children for r in paid)
     ai_child_s = sum(r.breed_s for r in paid) / children if children else 0.0
     round_s = eval_s + plan.children * ai_child_s

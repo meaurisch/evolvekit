@@ -831,3 +831,46 @@ def test_the_results_of_a_held_group_say_what_the_verdict_says_not_better(tmp_pa
     assert f"Final check (small): {doc['groups']['small']['line']}" in data["summary_text"].splitlines()
     _run_phase(run_dir, "done")
     assert jobs.results(root, "r1", document_of, group="small")["final"]["decision"] == "use", "read once all are done"
+
+
+def test_each_group_s_job_json_gets_rounds_left_within_its_own_share(tmp_path, monkeypatch):
+    """A4.1: each group's search re-plans against its own plan (its share of the hours), into its own job.json."""
+    from types import SimpleNamespace
+
+    root = per_group_study(tmp_path, sizes=[20] * 4 + [80] * 4 + [20, 20, 80, 80], held=4, tags={"small": 6, "large": 6})
+    monkeypatch.setattr(execute, "require_valid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execute, "measured", lambda _root: None)
+    monkeypatch.setattr(execute, "plan_for", lambda *args, hours, **kwargs: replace(Plan.fixed(children=4),
+                                                                                    search_s=hours * 3600.0))
+
+    def make_folder(study, harness, plan, root_, run_id, **kwargs):
+        folder = root_ / "runs" / run_id / "groups" / kwargs["group"]
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    class FakeDriver:
+        def __init__(self, config, *, run_dir, on_round=None, **kwargs):
+            self.run_dir, self.on_round = Path(run_dir), on_round
+
+        def run(self):
+            rows = [{"type": "generation_finished", "session": "s", "ts": f"2026-11-14T10:0{i}:40+00:00",
+                     "generation": i, "duration_s": 100.0, "breed_s": 10.0 if i else 0.0, "adopted": False,
+                     "children": 4 if i else 1, "round_best": 1.0, "best_fitness": 1.0} for i in (0, 1)]
+            (self.run_dir / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            assert self.on_round(1) is None
+            return SimpleNamespace(stop_reason="done", generations=1, best=None, aborted=False)
+
+    monkeypatch.setattr(execute, "write_run", make_folder)
+    monkeypatch.setattr(execute, "load_config", lambda path: None)
+    monkeypatch.setattr("evolvekit.search.driver.Driver", FakeDriver)
+    monkeypatch.setattr(execute, "_final_check", lambda study, plan, config, folder, job, log, **kw: job.finish("done"))
+    monkeypatch.setattr(execute, "apply_group_holm", lambda _run_dir: None)
+    monkeypatch.setattr(execute, "write_group_exports", lambda *args: [])
+    execute.run_per_group(root, "r1", log=lambda line: None)
+    run = json.loads((root / "runs" / "r1" / "job.json").read_text(encoding="utf-8"))
+    for name, plan in run["plan"]["groups"].items():
+        own = json.loads((root / "runs" / "r1" / run["per_group"]["dirs"][name] / "job.json").read_text(encoding="utf-8"))
+        # a round of 90 s + 4 * 2.5 s = 100 s; 60 s used of the group's own search seconds
+        assert own["plan"]["rounds_done"] == 1 and own["plan"]["measured"] == {"round_s": 100.0, "ai_child_s": 2.5}
+        assert own["plan"]["rounds_left"] == int((plan["search_s"] - 60.0) // 100.0), name
+        assert "rounds_left" not in run["plan"], "the run folder's plan holds the groups' plans, not one of its own"

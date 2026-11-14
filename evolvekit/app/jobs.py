@@ -2036,7 +2036,12 @@ def pace(series: list[dict[str, Any]], plan: dict[str, Any], job: dict[str, Any]
     A run that re-plans after every round (`plan.replan`, A4) writes
     `plan.rounds_done` and `plan.rounds_left` into `job.json`: then those give
     the rounds (one source for the number); a run from before it keeps the
-    reading of the series."""
+    reading of the series. The two count differently: `rounds_left` divides
+    the search time left by the median round (its evaluation plus the AI's
+    measured seconds per child), while the series reading -- like the
+    search's own stop, `RunStop.before_generation` -- uses the longest of the
+    last two rounds. So `rounds_left` is "about": after a slow round the
+    search may start one round fewer than it says."""
     if job.get("phase") != "search" or _continued(job) or job.get("resumed_at") or job.get("bakeoff"):
         return None
     if {"rounds", "generations"} & set(plan.get("adjusted") or ()):

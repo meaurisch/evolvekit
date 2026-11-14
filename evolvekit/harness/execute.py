@@ -375,7 +375,7 @@ def run_study(
     try:
         config = load_config(run_dir / CONFIG)
         summary = Driver(config, run_dir=run_dir, log=log,
-                         on_round=_round_hook(run_dir, job, plan, uses_tpe=_uses_tpe(config))).run()
+                         on_round=_round_hook(run_dir, job, plan, uses_tpe=_uses_tpe(config), log=log)).run()
         job.update(search={
             "stop_reason": summary.stop_reason, "generations": summary.generations,
             "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
@@ -558,7 +558,8 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
                                   plan=plans[name].to_json())
             config = load_config(folder / CONFIG)
             summary = Driver(config, run_dir=folder, log=log,
-                             on_round=_round_hook(folder, group_job, plans[name], uses_tpe=_uses_tpe(config))).run()
+                             on_round=_round_hook(folder, group_job, plans[name], uses_tpe=_uses_tpe(config),
+                                                  log=log)).run()
             group_job.update(search={
                 "stop_reason": summary.stop_reason, "generations": summary.generations,
                 "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
@@ -884,20 +885,30 @@ def _uses_tpe(config: Any) -> bool:
     return operators.get("param_tpe", 0) > 0
 
 
-def _round_hook(run_dir: Path, job: Job, plan: Plan, *, uses_tpe: bool) -> Callable[[int], str | None]:
+def _round_hook(run_dir: Path, job: Job, plan: Plan, *, uses_tpe: bool,
+                log: Callable[[str], None] = print) -> Callable[[int], str | None]:
     """The driver's `on_round` for a study's search: after every round, the
     plan re-estimated from the rounds measured (`plan.replan`) goes into
     `job.json`'s plan -- `rounds_done`, `rounds_left`, `measured`, beside the
     planned numbers, which stay -- and the answer is whether to end the search
-    (None: go on). `uses_tpe`: the search proposes with `param_tpe`."""
+    (None: go on). `uses_tpe`: the search proposes with `param_tpe`. A file
+    that cannot be read or written is logged and skipped: the answer never
+    depends on the write."""
 
     from evolvekit.events import read_events
     from evolvekit.stopping import active_seconds
 
-    def on_round(_generation: int) -> str | None:
-        events = read_events(run_dir)
+    def on_round(generation: int) -> str | None:
+        try:
+            events = read_events(run_dir)
+        except OSError as exc:
+            log(f"gen {generation:<2} the plan was not re-estimated: events.jsonl could not be read ({exc})")
+            return None
         replanned = replan(plan, Measured(tuple(round_records(events)), used_s=active_seconds(events)))
-        job.update(plan={**(job.state.get("plan") or {}), **replanned.measured_json()})
+        try:
+            job.update(plan={**(job.state.get("plan") or {}), **replanned.measured_json()})
+        except OSError as exc:
+            log(f"gen {generation:<2} job.json could not be rewritten with the re-estimated plan ({exc})")
         return None
 
     return on_round
@@ -966,7 +977,7 @@ def resume_study(
         job.state.pop(old, None)
     try:
         config = load_config(run_dir / CONFIG)
-        hook = _round_hook(run_dir, job, _stored_plan(stored, config), uses_tpe=_uses_tpe(config))
+        hook = _round_hook(run_dir, job, _stored_plan(stored, config), uses_tpe=_uses_tpe(config), log=log)
         summary = Driver(config, run_dir=run_dir, log=log, on_round=hook).run()
         job.update(search={
             "stop_reason": summary.stop_reason, "generations": before + summary.generations,

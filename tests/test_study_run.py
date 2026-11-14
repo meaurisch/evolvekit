@@ -128,23 +128,30 @@ def test_a_study_runs_its_search_and_then_the_final_check(tmp_path):
 
 
 @pytest.mark.slow
-def test_a_study_run_writes_rounds_left_after_every_round(tmp_path):
+def test_a_study_run_writes_rounds_left_after_every_round(tmp_path, monkeypatch):
     """A4.1: the run re-plans after every round from what the rounds measured,
     and `job.json`'s plan says it: the rounds done, the rounds the time left
     buys, the measured round. The planned numbers stay as they were planned."""
     folder = _study(tmp_path)
     _fix_plan(folder)
-    seen: list[dict] = []
-    run_dir = folder / "runs" / "r1"
-    job = run_study(folder, "r1", log=lambda _m: seen.append(dict((read_job(run_dir) or {}).get("plan") or {})))
+    written: list[object] = []
+    write = Job._write
+
+    def recording(self):
+        written.append((self.state.get("plan") or {}).get("rounds_done"))
+        write(self)
+
+    monkeypatch.setattr(Job, "_write", recording)
+    job = run_study(folder, "r1", log=lambda _m: None)
     plan = job["plan"]
     assert job["search"]["generations"] >= 1, job["search"]
     assert plan["rounds_done"] == job["search"]["generations"]
     assert isinstance(plan["rounds_left"], int) and plan["rounds_left"] >= 0
     assert plan["measured"]["round_s"] > 0 and 0 <= plan["measured"]["ai_child_s"] < 1.0, "no AI: milliseconds to write"
     assert plan["rounds"] == plan["generations"] == 3, "the plan as it was set"
-    done = {p["rounds_done"] for p in seen if isinstance(p.get("rounds_done"), int)}
-    assert set(range(plan["rounds_done"])) <= done, "rewritten after every round"
+    done = [n for n in written if isinstance(n, int)]
+    assert sorted(set(done)) == list(range(plan["rounds_done"] + 1)), "rewritten after every round, the last included"
+    assert done == sorted(done), "never backwards"
 
 
 _ROUND_TOY = r'''
@@ -186,10 +193,35 @@ def test_the_driver_calls_on_round_after_each_recorded_round_and_stops_on_a_reas
     finished = [e for e in read_events(run_dir) if e["type"] == "generation_finished"]
     assert [e["generation"] for e in finished] == [0, 1, 2, 3]
     for event in finished:
-        assert {"round_best", "breed_s", "noise_sd", "tpe_ratio", "breadth_at_ceiling"} <= set(event)
+        assert {"round_best", "breed_s", "adopted", "noise_sd", "tpe_ratio", "breadth_at_ceiling"} <= set(event)
         assert event["breed_s"] >= 0 and event["tpe_ratio"] is None and event["breadth_at_ceiling"] is None
+        assert event["adopted"] is False
         assert event["round_best"] == event["best_fitness"], "no re-evaluation here"
-    assert finished[0]["breed_s"] == 0.0 and all(e["breed_s"] >= 0.001 for e in finished[1:]), "0 marks no writing"
+    assert finished[0]["breed_s"] == 0.0, "the starting point is not bred"
+
+
+def test_the_round_event_says_whether_adaptive_breadth_ended_at_its_ceiling(tmp_path):
+    """`breadth_at_ceiling`: after the round's own breadth update. A flat toy never
+    improves, so with `grow_after: 1` the breadth grows 2 -> 3 (its max) in round 1."""
+    from evolvekit.config import build_config
+    from evolvekit.events import read_events
+    from evolvekit.search.driver import Driver
+
+    (tmp_path / "toy.py").write_text(_ROUND_TOY.replace("a.x + a.seed / 1000.0", "1.0"), encoding="utf-8")
+    config = build_config({
+        "problem": {"parameters": {"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.0}}},
+        "evaluate": {
+            "stages": [{"id": "static", "kind": "builtin-static"},
+                       {"id": "full", "kind": "command", "kpis_from": "stdout",
+                        "command": "{python} toy.py --seed {seed} {params}"}],
+            "score": {"objective": "value", "direction": "maximize"},
+        },
+        "search": {"operators": {"param_lhs": 1.0}, "children_per_generation": 2,
+                   "adaptive_children": {"min": 2, "max": 3, "grow_after": 1}},
+    }, base_dir=tmp_path)
+    Driver(config, run_dir=tmp_path / "run").run(generations=2)
+    finished = [e for e in read_events(tmp_path / "run") if e["type"] == "generation_finished"]
+    assert [(e["generation"], e["breadth_at_ceiling"]) for e in finished] == [(0, False), (1, True), (2, True)]
 
 
 @pytest.mark.slow
