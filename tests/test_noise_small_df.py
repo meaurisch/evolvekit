@@ -224,6 +224,48 @@ def test_with_two_correlated_measures_an_equal_candidate_is_kept_out_in_about_8_
     assert band[0] <= rate <= band[1]
 
 
+def _calibrated_correlated_veto_rate(tmp_path: Path, rho: float, trials: int, rng: random.Random) -> float:
+    """score = a + b, `seeds: 1`, wall-clock: the only noise is the calibration
+    (`record_check` on the seed's three runs); one run's a and b have sd 1 each
+    and correlation `rho`. An equal candidate against the seed, one hold-out run
+    each; the public noise stands in for the hold-out's, rescaled by 1."""
+    from evolvekit.evaluate.cascade import holdout_veto
+
+    cascade = _cascade(tmp_path, 1, weights={"a": 1.0, "b": 1.0})
+    stage = StageConfig(id="full", kind="command", command="x {seed}", seeds=1)
+
+    def pair():
+        z1, z2 = rng.gauss(0, 1), rng.gauss(0, 1)
+        return 100 + z1, 50 + rho * z1 + math.sqrt(1 - rho**2) * z2
+
+    kept = 0
+    for _ in range(trials):
+        a0, b0 = pair()
+        first = StageOutcome(stage_id="full", ok=True, kpis={"a": a0, "b": b0},
+                             seed_runs={"a": [a0], "b": [b0]}, seed_list=(0,))
+        (a1, b1), (a2, b2) = pair(), pair()
+        extra = StageOutcome(stage_id="full", ok=True, kpis={"a": (a1 + a2) / 2, "b": (b1 + b2) / 2},
+                             seed_runs={"a": [a1, a2], "b": [b1, b2]}, seed_list=(0, 1))
+        cascade.noise = Noise()
+        assert record_check(cascade.noise, "full", stage, first, extra, objective="a", digits=9).calibrated
+        seed, mine = sum(pair()), sum(pair())
+        cascade.seed_public = cascade.seed_private = seed
+        kept += holdout_veto(cascade.config, mine, seed, cascade.holdout_margin()) is not None
+    return _report(f"veto, equal candidate kept out, calibrated, two measures at correlation {rho}", kept, trials)
+
+
+@pytest.mark.parametrize("rho", [0.8, 0.0, -0.5])
+@_sizes((0.070, 0.088), (0.065, 0.095), slow=20_000, fast=4000)
+def test_with_a_calibrated_noise_and_two_correlated_measures_an_equal_candidate_is_kept_out_in_about_8_percent(
+        tmp_path, rho, trials, band):
+    """Statistician round 3: the calibration kept no per-run values, so a weighted
+    score fell back to √(Σ w² sd²): 10.6 / 4.7 / 2.2 % at correlation 0.8 / 0 / -0.5.
+    The calibration's three runs are now kept aligned, so the score's own three
+    values give its noise (2 df)."""
+    rate = _calibrated_correlated_veto_rate(tmp_path, rho, trials, random.Random(int(10 * rho) + 70))
+    assert band[0] <= rate <= band[1]
+
+
 # -- the promotion band: a level candidate falls below it in about 8 % ----------------
 
 
@@ -336,14 +378,52 @@ def test_with_a_calibrated_noise_a_true_twin_on_ten_instances_is_caught_in_at_le
     assert band[0] <= rate <= band[1]
 
 
-@_sizes((0.67, 0.74), (0.65, 0.75), slow=10_000, fast=2000)
-def test_with_a_calibrated_noise_a_gain_of_four_sd_on_ten_instances_is_a_twin_in_about_70_percent(trials, band):
-    """Decision 18c: the price of the shared estimate. A real gain of four run-sd on
-    every one of ten cases is called a twin when the one calibrated cv (2 df) came
-    out large enough to cover it everywhere -- far more often than the 8 % one
-    number has at a known sd: measured 70.3 % (SE 0.46 %); the docs quote it."""
-    rate = _report("gain of 4 sd on 10 instances called a twin, calibrated",
-                   _ten_instance_twins(random.Random(17), trials, 4.0), trials)
+def _guarded_twins(rng: random.Random, trials: int, shifts: list[float]) -> int:
+    """Through the whole twin check (`BehaviourIndex.check_values`, the "scored at
+    least as well" guard included): an earlier-round neighbour at the true level,
+    a child off by `shifts[i]` run-sd on case i (minimize: score = -mean cost),
+    under a calibrated noise (2 df) on 10 cases."""
+    scale, name = [100.0 * (1 + k) for k in range(10)], "cost_per_instance"
+
+    def behaviour(offsets):
+        xs = [s * (1 + 0.02 * d) + s * 0.02 * rng.gauss(0, 1) for s, d in zip(scale, offsets)]
+        return Behaviour({}, {name: xs}, -fmean(xs))
+
+    twins = 0
+    for _ in range(trials):
+        noise = _calibrated_instances(rng, scale, 0.02)
+        index = BehaviourIndex()
+        index.add("old", "full", "h", behaviour([0.0] * 10), generation=1)
+        child = behaviour(shifts)
+        margins = twin_margins(
+            child, {}, {name: [noise.vector_sd("full", name, i) for i in range(10)]}, 1,
+            cvs={name: noise.vector_cv("full", name)},
+            vector_dfs={name: [noise.vector_df("full", name, i) for i in range(10)]},
+            cv_dfs={name: noise.vector_cv_df("full", name)},
+        )
+        twins += index.check_values("full", child, margins, 9, exclude="child", before=2, exact_digits=9).duplicate
+    return twins
+
+
+@_sizes((0.0, 0.001), (0.0, 0.001), slow=10_000, fast=2000)
+def test_with_a_calibrated_noise_a_real_gain_of_four_sd_on_ten_cases_is_a_twin_in_0_percent(trials, band):
+    """Decision 18c: the shared estimate lets ten numbers' margins cover a 4-sd move
+    together (`within` alone: about 70 %), but a twin must also have scored no
+    better than what it resembles: a real gain never is one (statistician round 3:
+    0 of 10 000)."""
+    rate = _report("real gain of 4 sd on 10 cases called a twin, calibrated",
+                   _guarded_twins(random.Random(17), trials, [-4.0] * 10), trials)
+    assert band[0] <= rate <= band[1]
+
+
+@_sizes((0.67, 0.75), (0.65, 0.77), slow=10_000, fast=2000)
+def test_with_a_calibrated_noise_a_child_trading_cases_by_four_sd_is_a_twin_in_about_71_percent(trials, band):
+    """Equal true score, 4 run-sd better on five cases and 4 worse on the other
+    five: the price of one shared 2-df estimate (statistician round 3: 70.7 %).
+    Printed beside it: an equal child (about 47 %)."""
+    rate = _report("child trading cases by 4 sd called a twin, calibrated",
+                   _guarded_twins(random.Random(18), trials, [-4.0] * 5 + [4.0] * 5), trials)
+    _report("equal child called a twin, calibrated", _guarded_twins(random.Random(19), trials, [0.0] * 10), trials)
     assert band[0] <= rate <= band[1]
 
 

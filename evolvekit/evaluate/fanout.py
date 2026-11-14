@@ -160,7 +160,7 @@ class Race:
     def margin_at(self, diffs: Sequence[float]) -> float:
         """How far behind, in percent, a candidate may be at a look over
         `diffs` (`_diffs`, fractions): the largest of `margin_pct`; the
-        run-to-run noise term `100 · t_ν(0.995) · √2·cv/√m` -- one side at
+        run-to-run noise term `100 · t_ν(0.9975) · √2·cv/√m` -- one side at
         `cv`, the other at `cv`, so the mean ratio over m instances has sd
         `√2·cv/√m`, and the term is its one-sided `1 - RACE_TAIL` tail at each
         look, with Student's t at the cv's `df` (Decision 18a; 2.81 at infinite

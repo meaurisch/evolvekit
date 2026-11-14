@@ -1298,13 +1298,16 @@ any order.
   calibrated estimate in about 94 % (measures whose noise is one estimate
   miss together, which is why the catch is *at least* 84 %).
 - A real difference of four noise sd (twice the margin) is still called a twin
-  about **8 %** of the time when σ̂ is well measured. On few degrees of freedom
-  the margin is wider, and where many numbers share one estimate they miss
-  together: a real gain of four run-sd on every one of ten cases is called a
-  twin in about **70 %** of trials when the noise is a calibration's (three
-  runs, 2 degrees of freedom) — the one estimate sometimes comes out large
-  enough to cover every case at once. More replicates (`seeds: 3`, or more
-  candidates with their own runs) shrink it.
+  about **8 %** of the time when σ̂ is well measured — but only one that
+  measured no better than what it resembles: a real *gain* is never a twin
+  (the "scored at least as well" guard; none in 10 000 trials of a gain of
+  four run-sd on ten cases under a calibrated noise). On few degrees of
+  freedom the margin is wider, and where many numbers share one estimate they
+  move together: on a calibration's 2 degrees of freedom and ten cases, a child
+  that trades cases — four run-sd better on half of them, four worse on the
+  rest, at an equal true score — is a twin in about **71 %** of trials, and an
+  equal child in about 47 %. More replicates (`seeds: 3`, or more candidates
+  with their own runs) narrow the margins.
 - Where many earlier candidates sit close together, a child truly one run-sd
   better than all of them is evaluated about 95 % of the time at `seeds: 3`
   (about 84 % at `seeds: 1`), with the noise well measured. When those candidates' own scores are noisy, the
@@ -1361,9 +1364,11 @@ sd of one candidate's hold-out score as the run's noise estimate
 score and `seeds` the final stage's, the seed's own runs included. With
 `score.weights` over several measures, σ̂ is the spread of the score's own
 per-run values (Σ wₖ·xₖ of each run), so measures that move together, or
-against each other, count as they do; where the runs are not kept (a
-calibration) it is `√(Σ wₖ² σ̂ₖ²)` on the smallest of the measures' degrees of
-freedom. When the
+against each other, count as they do; where no runs were kept (a file from
+before them) it is `√(Σ wₖ² σ̂ₖ²)` on the smallest of the measures' degrees of
+freedom. A calibration keeps its three runs in order for every measure, so
+there too the score's own three values give its noise (2 degrees of freedom).
+When the
 hold-out has no estimate of its own (it replicates nothing, e.g. at `seeds: 1`),
 the public stage's noise stands in, rescaled by `|seed's private / seed's
 public|` — only when both are non-zero and of one sign; otherwise the margin is

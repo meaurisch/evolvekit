@@ -553,7 +553,9 @@ class Noise:
         entry = stage.get("kpis", {}).get(kpi)
         if entry is None:
             return _Paired(None, 0, None)
-        ss, df, total, count = _two_way((e["seeds"], e["values"]) for e in entry["runs"].values())
+        ss, df, total, count = _two_way(
+            (e["seeds"], e["values"]) for cid, e in entry["runs"].items() if cid != CALIBRATION_ID
+        )
         mean = total / count if count else None
         if mean is None:
             base = (stage.get("seed") or {}).get("kpis", {}).get(kpi)
@@ -728,27 +730,32 @@ class Noise:
 
     def _score_runs(self, key: str, weights: Mapping[str, float]) -> list[tuple[list[int], list[float]]]:
         """Per candidate that kept runs of every weighted KPI on the same
-        seeds: `(seeds, Σ w_k · x_k per run)`, the score's own per-run values."""
+        seeds: `(seeds, Σ w_k · x_k per run)`, the score's own per-run values.
+        The calibration's runs count only while no candidate has such values,
+        and never on a repeatable stage (as for every accessor)."""
         entries = [self._stages.get(key, {}).get("kpis", {}).get(kpi) for kpi in weights]
         if any(entry is None for entry in entries):
             return []
-        tables = []
+        tables: dict[str, tuple[list[int], list[float]]] = {}
         for cid, first in entries[0]["runs"].items():  # type: ignore[index]
             rows = [entry["runs"].get(cid) for entry in entries]  # type: ignore[index]
             if any(row is None or row["seeds"] != first["seeds"] for row in rows):
                 continue
             values = [sum(w * row["values"][j] for w, row in zip(weights.values(), rows))
                       for j in range(len(first["seeds"]))]
-            tables.append((list(first["seeds"]), values))
-        return tables
+            tables[cid] = (list(first["seeds"]), values)
+        if CALIBRATION_ID in tables and (len(tables) > 1 or self.repeatable(key)):
+            del tables[CALIBRATION_ID]
+        return list(tables.values())
 
     def _score_estimate(self, key: str, score: "ScoreConfig") -> tuple[float, float]:
         """One run's score variance and its df (Decision 18b). One KPI: its
         own (`sd`, `df`). A weighted sum: from the score's own per-run values
         -- across seeds per candidate (`Σ (nᵢ - 1)`), or two-way on a
         repeatable stage -- so the covariance of the measures is in, and the
-        df is exact. Without such runs (a calibration, a file from before
-        them): `Σ w_k² sd_k²`, on the smallest of the measures' df."""
+        df is exact; a calibration's three runs are such values too (2 df).
+        Without any (a file from before them): `Σ w_k² sd_k²`, on the
+        smallest of the measures' df."""
         weights = dict(score.weights or {score.objective: 1.0})
         if len(weights) == 1:
             (kpi, w), = weights.items()
@@ -902,6 +909,7 @@ class Noise:
             entry = _group(stage, "kpis", kpi)
             if instance is None:
                 entry["across"][CALIBRATION_ID] = {"runs": runs, "mean": mean, "var": var}
+                self._calibration_runs(entry, values, mean, 1.0)
                 continue
             if not 0 <= instance < m:
                 raise ValueError(f"calibrate: instance {instance} is not one of {m}")
@@ -912,9 +920,24 @@ class Noise:
             else:
                 scalar, scalar_mean = var / m, None
             entry["across"][CALIBRATION_ID] = {"runs": runs, "mean": scalar_mean, "var": scalar}
+            self._calibration_runs(entry, values, mean, math.sqrt(scalar / var) if var > 0 else 0.0)
             vector_key = (elements or {}).get(kpi, f"{kpi}_per_instance")
             if vector_key is not None:
                 self.calibrate_element(key, vector_key, values, instance=instance, instances=m)
+
+    @staticmethod
+    def _calibration_runs(entry: dict[str, Any], values: Sequence[float], mean: float, scale: float) -> None:
+        """The calibration's runs kept in order, one per position (the seed's
+        first run, the repeat, seed 1: the same three runs for every KPI), so a
+        weighted score's own per-run values exist (`_score_runs`, Decision 18b):
+        the measures' covariance is in. Stage-level: each run's deviation from
+        the mean scaled by `scale` (`√(stage-level var / instance var)`), so
+        their variance is the KPI's calibrated one. Positions, not seeds (seed 0
+        ran twice): never a cell of the two-way table."""
+        entry["runs"][CALIBRATION_ID] = {
+            "seeds": list(range(len(values))),
+            "values": [mean + scale * (float(v) - mean) for v in values],
+        }
 
     def calibrate_element(
         self, key: str, vector_key: str, values: Sequence[float], *, instance: int, instances: int
