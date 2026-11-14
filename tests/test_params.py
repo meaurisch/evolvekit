@@ -25,7 +25,6 @@ from evolvekit.search.params import (
     current_values,
     declared_ranges,
     has_params,
-    param_variant,
 )
 
 BLOCK = '''\
@@ -88,38 +87,24 @@ def test_apply_params_rewrites_only_the_assignment_lines():
     assert current_values(updated, {"ALPHA", "STEPS"}) == {"ALPHA": 8.25, "STEPS": 7}
 
 
-def test_a_variant_is_inside_the_declared_ranges_and_keeps_integer_types():
-    block, values = param_variant(BLOCK, seed=3)
-    assert 0.0 <= values["ALPHA"] <= 10.0
-    assert 1 <= values["STEPS"] <= 9 and isinstance(values["STEPS"], int)
-    assert values != {"ALPHA": 5.0, "STEPS": 3}, "variant 0 is the base point"
-    assert current_values(block, {"ALPHA", "STEPS"}) == values
-
-
-def test_variants_are_reproducible_from_the_seed():
-    assert param_variant(BLOCK, seed=11) == param_variant(BLOCK, seed=11)
-    assert param_variant(BLOCK, seed=11) != param_variant(BLOCK, seed=12)
-
-
-def test_a_block_with_nothing_to_sweep_yields_no_variant():
-    assert param_variant("def f():\n    return 1\n", seed=1) is None
-    # Declared but never assigned: still nothing to rewrite.
-    assert param_variant('# PARAMS: {"A": [0, 1]}\n\n\ndef f():\n    return 1\n', seed=1) is None
-
-
 # -- the operator ----------------------------------------------------------
 
 
 def test_the_operator_costs_no_tokens_and_reports_what_it_changed():
-    outcome = param_lhs(candidate(), seed=5)
+    outcome = param_lhs(candidate(), row={"ALPHA": 7.25, "STEPS": 6})
     assert outcome.ok and outcome.mode == "param_lhs"
     assert outcome.completion is None and outcome.messages == []
-    assert set(outcome.meta["params"]) == {"ALPHA", "STEPS"}
-    assert outcome.block != BLOCK
+    assert outcome.meta["params"] == {"ALPHA": 7.25, "STEPS": 6}
+    assert "ALPHA = 7.25\n" in outcome.block and "STEPS = 6\n" in outcome.block
+
+
+def test_a_constant_the_row_does_not_name_keeps_its_value():
+    outcome = param_lhs(candidate(), row={"ALPHA": 1.5, "OTHER": 3})
+    assert outcome.meta["params"] == {"ALPHA": 1.5, "STEPS": 3}
 
 
 def test_the_operator_fails_loudly_on_a_param_less_block():
-    outcome = param_lhs(candidate("def f():\n    return 1\n"), seed=1)
+    outcome = param_lhs(candidate("def f():\n    return 1\n"), row={"ALPHA": 1.0})
     assert not outcome.ok
     assert "no sweepable parameters" in outcome.error
 

@@ -60,7 +60,9 @@ and the budget against those measurements — see
 [Before you spend anything](#before-you-spend-anything-preflight).
 
 A run directory holds `runs.jsonl` (one row per candidate, with lineage, cell
-and novelty verdict), `usage.jsonl` (one row per LLM call, with tokens and
+and novelty verdict), `reevaluations.jsonl` (with
+[`search.reevaluate_best_every`](#stochastic-evaluators-seeds-n): one row per
+extra run of the best, pooled into its row by every reader), `usage.jsonl` (one row per LLM call, with tokens and
 USD), `archive.json` (the MAP-Elites grid: cells, elites, children counts and
 lineage), `scratchpad.md` (the running notes), `.lock` (the owning pid) and
 `traces/<candidate-id>.json` (the exact messages sent and the response
@@ -86,10 +88,13 @@ live run is built from:
   | `type` | When | Carries |
   |---|---|---|
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
-  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd` |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force) |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
-  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`; then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
+  | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
+  | `raced_out` | when a race stops a candidate | `candidate_id`, `stage`, `private`, `reason` (the sentence, with its margin), `runs_done`, `looks` (the stage's look counts) and `margin_pct` (the margin it was stopped by, percent, to two places) |
+  | `noise_checked` | once per run and per command stage with `{seed}`, after the seed has passed that stage and been [run again](#stochastic-evaluators-seeds-n) | `stage`, `instance` (the one the seed ran again on; `null` without instances), `repeatable`, `runs` (the seed's runs compared there) and `cv` (the objective's relative noise the search now reads; 0 on a repeatable stage at `seeds: 1`) |
+  | `screening_changed` | when a stage with [`promote.adapt`](#how-it-works) changes after a round (*A screen that checks itself*) | `stage`, `k` (how many it promotes a round from now on), `off` (passed over for the rest of the run), `rho` (the rank correlation read; `null` when the cap alone switched it off before one could be read) and `n` (the candidates it was read over) |
   | `log` | every line the run printed | `message` — stdout is block-buffered when redirected and gone with its terminal; this is not |
   | `run_finished` / `run_interrupted` / `run_crashed` | how the session ended | `stop_reason` and the best candidate; or the exception. A session with none of the three did not get the chance to write one. |
 
@@ -117,8 +122,8 @@ interrupted or dead.
 | Section | Answers |
 |---|---|
 | `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
-| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero (the search's own reading, not `confirm`'s rule, which is a chance of a gain) — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. |
-| `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, and each declared parameter's value beside its default. |
+| `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero (the search's own reading, not `confirm`'s rule, which is a chance of a gain) — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. `noise` is the run's [noise estimate](#stochastic-evaluators-seeds-n) at the final `stage` (`work/noise.json`): `repeatable` (`null` until measured), `source` (`replicates`, `calibration`, `paired` or `none`: where `sd` came from), and per measure `sd` (the noise of one run, one side of a comparison, that the search reads), `sd_across` (the across-seed estimate, always), `cv` (relative), with `runs_per_candidate` (the stage's `seeds`); `source: none` with empty maps when nothing was measured. |
+| `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, `replicates` (how many final-stage runs its values are the mean of: the stage's `seeds`, plus one per [re-evaluation](#stochastic-evaluators-seeds-n); 0 for a row written before it), and each declared parameter's value beside its default. |
 | `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
 | `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
 | `failures` | Every failed evaluator run, newest first, with its stage, seed, hold-out flag, exit status, duration, **command line**, stderr tail and the path of the full log; plus responses that could not be applied and candidates the static stage refused. |
@@ -187,8 +192,11 @@ seed = the skeleton's EVOLVE-BLOCK
   │
   ├─ generation g       C children; C adapts on stagnation (optional)
   │    sample P parents from the archive's elites
-  │                  weight = sigmoid(z(fitness)) × 1/(1 + children)
+  │                  weight = sigmoid(z(fitness)/τ) × 1/(1 + c)
+  │                  τ = search.selection_temperature (default 1)
+  │                  c = the parent's evaluated children, halved every generation
   │    draw 1 to `search.inspirations` (default 2) elites from *other* cells
+  │                  weight = sigmoid(z(fitness)/τ), without the 1/(1 + c)
   │
   │    operators   diff (SEARCH/REPLACE) · rewrite · crossover → small model
   │                big_step, every K gens or on plateau        → strong model
@@ -214,8 +222,8 @@ seed = the skeleton's EVOLVE-BLOCK
   ├─ economics: cumulative USD, best, USD since the last improvement,
   │             USD per unit of gain over a sliding window
   │
-  └─ stop on budget.max_usd / max_tokens / max_hours, stop.patience,
-     stop.target, stop.max_usd_since_improvement, stop.min_gain_per_usd,
+  └─ stop on budget.max_usd / max_tokens / max_hours, stop.patience
+     (flat: no gain > stop.epsilon), stop.target, stop.max_usd_since_improvement, stop.min_gain_per_usd,
      or a stop request
 ```
 
@@ -226,6 +234,71 @@ time at all; the behavioural one costs exactly the stage that caught it.
 There is one LLM call per child and one attempt at applying its response — the
 single exception is the novelty re-prompt, bounded to one extra call, because
 v1's nested 3×3 retry was the largest single multiplier on its token bill.
+
+**Promotion past a cheaper stage.** A stage's `promote` rule takes
+`top_k_per_generation: k`, `archive_percentile: p`, or both (a candidate needs
+to pass one). `top_k_per_generation` promotes the generation's k best at that
+stage and, when the stage's noise is known
+([Stochastic evaluators](#stochastic-evaluators-seeds-n)), every candidate within a
+**noise band** of the k-th score: twice one candidate's score noise at that
+stage (`2 · score_sd`, a mean over the stage's `seeds`). The top k and the band
+together are capped at `2k`, by score (ties by id). A candidate exactly as
+good as the k-th falls below the band in about 8 % of rounds, whether the
+noise is well measured or rests on the seed's three runs: the band's normal
+quantile becomes Student's t at the estimate's degrees of freedom (on a
+calibration's two, the band is 1.57 times as wide). With k = 2 of eight
+candidates and the noise well measured, one truly one noise sd better than the
+other seven is left out about 18 % of the time (about 41 % with the top k
+alone). The behaviour-twin
+rule compares a child only with earlier rounds
+([The novelty filters](#the-novelty-filters--structural-near-and-behavioural)),
+so it does not empty the band: a child just below the k-th of its own round is
+not that candidate's twin. With no noise
+estimate — a stage of one run that is never calibrated, as a study's screen —
+the band is 0 and the rule is the top k exactly. `archive_percentile: p`
+promotes every candidate whose score at that stage is at least the p-th
+percentile of the competing archive members' **own scores at that stage**
+(like with like: a proxy score against proxy scores, not against the final
+fitness); members recorded without a score there are left out, and with none
+the members' fitness is used, as before. Whatever this promotes is promoted
+whatever the cap.
+
+**A screen that checks itself: `promote.adapt`.** With
+`promote: {top_k_per_generation: 2, adapt: true}` (a config error without
+`top_k_per_generation`) on a command stage followed by another command stage,
+the run checks after every round whether the cheaper stage still ranks
+candidates as the next one does: the Spearman rank correlation ρ between the
+two stages' scores, over every candidate that has both (the seed included, not
+rejected, not failed), cumulative over the run. With fewer than 8 such
+candidates, or no ρ (a side that does not vary), nothing changes. Otherwise:
+
+- ρ < 0 at two checks running: the stage is **switched off** for the rest of
+  the run — passed over, its candidates go straight to the next stage, with no
+  score of their own at it;
+- else ρ < 0.2: `k` grows by one (one more promoted a round), up to the
+  round's children; when `k` would reach them — every child promoted, no screen
+  left — the stage is switched off instead.
+
+The run log says each change in a sentence (`screening promotes 3 a round from
+now on: it agrees with the full stage only weakly (rho = 0.10 over 9
+candidates)`, `screening off for the rest of the run: …`), and `events.jsonl`
+has `screening_changed` with `stage`, `k`, `off`, `rho` and `n`. The state is
+`work/screening.json`, one entry per adapting stage under `stages` (`k`,
+`off`, `below_zero` — consecutive checks with ρ < 0 — and `history`, one entry
+per check: `generation`, `n`, `rho`, `k`, `off`, `said`), saved after every
+check; a resumed run keeps each stage's `k` and off, and a run from before the
+file starts from the configured `k`. A run that died between a round's rows and
+its check makes that check on resume, over the same candidates.
+`promote.adapt` needs a later command stage to compare with: on the final
+stage, or with `problem.tree.build` (candidates built one at a time), it is a
+config error. ρ is over
+promoted candidates only, the best by the screen, so the range is restricted
+and ρ reads low: a screen whose scores correlate 0.8 with the next stage's
+shows about 0.65. The thresholds allow for that: in a seeded simulation of ten
+rounds of six children, an agreeing screen (0.8) is switched off in about 1 %
+of runs, and one that does not predict the next stage at all grows `k` in about
+91 %. A longer round after `k` grows shows in the next pace line, which is
+re-planned from the measured round durations. A study's screen sets `adapt`.
 
 **A finite score is not a comparable score.** A candidate *competes* — is
 ranked, archived, sampled as a parent, reported as `best` — only when it got
@@ -247,8 +320,9 @@ below the starting point's is kept out by the veto. It is counted apart, as
 ### The archive
 
 `search.archive.descriptors` is a list of axes, each naming a KPI the evaluator
-already emits, a bin count, and either an explicit `range: [lo, hi]` or
-`range: auto` (which widens and re-bins as the run discovers values):
+already emits (`kpi:`) or one of `problem.parameters` (`param:`), a bin count,
+and for a KPI either an explicit `range: [lo, hi]` or `range: auto` (bins drawn
+from the values the run has seen):
 
 ```yaml
 search:
@@ -263,9 +337,79 @@ search:
         range: [0.0, 0.25]
 ```
 
+*Bins.* An explicit `range` is cut into `bins` equal widths; a value outside it
+lands in the end bin. A `range: auto` axis is cut at the **quantiles** of its
+members' values (`statistics.quantiles(..., method="inclusive")`), so each bin
+holds about as many members and one outlier cannot squash every other
+candidate into the bottom bin. Each cut sits halfway between two neighbouring
+distinct values, so tied values — a count such as `complexity` repeats a lot —
+never put two distinct values in one bin while there are no more distinct
+values than bins; with fewer distinct values than bins every one has a bin of
+its own, and quantiles that tie are replaced by a cut through the fullest bin.
+The cut points move only when the member count doubles — at 2, 4, 8, 16 …
+members — and every member is then placed again (and when a re-evaluation
+changes a member's value, the last cut is made again with it, as a resumed run
+makes it); until a re-bin has seen two distinct values, everything is in bin 0.
+`archive.json` lists each auto axis's cut points under `edges`, and a cell's
+label gives its range. A parameter axis's label is in the parameter's own
+values (`0.25..0.5`; the choices in it, `fast/slow`).
+
+*Parameter axes.* With `problem.parameters` declared and no `descriptors`
+written, the grid's axes are the **first two declared parameters** (one when
+the space has one), 4 bins each — a tuning candidate's `complexity` hardly
+changes, so the default axis would put every candidate in one cell. Name
+others with `{param: name, bins: 4}`; a name that is not a declared parameter
+is a config error that lists them. A parameter's range is known, so its axis
+is fixed: `bins` equal parts (quarters at 4) of the parameter's range on its own scale (its unit
+scale — logarithmic for `log: true`; a choice by its position in the list),
+never quantile-binned and never re-binned. A study (`evolvekit study`) writes
+its axes explicitly: two of its tuned values, the harness's recommended
+settings first in the harness's order, else the first two the study tunes.
+
+```yaml
+search:
+  archive:
+    descriptors:
+      - param: max_iterations    # fixed quarters of its range
+        bins: 4
+      - kpi: mean_openness       # quantile bins
+        bins: 4
+```
+
 Each cell keeps one elite — the best candidate that landed in it — and the
 archive keeps a global top-k besides. A candidate only ever displaces the elite
 of its own cell, which is what stops a run collapsing onto a single lineage.
+
+*The elite rule.* A challenger takes its cell when its fitness beats the
+elite's by more than the noise of one finished candidate's score (`Noise.score_sd`
+at the final stage — see [Stochastic evaluators](#stochastic-evaluators-seeds-n)),
+or on any gain when its score is the mean of more runs than the elite's
+(`replicates` on the row; 0, a row written before it, counts as equal). With no
+noise estimate — a repeatable evaluator, or `seeds: 1` without `{seed}` — that is
+a strict `>`, as it always was. A challenger exactly as good as the elite, both
+measured with noise sd σ, takes the cell in about 24 % of trials (50 % without
+the margin), whether σ is well measured or estimated from the seed's three
+runs: the margin's normal quantile becomes Student's t at the estimate's
+degrees of freedom (1.22 σ̂ on a calibration's two). A re-bin of the auto axes applies the same rule, in id
+order; a resumed run rebuilds the grid with the noise as it is when it resumes.
+
+*Parent selection: `search.selection_temperature`.* Each generation's parents
+are drawn from the elites with weight `sigmoid(z(fitness)/τ) × 1/(1 + c)`: `z`
+is the elite's fitness as a z-score over the elites, `τ` is
+`search.selection_temperature` (default `1`; any number > 0 — below 1 the
+fitter elites are drawn harder, `0.25` turns the 0.27 : 0.73 of `z = ∓1` into
+0.02 : 0.98; above 1 softer), and `c` is the parent's **pressure**: one for each
+of its children that was handed to the cascade, halved at the start of every
+generation, so a parent that has just been used a lot rests for a while and
+then recovers. A child the novelty filter refused before evaluation (no-op,
+duplicate) or whose proposal did not apply costs its parent nothing; a child
+rejected by the static stage or caught as a behavioural twin was evaluated and
+counts. Inspirations are drawn by `sigmoid(z(fitness)/τ)` alone, without the
+`1/(1 + c)`. `archive.json`'s `children` (and each cell's) still counts every
+attempt, failed applies and duplicates included. A resumed run replays the
+pressure from `runs.jsonl` — halved once per generation, then the generation's
+evaluated children — so it is what the uninterrupted run had. The weight is
+never below 10⁻⁶.
 
 Choose the second axis for *behaviour*, not quality. The bin-packing example
 uses `mean_openness`: where the chosen bin sat between the tightest and the
@@ -279,10 +423,10 @@ run resumes — the snapshot is a convenience, the log is the record. `status`
 and `leaderboard` print cell occupancy; the HTML dashboard draws the grid.
 
 The `cells=` figure printed each generation is the occupancy *after* that
-generation's inserts, and it can go **down**: an axis with `range: auto` widens
-when it sees a new value, which re-bins every member the grid already holds and
-can merge two cells into one. A falling count is the grid rescaling, not
-candidates being lost.
+generation's inserts, and it can go **down**: an axis with `range: auto` moves
+its cut points when its members double, which re-bins every member the grid
+already holds and can merge two cells into one. A falling count is the grid
+rescaling, not candidates being lost.
 
 ### Operators
 
@@ -292,7 +436,7 @@ candidates being lost.
 | `rewrite` | small | the same, and asks for the whole block back |
 | `crossover` | small | the parent **and** one inspiration's block, both with score breakdowns |
 | `big_step` | strong | scheduled every `big_step_every` generations, or on plateau |
-| `param_lhs` | none | a Latin-hypercube variant of the block's own constants |
+| `param_lhs` | none | the next row of the run's Latin hypercube over the block's own constants |
 | `param_local` | none | a good configuration; moves one to three of its parameters a little |
 | `param_cross` | none | two good configurations; each parameter from one of them |
 | `param_tpe` | none | every configuration evaluated so far, the failed ones included |
@@ -301,7 +445,9 @@ Shares come from `search.operators`. Inspirations are drawn from cells other
 than the parent's and are shown as one-line delta summaries — a unified-diff
 stat against their own parent plus the first line of their docstring, both
 computed locally. Crossover is the one operator that also sees an inspiration's
-code, because it cannot combine two candidates otherwise.
+code, because it cannot combine two candidates otherwise. The model-free
+operators (role `none`) read no inspirations, so none are drawn for them: on a
+typed space, adding parameter axes leaves the run's proposals as they were.
 
 Each inspiration adds a summary and a score line to the prompt, and on a tree
 problem its whole diff, so raising `search.inspirations` raises the cost of
@@ -318,6 +464,30 @@ WIDTH = 128.0
 Blocks without that line are never routed to it, so listing it in
 `search.operators` against a skeleton that declares nothing is harmless.
 
+**One hypercube for the run.** The `param_lhs` children of a run take the rows
+of one Latin hypercube in turn, so the first K of them cover K strata of every
+parameter — however the children fall across generations (with the default
+shares a generation has none, one or two). The cube is sized from the run's
+expected number of `param_lhs` children (`search.generations ×
+children_per_generation × its share / the sum of shares`), at least 4 rows and
+at most 64, and a new one is built when it is used up. A row that breaks a
+[constraint](#constraints-between-parameters-problemparameter_constraints), or
+equals the parent's configuration, is passed over; a child the novelty filter
+finds a duplicate is asked once more and takes the next row. A typed
+`problem.parameters` space has one cube; a `# PARAMS` block one per declaration
+(a parent that declares other ranges gets its own). The cubes and the next row
+of each are kept in `work/lhs.json` (`{"cubes": {"typed" | "params:<ranges as
+JSON>": {"K", "built", "next", "rows"}}}`, with `prior` beside `rows` when a
+parameter has one), written as each row is handed out, so a resumed run goes on
+from the next row; a run without the file builds a cube at its next `param_lhs`
+child. A run that dies while it breeds a round, before the round's
+`pending.json` is written, skips the rows that round had taken.
+A cube is used up before a new one is built when only the run's size changes
+(generations, children, shares), and is built anew when a resumed run declares
+the space differently (names, types, ranges, scales, choices or priors).
+Building a cube takes one number from the run's random stream; a child takes
+none.
+
 `param_local`, `param_cross` and `param_tpe` work on a declared
 [`problem.parameters`](#tuning-a-command-problemparameters) space and are what
 makes a model-free run a *search* rather than a sweep. `param_lhs` fills the box
@@ -325,31 +495,79 @@ evenly and never looks at a score — the right first move and the wrong tenth
 one. `param_local` starts from one of the best four configurations (the best
 most often, not always: on a noisy objective the single best is partly luck)
 and moves one parameter twice as often as two, two twice as often as three; an
-integer moves by at least one, a boolean flips. `param_cross` tries gains
+integer moves by at least one, a boolean flips. A number takes a Gaussian step
+on its own 0..1 scale, and a step past an end of the range is **reflected**
+back inside rather than clamped onto the end (clamping put about 45 % of the
+steps from 0.98 on 1.0 exactly, the same configuration again and again); how
+large the step is, is below. A step from the starting point first moves each
+parameter that has a `prior` to the prior's value, with the prior's weight as
+its chance (the record's `prior` names them), and steps from
+there. `param_cross` tries gains
 together that were found separately. `param_tpe` is a Tree-structured Parzen
 Estimator: it models, parameter by parameter, where good configurations are
-dense relative to bad ones and proposes where that ratio is highest — a
-candidate that crashed counts as the worst observation, so a region that kills
-the solver is not proposed again, one that was raced out counts as no better
-than the worst finished one (whatever its screening score), and one that was
-only screened by a cheap stage still says where not to look — when every command
-stage lists `instances` with `normalize: baseline`, so that its score is on the final
-stage's scale; otherwise only finished candidates (and failures) are observations. Until there are eight observations it takes
-a local step instead, and the record says so.
+dense relative to bad ones and proposes where that ratio is highest. The good
+set is the best tenth of the observations, rounded up, at least 2 and at most
+25 (Optuna's split); a number's density is one Gaussian per observation on the
+parameter's own 0..1 scale, each as wide as the larger gap to its neighbours
+(the ends of the range count as neighbours), kept between 0.02 and 0.5, cut to
+the range and renormalised so no mass is lost at an end, plus the range itself
+as one more observation spread evenly. Of the 48 candidates it rates, 24 are
+drawn from the good density and 24 evenly from the whole box, so the ratio can
+find a region the good set has not reached; the best ratio is proposed. A
+parameter's [`prior`](#studies-over-time) is part of both densities: a prior of
+weight *w* adds 4*w* observations at its value (a bump 0.1 wide on the unit
+scale, for a bool or a choice 4*w* counts on the value) beside the range's
+one, so it pulls the proposals towards an earlier winner without ruling out
+any value. It reads
+**ranks**, not scores, in four tiers, best first: finished candidates by
+fitness; candidates screened out by a cheaper stage, by the deepest stage they
+reached and that stage's score (on any scale: only the order counts, and they
+rank below every finished one); raced-out candidates and those kept out by the
+hold-out veto, one shared rank (whatever their screening score); and failed or
+gated candidates, one shared rank, the worst — so a region that kills the
+solver is not proposed again. Ties share the mean position. A candidate whose
+final stage was cut short with nothing wrong (a stop request, the time limit,
+the daily cap) is not an observation at all. The siblings
+already proposed in the same generation (by any operator) count as bad
+observations until they are evaluated (a "constant liar"), so several
+`param_tpe` children of one generation spread out instead of proposing the same
+neighbourhood. Until there are eight observations it takes a local step
+instead, and the record says so.
+
+**The step's size follows the 1/5 rule.** It starts at 0.15 of the range (the
+sd of the step) and is adapted after every round that had local steps — those
+of `param_local` and the local-step fallbacks of `param_cross` and `param_tpe`
+whose parent has a fitness. Children refused before evaluation (a constraint,
+the novelty filter) are not counted: they say nothing about the step's size. A
+child counts as an improvement when it competes and beats its parent's fitness
+by more than the noise margin the [elite rule](#the-archive) uses (0 without a
+noise estimate). The rule is applied per trial: of `tried` local steps of which
+`improved` improved, the step is multiplied by `1.2 ** (improved − 0.2 × tried)`
+and kept between 0.03 and 0.4, so it grows while more than one step in five
+improves, shrinks while fewer do, and balances at exactly 20 % however many
+local children a round has (one success in five leaves it as it was). A round
+without local steps leaves it. The size and one line per round are kept in
+`work/perturb.json` (`{"scale": 0.161, "history": [{"generation": 3,
+"improved": 1, "tried": 3, "scale": 0.161}]}`), so a resumed run takes the size
+up where it was; a round whose rows were recorded but whose line is missing (the
+run died between the two) is counted when the run resumes. A run without the
+file starts at 0.15.
 
 Which to use depends on how good the defaults already are. Measured at equal
 budget, five search seeds each, on two stand-in solvers
 (`python benchmarks/operator_mixes.py` reproduces it): with defaults far from
-the optimum and 36 evaluations, `param_lhs` alone does as well as any mix (mean
-best 1031.6 vs 1034.3; defaults 1225, optimum 1000) and `param_local` alone is
-clearly worse (1106.4). With a *mature* solver — 25 parameters, defaults close
-to good, most random settings harmful, noisy, 78 evaluations — `param_lhs`
-alone returned the defaults in three runs of five (mean true cost of the
-reported best 102.20, defaults 102.57), while `param_local` alone reached
-100.05 and `{param_lhs: 0.15, param_local: 0.45, param_tpe: 0.3, param_cross:
-0.1}` reached 100.30, of a possible 98.20. For a solver somebody has already
-tuned, lead with `param_local`; keep some `param_lhs` when you do not know which
-of the two cases you are in.
+the optimum and 36 evaluations, `param_lhs` alone and the mix `{param_lhs: 0.2,
+param_local: 0.4, param_tpe: 0.3, param_cross: 0.1}` end close together (mean
+best 1043.3 and 1035.4; defaults 1225, optimum 1000 — five seeds do not tell
+them apart), and `param_local` alone is well behind both (1098.0). With a
+*mature* solver — 25 parameters, defaults close to good, most random settings
+harmful, noisy, 78 evaluations — `param_lhs` alone barely moved from the
+defaults (mean true cost of the reported best 102.52, defaults 102.57), while
+`param_local` alone reached 100.30 and `{param_lhs: 0.15, param_local: 0.45,
+param_tpe: 0.3, param_cross: 0.1}` reached 99.89, of a possible 98.20 (the gap
+between those two is within what five seeds can show). For a solver somebody
+has already tuned, lead with `param_local`, alone or as the mix's largest share;
+keep some `param_lhs` when you do not know which of the two cases you are in.
 
 **A run without any model.** When only model-free operators (`param_*`) have a share,
 nothing in the run calls a model, and nothing may: no big steps are planned
@@ -490,10 +708,11 @@ nothing can be called, imported or reached through an attribute (`evolvekit/expr
 - **Refused before any solving.** The static stage refuses a configuration that breaks a
   constraint -- with its sentence (`says`) and the values -- and the command never starts. One that
   cannot be computed for a configuration (a division by zero) counts as broken.
-- **Not proposed in the first place.** `param_lhs`, `param_local`, `param_cross` and `param_tpe` draw
+- **Not proposed in the first place.** `param_local`, `param_cross` and `param_tpe` draw
   again, up to 100 times, rather than propose a configuration that breaks one; after that the last
-  draw is left to the static stage. A model sees the constraints in the prompt, under the parameter
-  list.
+  draw is left to the static stage. `param_lhs` passes over the rows of the run's hypercube that
+  break one; after a whole cube's worth of such rows the last is left to the static stage. A model
+  sees the constraints in the prompt, under the parameter list.
 
 Prefer a space in which every value is valid: tune a truck *premium* of 0 or more rather than two
 costs that must stay ordered, a scale within ±20 % rather than "no more than 20 % from today". A
@@ -687,17 +906,144 @@ number the candidate never achieved.
 `seeds: N > 1` without a `{seed}` placeholder is a config error, because N
 identical runs is N times the bill for one sample.
 
-**The behaviour signature has to give ground, and this is the important part.**
-A stochastic evaluator never fingerprints identically. A different random
-restart, a tie broken by a different hash order, a solver that stopped a
-microsecond later — and the eighth significant digit has already moved. At the
-default nine digits every candidate on such a stage looks novel, and the
-behavioural filter, the one thing standing between an hour-long evaluator and a
-re-expression of its own seed, silently stops filtering. So on a stage with
-`seeds > 1` the fingerprint is built from the *means* and rounded to
-`evaluate.signature_digits_stochastic` (default `3`) instead. Three significant
-digits on a mean of N runs is a claim about the program; nine is a claim about
-the dice.
+**The run's noise estimate: `work/noise.json`.** Every command stage's outcome
+adds to one estimate the whole run shares, per stage (and per hold-out, as
+`<stage>/private`) and per measure: each candidate with two or more runs
+contributes its own sample variance over its seeds, and the estimate is their
+pool (per element for a per-instance list, in that list's own units; under
+`normalize: baseline` the objective's is in percent of the seed, its
+`_per_instance` list's raw). A candidate that failed, was raced out or was
+abandoned contributes nothing. The file is saved after every generation and read
+back on resume; a run written before it starts with no noise. It carries
+`"schema": 2` (each candidate's per-seed runs, for the paired estimate below);
+a file of another schema is no noise.
+
+*Is the evaluator repeatable?* Once per run and per command stage, after the
+seed has passed that stage, and only when the stage's command has a `{seed}`
+(a screen as well as the final stage): the seed is run
+**once more on seed 0**, with the cache bypassed (a lookup would read the first
+run back), on the instance whose seed run took the median time (without
+`instances`, on the whole input set). If every measure equals the first run to
+`evaluate.signature_digits` (the ones in `evaluate.signature_ignore`, a run
+time, left out), the stage is *repeatable*: same program, same seed, same
+numbers. Every candidate runs on the same seeds, so on such a stage what matters
+is how far two candidates' *difference* on matching seeds moves, not how far
+the seeds spread: the noise a comparison reads is the **paired** one — the
+two-way (candidate × seed) residual over every candidate that ran the stage's
+seeds, the seed's own runs included: each run minus its candidate's mean,
+minus that seed's mean over the candidates, plus the grand mean, with
+(C − 1)(S − 1) degrees of freedom for C candidates on S seeds. That is the
+noise of one side (half the residual variance of a difference); every
+candidate's own level and every seed's own effect drop out, so the estimate
+sharpens as candidates come in (`work/noise.json` keeps each candidate's
+per-seed runs). At `seeds: 1` it is 0: a repeatable evaluator is compared
+exactly, as before. On a stage that is not repeatable (a wall-clock solver)
+the noise is the across-seed one.
+
+*When nothing replicates* (`seeds: 1`, not repeatable): the same check also
+runs the seed on **seed 1**, one more run in all, and the three runs of the
+seed on that instance calibrate the noise: their relative spread is taken to
+hold on every instance, independently, so one run of the stage has variance
+`cv² · Σ seed_mean_i² / M²` over the M instances. Three runs are two degrees of
+freedom, so a calibrated noise is quoted to **one significant digit** ("about
+2 %"). The first candidate with replicates of its own replaces the calibration;
+on a repeatable stage it is measured and reported (`sd_across`) but never read.
+The extra runs are not evaluations of the search (no `eval_started` /
+`eval_finished`, not cached, not counted against `budget.max_full_evals_per_day`); the run logs one
+line per stage (`noise: the seed run again on i2: one run varies by about 2 %
+(the search's comparisons allow for it)`, or `… the evaluator gives the same
+numbers for the same seed (comparisons are paired by seed)`; for a stage before
+the final one, `noise at stage <id>: …`) and the event log one
+`noise_checked`. A failed extra run is logged and leaves the stage unmeasured.
+Until a stage's repeatability is measured, its behaviour twins are compared by
+the exact fingerprint: a screen that is deterministic per seed has an
+across-seed spread that is the seeds', not noise.
+
+*No `{seed}`*: with `seeds: 1` nothing is run again and the noise is 0 —
+every comparison is made as if the evaluator were exact, which is how every
+rule read before this estimate existed. (`seeds > 1` without `{seed}` is a
+config error, above.)
+
+*Few degrees of freedom.* The estimate is read as it is from the first
+candidates on — two degrees of freedom after a calibration, or from the seed's
+own runs at `seeds: 3` — and every rule that reads it allows for how little
+that is: its normal quantile becomes Student's t at the same tail probability,
+with the estimate's degrees of freedom (across seeds Σ(nᵢ − 1) over the
+candidates pooled; paired (C − 1)(S − 1); a calibration 2). Each rate quoted
+below then holds whether the noise rests on three runs or three hundred: an
+equal candidate is kept out by the veto in about 8 % either way, not 15 %, and
+a true twin is caught in about 84 %, not 70 %. It is shown by `status` (`progress.noise`) and
+[`preflight`](#before-you-spend-anything-preflight). Each rule that reads the
+estimate says so in its own section and is listed here:
+
+- the hold-out veto's margin ([The hold-out penalty](#the-hold-out-penalty));
+- behaviour twins on a stage that is not repeatable
+  ([The novelty filters](#the-novelty-filters--structural-near-and-behavioural),
+  *Behavioural*): within the noise of a candidate of an earlier round that scored at
+  least as well, instead of equal to nine digits;
+- the race's margin ([One run per instance](#one-run-per-instance-instances-workers-retries),
+  `race`): at least twice the objective's relative noise of one run, read at
+  fixed looks;
+- promotion's noise band beside `top_k_per_generation`
+  ([How it works](#how-it-works), *Promotion past a cheaper stage*): every
+  candidate within twice one candidate's score noise of the k-th, capped at `2k`;
+- the automatic `stop.epsilon` ([Adaptive breadth](#adaptive-breadth),
+  *What counts as an improvement*): half one finished candidate's score noise;
+- the archive's elite rule ([The archive](#the-archive)): a challenger takes a
+  cell when it beats the elite by more than one finished candidate's score noise.
+
+**Re-evaluating the best: `search.reevaluate_best_every`.** The best of a
+noisy run is selected *because* it measured high, so part of its lead is luck:
+the best of eight equal candidates, one run each, measures about 1.4 run-sd
+above the truth. With `search.reevaluate_best_every: N` (default `0`, off),
+after every N-th round the archive's best runs **once more at the final
+stage**, on the public inputs only (no hold-out run, no race), on a fresh seed:
+`2000 + k`, k the run's re-evaluations so far — never one of the final
+check's seeds (1001 … 1012) and never one the search runs a candidate on. Its
+runs are then pooled: with n the runs its value stood for (the stage's `seeds`
+at first), every measure and the score become `(n · old + new) / (n + 1)` (the
+score is the mean of the runs' scores, not the score of the pooled measures),
+the public score follows, the ranking score is recomputed with
+`evaluate.holdout_penalty`, the hold-out veto is applied after, and the row's
+`replicates` counts the runs (`n + 1`). After three re-evaluations the lucky
+lead above is a quarter of what it was (a seeded simulation: 0.35 run-sd). Every
+view reads the pooled value — the archive (every member re-placed by the elite
+rule, where `replicates` counts), the run's best, `status`, the leaderboard,
+`export`, `confirm --candidates best|top:N`, a study's exports and final check,
+and the app. **A re-evaluation is never search progress.** The round it was
+made in is judged by what its own candidates measured; then the stop policy's
+bar becomes the pooled best, down (a lucky best regressed: a real gain has to
+clear the lower bar) or up (an unlucky one), with `stop.patience`'s flat count
+and the big-step counts left as they are. The economics series (and so the
+stop rules, `status`'s rounds and the dashboard) reads it the same way: from
+the round a re-evaluation was made in, the best is the pooled value, not an
+improvement either way, and earlier rounds keep the values they had. The hold-out
+veto's reference stays the starting point's hold-out score as first written,
+even when the starting point is the best that is run again. The Study page's
+*Tries* view draws each try from its own evaluator runs, so a re-evaluated best
+shows there with its first measurement. `runs.jsonl` keeps the row as it was written; each re-evaluation is one
+row of `reevaluations.jsonl` beside it (`id`, `generation`, `seed`, `stage`,
+`prior_runs` — the n above —, `kpis` and `score` of the new run alone,
+normalised against the run's reference like any other, and `at`), read back on
+resume. The new run joins the candidate's own runs in the noise estimate when it
+has some (`seeds > 1`); at `seeds: 1` it adds nothing there (its first run was
+selected as the best, and paired with a fresh one would overstate the noise —
+about 1.7 times the variance for the best of eight). A limit: at `seeds > 1` the
+merged entry overstates it a little too, since the best's mean was selected
+(about 11 % in the variance, 5 % in the sd, for the best of eight at `seeds: 3`).
+The noise is saved before the row is written, and `noise.json` names each run
+it pooled (`pooled`: `"<id>@<seed>"`), so a run that died between the two makes
+the same run again on resume without counting it twice in the noise. When a
+run has re-evaluations, every view ranks every row with the run's
+`evaluate.holdout_penalty`, the pooled ones and the others alike.
+
+What it costs: one final-stage run per N rounds, counted against
+`budget.max_full_evals_per_day`; skipped, with a line in the run log (`the best
+… was not run again on seed …: why`), when the cap is reached, the run is
+stopping, or less of `budget.max_hours` is left than one run of the seed took.
+It needs a final command stage with `{seed}` (a config error otherwise) and is
+not available on a source tree (`problem.tree`). `confirm` warns when it is
+given one of the seeds a best was re-evaluated on, as for the search's own.
 
 ### One run per instance: `instances`, `workers`, `retries`
 
@@ -770,13 +1116,45 @@ own, and the framework knows what it could not know before:
 - **A candidate that is clearly behind stops costing** (`race`, off unless
   configured). Every candidate is measured on the same instances in the same
   order, so after `after` of them a candidate can be compared with the best so
-  far *on exactly those*. More than `margin_pct` percent behind, and it is
-  raced out: its remaining runs are never started, it keeps the score of the
-  stage before, and it does not compete — the standing of a candidate that was
-  not promoted, not of one that failed. With ten-minute runs, `after: 4` of ten
+  far *on exactly those*. The race reads at fixed *looks*: after `after`
+  instances, then every quarter of them (⌈n/4⌉), never at the last one — with
+  `after: 4` of ten, after 4 and after 7 — and each look once per candidate, so
+  a later seed's run or a parallel worker landing in between never reads the
+  same look twice. Further behind than the margin at a look, and it is raced
+  out: its remaining runs are never started, it keeps the score of the stage
+  before, and it does not compete — the standing of a candidate that was not
+  promoted, not of one that failed. With ten-minute runs, `after: 4` of ten
   instances saves an hour of solver time per losing candidate. The margin is
-  the protection against noise: set it to a few times what two runs of one
-  configuration differ by. The baseline always finishes (it is the yardstick),
+  the largest of three: `margin_pct`; the run-to-run noise term
+  `100 · t_ν(0.9975) · √2 · cv/√m` percent at a look over m cases — the 99.75 %
+  quantile of the mean ratio's noise, 0.25 % a look (`cv` the objective's
+  relative noise from [the run's estimate](#stochastic-evaluators-seeds-n),
+  measured by the run, ν its degrees of freedom; about 2·cv at m = 4 with the
+  noise well measured; 0 without an estimate, which leaves `margin_pct`); and twice
+  the standard error of the per-case differences seen so far, shrinking to
+  nothing as the last cases come in (the factor √(1 − m/n) over the m of n
+  instances compared). The race asks whether a candidate is behind *on this
+  stage's own cases* — their mean is its score — so those n cases are the whole
+  population. At `seeds > 1` a candidate's first cases are its seed-0 runs,
+  and they are compared with the incumbent's own values **on the same seeds**
+  (`work/incumbent.json` keeps them per seed), so on a repeatable evaluator the
+  seed's own effect is the same on both sides and the paired noise is the right
+  one; an incumbent file from before that keeps only its means over its S
+  seeds, and the race then reads the across-seed noise scaled by
+  √((1 + 1/S)/2). With 2 % run noise, a candidate exactly as good as the
+  incumbent is raced out in under 1 % of runs against a fresh incumbent (about
+  0.5 % with the noise well measured, 0.2 % on a calibration's three runs, and
+  none in 4000 on a repeatable evaluator at `seeds: 3`), and in under 3 %
+  against the best of eight (about 2.7 %; 0.8 % calibrated), rising to about
+  7 % against the best of 50. One that trades cases (per-case differences of
+  3 %, no run noise) and is not behind on the mean over the stage's cases is
+  raced out in about 3 %; over all such candidates the rate is about 19 %,
+  nearly all of them really behind on the stage's cases. A candidate 5 %
+  behind is stopped in about 97 % with the noise well measured. At `seeds: 1`,
+  where the noise rests on the seed's three runs, the race can only stop large
+  deficits: 5 % behind is stopped in about 11 %, 10 % in about 36 %, 20 % in
+  about 82 %. The reason names the margin it used, and the `raced_out` event
+  the `looks`. The baseline always finishes (it is the yardstick),
   so does the first candidate through a stage, and the best so far is kept in
   `work/incumbent.json` for a resumed run. `confirm` never races. `after` must be
   below the stage's number of instances — a candidate with nothing left to run
@@ -893,6 +1271,80 @@ rather than changing it. A list-valued KPI (the example evaluator emits
 fingerprint is per-instance rather than per-mean; an evaluator that emits only
 scalars is unaffected.
 
+*On a noisy evaluator* a fingerprint is no use — a different random restart, a
+solver that stopped a microsecond later, and the eighth digit has moved — and
+fewer digits are no answer either: three significant digits call two
+candidates 0.3 % apart twins under a 0.1 % noise, and 1.5 % apart novel under a
+2 % one. So on a stage whose evaluator was measured **not repeatable** (the
+seed run again) and that has a
+[noise estimate](#stochastic-evaluators-seeds-n) (`work/noise.json`), a child is
+a twin of an earlier candidate when every measure the evaluator reports — per
+case on a stage with `instances` (the `<kpi>_per_instance` values, in the
+evaluator's own units; nothing derived, no percent of the seed), every scalar
+and list otherwise, minus `signature_ignore` — is within
+`c · σ̂ · √(2/seeds)` of that candidate's, **and** that candidate scored at
+least as well at the stage. It is then a twin *of the best such* (ties: the
+first seen). A child within the noise of everything it resembles but ahead of
+all of it is evaluated: on a noisy stage that is the only way to find out
+whether it is better, so a child is stopped only when it measures no better
+than something already paid for. A child is compared only with candidates of
+**earlier rounds**: two children of the same round are never each other's
+noise twin, so which of them was evaluated first decides nothing (with
+parallel workers that order is arbitrary), and promotion's noise band sees
+every child of the round the rule kept. A round's children become targets for
+the next round's; a resumed run rebuilds the same targets from the rows'
+`generation`. Within a round a child is still the twin of one that reported the
+same numbers, as measured (nine digits): an exact duplicate behaves alike in
+any order.
+
+- `σ̂` is one run's noise of that measure (per case: that case's); where a
+  case's is unknown — a calibration measured one case — the relative noise
+  times the value. A measure with no noise (a `vehicles` count beside a noisy
+  `cost`) must be equal at `signature_digits`; one missing on either side, or
+  a list of another length, is never a twin.
+- `c` is √2 for one noisy number with a well-measured σ̂ (the margin is then
+  `2·σ̂/√seeds`) and grows with their count (about 2.4 for ten), so that a true
+  twin is caught at least about **84 %** of the time however many cases the
+  stage has; at `2·σ̂` per case, ten cases would catch one 18 % of the time.
+  σ̂ is estimated, so `c` is Student's t quantile at the same probability with
+  σ̂'s degrees of freedom: one number is then caught in about 84 % on a
+  calibration's two degrees of freedom too, and ten cases whose noise is one
+  calibrated estimate in about 94 % (measures whose noise is one estimate
+  miss together, which is why the catch is *at least* 84 %).
+- A real difference of four noise sd (twice the margin) is still called a twin
+  about **8 %** of the time when σ̂ is well measured — but only one that
+  measured no better than what it resembles: a real *gain* is never a twin
+  (the "scored at least as well" guard; none in 10 000 trials of a gain of
+  four run-sd on ten cases under a calibrated noise). On few degrees of
+  freedom the margin is wider, and where many numbers share one estimate they
+  move together: on a calibration's 2 degrees of freedom and ten cases, a child
+  that trades cases — four run-sd better on half of them, four worse on the
+  rest, at an equal true score — is a twin in about **71 %** of trials, and an
+  equal child in about 47 %. More replicates (`seeds: 3`, or more candidates
+  with their own runs) narrow the margins.
+- Where many earlier candidates sit close together, a child truly one run-sd
+  better than all of them is evaluated about 95 % of the time at `seeds: 3`
+  (about 84 % at `seeds: 1`), with the noise well measured. When those candidates' own scores are noisy, the
+  luckiest of them can measure above a better child, which then counts as its
+  twin far more often; that is selection on measured scores, not this rule.
+
+On a **repeatable** evaluator (same program, same seed, same numbers, which the
+seed run again establishes) two programs that behave alike give equal numbers
+on the same seeds, so the nine-digit fingerprint stays the rule, as it does
+with no noise estimate. Every candidate's fingerprint and compared numbers,
+with its stage score, are kept (`behaviour_signatures`, `behaviour_values` on
+its row), so the seed is a twin target under either rule and a resumed run
+compares with what its rows kept; a row written before `behaviour_values` is a
+target by its fingerprint only. `evaluate.signature_digits_stochastic`, the
+three-digit rounding this replaces, is a config error.
+
+`search.novelty.behavioural`: `on` (default) checks every command stage, `off`
+none. `auto` does not check a stage with `seeds > 1` while it says nothing a
+twin could be judged by — its noise is still 0 and it is not known to be
+repeatable — but keeps what each candidate did there, so the check starts,
+seed included, once the seed run again or the runs' spread has said; the noise
+rule itself waits for the seed run again to find the stage not repeatable.
+
 That last filter exists because of the 2026-08-22/23 run: five paid children
 were monotone re-expressions of best fit — `-(b - item) ** 1.01`, `item - b`
 and friends — which the AST filter passes and which score the seed's score to
@@ -910,21 +1362,53 @@ paid calls bought nothing; that is the number these are here to drive down.
 The hold-out acts in two ways. By default only the first is on.
 
 **The veto.** `evaluate.holdout_veto` (default `true`): a candidate whose
-private score is below the **seed's** private score does not compete. It is not
-ranked, archived or bred from, and its row carries `competes: false` and
-`veto: "holdout below the seed's …"` with the seed's value. The leaderboard
-lists these candidates under its table, each with the `!` flag — the flag and
-the veto are one condition — and counts them as "kept out by the hold-out",
-apart from the candidates that did not finish; `status` and the dashboard label
-them the same way. A row written before the veto existed is judged by it when
+private score is below the **seed's** private score by more than a noise margin
+does not compete. It is not ranked, archived or bred from, and its row carries
+`competes: false` and `veto: "holdout below the seed's …"` with the seed's
+value (and, when the margin is not 0, `"… by more than its noise margin …"`).
+The leaderboard lists these candidates under its table, each with the `!` flag
+— the flag and the veto are one condition — and counts them as "kept out by the
+hold-out", apart from the candidates that did not finish; `status` and the
+dashboard label them the same way. A row written before the veto existed is judged by it when
 it is read back, by the resumed run and by every view alike.
 
-The comparison is with the seed's hold-out score as it is, `private <
-seed's private`, with no allowance for noise: on a hold-out whose score varies
-from run to run, a candidate exactly as good as the seed is vetoed about half
-the time. When the seed's own hold-out run failed there is nothing to compare
-with, and nobody is vetoed. A resumed run reads the seed's private score back
-from `runs.jsonl`: the last seed row's, and none when that row has none.
+The comparison is `private < seed's private − margin`. The margin is twice the
+sd of one candidate's hold-out score as the run's noise estimate
+(`work/noise.json`) gives it: `2 · σ̂/√seeds`, σ̂ the sd of one run of the
+score and `seeds` the final stage's, the seed's own runs included. With
+`score.weights` over several measures, σ̂ is the spread of the score's own
+per-run values (Σ wₖ·xₖ of each run), so measures that move together, or
+against each other, count as they do; where no runs were kept (a file from
+before them) it is `√(Σ wₖ² σ̂ₖ²)` on the smallest of the measures' degrees of
+freedom. A calibration keeps its three runs in order for every measure, so
+there too the score's own three values give its noise (2 degrees of freedom).
+When the
+hold-out has no estimate of its own (it replicates nothing, e.g. at `seeds: 1`),
+the public stage's noise stands in, rescaled by `|seed's private / seed's
+public|` — only when both are non-zero and of one sign; otherwise the margin is
+0. On a repeatable evaluator (same program and same seed give the same numbers)
+the margin uses the paired noise, which is 0 at `seeds: 1`: the literal rule.
+It is 0 with `score.levels`. One margin is computed per generation, read after
+that generation's own hold-out runs, so early in a run the candidates' own
+replicates are part of the estimate they are judged by. Every
+row that finished with a hold-out score records the one it was judged with as
+`holdout_margin` (`0.0` with no noise estimate; absent on rows from before the
+margin, which are judged by the literal rule). The `!` flag follows the same
+margin.
+
+With the margin, a candidate exactly as good as the seed is kept out in about
+8 % of cases, whether σ̂ is well measured or rests on the seed's three runs
+(the margin's normal quantile is Student's t at σ̂'s degrees of freedom: on a
+calibration's two, 1.57 times `2 · σ̂/√seeds`; with the normal one it was
+15 %); without a noise estimate (σ̂ = 0, an evaluator with neither
+`seeds: N` nor `{seed}`) the comparison is literal, and on a hold-out that
+varies from run to run about half of them are. The 8 % is an average over runs:
+the seed's hold-out score is one draw, so in one run the rate for an equal
+candidate can be well above or below it. A candidate truly worse by three times
+one run's sd is still kept out in about 99 % of cases at `seeds: 3`. When the
+seed's own hold-out run failed there is nothing to compare with, and nobody is
+vetoed. A resumed run reads the seed's private (and public) score back from
+`runs.jsonl`: the last seed row's, and none when that row has none.
 
 **The penalty.** `evaluate.holdout_penalty` (default `0.0`) defines the score
 everything ranks by:
@@ -985,6 +1469,39 @@ one good child per generation is enough and the rest of the budget is spent on
 also-rans — and it is the only way out of a plateau. `search.children_per_generation`
 is the starting point, clamped into `[min, max]`; without the block, the
 breadth is fixed and nothing is logged.
+
+*What counts as an improvement.* An improving generation is one whose best
+beats the run's best by more than `stop.epsilon`; every other generation is
+flat, for `adaptive_children`, `stop.patience`, the economics series' "USD
+since improvement" (and so `stop.max_usd_since_improvement`) and `status`'s
+patience count alike. The run's best
+moves only on an improvement: a step inside epsilon leaves the bar where it was
+(no ratchet), so slow steady progress adds up: with an epsilon of 0.5, a best
+of 1.0, then 1.3 (flat), then 1.6 (an improvement over 1.0).
+
+```yaml
+stop:
+  epsilon: null      # the default (absent means the same): automatic
+  # epsilon: 0.001   # an explicit number is used as it is
+```
+
+Automatic is `max(1e-6, 1e-9 × |best|, half the noise of one finished
+candidate's score)`: with no noise estimate (see
+[Stochastic evaluators](#stochastic-evaluators-seeds-n)) it is `1e-6`, the old
+default. On a noisy final stage, a generation whose best is exactly as good as
+the run's best, both measured once with noise sd σ, reads as an improvement in
+about 36 % of generations instead of 50 %, whether σ is well measured or
+estimated from the seed's three runs (the half is widened to Student's t at the
+estimate's degrees of freedom: 0.58 σ̂ on a calibration's two). The noise is that of the public
+score: with `evaluate.holdout_penalty > 0` and a candidate whose hold-out falls
+short of its public score, its fitness also carries the hold-out's noise, so
+its real noise differs from the one this rule and the elite rule read. On a resumed run the recorded
+generations are replayed with the noise as it is when the run resumes, each
+against the best it had then (the `1e-9 × |best|` term as in the live round).
+`stop.target` is checked against the generation's best itself, not the gated
+best: a target reached by a step inside epsilon is reached. The patience stop
+says the epsilon it used: `stop.patience reached: no improvement > 0.25 for 5
+generation(s)`.
 
 ### Economics: USD per unit of improvement
 
@@ -1185,7 +1702,16 @@ Then it checks the config against what it just measured:
   how many days of calendar time it spans;
 * projected evaluator wall clock for the whole run — a note under a day, a
   warning over it;
-* on a `seeds: N` stage, how much the noisiest KPI moved between the runs.
+* on a `seeds: N` stage, how much the noisiest KPI moved between the runs;
+* at the final stage, the run-to-run noise, measured as a run measures it
+  ([the seed run again](#stochastic-evaluators-seeds-n): seed 0 once more, and
+  seed 1 at `seeds: 1`, on the median-time instance) — one line of four:
+  `run-to-run noise at stage full: one run varies by about 2 % (3 runs of the
+  seed on i3)` (one significant digit: three runs), the same with `(seeds: 3)`
+  when the stage's own runs give it, `stage full: the evaluator gives the same
+  numbers for the same seed; comparisons are paired by seed`, or `stage full:
+  the command has no {seed}, so the noise cannot be measured; every comparison
+  is made as if the evaluator were exact`. An extra run that fails is a warning.
 
 `--provider-check` is the only part that spends anything: one minimal call per
 configured model role, `embed` included when a slot exists, with the prompt
@@ -1206,6 +1732,7 @@ stage full                 ok      0.3s  (timeout 300s per run)
     | weibull: 5.808% excess over L1 across 8 instance(s), best 4.762%, worst 6.931%
     | worst single instance: full-or-8 at 8.571% excess
 
+note    : stage full: the evaluator gives the same numbers for the same seed; comparisons are paired by seed
 note    : projected evaluator wall clock for the whole run: about 19.3s, excluding model latency.
 
 verdict : clean (0 failure(s), 0 warning(s))
@@ -1580,7 +2107,6 @@ evaluate:
       timeout: 12000        # per run
       seeds: 2              # a noisy objective needs a mean, not a sample
       private_inputs: [holdout]
-  signature_digits_stochastic: 3
 ```
 
 **`patience ≥ 8`.** The second real Phase C run gave up on `patience: 4` after
@@ -1614,7 +2140,9 @@ that work once for one application — a solver, a simulator, any program with
 settings — so that tuning it becomes a set of choices instead of a config
 file; a **study** is one such set of choices, in a folder of its own.
 `evolvekit study run` compiles a study into an ordinary run directory, so
-everything in this README applies to it.
+everything in this README applies to it. A study that tunes values spreads its
+archive over two of them (`search.archive.descriptors`, the harness's
+recommended settings first; see [The archive](#the-archive)).
 
 Three harnesses come with evolvekit:
 
@@ -1859,6 +2387,20 @@ stops `wait` and `watch`, never the run.
   the hours buy fewer than three rounds it says so, with three concrete ways
   out: fewer cases, a shorter time limit, or more hours.
   `plan: {auto: false, children: 4, generations: 6}` overrides it.
+- **The screen.** With six or more training cases and a time limit of at
+  least 10 s, each round first runs every combination on a few cases at a
+  quarter of the time limit, and only the best two go on to every case. After
+  each round the study checks that bet: does the short run put the
+  combinations in the same order as the full one? When it agrees only weakly,
+  one more combination a round goes on to every case; when it disagrees two
+  rounds running, or would send every combination on anyway, the screen is
+  switched off and every combination runs on every case for the rest of the
+  study. The run log says each change in a sentence. The order is compared
+  over the combinations that went on only, so the agreement reads low; in a
+  simulation of ten rounds, a short run that agrees well was switched off
+  about 1 % of the time, and one that says nothing about the full run sent
+  more on about 91 % of the time
+  ([`promote.adapt`](#how-it-works), *A screen that checks itself*).
 - **The run** is an ordinary run directory, `runs/<id>/`, with
   `study-run.json` (what the harness's runner reads), a copy of `study.yaml`
   as it was when the run started (its results and any later final check
@@ -2263,7 +2805,14 @@ measure. Each run then draws a share of its combinations around each tuned
 setting's winner: a prior of weight one half, which halves again with every
 other study finished since that winner and is dropped below 0.05 or once four
 have. It is only a prior — it never stops the search from trying any value in
-range, and a bool or a choice is drawn as the winner itself. `study new` says
+range, and a bool or a choice is drawn as the winner itself. The prior also
+acts on the rest of the search: `param_tpe` counts it as 4 × its weight
+observations at the winner's value in both its densities, and a `param_local`
+step from the starting point starts from the winner's value, with the prior's
+weight as its chance ([Operators](#operators)). That start matters only when
+the starting point differs from the prior's value: a warm start already puts
+each tuned setting at the winner, so there it changes nothing, while
+`param_tpe`'s prior still acts. `study new` says
 what it did on stderr, and `study.yaml` records it as `warm: {from, run, at,
 ranked}`. The warm start changes the starting point the final check compares
 with: the result is judged against the winner's values, not the settings in
@@ -2835,9 +3384,10 @@ Known gaps, all deliberate:
   against a real embeddings endpoint — only against mocked clients and `fake`.
 - **The behaviour signature is exact** on a deterministic stage. Two rules that
   differ only on instances outside the current input set look like twins. That
-  is the trade the filter makes on purpose. On a stochastic stage the trade
-  moves the other way: three significant digits will call two genuinely
-  different programs twins if their means agree to a tenth of a percent.
+  is the trade the filter makes on purpose. On a stage that is not repeatable
+  the noise rule replaces it, and trades the other way: a real difference
+  smaller than the noise margin can be called a twin (about 8 % at four noise
+  sd, never a real gain; see [the novelty filters](#the-novelty-filters--structural-near-and-behavioural)).
 - **`preflight` measures the seed, once.** Its timeout advice is as good as the
   assumption that the seed's cost is representative, which on a problem whose
   candidates can pick their own effort it is not. The 1.5× headroom is the

@@ -27,6 +27,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -44,12 +45,18 @@ from evolvekit.deltas import delta_summary
 from evolvekit.economics import GenerationPoint, series
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage, holdout_veto, race_warnings
 from evolvekit.evaluate.scoring import ranking_score
-from evolvekit.evaluate.signature import BehaviourIndex
+from evolvekit.evaluate.signature import Behaviour, BehaviourIndex
 from evolvekit.evaluate.stages import restore_build
 from evolvekit.evaluate.types import EvalResult
 from evolvekit.events import EventLog, Heartbeat, read_events
-from evolvekit.leaderboard import seed_private
-from evolvekit.ledger import Ledger
+from evolvekit.leaderboard import (
+    REEVALUATION_SEED_BASE,
+    pool_rows,
+    read_reevaluations,
+    seed_private,
+    seed_public,
+)
+from evolvekit.ledger import Ledger, _atomic_write
 from evolvekit.lock import run_lock
 from evolvekit.prompts import Inspiration, big_step_reason
 from evolvekit.providers import Provider, build_provider
@@ -61,6 +68,7 @@ from evolvekit.search.operators import (
     OPERATOR_ROLES,
     OperatorResult,
     TreeContext,
+    latin_rows,
     param_cross,
     param_lhs,
     param_lhs_typed,
@@ -68,9 +76,12 @@ from evolvekit.search.operators import (
     param_tpe,
     run_operator,
 )
-from evolvekit.search.params import has_params
+from evolvekit.search.lhs import latin_hypercube, rows_for_params
+from evolvekit.search.params import current_values, declared_ranges, has_params
 from evolvekit.search.scratchpad import Scratchpad
+from evolvekit.search.screening import SCREENING_FILE, ScreenControl
 from evolvekit.search.tuning import Observation
+from evolvekit.space import STEP_SCALE
 from evolvekit.stopping import RunStop, active_seconds, ai_seconds
 
 __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
@@ -80,12 +91,18 @@ def _random_stream(seed: int, recorded: int) -> random.Random:
     """The run's generator: reproducible, and never the same stream twice.
 
     A fresh run is seeded with `search.seed`, as it always was. A resumed run
-    seeded the same way draws the same operators, parents and `param_lhs` sweep
-    seeds as its first generation did -- and `param_lhs` samples from that seed
-    alone, so the children it breeds are blocks the run already holds and the
-    novelty filter discards them. Folding in how much the directory already
-    holds gives a resumed run a stream of its own that is still a function of
-    the seed and the directory, so resuming stays reproducible too.
+    seeded the same way would draw the same operators, parents and seeds as its
+    first generation did -- and an operator that samples from such a seed alone
+    breeds blocks the run already holds, which the novelty filter discards.
+    Folding in how much the directory already holds gives a resumed run a
+    stream of its own that is still a function of the seed and the directory,
+    so resuming stays reproducible too. (`param_lhs` rows do not come from
+    this stream on resume: the run's hypercube and its next row are kept in
+    `work/lhs.json`, written as each row is handed out, so a resumed run goes
+    on from the next row. One window is left: a run that dies while it breeds
+    a round, before that round's `pending.json` exists, has handed out rows
+    that no child kept -- the resumed run breeds the round anew from the rows
+    after them, so those rows are skipped.)
     """
     return random.Random(seed if recorded == 0 else f"{seed}/{recorded}")
 
@@ -170,6 +187,9 @@ class Driver:
         self.config = config
         self.allow_changed_problem = allow_changed_problem
         self.ledger = Ledger(run_dir)
+        self._reevaluations: list[dict] = read_reevaluations(self.ledger.run_dir)
+        """`reevaluations.jsonl` (`search.reevaluate_best_every`): every reading
+        of `runs.jsonl` here is pooled with it (`_replayed_rows`)."""
         self.budget = BudgetGuard(config.budget)
         # `min_big_steps` holds a plateau open until the strong model has been
         # tried. A run without a model has no big step to wait for, and would
@@ -201,9 +221,28 @@ class Driver:
             on_event=self._on_evaluation,
             stop=self.run_stop.event,
             time_left=self.run_stop.left_s,
+            log=self.log,
         )
         self.rng = _random_stream(config.search.seed, len(self.ledger.runs()))
+        self._lhs: dict[str, dict] = self._read_lhs()
+        """The run's Latin hypercubes (`work/lhs.json`), one per space: what
+        `param_lhs` children take their rows from, in order (`_next_lhs_row`)."""
+        self.step_scale: float
+        self._step_history: list[dict]
+        self.step_scale, self._step_history = self._read_perturb()
+        """The sd of a local step, as a share of each parameter's range
+        (`ParameterSpace.perturb`; `STEP_SCALE` at first): what `param_local`
+        and the local-step fallbacks of `param_cross` and `param_tpe` step with.
+        Adapted after each round by the 1/5 rule (`_adapt_step`), kept with one
+        line per round in `work/perturb.json`."""
+        self._taken: list[dict] = []
+        """The configurations proposed so far in this generation (`_breed`):
+        what `param_tpe` counts as bad before they are evaluated."""
         self.breadth = AdaptiveBreadth.from_config(config.search)
+        self.screens: dict[str, ScreenControl] = self._screen_controls()
+        """Per stage with `promote.adapt` before a command stage, its screening
+        controller (`search/screening.py`), restored from `work/screening.json`."""
+        self._apply_screens()
         self._log_sink = log or (lambda _msg: None)
         self._providers = providers or {}
 
@@ -225,7 +264,10 @@ class Driver:
             )
             self.skeleton_source = skeleton
         self.archive: list[Candidate] = []
-        self.grid = Archive.from_config(config.search.archive, tree=self.repo is not None)
+        self.grid = Archive.from_config(
+            config.search.archive, tree=self.repo is not None, space=config.problem.parameters,
+            temperature=config.search.selection_temperature,
+        )
         near_cfg = config.search.novelty.near
         self._embed_context: tuple[str, int] = ("startup", 0)
         self.novelty = NoveltyIndex(
@@ -521,26 +563,64 @@ class Driver:
         Rebuilt from the two logs rather than accumulated, for the same reason
         the archive is: the logs are the record, and a series that drifts from
         them would be worse than no series. Read as the replay reads them
-        (`_replayed_rows`), so the stop rules see the order the archive has.
+        (`_replayed_rows`), so the stop rules see the order the archive has --
+        the rows as written, with the best's re-evaluations as of the round
+        each was made in (`economics.series`, the series `status` reads).
         """
         return series(
-            self._replayed_rows(self.ledger.runs()),
+            self._replayed_rows(self.ledger.runs(), []),
             self.ledger.usage(),
             window=self.config.stop.economics_window,
-            epsilon=self.config.stop.epsilon,
+            # Each round against its own bar, as the stop policy judged it --
+            # also when `_restore_stop_policy` replays the series before the
+            # policy has a best (`epsilon_now` would then miss `1e-9·|best|`).
+            epsilon=self.stop_policy.epsilon_at,
+            reevaluations=self._reevaluations,
+            holdout_penalty=self.config.evaluate.holdout_penalty,
         )
+
+    def _refresh_noise(self) -> None:
+        """The sd of one finished candidate's score at the final stage, as the
+        run's noise estimate stands now (`Noise.score_sd`: paired on a
+        repeatable stage, so 0 at `seeds: 1`), handed to the two rules that
+        read it: the stop policy's automatic epsilon and the elite rule, with
+        the degrees of freedom it rests on (`Noise.score_df`), which widen
+        each rule's normal quantile to Student's t (Decision 17b)."""
+        final = self.config.final_stage
+        sd = self.cascade.noise.score_sd(final.id, self.config.evaluate.score, final.seeds)
+        df = self.cascade.noise.score_df(final.id, self.config.evaluate.score)
+        self.stop_policy.noise_sd, self.stop_policy.noise_df = sd, df
+        self.grid.noise_sd, self.grid.noise_df = sd, df
 
     def _archive_scores(self) -> list[float]:
         return [c.fitness for c in self.archive if _competes(c)]
 
+    def _archive_stage_scores(self) -> dict[str, list[float]]:
+        """Per command stage, the competing archive members' own score there:
+        what that stage's `promote.archive_percentile` compares a candidate
+        with (like with like). A member recorded without it is left out."""
+        members = [c for c in self.archive if _competes(c)]
+        return {
+            stage.id: [c.stage_scores[stage.id] for c in members if stage.id in c.stage_scores]
+            for stage in self.config.evaluate.stages
+            if stage.kind == "command"
+        }
+
     # -- resume ----------------------------------------------------------
 
-    def _replayed_rows(self, raw: list[dict]) -> list[dict]:
-        """`runs.jsonl` rows judged by today's rules: `competes` settled, the
-        hold-out veto applied against the seed's private score, and the ranking
-        score recomputed with this run's λ."""
+    def _replayed_rows(self, raw: list[dict], reevaluations: Sequence[dict] | None = None) -> list[dict]:
+        """`runs.jsonl` rows judged by today's rules: pooled with the run's
+        re-evaluations (`leaderboard.pool_rows`; `reevaluations`, the run's
+        when not given), `competes` settled, the hold-out veto applied against
+        the seed's private score, and the ranking score recomputed with this
+        run's λ. Pooling comes first, as in `leaderboard.read_rows`; the veto
+        reads the private score only, which pooling and λ leave alone."""
         reference = seed_private(raw)
-        return [self._rerank(self._settle_competes(row, reference)) for row in raw]
+        pooled = pool_rows(
+            raw, self._reevaluations if reevaluations is None else reevaluations,
+            holdout_penalty=self.config.evaluate.holdout_penalty,
+        )
+        return [self._rerank(self._settle_competes(row, reference)) for row in pooled]
 
     def resume(self) -> int:
         """Rebuild the archive from `runs.jsonl`. Returns the last generation.
@@ -552,9 +632,19 @@ class Driver:
         raw = self.ledger.runs()
         rows = self._replayed_rows(raw)
         self.cascade.seed_private = seed_private(raw)
+        self.cascade.seed_public = seed_public(raw)
         if not rows:
             return 0
-        self.grid = Archive.from_records(rows, self.config.search.archive, tree=self.repo is not None)
+        self._refresh_noise()
+        self.grid = Archive.from_records(
+            rows,
+            self.config.search.archive,
+            tree=self.repo is not None,
+            noise_sd=self.stop_policy.noise_sd,
+            noise_df=self.stop_policy.noise_df,
+            space=self.config.problem.parameters,
+            temperature=self.config.search.selection_temperature,
+        )
         last_generation = 0
         for row in rows:
             candidate = Candidate.from_record(row)
@@ -564,11 +654,20 @@ class Driver:
             if not candidate.rejected:
                 self._embed_context = (candidate.id, int(candidate.generation))
                 self.novelty.add(candidate.id, candidate.block, parent_block=self._parent_block(candidate))
-            # Signatures come back even for a rejected twin: it is the *first*
-            # id per signature that matters, and dropping it would let the same
-            # behaviour be paid for again after a resume.
+            # A twin's hash and numbers at the stage that caught it never became
+            # a target in the run that wrote the row, so they do not become one
+            # now (a noise twin's hash is its own, and would). At its earlier
+            # stages it was added like anyone else.
+            caught_at = candidate.stages_reached[-1] if candidate.behaviour_twin_id and candidate.stages_reached else None
             for stage_id, signature in (candidate.behaviour_signatures or {}).items():
-                self.behaviour.add(candidate.id, stage_id, signature)
+                if stage_id != caught_at:
+                    self.behaviour.add(candidate.id, stage_id, signature, generation=int(candidate.generation))
+            # The numbers the noise rule compares, with the stage score. A row
+            # from before them is a target by its hash only.
+            for stage_id, raw_values in (candidate.behaviour_values or {}).items():
+                values = Behaviour.from_json(raw_values)
+                if values is not None and stage_id != caught_at:
+                    self.behaviour.add(candidate.id, stage_id, "", values, generation=int(candidate.generation))
             if candidate.novelty == "behavioural":
                 self._remember_dead_end(candidate)
             last_generation = max(last_generation, int(candidate.generation))
@@ -577,6 +676,8 @@ class Driver:
                 self._counter = max(self._counter, int(suffix))
         self._resumed_generation = last_generation
         self._restore_budget(rows)
+        self._replay_missing_step()
+        self._replay_missing_screen_checks(last_generation)
         return last_generation
 
     def _settle_competes(self, row: dict, seed_private: float | None = None) -> dict:
@@ -588,6 +689,8 @@ class Driver:
         field exists to end. A row that carries `competes` keeps it, and the
         veto is applied on top exactly as in a live run: a row written before
         the veto existed, whose hold-out is below the seed's, stops competing.
+        Each row is judged with the noise margin it was judged with live
+        (`holdout_margin`); a row from before the margin, literally.
         """
         if "competes" in row:
             finished = bool(row["competes"])
@@ -600,7 +703,8 @@ class Driver:
                 private_score=row.get("private_score"),
                 gated=row.get("gated"),
             )
-        veto = holdout_veto(self.config, row.get("private_score"), seed_private) if finished else None
+        margin = float(row.get("holdout_margin") or 0.0)  # none on a row from before A2: the literal rule
+        veto = holdout_veto(self.config, row.get("private_score"), seed_private, margin) if finished else None
         if veto is not None:
             return {**row, "competes": False, "veto": veto}
         if "competes" in row:
@@ -772,6 +876,8 @@ class Driver:
                 self.log(f"ABORT: {summary.stop_reason}")
                 return self._finalise(summary)
 
+        # The replay reads the noise as it is now (open question 12).
+        self._refresh_noise()
         decision = self._restore_stop_policy()
 
         for offset in range(1, total + 1):
@@ -803,15 +909,24 @@ class Driver:
                 break
 
             self._maybe_refresh_scratchpad(generation)
+            self._refresh_noise()
 
             began = self._generation_started(
                 generation, children=self.children_per_generation
             )
+            # Last generation's pressure on its parents counts half now
+            # (`Archive.from_records` replays the same on resume).
+            self.grid.decay()
             children = self._adopt_pending(generation)
             if children is None:
                 children = self._breed(generation, plateau=decision.plateau)
                 self._write_pending(generation, children)
             viable = [c for c in children if not c.rejected]
+            for child in viable:
+                # Handed to the cascade: a refused or failed child cost its
+                # parent nothing and does not make it less attractive.
+                if child.parent_id:
+                    self.grid.note_evaluated(child.parent_id)
             if self._evaluate_and_record(viable, generation=generation):
                 # Stopped in the middle: nothing of this generation is
                 # recorded, and `pending.json` keeps its children for the
@@ -826,8 +941,25 @@ class Driver:
             for child in children:
                 if child.rejected and child.id not in self.results:
                     self._record(child)
+            # The local step's size, from this round's local steps as they
+            # measured (before a re-evaluation pools the best in place).
+            self._adapt_step(generation, children)
             self._pending_path.unlink(missing_ok=True)
             summary.generations = offset
+            # The round is judged by what its own candidates measured; a
+            # re-evaluation of the best at its end is never progress: it only
+            # moves the bar to the pooled best (`StopPolicy.rebase`).
+            # (A float, taken now: the re-evaluation pools the best in place.)
+            measured = self.best.fitness if self.best is not None else None
+            rebased = self._reevaluate_best(generation)
+            # The stop policy first, so the generation's event carries the
+            # flat count and the epsilon `status` reads.
+            points = self._economics()
+            point = points[-1] if points else None
+            decision = self.stop_policy.update(measured, point)
+            best = self.best
+            if rebased and best is not None:
+                self.stop_policy.rebase(best.fitness)
             self._generation_finished(generation, began, children)
 
             if self._provider_is_dead():
@@ -839,10 +971,6 @@ class Driver:
                 self.log(f"ABORT: {summary.stop_reason}")
                 break
 
-            best = self.best
-            points = self._economics()
-            point = points[-1] if points else None
-            decision = self.stop_policy.update(best.fitness if best else None, point)
             self.log(
                 f"gen {generation:<2} {len(children)} child(ren)  "
                 f"best={_fmt(best.fitness if best else None)}  "
@@ -867,6 +995,87 @@ class Driver:
 
         return self._finalise(summary)
 
+    # -- re-evaluating the best (search.reevaluate_best_every) ------------
+
+    def _reevaluate_best(self, generation: int) -> bool:
+        """After round `generation` is recorded, every `reevaluate_best_every`
+        rounds: the archive's best runs once more at the final stage on seed
+        `REEVALUATION_SEED_BASE + k` (k: the run's re-evaluations so far), the
+        run goes to `reevaluations.jsonl`, and its runs are pooled everywhere --
+        the candidate, the noise (`Noise.pool`), the archive (`Archive.update`);
+        the caller moves the stop policy's bar (`StopPolicy.rebase`) once the
+        round is judged. Skipped, with a line in the log, when the daily cap or
+        the time left says no. True when a re-evaluation was made."""
+        every = self.config.search.reevaluate_best_every
+        if every <= 0 or generation < 1 or generation % every:
+            return False
+        best = self.best
+        if best is None:
+            return False
+        final = self.config.final_stage
+        seed = REEVALUATION_SEED_BASE + len(self._reevaluations)
+        why = None
+        capped = self.budget.check_full_eval()
+        left, needed = self.run_stop.left_s(), self._reevaluation_s()
+        if not capped.allowed:
+            why = capped.reason
+        elif self.run_stop.poll() is not None:
+            why = self.run_stop.reason
+        elif left is not None and needed is not None and left < needed:
+            why = f"{left:.0f} s of the run's time is left, less than one run of it ({needed:.0f} s)"
+        # Scored over the measures as first written: the earlier stages' are in
+        # the row, and this run's replace the final stage's.
+        written = next((r for r in reversed(self.ledger.runs()) if r.get("id") == best.id), None)
+        outcome = None if why else self.cascade.reevaluate(
+            best, seed, earlier_kpis=dict((written or {}).get("kpis") or best.kpis))
+        if outcome is None or not outcome.ok or outcome.abandoned or outcome.score is None:
+            if why is None:
+                why = (outcome.failure if outcome is not None and outcome.failure else "the run was stopped")
+            self.log(f"gen {generation:<2} the best {best.id} was not run again on seed {seed}: {why}")
+            return False
+        prior = int(best.replicates or 0) or final.seeds
+        entry = {
+            "id": best.id,
+            "generation": generation,
+            "seed": seed,
+            "stage": final.id,
+            "prior_runs": prior,
+            "kpis": dict(outcome.kpis),
+            "score": float(outcome.score),
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        # The noise first: it remembers the runs it pooled (`Noise.pool`), so a
+        # run that dies before the entry is written makes the same run on the
+        # same seed after the resume without pooling it twice; the other way
+        # round, the entry would stand in `reevaluations.jsonl` with its run
+        # missing from the noise for good.
+        self.cascade.noise.pool(final.id, best.id, outcome)
+        self.cascade.noise.save()
+        self.ledger.record_reevaluation(entry)
+        self._reevaluations.append(entry)
+        was = best.fitness
+        (pooled,) = pool_rows([best.to_record()], [entry], holdout_penalty=self.config.evaluate.holdout_penalty)
+        best.kpis = dict(pooled["kpis"])
+        best.score = pooled["score"]
+        best.public_score = pooled.get("public_score")
+        best.ranking_score = pooled["ranking_score"]
+        best.generalization_gap = pooled.get("generalization_gap")
+        best.replicates = int(pooled["replicates"])
+        self._refresh_noise()
+        self.grid.update(best)
+        self.log(
+            f"gen {generation:<2} the best {best.id} run again on seed {seed}: {_fmt(float(outcome.score))}; "
+            f"the mean of its {best.replicates} runs is {_fmt(best.fitness)} (was {_fmt(was)})"
+        )
+        return True
+
+    def _reevaluation_s(self) -> float | None:
+        """How long one run of the final stage takes: the seed's final stage
+        over its seeds; `None` before the seed has passed it."""
+        final = self.config.final_stage
+        spent = self._seed_stages.get(final.id)
+        return None if spent is None else spent / max(1, final.seeds)
+
     def _recorded_seed(self) -> Candidate | None:
         """The seed as last evaluated: a seed evaluated again after an abort is
         a second seed row, and the later one is the one that counts."""
@@ -886,6 +1095,9 @@ class Driver:
         self.behaviour.by_key = {
             key: owner for key, owner in self.behaviour.by_key.items() if owner != candidate_id
         }
+        for entries in self.behaviour.values.values():
+            entries.pop(candidate_id, None)
+        self.behaviour.generations.pop(candidate_id, None)
 
     # -- a generation that was interrupted -------------------------------
 
@@ -1007,6 +1219,12 @@ class Driver:
             day = str(row.get("created_at") or "")[:10]
             if day and (final in (row.get("stages_reached") or []) or ran_and_failed):
                 self.budget.record_full_eval(day)
+        # A re-evaluation of the best is a full evaluation too, on the day it ran
+        # (one that failed wrote no row, and is not counted: a small undercount).
+        for entry in self._reevaluations:
+            day = str(entry.get("at") or "")[:10]
+            if day:
+                self.budget.record_full_eval(day)
 
     def _restore_stop_policy(self) -> StopDecision:
         """Replay the recorded generations through the stop policy.
@@ -1046,7 +1264,11 @@ class Driver:
                 self.stop_policy.note_big_step()
             if point.generation in applied:
                 self.stop_policy.note_big_step_applied()
-            decision = self.stop_policy.update(point.best, point)
+            # As live: the round by its own candidates, then the bar moved to
+            # the pooled best where the best was re-evaluated at its end.
+            decision = self.stop_policy.update(point.measured_best, point)
+            if point.rebased:
+                self.stop_policy.rebase(point.best)
         return decision
 
     # -- generation internals -------------------------------------------
@@ -1079,6 +1301,8 @@ class Driver:
             best_id=best.id if best else None,
             best_fitness=best.fitness if best else None,
             spent_usd=self.budget.state.usd,
+            flat_generations=self.stop_policy.stagnant,
+            stop_epsilon=self.stop_policy.epsilon_now(),
         )
         self._snapshot_archive()
 
@@ -1215,45 +1439,271 @@ class Driver:
         others = [c for c in self._tuning_elites() if c.id != parent.id and c.params != parent.params]
         return self.rng.choice(others) if others else None
 
+    # -- the local step's size: the 1/5 rule (`work/perturb.json`) ----------
+
+    STEP_LIMITS = (0.03, 0.4)
+    """The smallest and the largest local step, as a share of the range."""
+    STEP_FACTOR = 1.2
+    STEP_SUCCESS = 0.2
+    """The success rate the step balances at (Rechenberg's 1/5 rule): above
+    it the step grows, below it the step shrinks."""
+
+    def _perturb_path(self) -> Path:
+        return self.ledger.run_dir / "work" / "perturb.json"
+
+    def _read_perturb(self) -> tuple[float, list[dict]]:
+        """`work/perturb.json`'s step size and history; the default size and no
+        history for a run written before it, or when it is malformed."""
+        try:
+            data = json.loads(self._perturb_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return STEP_SCALE, []
+        scale = data.get("scale") if isinstance(data, dict) else None
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
+            return STEP_SCALE, []
+        history = data.get("history")
+        kept = [h for h in history if isinstance(h, dict)] if isinstance(history, list) else []
+        return float(scale), kept
+
+    def _local_trials(self, children: Sequence[Candidate]) -> list[tuple[Candidate, Candidate]]:
+        """The round's local steps the 1/5 rule counts, each with its parent:
+        evaluated children with `operator == "param_local"` (the fallbacks of
+        `param_cross` and `param_tpe` included) whose parent has a fitness. A
+        child refused before evaluation says nothing about the step's size."""
+        trials = []
+        for child in children:
+            if child.operator != "param_local" or child.rejected:
+                continue
+            parent = self.by_id.get(child.parent_id or "")
+            if parent is not None and parent.fitness is not None:
+                trials.append((child, parent))
+        return trials
+
+    def _adapt_step(self, generation: int, children: Sequence[Candidate]) -> None:
+        """The 1/5 rule per trial (Decision 16), once per recorded round: of the
+        round's local steps (`_local_trials`), `improved` are those that compete
+        with a fitness above their parent's by more than the elite rule's noise
+        margin (`grid.margin`; 0 with no noise estimate), and the step is
+        multiplied by `1.2 ** (improved - 0.2 * tried)`, within `STEP_LIMITS`.
+        That balances at a success rate of exactly 20 % however many local
+        children a round has (a threshold on each round's share would settle at
+        50 % with one child, 29 % with two). A round without local steps leaves
+        it; a round already in the history is not counted again."""
+        if any(h.get("generation") == generation for h in self._step_history):
+            return
+        trials = self._local_trials(children)
+        if not trials:
+            return
+        margin = self.grid.margin
+        improved = sum(
+            1 for child, parent in trials
+            if _competes(child) and child.fitness > parent.fitness + margin  # type: ignore[operator]
+        )
+        low, high = self.STEP_LIMITS
+        grown = self.step_scale * self.STEP_FACTOR ** (improved - self.STEP_SUCCESS * len(trials))
+        self.step_scale = min(high, max(low, grown))
+        self._step_history.append(
+            {"generation": generation, "improved": improved, "tried": len(trials), "scale": self.step_scale}
+        )
+        path = self._perturb_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, json.dumps({"scale": self.step_scale, "history": self._step_history}, indent=1) + "\n")
+
+    def _replay_missing_step(self) -> None:
+        """On resume: the latest recorded round with local steps, when
+        `perturb.json`'s history lacks it (the run died between writing the
+        round's rows and the file), is counted now, with the noise as it stands.
+        A run written before the file (several such rounds and no history)
+        keeps the default size: only a missing *last* update is replayed."""
+        rounds: dict[int, list[Candidate]] = {}
+        for candidate in self.archive:
+            if int(candidate.generation) >= 1:
+                rounds.setdefault(int(candidate.generation), []).append(candidate)
+        stepped = [g for g in sorted(rounds) if self._local_trials(rounds[g])]
+        if not stepped:
+            return
+        recorded = {h.get("generation") for h in self._step_history}
+        if stepped[-1] in recorded:
+            return
+        if not self._step_history and len(stepped) > 1:
+            return
+        self._adapt_step(stepped[-1], rounds[stepped[-1]])
+
+    # -- one Latin hypercube for the run (`param_lhs`) ----------------------
+
+    LHS_ROWS = (4, 64)
+    """The fewest and the most rows of one cube."""
+
+    def _lhs_path(self) -> Path:
+        return self.ledger.run_dir / "work" / "lhs.json"
+
+    def _read_lhs(self) -> dict[str, dict]:
+        """`work/lhs.json`'s cubes; none for a run written before it (or before
+        its first `param_lhs` child), and a malformed entry is dropped: a cube
+        is then built at the next `param_lhs` child."""
+        try:
+            data = json.loads(self._lhs_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        cubes = data.get("cubes") if isinstance(data, dict) else None
+        if not isinstance(cubes, dict):
+            return {}
+        kept: dict[str, dict] = {}
+        for key, cube in cubes.items():
+            if (
+                isinstance(cube, dict)
+                and isinstance(cube.get("rows"), list)
+                and all(isinstance(row, dict) for row in cube["rows"])
+                and isinstance(cube.get("next"), int)
+                and isinstance(cube.get("K"), int)
+                and isinstance(cube.get("built"), int)
+            ):
+                kept[str(key)] = cube
+        return kept
+
+    def _write_lhs(self) -> None:
+        path = self._lhs_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, json.dumps({"cubes": self._lhs}, indent=1) + "\n")
+
+    def _lhs_size(self) -> int:
+        """The run's expected number of `param_lhs` children, clamped to
+        `LHS_ROWS`: `generations x children x share(param_lhs) / sum of shares`."""
+        search = self.config.search
+        total = sum(w for w in search.operators.values() if w > 0)
+        share = max(0.0, search.operators.get("param_lhs", 0.0))
+        expected = search.generations * search.children_per_generation * share / total if total > 0 else 0.0
+        low, high = self.LHS_ROWS
+        return min(high, max(low, math.ceil(expected - 1e-9)))
+
+    def _lhs_take(self, parent: Candidate) -> tuple[dict, list[str]] | None:
+        """The next row of the run's hypercube for `parent`'s space, and the
+        names of its parameters drawn near a prior. `None` when an untyped
+        parent declares nothing to sweep.
+
+        A typed space has one cube (`"typed"`); a `# PARAMS` block one per
+        declaration, keyed by its ranges as sorted JSON. A row that breaks a
+        constraint, or equals the parent's configuration, is passed over; after
+        a whole cube's worth of such rows the last is handed out anyway (the
+        static stage has the last word). When the rows run out a new cube is
+        built from one draw of the run's generator -- the only number a
+        `param_lhs` child ever draws from it.
+
+        A cube is kept until it is used up when only the run's size changes
+        (generations, children, shares); a typed cube records its space
+        (`"space"`: names, types, ranges, scales, choices, priors) and is built
+        anew when a resumed run declares the space differently."""
+        space = self.config.problem.parameters
+        signature: str | None = None
+        if space is not None:
+            key, base, ok = "typed", dict(parent.params or space.defaults()), space.satisfies
+            names = set(space.names)
+            signature = _space_signature(space)
+
+            def build(size: int, rng: random.Random) -> tuple[list[dict], list[list[str]]]:
+                drawn = latin_rows(space, size, rng)
+                return [values for values, _ in drawn], [prior for _, prior in drawn]
+        else:
+            ranges = declared_ranges(parent.block)
+            base = current_values(parent.block, set(ranges)) if ranges else {}
+            if not base:
+                return None
+            key, ok, names = "params:" + json.dumps(ranges, sort_keys=True), (lambda _row: True), set(base)
+
+            def build(size: int, rng: random.Random) -> tuple[list[dict], list[list[str]]]:
+                rows = rows_for_params(ranges, base, latin_hypercube(ranges, size, rng.randrange(1 << 30)))
+                return rows, [[] for _ in rows]
+
+        passed = 0
+        while True:
+            cube = self._lhs.get(key)
+            if cube is not None and (
+                (cube["rows"] and set(cube["rows"][0]) != names)
+                or (signature is not None and cube.get("space") != signature)
+            ):
+                cube = None  # a cube of another space: not this one's rows
+            if cube is None or cube["next"] >= len(cube["rows"]):
+                size = self._lhs_size()
+                rows, priors = build(size, random.Random(self.rng.randrange(1 << 30)))
+                cube = {"K": size, "built": (cube or {}).get("built", 0) + 1, "next": 0, "rows": rows}
+                if signature is not None:
+                    cube["space"] = signature
+                if any(priors):
+                    cube["prior"] = priors
+                self._lhs[key] = cube
+            index = cube["next"]
+            cube["next"] = index + 1
+            row = dict(cube["rows"][index])
+            prior = list(cube.get("prior", [[]] * len(cube["rows"]))[index])
+            passed += 1
+            if (row != base and ok(row)) or passed >= cube["K"]:
+                break
+        self._write_lhs()
+        return row, prior
+
+    def _next_lhs_row(self, parent: Candidate) -> dict | None:
+        """The row the next `param_lhs` child of `parent` takes (`_lhs_take`)."""
+        taken = self._lhs_take(parent)
+        return taken[0] if taken is not None else None
+
     def _observations(self) -> list[Observation]:
-        """Every configuration that was evaluated, judged by the deepest stage
-        it finished. One that crashed or timed out is an observation too -- the
-        worst one: that is a region not to propose in again.
+        """Every configuration that was evaluated, as a rank score (higher is
+        better, minus the position): only the order reaches the estimator, so
+        numbers on different scales never meet. Four tiers, best first:
 
-        A raced-out candidate still carries the score of the stage before the
-        race -- a screening score that may beat every finished candidate's --
-        but the race has just shown it to be behind the best. It is recorded at
-        the floor, no better than the worst finished configuration, rather
-        than as the good configuration its screening score would make it.
+        1. finished (it competes), by fitness;
+        2. screened out by a cheaper stage, by the deepest stage it reached and
+           that stage's score -- whatever the scale, since it is ranked below
+           every finished one;
+        3. raced out, or kept out by the hold-out veto: one shared rank. The
+           race has just shown it to be behind the best, whatever its
+           screening score; a vetoed one does worse than the seed where it was
+           not selected on, and the estimator must not learn to propose there;
+        4. failed or gated: one shared rank, the worst -- a region not to
+           propose in again.
 
-        A candidate that was screened out by a cheaper stage is judged by that
-        stage's score only when it is on the same scale as the final stage's:
-        when every command stage states the objective as a percentage of the
-        baseline (`normalize: baseline`). A plain mean over a proxy's few small
-        instances is a different number altogether, and would rank every
-        screened-out candidate above every finished one."""
-        commands = [stage for stage in self.config.evaluate.stages if stage.kind == "command"]
-        same_scale = all(stage.fans_out and stage.normalize == "baseline" for stage in commands)
-        scored: list[tuple[Candidate, float]] = []
+        Ties (inside a tier, or a whole tier 3 or 4) share the mean position.
+
+        A candidate that reached the final stage without finishing it, and
+        without failing, being raced out, vetoed or gated (abandoned: a stop
+        request, the time limit, the daily cap), is no observation at all: its
+        stage was cut short for a reason that says nothing about it, and as a
+        failure it would steer the estimator away from a region on no evidence."""
+        index = {stage.id: i for i, stage in enumerate(self.config.evaluate.stages)}
+        final = self.config.final_stage.id
+        finished: list[tuple[float, Candidate]] = []
+        screened: list[tuple[tuple[int, float], Candidate]] = []
         behind: list[Candidate] = []
         failed: list[Candidate] = []
         for c in self.archive:
             if not c.params or c.rejected:
                 continue
-            # A configuration that broke a gate is as bad as one that crashed:
-            # a region the estimator should not propose in again.
             if c.last_failure or c.gated:
                 failed.append(c)
-            elif c.raced_out:
+            elif c.raced_out or c.veto:
                 behind.append(c)
             elif c.competes and c.fitness is not None:
-                scored.append((c, float(c.fitness)))
-            elif same_scale and c.stages_reached and c.score is not None:
-                scored.append((c, float(c.score)))
-        floor = min((value for _, value in scored), default=0.0)
-        observations = [Observation(c.params, value) for c, value in scored]
-        observations += [Observation(c.params, floor) for c in behind]
-        observations += [Observation(c.params, floor - 1.0) for c in failed]
+                finished.append((float(c.fitness), c))
+            elif c.stages_reached and final not in c.stages_reached:
+                deepest = c.stages_reached[-1]
+                score = c.stage_scores.get(deepest, c.score)
+                if score is not None:
+                    screened.append(((index.get(deepest, -1), float(score)), c))
+        groups: list[list[Candidate]] = []
+        for tier in (finished, screened):
+            tier.sort(key=lambda pair: pair[0], reverse=True)
+            for i, (key, c) in enumerate(tier):
+                if i and key == tier[i - 1][0]:
+                    groups[-1].append(c)
+                else:
+                    groups.append([c])
+        groups += [tier for tier in (behind, failed) if tier]
+        observations: list[Observation] = []
+        position = 1
+        for group in groups:
+            rank = position + (len(group) - 1) / 2
+            observations += [Observation(c.params, -rank) for c in group]
+            position += len(group)
         return observations
 
     def _parent_pool(self, wanted: int) -> list[Candidate]:
@@ -1289,11 +1739,19 @@ class Driver:
         )
 
     def _inspirations(self, parent: Candidate, operator: str) -> list[Inspiration]:
-        """1 to `search.inspirations` elites from other cells; only crossover is shown their code."""
+        """1 to `search.inspirations` elites from other cells; only crossover is shown their code.
+
+        An operator that calls no model (role "none", the `param_*` ones) never
+        reads them, so none are drawn: on a typed space the parameter axes
+        spread the archive over many cells, and drawing from them would shift
+        every later number of the run (A2 decision 19). The count is still
+        drawn, so the stream is the one a single-cell grid gives."""
         budget = self.config.search.inspirations
         if budget <= 0:
             return []
         wanted = 1 if operator == "crossover" else self.rng.randint(1, budget)
+        if _role_of(operator) == "none":
+            return []
         picks = self.grid.sample_inspirations(parent, wanted, self.rng)
         return [
             Inspiration(
@@ -1356,6 +1814,7 @@ class Driver:
         pool = self._parent_pool(self.config.search.parents_wanted(len(plan)))
         best = self.best
         children: list[Candidate] = []
+        self._taken = []  # this generation's proposals so far (`_breed_one`)
         for slot, operator in enumerate(plan):
             if not self.budget.check().allowed or self._provider_is_dead() or self.run_stop.triggered:
                 break
@@ -1385,6 +1844,9 @@ class Driver:
         outcome, verdict, attempts = self._propose(
             operator, parent, inspirations, candidate_id, generation, role
         )
+        if outcome.ok and isinstance(outcome.meta.get("params"), dict):
+            # Q19: any sibling with a configuration, whichever operator proposed it.
+            self._taken.append(dict(outcome.meta["params"]))
         if operator == "big_step" and outcome.ok:
             # The response parsed and applied; `_restore_stop_policy` reads the same from the row.
             self.stop_policy.note_big_step_applied()
@@ -1490,12 +1952,16 @@ class Driver:
         verdict = self.novelty.check(
             outcome.block or "", parent.block, parent.id, near=wants_near
         )
-        if verdict.novel or not self.config.search.novelty_retry or role == "none":
+        if verdict.novel or not self.config.search.novelty_retry:
+            return outcome, verdict, attempts
+        if role == "none" and operator != "param_lhs":
+            # Seeded from the run's stream once: asked again it would hand back the same.
+            # A `param_lhs` child asked again takes the cube's next row, and costs nothing.
             return outcome, verdict, attempts
         if operator == "agent_patch":
             # A whole agent run is not re-asked for a duplicate: the next round's brief shows it.
             return outcome, verdict, attempts
-        if not self._ai_room():
+        if role != "none" and not self._ai_room():
             return outcome, verdict, attempts
 
         # One re-prompt, ever. The first real run showed the small model
@@ -1527,20 +1993,31 @@ class Driver:
         candidate_id: str,
     ) -> OperatorResult:
         if operator == "param_lhs":
-            seed = self.rng.randrange(1 << 30)
+            taken = self._lhs_take(parent)
             space = self.config.problem.parameters
+            if taken is None:  # the parent declares nothing to sweep: the operator says so
+                return param_lhs(parent, row={})
+            row, prior = taken
             if space is not None:
-                return param_lhs_typed(space, parent, seed=seed)
-            return param_lhs(parent, seed=seed)
+                own = dict(parent.params or space.defaults())
+            else:
+                own = current_values(parent.block, set(declared_ranges(parent.block)))
+            if row == own:  # a whole cube's worth of rows equal the parent: a space of one point
+                return OperatorResult(operator="param_lhs", messages=[],
+                                      error="param_lhs found nothing to sweep: every sample equals the parent")
+            if space is not None:
+                return param_lhs_typed(space, parent, row=row, prior=prior)
+            return param_lhs(parent, row=row)
         if operator in TYPED_SPACE_OPERATORS:
             seed = self.rng.randrange(1 << 30)
             space = self.config.problem.parameters
             assert space is not None  # `config._check_typed_operators`
+            scale = self.step_scale
             if operator == "param_local":
-                return param_local(space, parent, seed=seed)
+                return param_local(space, parent, seed=seed, scale=scale)
             if operator == "param_cross":
-                return param_cross(space, parent, self._mate_for(parent), seed=seed)
-            return param_tpe(space, parent, self._observations(), seed=seed)
+                return param_cross(space, parent, self._mate_for(parent), seed=seed, scale=scale)
+            return param_tpe(space, parent, self._observations(), seed=seed, taken=self._taken, scale=scale)
         if operator == "agent_patch":
             return self._agent_patch(parent, role, candidate_id)
         return run_operator(
@@ -1758,21 +2235,28 @@ class Driver:
             # A build installs one tree where the commands find it, so two
             # candidates cannot be evaluated at once: one after the other, in
             # order (a stage's `workers` still run one candidate's cases together).
-            prior = self._archive_scores()
+            prior, own = self._archive_scores(), self._archive_stage_scores()
             results: dict[str, EvalResult] = {}
             for candidate in candidates:
-                results.update(self.cascade.evaluate_generation([candidate], prior))
+                results.update(self.cascade.evaluate_generation([candidate], prior, stage_scores=own))
                 self._drop_trees([candidate])
                 if any(result.abandoned for result in results.values()):
                     return True
         else:
-            results = self.cascade.evaluate_generation(candidates, self._archive_scores())
+            results = self.cascade.evaluate_generation(
+                candidates, self._archive_scores(), stage_scores=self._archive_stage_scores()
+            )
             self._drop_trees(candidates)
         if any(result.abandoned for result in results.values()):
             return True
+        # The generation's outcomes have joined the estimate: the elite rule
+        # below and the stop policy after the round read it as it is now.
+        self._refresh_noise()
+        final = self.config.final_stage
         for candidate in candidates:
             result = results[candidate.id]
             self.results[candidate.id] = result
+            candidate.replicates = final.seeds if final.id in result.stages_reached else 0
             candidate.commit = result.commit
             candidate.score = result.score
             candidate.params = result.params
@@ -1780,6 +2264,7 @@ class Driver:
             candidate.raced_out = result.raced_out
             candidate.gated = result.gated
             candidate.veto = result.veto
+            candidate.holdout_margin = result.holdout_margin
             candidate.rejected = result.rejected
             candidate.reject_reason = result.reject_reason
             candidate.kpis = result.kpis
@@ -1794,6 +2279,7 @@ class Driver:
             candidate.last_failure = result.last_failure
             candidate.feedback = result.feedback
             candidate.behaviour_signatures = result.behaviour_signatures
+            candidate.behaviour_values = result.behaviour_values
             candidate.behaviour_twin_id = result.behaviour_twin_id
             if result.behaviour_twin_id is not None:
                 candidate.novelty = "behavioural"
@@ -1803,7 +2289,59 @@ class Driver:
             if not candidate.rejected:
                 self.novelty.add(candidate.id, candidate.block, parent_block=self._parent_block(candidate))
             self._record(candidate)
+        self._check_screens(generation)
         return False
+
+    # -- screening (search/screening.py) ----------------------------------
+
+    def _screen_controls(self) -> dict[str, ScreenControl]:
+        path = self.ledger.run_dir / "work" / SCREENING_FILE
+        return {
+            stage.id: ScreenControl.load(
+                path, stage.id, int(stage.promote.top_k_per_generation or 0), self.children_per_generation,
+                later=later.id,
+            )
+            for stage, later in adapting_stages(self.config)
+        }
+
+    def _apply_screens(self) -> None:
+        for stage_id, control in self.screens.items():
+            self.cascade.promote_k[stage_id] = control.k
+            if control.off:
+                self.cascade.skipped.add(stage_id)
+
+    def _check_screens(self, generation: int, only: Sequence[str] | None = None) -> None:
+        """After a recorded round: each adapting stage's check over every
+        candidate scored at it and at the next stage (the seed included, as
+        `status`'s screening agreement counts them), cumulative over the run.
+        `only`: these stages' checks alone (`_replay_missing_screen_checks`)."""
+        for stage_id, control in self.screens.items():
+            if control.off or (only is not None and stage_id not in only):
+                continue
+            pairs = screen_pairs(self.archive, stage_id, control.later)
+            control.cap = self.children_per_generation
+            said = control.after_round(generation, pairs)
+            self._apply_screens()
+            if said is None:
+                continue
+            self.log(f"        {said}")
+            last = control.history[-1]
+            self.events.emit("screening_changed", stage=stage_id, k=control.k, off=control.off,
+                             rho=last["rho"], n=last["n"])
+
+    def _replay_missing_screen_checks(self, last_generation: int) -> None:
+        """On resume: the latest recorded round's screening check, for each
+        adapting stage whose `screening.json` history lacks it (the run died
+        between writing the round's rows and the file), made now over the same
+        candidates -- the check reads the archive only, so it says what the
+        lost one said. A check that read no ρ (too few pairs) left no history
+        entry and is made again: it reads none again and changes nothing."""
+        missing = [
+            stage_id for stage_id, control in self.screens.items()
+            if not control.off and all(h.get("generation") != last_generation for h in control.history)
+        ]
+        if missing:
+            self._check_screens(last_generation, only=missing)
 
     def _drop_trees(self, candidates: Sequence[Candidate]) -> None:
         """Each candidate's tree, removed once its evaluation has finished: no
@@ -1855,6 +2393,55 @@ class Driver:
         self.archive.append(candidate)
         self.by_id[candidate.id] = candidate
         self.ledger.record_run(candidate.to_record())
+
+
+def adapting_stages(config: Config) -> list[tuple]:
+    """`(stage, next stage)` for every command stage with `promote.adapt` and a
+    top k whose next stage is a command stage: what gets a screening controller.
+    None with `problem.tree.build`: candidates are then evaluated one at a
+    time, so a round's top k is of one."""
+    tree = config.problem.tree
+    if tree is not None and tree.build:
+        return []
+    stages = config.evaluate.stages
+    return [
+        (stage, later)
+        for stage, later in zip(stages, stages[1:])
+        if stage.promote.adapt and stage.promote.top_k_per_generation is not None
+        and stage.kind == "command" and later.kind == "command"
+    ]
+
+
+def screen_pairs(candidates: Sequence[Candidate], stage_id: str, later: str) -> list[tuple[float, float]]:
+    """`(score at stage_id, score at later)` over every candidate scored at
+    `stage_id`, not rejected and not failed. One raced out at `later` was
+    judged behind there: it ranks last at `later` (one value below every
+    finished score, ties among them), rather than leaving the pairs -- else a
+    race would hide exactly the screen's mistakes."""
+    finished: list[tuple[float, float]] = []
+    behind: list[float] = []
+    for c in candidates:
+        if c.rejected or c.last_failure or stage_id not in c.stage_scores:
+            continue
+        if later in c.stage_scores:
+            finished.append((float(c.stage_scores[stage_id]), float(c.stage_scores[later])))
+        elif c.raced_out:
+            behind.append(float(c.stage_scores[stage_id]))
+    if not behind:
+        return finished
+    floor = min((b for _, b in finished), default=0.0) - 1.0
+    return finished + [(a, floor) for a in behind]
+
+
+def _space_signature(space) -> str:
+    """What a typed cube's rows depend on: each parameter's name, type, range,
+    scale, choices and prior (not its default, help or the constraints, which
+    are read when a row is handed out)."""
+    return json.dumps(
+        [{**{k: v for k, v in p.describe().items() if k not in ("default", "help")}, "prior": p.prior}
+         for p in space.parameters],
+        sort_keys=True, default=str,
+    )
 
 
 def _role_of(operator: str) -> str:

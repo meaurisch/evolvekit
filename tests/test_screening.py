@@ -1,0 +1,360 @@
+"""Screening as a controller (`search/screening.py`, S6).
+
+A cascade bets that its cheap stage ranks candidates as the expensive one
+does. Every promoted candidate has a score at both, so the bet is checked
+after each round: a screen that agrees only weakly promotes one more a round,
+and one that disagrees two rounds running -- or that would promote every
+child -- is switched off, its stage passed over for the rest of the run.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import random
+import sys
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from evolvekit.candidate import Candidate
+from evolvekit.config import ConfigError, PromoteRule, build_config
+from evolvekit.events import read_events
+from evolvekit.search.driver import Driver, adapting_stages, screen_pairs
+from evolvekit.search.screening import SCREENING_FILE, ScreenControl
+
+WEAK = [(float(i), float((4 * i) % 9)) for i in range(9)]  # rho = 0.100 (Decision 12)
+
+
+# -- the controller ----------------------------------------------------------
+
+
+def test_a_weak_screen_promotes_one_more_and_a_contrary_one_is_switched_off(tmp_path):
+    control = ScreenControl("screen", k=2, cap=6, path=tmp_path / "screening.json")
+    assert "promotes 3" in control.after_round(3, WEAK) and control.k == 3
+    contrary = [(float(i), float(-i)) for i in range(9)]
+    assert control.after_round(4, contrary) is None or control.k == 4
+    assert "off" in control.after_round(5, contrary) and control.off
+    assert ScreenControl.load(tmp_path / "screening.json", "screen", 2, 6).off, "it survives a resume"
+
+
+def test_the_sentences_say_what_changed_and_why(tmp_path):
+    control = ScreenControl("screen", k=2, cap=6, path=None)
+    said = control.after_round(3, WEAK)
+    assert said == (
+        "screening promotes 3 a round from now on: it agrees with the full stage only weakly "
+        "(rho = 0.10 over 9 candidates)"
+    )
+    contrary = [(float(i), float(-i)) for i in range(12)]
+    control.after_round(4, contrary)
+    assert control.after_round(5, contrary) == (
+        "screening off for the rest of the run: its ranking disagreed with the full stage's two rounds "
+        "running (rho = -1.00 over 12 candidates)"
+    )
+    assert control.after_round(6, contrary) is None, "off is off: nothing more to change"
+    assert [h["generation"] for h in control.history] == [3, 4, 5]
+    assert control.history[0] == {"generation": 3, "n": 9, "rho": pytest.approx(0.1), "k": 3, "off": False,
+                                  "said": said}
+
+
+def test_fewer_than_eight_pairs_change_nothing(tmp_path):
+    control = ScreenControl("screen", k=2, cap=6, path=tmp_path / "screening.json")
+    contrary = [(float(i), float(-i)) for i in range(7)]
+    assert control.after_round(1, contrary) is None and control.after_round(2, contrary) is None
+    assert (control.k, control.off, control.below_zero, control.history) == (2, False, 0, [])
+    flat = [(1.0, float(i)) for i in range(9)]  # a screen that does not vary: no rank correlation
+    assert control.after_round(3, flat) is None and (control.k, control.off) == (2, False)
+    saved = json.loads((tmp_path / "screening.json").read_text(encoding="utf-8"))
+    assert saved == {"stages": {"screen": {"k": 2, "off": False, "below_zero": 0, "history": []}}}
+
+
+def test_a_check_at_or_above_zero_resets_the_count_of_contrary_rounds():
+    control = ScreenControl("screen", k=2, cap=20, path=None)
+    contrary = [(float(i), float(-i)) for i in range(9)]
+    agreeing = [(float(i), float(i)) for i in range(9)]
+    control.after_round(1, contrary)
+    control.after_round(2, agreeing)
+    assert control.below_zero == 0
+    control.after_round(3, contrary)
+    assert not control.off and control.below_zero == 1
+
+
+def test_a_screen_whose_k_reaches_the_cap_is_switched_off(tmp_path):
+    """Decision 10: promoting every child is no screen at all; the stage is skipped,
+    with the same sentence and event as a contrary screen."""
+    control = ScreenControl("screen", k=2, cap=3, path=None)
+    control.after_round(3, WEAK)
+    assert control.k == 3 and control.off and "off for the rest of the run" in control.history[-1]["said"]
+    assert control.history[-1]["said"].endswith("it would promote every child)")
+
+
+def test_a_round_shrunk_to_k_children_switches_the_screen_off_before_any_rho():
+    """Adaptive breadth can shrink the round to k children: top k of k is no
+    screen, whatever the correlation and however few pairs there are."""
+    control = ScreenControl("screen", k=3, cap=6, path=None)
+    agreeing = [(float(i), float(i)) for i in range(4)]
+    assert control.after_round(1, agreeing) is None
+    control.cap = 3
+    said = control.after_round(2, agreeing)
+    assert control.off and said.startswith("screening off for the rest of the run")
+    assert said.endswith("it would promote every child)")
+    assert control.history[-1] == {"generation": 2, "n": 4, "rho": None, "k": 3, "off": True, "said": said}
+
+
+def test_a_candidate_raced_out_at_the_next_stage_ranks_last_there():
+    def candidate(cid, screen, full=None, raced=None):
+        scores = {"screen": screen, **({"full": full} if full is not None else {})}
+        return Candidate(id=cid, generation=1, block="", source="", operator="param_lhs",
+                         stage_scores=scores, raced_out=raced)
+
+    archive = [candidate("a", 1.0, -5.0), candidate("b", 2.0, -4.0), candidate("c", 3.0, raced="behind"),
+               candidate("d", 4.0, raced="behind"), candidate("e", 5.0)]  # e: not promoted, no race
+    assert screen_pairs(archive, "screen", "full") == [(1.0, -5.0), (2.0, -4.0), (3.0, -6.0), (4.0, -6.0)]
+
+
+def test_no_controller_when_candidates_are_built_one_at_a_time(tmp_path):
+    config = build_config(_raw(tmp_path), base_dir=tmp_path)
+    assert [s.id for s, _ in adapting_stages(config)] == ["screen"]
+    built = replace(config, problem=replace(config.problem, tree=SimpleNamespace(build="make")))
+    assert adapting_stages(built) == []
+
+
+def test_a_missing_or_foreign_file_starts_from_the_configured_k(tmp_path):
+    path = tmp_path / "screening.json"
+    assert (ScreenControl.load(path, "screen", 2, 6).k, ScreenControl.load(path, "screen", 2, 6).off) == (2, False)
+    path.write_text(json.dumps({"stage": "proxy", "k": 5, "off": True, "below_zero": 0, "history": []}),
+                    encoding="utf-8")
+    assert ScreenControl.load(path, "screen", 2, 6).off is False, "another stage's state is not this one's"
+    path.write_text("{not json", encoding="utf-8")
+    assert ScreenControl.load(path, "screen", 2, 6).k == 2
+
+
+def test_each_adapting_stage_keeps_its_own_entry_in_the_file(tmp_path):
+    """Two adapting stages share `screening.json`: each save writes its own entry
+    and keeps the other's (before, each save replaced the whole file)."""
+    path = tmp_path / "screening.json"
+    proxy, screen = ScreenControl("proxy", 3, 6, path), ScreenControl("screen", 2, 6, path)
+    proxy.k, proxy.below_zero = 4, 1
+    proxy.save()
+    screen.off = True
+    screen.save()
+    assert (ScreenControl.load(path, "proxy", 3, 6).k, ScreenControl.load(path, "proxy", 3, 6).below_zero) == (4, 1)
+    assert ScreenControl.load(path, "screen", 2, 6).off is True
+
+
+def test_a_file_of_the_first_shape_still_reads(tmp_path):
+    path = tmp_path / "screening.json"
+    path.write_text(json.dumps({"stage": "screen", "k": 4, "off": False, "below_zero": 1, "history": []}),
+                    encoding="utf-8")
+    control = ScreenControl.load(path, "screen", 2, 6)
+    assert (control.k, control.below_zero) == (4, 1)
+    other = ScreenControl("proxy", 3, 6, path)
+    other.save()
+    assert ScreenControl.load(path, "screen", 2, 6).k == 4, "a save of another stage keeps it, in the new shape"
+    assert set(json.loads(path.read_text(encoding="utf-8"))["stages"]) == {"screen", "proxy"}
+
+
+def _run(rng, rho0, rounds=10, children=6):
+    control, pairs = ScreenControl("screen", k=2, cap=children, path=None), []
+    grew = False
+    for g in range(1, rounds + 1):
+        if control.off:
+            break
+        drawn = []
+        for _ in range(children):
+            x = rng.gauss(0, 1)
+            drawn.append((x, rho0 * x + math.sqrt(1 - rho0**2) * rng.gauss(0, 1)))
+        drawn.sort(key=lambda p: -p[0])
+        pairs += drawn[: control.k]
+        before = control.k
+        control.after_round(g, pairs)
+        grew |= control.k > before
+    return control, grew
+
+
+def test_a_screen_that_agrees_is_switched_off_in_under_5_percent_of_runs():
+    """rho 0.8 before selection; within the promoted top third it is about 0.65
+    (range restriction; measured Spearman 0.64). Measured through this code, seed
+    41: off 1.1 % (SE 0.23 %). Also printed: how often k grows (13.8 %, SE 0.77 %)."""
+    rng = random.Random(41)
+    runs = [_run(rng, 0.8) for _ in range(2000)]
+    off = sum(c.off for c, _ in runs) / 2000
+    print(f"agreeing screen: off {off:.1%}, k grew {sum(g for _, g in runs) / 2000:.1%}")
+    assert off < 0.05
+
+
+def test_a_screen_that_does_not_predict_grows_k_in_over_85_percent_of_runs():
+    """rho 0: rho-hat < 0.2 with probability about 0.7 at each check from round 4 on;
+    measured through this code, seed 42: 90.6 % (SE 0.65 %), so the bound is 85 %
+    (Decision 12)."""
+    rng = random.Random(42)
+    grew = sum(g for _, g in (_run(rng, 0.0) for _ in range(2000))) / 2000
+    print(f"unrelated screen: k grew {grew:.1%}")
+    assert grew > 0.85
+
+
+# -- the configuration -------------------------------------------------------
+
+
+def test_adapt_is_read_with_a_top_k_and_refused_without_one():
+    rule = PromoteRule.parse({"top_k_per_generation": 2, "adapt": True}, "evaluate.stages[1].promote")
+    assert rule.top_k_per_generation == 2 and rule.adapt is True
+    assert PromoteRule.parse({"top_k_per_generation": 2}, "p").adapt is False
+    with pytest.raises(ConfigError, match=r"evaluate\.stages\[1\]\.promote\.adapt"):
+        PromoteRule.parse({"archive_percentile": 50, "adapt": True}, "evaluate.stages[1].promote")
+
+
+def test_adapt_on_the_final_stage_is_refused_and_says_why(tmp_path):
+    raw = _raw(tmp_path)
+    raw["evaluate"]["stages"][2]["promote"] = {"top_k_per_generation": 2, "adapt": True}
+    with pytest.raises(ConfigError, match=r"evaluate\.stages\[2\]\.promote\.adapt: the final stage promotes to no later"):
+        build_config(raw, base_dir=tmp_path)
+
+
+def test_adapt_with_a_build_is_refused_and_says_why(tmp_path):
+    from evolvekit.config import _tree_rules
+
+    config = build_config(_raw(tmp_path), base_dir=tmp_path)
+    built = replace(config, problem=replace(config.problem, tree=SimpleNamespace(build="make", build_timeout_s=60.0)))
+    stages = (config.evaluate.stages[0], replace(config.evaluate.stages[1], kind="builtin-build", promote=PromoteRule()),
+              *config.evaluate.stages[1:])
+    built = replace(built, evaluate=replace(config.evaluate, stages=stages))
+    with pytest.raises(ConfigError, match=r"promote\.adapt: cannot be used with `problem\.tree\.build`: candidates are built one at a time"):
+        _tree_rules(built)
+
+
+# -- the cascade -------------------------------------------------------------
+
+SOLVER = (
+    "import argparse, json\n"
+    "p = argparse.ArgumentParser()\n"
+    "p.add_argument('--out'); p.add_argument('--stage'); p.add_argument('--x', type=float)\n"
+    "a = p.parse_args()\n"
+    # The screen ranks the other way round: the full stage minimises x, the screen 1 - x.
+    "cost = a.x if a.stage == 'full' else 1.0 - a.x\n"
+    "json.dump({'kpis': {'cost': cost}}, open(a.out, 'w'))\n"
+)
+
+
+def _raw(tmp_path: Path, *, generations: int = 7, children: int = 4) -> dict:
+    (tmp_path / "solver.py").write_text(SOLVER, encoding="utf-8")
+
+    def stage(name: str, **extra) -> dict:
+        return {"id": name, "kind": "command", "timeout": 60, **extra,
+                "command": f'"{sys.executable}" solver.py --out {{out}} --stage {name} {{params}}'}
+
+    return {
+        "problem": {"parameters": {"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}},
+                    "description": "Tune x."},
+        "evaluate": {
+            "stages": [{"id": "static", "kind": "builtin-static"},
+                       stage("screen", promote={"top_k_per_generation": 2, "adapt": True}),
+                       stage("full")],
+            "score": {"objective": "cost", "direction": "minimize"},
+        },
+        "search": {
+            "operators": {"param_lhs": 1.0},
+            "children_per_generation": children,
+            "generations": generations,
+            "seed": 3,
+            "novelty": {"behavioural": "off", "near": {"method": "off"}},
+        },
+        # The run's one hypercube can find the best x early; patience must not end it before round 6.
+        "stop": {"patience": 20},
+    }
+
+
+def test_the_cascade_promotes_its_adapted_k_and_passes_a_skipped_stage_over(tmp_path):
+    config = build_config(_raw(tmp_path), base_dir=tmp_path)
+    driver = Driver(config, run_dir=tmp_path / "run")  # for the skeleton's prefix and suffix
+    cascade = driver.cascade
+
+    def candidates(prefix: str) -> list[Candidate]:
+        out = []
+        for i, x in enumerate((0.1, 0.4, 0.7, 0.9)):
+            block = driver.seed_block.replace("0.5", str(x))
+            out.append(Candidate(id=f"{prefix}{i}", generation=1, block=block,
+                                 source=driver._make_source(block), operator="param_lhs"))
+        return out
+
+    cascade.promote_k["screen"] = 3
+    results = cascade.evaluate_generation(candidates("a"))
+    reached = sorted(cid for cid, r in results.items() if "full" in r.stages_reached)
+    assert reached == ["a1", "a2", "a3"], "the three best by the screen (largest x)"
+    cascade.skipped.add("screen")
+    results = cascade.evaluate_generation(candidates("b"))
+    assert all(r.stages_reached == ["static", "full"] for r in results.values())
+    assert all("screen" not in r.stage_scores and r.competes for r in results.values())
+
+
+def test_a_screen_that_disagrees_grows_k_then_is_switched_off_in_a_run(tmp_path):
+    """The screen ranks every candidate the other way round from the full stage:
+    the first check (9 pairs, after round 4) promotes 3, the second switches it
+    off, and the rounds after that pass the screen over. A resumed run keeps it off."""
+    lines: list[str] = []
+    config = build_config(_raw(tmp_path), base_dir=tmp_path)
+    Driver(config, run_dir=tmp_path / "run", log=lines.append).run()
+    run = tmp_path / "run"
+    saved = json.loads((run / "work" / SCREENING_FILE).read_text(encoding="utf-8"))
+    assert saved["stages"]["screen"]["k"] == 3 and saved["stages"]["screen"]["off"] is True
+    assert any("screening promotes 3 a round from now on" in line for line in lines)
+    assert any("screening off for the rest of the run" in line for line in lines)
+    changed = [e for e in read_events(run) if e.get("type") == "screening_changed"]
+    assert [(e["stage"], e["k"], e["off"], e["n"]) for e in changed] == [("screen", 3, False, 9),
+                                                                       ("screen", 3, True, 12)]
+    assert all(e["rho"] == pytest.approx(-1.0) for e in changed)
+    rows = [json.loads(line) for line in (run / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+    late = [r for r in rows if r["generation"] >= 6]
+    assert late and all("screen" not in r["stages_reached"] and r["competes"] for r in late)
+    resumed = Driver(config, run_dir=run)
+    assert resumed.cascade.skipped == {"screen"} and resumed.cascade.promote_k == {"screen": 3}
+
+
+def test_a_stage_without_adapt_keeps_its_k(tmp_path):
+    raw = _raw(tmp_path)
+    raw["evaluate"]["stages"][1]["promote"] = {"top_k_per_generation": 2}
+    driver = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")
+    assert driver.screens == {} and driver.cascade.promote_k == {} and not driver.cascade.skipped
+
+
+def test_two_adapting_stages_keep_their_own_state_across_a_resume(tmp_path):
+    """Two `promote.adapt` stages in one run: each restores its own `k` and off
+    from the shared `work/screening.json` (before, the last save won)."""
+    raw = _raw(tmp_path)
+    proxy = dict(raw["evaluate"]["stages"][1], id="proxy", promote={"top_k_per_generation": 3, "adapt": True})
+    raw["evaluate"]["stages"].insert(1, proxy)
+    config = build_config(raw, base_dir=tmp_path)
+    driver = Driver(config, run_dir=tmp_path / "run")
+    assert sorted(driver.screens) == ["proxy", "screen"]
+    driver.screens["proxy"].k = 4
+    driver.screens["proxy"].save()
+    driver.screens["screen"].off = True
+    driver.screens["screen"].save()
+    resumed = Driver(config, run_dir=tmp_path / "run")
+    assert (resumed.screens["proxy"].k, resumed.screens["proxy"].off) == (4, False)
+    assert (resumed.screens["screen"].k, resumed.screens["screen"].off) == (2, True)
+    assert resumed.cascade.promote_k == {"proxy": 4, "screen": 2} and resumed.cascade.skipped == {"screen"}
+
+
+def test_a_check_lost_with_the_run_is_made_again_on_resume(tmp_path):
+    """The run dies after round 4's rows and before `screening.json` has its
+    check (9 pairs: promotes 3). The resumed run makes that check over the same
+    candidates, once."""
+    config = build_config(_raw(tmp_path), base_dir=tmp_path)
+    run = tmp_path / "run"
+    Driver(config, run_dir=run).run(generations=4)
+    path = run / "work" / SCREENING_FILE
+    assert json.loads(path.read_text(encoding="utf-8"))["stages"]["screen"]["k"] == 3
+    path.write_text(json.dumps({"stages": {"screen": {"k": 2, "off": False, "below_zero": 0, "history": []}}}),
+                    encoding="utf-8")
+    resumed = Driver(config, run_dir=run)
+    assert resumed.resume() == 4
+    control = resumed.screens["screen"]
+    assert control.k == 3 and [h["generation"] for h in control.history] == [4]
+    assert resumed.cascade.promote_k == {"screen": 3}
+    assert json.loads(path.read_text(encoding="utf-8"))["stages"]["screen"]["k"] == 3, "saved"
+    again = Driver(config, run_dir=run)
+    again.resume()
+    assert again.screens["screen"].k == 3 and len(again.screens["screen"].history) == 1, "made once"

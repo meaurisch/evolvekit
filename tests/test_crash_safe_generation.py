@@ -46,7 +46,9 @@ def _config(tmp_path: Path, **evaluate):
                     {
                         "id": "full", "kind": "command", "kpis_from": "stdout", "timeout": 60,
                         "instances": ["a", "bb", "ccc"],
-                        "command": f'"{sys.executable}" solver.py --instance {{instance}} --seed {{seed}} {{params}}',
+                        # No {seed}: the seed is not run again to measure the noise
+                        # (`evaluate/noise.py`), so every call counted here is the cache's.
+                        "command": f'"{sys.executable}" solver.py --instance {{instance}} {{params}}',
                     },
                 ],
                 "score": {"objective": "cost", "direction": "minimize"},
@@ -200,7 +202,7 @@ def test_a_run_killed_mid_generation_resumes_with_the_same_children_and_pays_onl
     real = driver.cascade.evaluate_generation
     state = {"generation": 0}
 
-    def dying(candidates, scores=()):
+    def dying(candidates, scores=(), **keywords):  # `stage_scores=` since A2
         state["generation"] += 1
         if state["generation"] == 2:  # generation 1: let a few runs finish, then die
             driver.cascade.evaluate_generation = real
@@ -215,7 +217,7 @@ def test_a_run_killed_mid_generation_resumes_with_the_same_children_and_pays_onl
                         raise KeyboardInterrupt
 
             driver.cascade.on_event = counting
-        return real(candidates, scores)
+        return real(candidates, scores, **keywords)
 
     driver.cascade.evaluate_generation = dying
     with pytest.raises(KeyboardInterrupt):

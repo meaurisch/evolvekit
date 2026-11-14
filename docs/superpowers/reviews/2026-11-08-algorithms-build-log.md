@@ -223,3 +223,156 @@ The owner accepted the rule and its measured rates, and asked for chances in per
 "under 95 %", "over 5 %". Words only; no decision changes. Gate after the change: 2913 passed, 1 failed, 5 skipped in 43:03;
 the one failure was a report test that asserted no "95 %" anywhere (the rule now says it), narrowed
 to "no 95 % range"; that file then passed (25 tests).
+
+## Step 0 for A2–A4 — a clean start (2026-11-11)
+
+The second session runs from [the handoff prompt](../design/2026-11-09-algorithms-a2-a4-session-prompt.md),
+started by another session, in the git worktree `.claude/worktrees/app-redesign-build-17432c` (the
+main checkout holds `algo/1-verdict`).
+
+- `git status --porcelain` empty. Base: A0 (#78) and A1 (#79) are merged, so **`master` at 90c8c38**
+  ("Merge pull request #79"); `algo/2-noise` is cut from it.
+- `user.email` and `user.name` as required.
+- Python is the main checkout's `.venv/Scripts/python.exe` with `PYTHONPATH` set to the worktree
+  (the venv's editable install points at the main checkout; `PYTHONPATH` makes every test and
+  subprocess import the worktree's code). The git-ignored `benchmarks/pyvrp_hard/instances/` was
+  copied into the worktree.
+- `python tasks.py check` on master: **2905 passed, 1 failed, 13 skipped** in 30:47. The failure is
+  the worktree's path, not the code: `test_check_a_sample_that_fails_names_the_engineer_s_program`
+  asserts that the fix sentence does not contain "trees" (a removed checkout's path), and this
+  worktree's path is `…\.claude\worktrees\…`. It passes in the main checkout; every later gate in
+  this log carries the same one failure for the same reason. Eight more tests skip than in the
+  first session (environmental; the later gates print their reasons).
+- `python benchmarks/operator_mixes.py --seeds 5` on master (the "before" of A2):
+
+  | Regime | lhs only | local only | mix |
+  |---|--:|--:|--:|
+  | far (defaults 1225.00) | 1031.56 | 1106.35 | 1034.30 |
+  | mature (defaults 102.57) | 102.20 | 100.05 | 100.30 |
+
+## Project A2 — noise-aware search (2026-11-11 to 2026-11-14)
+
+Branch `algo/2-noise` from master 90c8c38. Plan:
+[2026-11-10-algo-2-noise.md](../plans/2026-11-10-algo-2-noise.md), written to step level from design
+§5 and checked by a fresh builder check that re-derived every formula and simulated every rate the
+plan asserted; nineteen decisions in the plan record what was ruled before, during and after the
+build. Fourteen tasks, each built by a fresh implementer and reviewed by a fresh reviewer; then four
+statistician rounds, a benchmark diagnosis and a docs sweep.
+
+| Task | Closes | Review rounds | Commits |
+|---|---|---|---|
+| A2.1a the noise estimate (`work/noise.json`) | — | 1 + minors | 1a094bc 7beb926 |
+| A2.1b repeatability, calibration, `progress.noise` | — | 1 + minors | 177ac67 c1d4d0d |
+| A2.1c the hold-out veto's noise margin | A0 decision 7 | 1 + minors | 521aa95 be84127 |
+| A2.2 behaviour twins by noise | Q7 | 1 + minors | cc19ed0 9423299 |
+| A2.3a the race at fixed looks | S5 | 1 + minors (a ruling mid-task: decision 14) | 85d7d49 5f9027d |
+| A2.3b promotion band, percentiles of like with like | Q9 | 2 (decision 15) | ebaff0e 595826f 4a1b2ea |
+| A2.3c screening as a controller | S6 | 1 + minors | 3023c94 1674eac |
+| A2.4a improvement and elites on the noise | Q5 | 2 (three Important) | f82ba85 eaf2a24 |
+| A2.4b re-evaluating the best | Q5 | 2 (two Critical) | 75cbbc0 b7dd9fc |
+| A2.5a one run-wide hypercube, ranked TPE, constant liar | Q3, Q4 | 1 (one Important) | b45d99d 5f9412f |
+| A2.5b TPE density, priors that act | Q4, S11 in part | 1 + minors | 32bb49b cf66895 |
+| A2.6a quantile and parameter axes | Q2 | 3 (two Important) | 099a0de 5471c9f 5c35ee6 |
+| A2.6b a dial on selection | Q1 | 1 + minors | 65930a5 f60b524 |
+| A2.6c reflected steps, the 1/5 rule | Q6 | 1 (decision 16) | d572f39 6303f2a |
+| Statistician fixes (decisions 17, 18) | — | rounds 1–4 | 74e3467 c27f25f c53df5d |
+| Benchmark fix (decision 19) | — | — | 027d550 |
+
+### What measurement changed
+
+The design's rules did not all survive measurement; each change is a numbered decision in the plan.
+
+- **The noise a comparison means** (decisions 1, 17). Every candidate runs on the same seeds, so for
+  an evaluator that repeats itself on a seed the across-seed spread is the wrong yardstick: the run
+  now runs the seed once more on seed 0 per stage, and a repeatable stage compares candidates by the
+  paired noise (two-way residuals over candidates × seeds). At `seeds: 1` that is no noise — today's
+  behaviour.
+- **Twins** (decisions 2, 3, 13, 15). "Within the noise of anything" rejected 97–100 % of children
+  once the index filled; a child is now a twin only of a candidate of an earlier round that scored
+  at least as well, compared on the evaluator's own numbers. A real gain is never a twin.
+- **The race** (decisions 5, 14, 17a, 18a). A spread term for cases that trade, read on the stage's
+  own cases; same-seed comparison with the incumbent; a fixed per-look tail. Equal candidates are
+  raced out in about 0.5 % (36.5 % before A2, measured).
+- **Few degrees of freedom** (decision 17b, superseding the design's "no minimum evidence"). A
+  one-run study's noise comes from three runs: every margin now uses the Student-t quantile at the
+  estimate's degrees of freedom, so the documented rates hold at 2 df as at 200. The price is power:
+  at `seeds: 1` the race stops 11 / 36 / 82 % of candidates 5 / 10 / 20 % behind (97 % at 5 % when
+  the noise is well measured), and the docs say so.
+- **A re-evaluation is never progress** (A2.4b review). A re-measured best moves the bar both ways
+  without touching patience; the economics series is read as of each round.
+- **The 1/5 rule per trial** (decision 16): the design's per-round threshold settles at 30–50 %
+  success with one or two local children a round.
+- **The benchmark** (decision 19). After A2.6a the "mature" mix read 100.72 against 100.27 (15
+  seeds). Diagnosis: on a typed space the grid does not steer the search; the larger grid only made
+  every child draw inspirations that model-free operators never read, shifting the random stream.
+  Model-free operators now draw none.
+
+Measured rates (seeded, through the product's code, with the noise estimated as the product
+estimates it; slow tests assert the tight bands):
+
+| Rule | Rate |
+|---|--:|
+| hold-out veto: an equal candidate kept out (any df, any correlation of weighted measures) | 7.6–8.3 % (50 % before) |
+| twin: a true twin caught, one number / ten numbers at 2 df | 84.5 % / 93.8 % |
+| twin: a real gain of 4 sd called a twin | 0 % |
+| race: an equal candidate raced out, fresh / best of 8 / best of 50 (well measured) | 0.5 / 2.7 / 6.6 % |
+| race: a candidate trading cases, not behind on the stage's cases | 3.1 % |
+| promotion: a candidate level with the k-th left out | 7.9 % |
+| promotion: one noise sd better left out (well measured) | 18 % (41 % before) |
+| epsilon: an equal candidate read as an improvement over one draw | 36.2 % |
+| elite: an equal challenger takes the cell | 24.2 % |
+| screening: a good screen switched off / an unrelated one grows k | 1.1 % / 90.6 % |
+
+### Statistician review
+
+| Round | Findings | What it found |
+|---|---|---|
+| 1 | 1 Critical, 3 Important, 1 Minor | the race compared a seed-0 prefix with an all-seed mean under the paired noise; every rate assumed a known noise (veto 14.7 %, twins 70 %); the paired estimate never passed the seed's 2 df; an unmeasured screen stage rejected distinct children as twins |
+| 2 | 2 Important, 2 Minor | the race lost its power at 2 df (5 % behind stopped 6 %); `score_sd` ignored the covariance of weighted measures (veto 14.8 % at correlation 0.8) |
+| 3 | 1 Important | the calibration path still ignored that covariance; one docs sentence described the wrong case |
+| 4 | **clean** | one Minor (calibration across cases assumes proportional profiles) |
+
+### Benchmark
+
+`python benchmarks/operator_mixes.py --seeds 5`, before (master 90c8c38) and after (027d550):
+
+| Regime | lhs only | local only | mix |
+|---|--:|--:|--:|
+| far, before | 1031.56 | 1106.35 | 1034.30 |
+| far, after | 1043.33 | 1098.02 | 1035.44 |
+| mature, before | 102.20 | 100.05 | 100.30 |
+| mature, after | 102.52 | 100.30 | **99.89** |
+
+The acceptance holds: the "mature" mix's mean true cost of the reported best did not rise. The
+benchmark's solvers have no `{seed}`, so it cannot see A2.1–A2.4 (σ̂ = 0 there); a seed-deterministic
+`{seed}` regime is the follow-up that would.
+
+### Limits logged, not fixed
+
+- A non-final stage is checked for repeatability only in the seed's generation; a run resumed from
+  before A2 keeps the exact hash at its screen.
+- The calibration's per-case covariance assumes the measures' levels are proportional across cases
+  (a negatively correlated, mismatched pair reads 8.6 %).
+- Two true noise twins of one round both go deeper (decision 15's cost).
+- `Noise.pool` (re-evaluation at `seeds > 1`) inflates the best's variance by about 11 %.
+- An interrupted re-evaluation is not retried and not counted against the daily cap on resume; the
+  as-of economics series costs O(re-evaluations × rows).
+- The parameter grid does not yet hold configurations apart in the search (typed parents come from
+  the flat top-4); drawing them from grid cells needs its own benchmark.
+- On resume the stop policy and the archive replay with today's noise (documented).
+- A run dying while it breeds, before `pending.json` exists, skips the hypercube rows that round took.
+
+### Whole-branch review and gate
+
+- A whole-branch review (read-only, across the seams between tasks) found one Important — two
+  `promote.adapt` stages shared one `work/screening.json` and overwrote each other on resume — and
+  nine Minor (resume windows for the noise, screening and hypercube files; the replayed epsilon;
+  λ recomputed on every row in the views; `promote.adapt` in places it cannot act now an error; the
+  `init` template writes `epsilon: null`; dead code). Fixed in 1141625.
+- The first gate (493b019) failed two slow tests the task implementers had not run: a fake
+  `evaluate_generation` without A2.3b's `stage_scores`, and a run count that did not include the
+  seed's repeatability runs (by design; the concurrency check now covers them too). Fixed in 1141625.
+- Gate: `python tasks.py check` on 1141625, nothing else running, the PyVRP harness tests pointed at
+  the main checkout's `.venv-pyvrp`: **3243 passed, 1 failed, 5 skipped** in 36:35. The one failure is
+  the worktree's path (step 0).
+- The benchmark re-run on 1141625 gives the "after" table above to the digit.

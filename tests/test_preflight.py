@@ -652,3 +652,68 @@ def test_a_measure_with_no_coefficient_is_n_a_in_the_noise_note(example_config_p
 def test_the_noise_note_skips_a_missing_coefficient_beside_a_real_one(example_config_path):
     note = _noisy_note(example_config_path, {"centred": None, "cost": 0.05})
     assert "varied by 5.00%" in note and "`centred`: n/a" in note
+
+
+# -- the seed run again: repeatability and calibration ------------------------
+
+
+def _seeded(tmp_path: Path, mode: str) -> str:
+    """`value` = 100 + seed (the same numbers for the same seed), or 100 plus
+    fresh noise on every call (a wall-clock solver)."""
+    script = tmp_path / "seeded.py"
+    script.write_text(
+        "import json, random, sys, pathlib\n"
+        "seed = int(sys.argv[3]) if len(sys.argv) > 3 else 0\n"
+        f"value = 100.0 + random.gauss(0.0, 2.0) if {mode!r} == 'wall-clock' else 100.0 + seed\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({'kpis': {'value': value}}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    return f'"{sys.executable}" "{script}" {{out}} {{candidate}}'
+
+
+def _noise_notes(minimal_raw, tmp_path, mode, *, seeds=1, placeholder=True, instances=None):
+    stage = {"id": "full", "kind": "command", "seeds": seeds,
+             "command": _seeded(tmp_path, mode) + (" {seed}" if placeholder else "")}
+    if instances:
+        stage["instances"] = instances
+        stage["command"] += " {instance}"
+    config = _config(minimal_raw, tmp_path, stages=[{"id": "static", "kind": "builtin-static", "import_check": False},
+                                                    stage])
+    report = preflight(config)
+    assert not report.failures, report.failures
+    return [n for n in report.notes + report.warnings if "noise" in n or "same numbers" in n]
+
+
+def test_preflight_measures_the_run_to_run_noise_of_a_wall_clock_evaluator(minimal_raw, tmp_path):
+    import re
+
+    notes = _noise_notes(minimal_raw, tmp_path, "wall-clock", instances=["i1", "i2", "i3"])
+    assert len(notes) == 1 and re.fullmatch(
+        r"run-to-run noise at stage full: one run varies by about \d+(\.\d+)? % \(3 runs of the seed on i[123]\)",
+        notes[0]), notes
+
+
+def test_preflight_says_a_repeatable_evaluator_is_compared_by_seed(minimal_raw, tmp_path):
+    notes = _noise_notes(minimal_raw, tmp_path, "repeatable")
+    assert notes == ["stage full: the evaluator gives the same numbers for the same seed; comparisons are paired by seed"]
+
+
+def test_preflight_reads_the_noise_of_a_stage_with_seeds_from_its_own_runs(minimal_raw, tmp_path):
+    import re
+
+    notes = _noise_notes(minimal_raw, tmp_path, "wall-clock", seeds=3)
+    assert len(notes) == 1 and re.fullmatch(
+        r"run-to-run noise at stage full: one run varies by about \d+(\.\d+)? % \(seeds: 3\)", notes[0]), notes
+
+
+def test_preflight_says_a_command_without_a_seed_cannot_have_its_noise_measured(minimal_raw, tmp_path):
+    notes = _noise_notes(minimal_raw, tmp_path, "repeatable", placeholder=False)
+    assert notes == ["stage full: the command has no {seed}, so the noise cannot be measured; "
+                     "every comparison is made as if the evaluator were exact"]
+
+
+def test_a_calibrated_noise_is_quoted_to_one_significant_digit():
+    from evolvekit.evaluate.noise import about_pct
+
+    assert about_pct(0.0234) == "2" and about_pct(0.00271) == "0.3" and about_pct(0.187) == "20"
+    assert about_pct(0.0) == "0"

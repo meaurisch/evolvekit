@@ -68,6 +68,10 @@ PRIOR_BAND = 0.1
 own scale, either side. A prior is what an earlier study's winner suggests, never a fence: the
 rest of the draws still cover the whole range."""
 
+STEP_SCALE = 0.15
+"""A local step's size before anything is known: the sd of its Gaussian step, as a share of the
+parameter's range on its own scale. A run adapts it (`Driver.step_scale`, `work/perturb.json`)."""
+
 
 class SpaceError(ValueError):
     """A parameter declaration, or a configuration, that cannot be used."""
@@ -531,7 +535,7 @@ class ParameterSpace:
         values: Mapping[str, Any],
         rng: random.Random,
         *,
-        scale: float = 0.15,
+        scale: float = STEP_SCALE,
         moves: int = 3,
     ) -> dict[str, Any]:
         """A neighbour of `values`: one to `moves` parameters moved a little.
@@ -541,9 +545,10 @@ class ParameterSpace:
         of seven or fewer). A step that moves eight of thirty parameters at once
         is a jump, and says nothing about any one of them; a step that moves one
         says exactly what that one is worth. A number takes a Gaussian step of
-        `scale` of its range on its own scale (an integer by at least one), a
-        boolean flips, a choice is redrawn. At least one parameter always
-        changes, because a child identical to its parent is a wasted evaluation.
+        `scale` of its range on its own scale (an integer by at least one),
+        reflected at the ends of the range; a boolean flips, a choice is
+        redrawn. At least one parameter always changes, because a child
+        identical to its parent is a wasted evaluation.
         """
         limit = max(1, min(int(moves), len(self.parameters) // 4))
         child = dict(values)
@@ -560,7 +565,17 @@ class ParameterSpace:
         if not parameter.numeric:
             return rng.choice([c for c in parameter.categories if c != current])
         step = rng.gauss(0.0, scale)
-        moved = parameter.from_unit(parameter.to_unit(current) + step)
+        # A step past an end is reflected back inside, not clamped onto the
+        # end: clamping put about 45 % of the steps from 0.98 on 1.0 exactly,
+        # the same configuration again and again. Folded as often as it takes
+        # (a step can be longer than the range): reflecting at 0 and at 1 is
+        # the position modulo 2, read backwards on its second half.
+        unit = parameter.to_unit(current) + step
+        if math.isfinite(unit) and not 0.0 <= unit <= 1.0:
+            unit %= 2.0
+            if unit > 1.0:
+                unit = 2.0 - unit
+        moved = parameter.from_unit(unit)
         if moved == current and parameter.type == "int":
             # The step rounded away. One whole unit in its direction, or the
             # other way at the edge of the range.

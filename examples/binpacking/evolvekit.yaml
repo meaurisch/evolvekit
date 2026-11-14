@@ -129,11 +129,10 @@ evaluate:
   # whose fingerprint matches one already seen at that stage is a re-expression
   # of something already paid for, and is stopped there. Both values are the
   # built-in defaults, spelled out here because they are worth knowing about.
+  # On an evaluator that gives different numbers for the same seed (a solver
+  # bounded by wall-clock time, say) twins are judged by the run's own noise
+  # instead of by the digits: docs/reference.md, "The novelty filters".
   signature_digits: 9
-  # Used instead on any stage with `seeds: N > 1`. Coarser on purpose: a
-  # stochastic evaluator moves the eighth digit for free, so at nine digits
-  # every candidate looks novel and the behavioural filter stops filtering.
-  signature_digits_stochastic: 3
   signature_ignore: [runtime_s, complexity, static_problems]
 
 models:

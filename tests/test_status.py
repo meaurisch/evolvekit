@@ -277,6 +277,30 @@ def test_every_stopping_criterion_reports_how_far_along_it_is(tmp_path):
     assert (limits["stop.patience"]["used"], limits["stop.patience"]["cap"]) == (2, 4)
 
 
+def _rising_by_less_than_the_noise(tmp_path, **finished):
+    run = RunDir(tmp_path)
+    run.event("run_started", 100, objective="cost", direction="minimize", stages=STAGES,
+              first_generation=1, generations_planned=5, resumed=False,
+              budget={"max_usd": 2.0}, stop={"patience": 4, "epsilon": None})
+    for generation, cost in enumerate((100.0, 99.8, 99.6)):   # each step 0.2, the noise epsilon 0.5
+        run.row(f"g00{generation}-c000{generation + 1}", generation, cost)
+    run.event("generation_finished", 10, generation=2, duration_s=5.0, **finished)
+    return {l["name"]: l for l in build_status(tmp_path, now=NOW)["health"]["limits"]}
+
+
+def test_the_flat_count_is_the_stop_policys_own_with_the_epsilon_it_used(tmp_path):
+    """The policy recorded 2 flat generations against epsilon 0.5 (no ratchet:
+    99.6 is 0.4 above 100.0); a reading of the series with epsilon 0 says 0."""
+    limits = _rising_by_less_than_the_noise(tmp_path, flat_generations=2, stop_epsilon=0.5)
+    assert limits["stop.patience"]["used"] == 2
+
+
+def test_a_run_from_before_the_recorded_flat_count_is_read_from_the_series(tmp_path):
+    """No `flat_generations` on the event: the series with the automatic
+    epsilon's floor (1e-6), where each 0.2 step is an improvement."""
+    assert _rising_by_less_than_the_noise(tmp_path)["stop.patience"]["used"] == 0
+
+
 # -- is it improving, and is that real? ------------------------------------
 
 
@@ -856,3 +880,72 @@ def test_whether_the_cheap_stage_predicts_the_expensive_one_can_be_read_off(tmp_
     assert pair["spearman"] == pytest.approx(0.8)
     assert pair["verdict"].startswith("the earlier stage ranks candidates much as")
     assert "range is restricted" in screening["why"]
+
+
+def test_the_rank_correlation_is_the_one_in_stats():
+    """`status` reads the agreement with `stats.spearman`, the function the
+    screening controller reads it with: average ranks for ties, `None` when a
+    side does not vary or there are fewer than three points."""
+    from evolvekit import stats, status
+
+    assert status._spearman is stats.spearman and status._ranks is stats.ranks
+    assert stats.ranks([3.0, 1.0, 3.0, 2.0]) == [3.5, 1.0, 3.5, 2.0]
+    assert stats.spearman([1.0, 2.0, 3.0, 4.0], [10.0, 30.0, 20.0, 40.0]) == pytest.approx(0.8)
+    assert stats.spearman([1.0, 1.0, 1.0], [1.0, 2.0, 3.0]) is None and stats.spearman([1.0, 2.0], [2.0, 1.0]) is None
+
+
+# -- progress.noise ----------------------------------------------------------
+
+
+def _noise_file(run_dir: Path, stages: dict) -> None:
+    (run_dir / "work").mkdir(parents=True, exist_ok=True)
+    (run_dir / "work" / "noise.json").write_text(json.dumps({"schema": 2, "stages": stages}), encoding="utf-8")
+
+
+def test_progress_reports_the_noise_per_measure(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(100)
+    run.row("g000-c0001", 0, 100.0)
+    _noise_file(tmp_path, {"full": {"repeatable": False, "kpis": {
+        "cost": {"across": {"g001-c0002": {"runs": 3, "mean": 100.0, "var": 4.0}}}}, "vectors": {}}})
+    noise = build_status(tmp_path, now=NOW)["progress"]["noise"]
+    assert noise["sd"] == {"cost": pytest.approx(2.0)} and noise["source"] == "replicates"
+    assert noise["sd_across"] == {"cost": pytest.approx(2.0)} and noise["repeatable"] is False
+    assert noise["cv"] == {"cost": pytest.approx(0.02)} and noise["stage"] == "full"
+    assert noise["runs_per_candidate"] == 1
+
+
+def test_progress_reports_the_paired_noise_on_a_repeatable_stage(tmp_path):
+    from evolvekit.evaluate.noise import Noise
+    from evolvekit.evaluate.types import StageOutcome
+
+    def runs(values):
+        return StageOutcome(stage_id="full", ok=True, kpis={"cost": statistics.fmean(values)},
+                            kpi_var={"cost": statistics.variance(values)}, seed_runs={"cost": list(values)},
+                            seed_list=(0, 1, 2), runs=3)
+
+    run = RunDir(tmp_path)
+    run.event("run_started", 100, objective="cost", direction="minimize", first_generation=1, generations_planned=3,
+              stages=[{"id": "full", "kind": "command", "seeds": 3, "final": True}])
+    run.row("g000-c0001", 0, 100.0)
+    (tmp_path / "work").mkdir()
+    noise = Noise(tmp_path / "work" / "noise.json")
+    noise.observe("full", "g000-c0001", runs([100.0, 105.0, 95.0]), is_seed=True)
+    noise.observe("full", "g001-c0002", runs([99.1, 103.9, 95.0]))
+    noise.set_repeatable("full", True)
+    noise.save()
+    shown = build_status(tmp_path, now=NOW)["progress"]["noise"]
+    assert shown["source"] == "paired" and shown["repeatable"] is True and shown["runs_per_candidate"] == 3
+    d = [99.1 - 100.0, 103.9 - 105.0, 95.0 - 95.0]
+    assert shown["sd"]["cost"] == pytest.approx(math.sqrt(statistics.variance(d) / 2))
+    assert shown["sd_across"]["cost"] > shown["sd"]["cost"]
+    json.dumps(shown, allow_nan=False)
+
+
+def test_progress_says_none_without_a_noise_file(tmp_path):
+    run = RunDir(tmp_path)
+    run.started(100)
+    run.row("g000-c0001", 0, 100.0)
+    assert build_status(tmp_path, now=NOW)["progress"]["noise"] == {
+        "stage": "full", "repeatable": None, "source": "none", "sd": {}, "sd_across": {}, "cv": {},
+        "runs_per_candidate": 1}
