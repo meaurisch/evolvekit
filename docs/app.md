@@ -719,7 +719,12 @@ is 403, sent before the body is read. The routes: `/api/home` (with
 `clock: {line}` while a rehearsal clock is on; a draft's card has `missing`,
 the first thing Set up lacks as `{"step", "key", "text"}`, or `null`),
 `/api/harnesses/{id}` (its `learned`: per setting `tuned_in`, `importance`,
-`importance_n`, `winners`, `direction` and `leaned`, the median of the
+`importance_n`, `importance_of`, `importance_p`, `winners`, `direction` and
+`leaned` — `importance_of` the studies with a strength on at least five
+combinations, `importance_p` their permutation p's (`importance.p`) combined
+by Fisher's rule (an item without one counts as 1), and `importance` their
+mean |ρ| over `importance_n` of them only when `importance_p` is under 0.1,
+else `null` with `importance_n` 0 — `leaned` the median of the
 settings studies' search-best values — the lower middle for a whole number,
 the most common value of a choice, `null` on a tie or with none; a study
 whose search did not run is listed in `studies` with `not_run: true` and

@@ -35,6 +35,9 @@ from evolvekit.status import build_status
 
 IMPORTANCE_MIN_N = 5
 """A study's importance counts when its correlation rests on at least this many fully evaluated combinations."""
+IMPORTANCE_P = 0.1
+"""A setting's strength is shown when its studies' permutation p's, combined by Fisher's rule, are under this
+(A4.3, S9; decision 2)."""
 MIN_PRIOR_WEIGHT = 0.05
 """A prior weaker than this (five studies since its winner) is dropped: it would steer nothing."""
 RERANK_AFTER = 3
@@ -205,7 +208,8 @@ def _items(run_dir: Path, document_of: Callable[[Path], dict] | None) -> list[di
             continue
         importance = item.get("importance") or {}
         items.append({"name": str(item["name"]), "default": item.get("default"), "best": item.get("best"),
-                      "importance": importance.get("value"), "n": int(importance.get("n") or 0)})
+                      "importance": importance.get("value"), "n": int(importance.get("n") or 0),
+                      "p": importance.get("p")})
     if key is not None:
         with _LOCK:
             if len(_CACHE) >= _CACHE_MAX:
@@ -239,16 +243,16 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
                 gone.append(f"{name} (in {f.name}) is not a setting of {current.title} {current.version} any more: left out")
                 continue
             entry = seen.setdefault(name, {"label": setting.label, "tuned_in": 0, "importance": None, "importance_n": 0,
-                                           "winners": [], "direction": None, "leaned": None, "_values": [], "_starts": [],
-                                           "_bests": [], "_type": setting.parameter.type})
+                                           "importance_of": 0, "importance_p": None, "winners": [], "direction": None,
+                                           "leaned": None, "_values": [], "_starts": [], "_bests": [],
+                                           "_type": setting.parameter.type})
             then = f.pinned.settings.get(name)
             difference = _difference(then.parameter, setting.parameter) if then is not None else None
             if difference:
                 changed.append(f"{name}: {difference.format(study=f.name)}: that study's figures are left out")
                 continue
             entry["tuned_in"] += 1
-            if item["importance"] is not None and item["n"] >= IMPORTANCE_MIN_N:
-                entry["_values"].append(float(item["importance"]))
+            entry["_values"].append((item["importance"], item["n"], item["p"]))
             if item["best"] is not None:
                 entry["_bests"].append(item["best"])
             if f.decision == "use" and item["best"] is not None:
@@ -258,8 +262,7 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
     for name, entry in seen.items():
         values, starts = entry.pop("_values"), entry.pop("_starts")
         entry["leaned"] = _leaned(entry.pop("_bests"), entry.pop("_type"))
-        entry["importance_n"] = len(values)
-        entry["importance"] = fmean(values) if values else None
+        entry.update(_pooled(values))
         moves = set()
         for winner, start in zip(entry["winners"], starts):
             a, b = _number(winner["value"]), _number(start)
@@ -268,6 +271,37 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
         entry["direction"] = "mixed" if len(moves) == 2 else next(iter(moves), None)
         out["settings"][name] = entry
     return out
+
+
+def _combined_p(ps: list[Any]) -> float | None:
+    """Fisher's combined p of independent studies: -2 * sum(ln p) against chi-squared with 2k degrees
+    of freedom, whose survival is exp(-x/2) * sum_{j<k} (x/2)^j / j!. A p that is not a number in
+    (0, 1] counts as 1: it was not shown to beat chance. None without a study."""
+    if not ps:
+        return None
+    numbers = [_number(p) for p in ps]
+    clean = [p if p is not None and 0.0 < p <= 1.0 else 1.0 for p in numbers]
+    half = -sum(math.log(p) for p in clean)
+    term, total = 1.0, 1.0
+    for j in range(1, len(clean)):
+        term *= half / j
+        total += term
+    return min(1.0, math.exp(-half) * total)
+
+
+def _pooled(studies: list[tuple[Any, int, Any]]) -> dict[str, Any]:
+    """A setting's strength over its studies, each `(|rho|, n, p)` (decision 2, departing from the design's
+    "pool over the studies with p < 0.1", which shows a setting that does nothing in about 26 % of cases
+    after three studies, at a strength as high as a real one's). A study counts when it has a strength on
+    at least `IMPORTANCE_MIN_N` combinations (`importance_of`); their p's are combined by Fisher's rule
+    (`importance_p`); when that is under `IMPORTANCE_P` the strength is the mean |rho| over all of them
+    (`importance`, over `importance_n` studies), else None and `importance_n` 0."""
+    counted = [(float(value), p) for value, n, p in studies if _number(value) is not None and n >= IMPORTANCE_MIN_N]
+    combined = _combined_p([p for _, p in counted])
+    shown = combined is not None and combined < IMPORTANCE_P
+    return {"importance": fmean(v for v, _ in counted) if shown else None,
+            "importance_n": len(counted) if shown else 0,
+            "importance_of": len(counted), "importance_p": combined}
 
 
 def _leaned(bests: list[Any], kind: str) -> Any:

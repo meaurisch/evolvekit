@@ -32,7 +32,7 @@ def test_api_harness_learned(tmp_path):
 
 LEARNED = {"title": "Demo tour", "learned": {"studies": [{"slug": "spring", "name": "Spring", "run": "r1",
     "finished_at": "2026-10-01T00:12:00+00:00", "decision": "use", "line": "Probably better: 3.1 % lower tour length …", "kind": "settings"}],
-    "settings": {"neighbours": {"label": "Candidate moves per stop", "tuned_in": 2, "importance": 0.42, "importance_n": 2,
+    "settings": {"neighbours": {"label": "Candidate moves per stop", "tuned_in": 2, "importance": 0.42, "importance_n": 2, "importance_of": 2,
         "winners": [{"value": 12, "study": "spring", "finished_at": "2026-10-01T00:12:00+00:00"}], "direction": "up",
         "leaned": 9}},
     "notes": ["old_knob (in Spring) is not a setting of Demo tour 1.1.0 any more: left out"]}}
@@ -80,11 +80,32 @@ def test_harness_page_says_what_is_missing():
     assert "No study on this application has finished yet." in empty and "Left out" not in empty
     lone = json.loads(json.dumps(LEARNED))
     setting = lone["learned"]["settings"]["neighbours"]
-    setting.update(importance=None, importance_n=0, winners=[], direction=None)
+    setting.update(importance=None, importance_n=0, importance_of=0, winners=[], direction=None)
     text = _view(lone)
     assert "not enough tries to tell" in text and "none yet" in text and "—" in text
     setting["direction"] = "mixed"
     assert "both ways" in _view(lone)
+
+
+def test_harness_page_says_how_many_studies_could_tell_a_setting_from_chance():
+    """A4.3 (S9): a strength is shown only when its studies together beat 999 shuffles; when they did
+    not, the cell says so in words, by the number of studies that measured it."""
+    text = _view(LEARNED)
+    assert "0.42 · from 2 studies" in text
+    assert ("A strength is shown only when the studies that measured it, taken together, could tell it from "
+            "chance: shuffling a search's results within each round goes with the setting as strongly less "
+            "than 10 % of the time.") in text
+    lone = json.loads(json.dumps(LEARNED))
+    setting = lone["learned"]["settings"]["neighbours"]
+    setting.update(importance=None, importance_n=0, importance_of=3)
+    assert "together, the 3 studies could not tell it from chance" in _view(lone)
+    setting["importance_of"] = 1
+    assert "the study could not tell it from chance" in _view(lone)
+    setting["importance_of"] = 0
+    assert "not enough tries to tell" in _view(lone)
+    del setting["importance_of"]
+    assert "not enough tries to tell" in _view(lone), "a document from before A4.3"
+    assert "ρ" not in _view(lone) and "permutation" not in _view(LEARNED).lower()
 
 
 def test_harness_page_never_says_better():

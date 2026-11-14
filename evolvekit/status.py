@@ -37,8 +37,10 @@ from __future__ import annotations
 import difflib
 import json
 import math
+import operator
+import random
 from datetime import datetime, timezone
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 from statistics import fmean, median, stdev
 from typing import Any, Callable, Mapping, Sequence
@@ -223,6 +225,83 @@ def _correlation_ratio(groups: Sequence[Any], ys: Sequence[float]) -> float | No
     if k > 2:
         share = 1.0 - (1.0 - share) * (n - 1) / (n - k)
     return math.sqrt(min(1.0, max(0.0, share)))
+
+
+PERMUTATIONS = 999
+"""Shuffles behind a setting's permutation p (A4.3, S9)."""
+PERMUTATION_MIN_N = 5
+"""Fewer fully evaluated combinations than this give no p: five values have only 120 orders."""
+
+
+@lru_cache(maxsize=4)
+def _shuffles(rounds: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
+    """`PERMUTATIONS` orders of the positions `0..n-1`, each moving positions only among those of the
+    same round (`rounds[i]` is position i's round, numbered by first appearance), drawn by
+    `random.Random(0)` from scratch: a fresh draw per call would give the same orders, so they are
+    kept for the run's settings to share, and no setting's p depends on the order they come in."""
+    rng = random.Random(0)
+    groups: dict[int, list[int]] = {}
+    for i, label in enumerate(rounds):
+        groups.setdefault(label, []).append(i)
+    shuffled = [g for g in groups.values() if len(g) > 1]
+    order = list(range(len(rounds)))
+    out = []
+    for _ in range(PERMUTATIONS):
+        if len(shuffled) == 1 and len(shuffled[0]) == len(order):
+            rng.shuffle(order)
+        else:
+            for positions in shuffled:
+                values = [order[i] for i in positions]
+                rng.shuffle(values)
+                for i, value in zip(positions, values):
+                    order[i] = value
+        out.append(tuple(order))
+    return tuple(out)
+
+
+def _permutation_p(
+    xs: Sequence[Any],
+    ys: Sequence[float],
+    statistic: Callable[[Sequence[Any], Sequence[float]], float | None] | None = None,
+    *,
+    rounds: Sequence[Any] | None = None,
+) -> float | None:
+    """How often the scores, shuffled within each round, go with the value at least as strongly
+    as they do: p = (1 + count) / (1 + PERMUTATIONS), ties counted as extreme (A4.3, S9).
+
+    `statistic` None is the absolute Spearman correlation, computed as one dot product of the
+    centred value ranks with the shuffled score ranks (ranks are precomputed: shuffling scores
+    shuffles their ranks); else `statistic(xs, shuffled ys)`, as `_correlation_ratio` for a choice of
+    more than two. Shuffling within rounds keeps a setting that only drifts along the lineage while
+    the search improves through others from looking important (decision 3). `rounds=None` is one
+    round; when every round has a single value nothing can move and p is 1. None below
+    `PERMUTATION_MIN_N` values or when the statistic has no value."""
+    n = len(ys)
+    if n < PERMUTATION_MIN_N or len(xs) != n:
+        return None
+    labels: dict[str, int] = {}
+    keys = [0] * n if rounds is None else [labels.setdefault(json.dumps(r, default=str), len(labels)) for r in rounds]
+    orders = _shuffles(tuple(keys))
+    if statistic is None:
+        if _spearman(list(xs), list(ys)) is None:
+            return None
+        rx, ry = _ranks(list(xs)), _ranks(list(ys))
+        mean = fmean(rx)
+        cx = [r - mean for r in rx]
+        my = fmean(ry)
+        scale = math.sqrt(sum(c * c for c in cx) * sum((r - my) ** 2 for r in ry))
+        observed = abs(sum(map(operator.mul, cx, ry)))
+        floor = observed - 1e-12 * scale
+        count = sum(1 for order in orders if abs(sum(map(operator.mul, cx, map(ry.__getitem__, order)))) >= floor)
+    else:
+        first = statistic(xs, ys)
+        if first is None:
+            return None
+        count = 0
+        for order in orders:
+            value = statistic(xs, [ys[j] for j in order])
+            count += value is not None and value >= first - 1e-12
+    return (1 + count) / (1 + PERMUTATIONS)
 
 
 CATEGORICAL = ("bool", "choice")
@@ -1491,12 +1570,14 @@ class _Run:
             for row, values in observed
             if name in values
         ]
-        ranked = [
-            p
-            for p in points
+        generations = [row.get("generation") for row, values in observed if name in values]
+        kept = [
+            (p, generation)
+            for p, generation in zip(points, generations)
             if p["competes"] and p["fitness"] is not None
             and not (categorical and p["position"] is None)  # a value the declaration no longer has
         ]
+        ranked, rounds = [p for p, _ in kept], [g for _, g in kept]
         fitnesses = [p["fitness"] for p in ranked]
         if categorical and len(categories) > 2:
             method = (
@@ -1504,6 +1585,7 @@ class _Run:
                 "the categories (square root, shrunk for their number), fully evaluated candidates only"
             )
             strength, sign = _correlation_ratio([p["value"] for p in ranked], fitnesses), 0
+            p_value = _permutation_p([p["value"] for p in ranked], fitnesses, _correlation_ratio, rounds=rounds)                 if strength is not None else None
         else:
             method = (
                 "absolute Spearman rank correlation between the value and the ranking score, "
@@ -1513,6 +1595,7 @@ class _Run:
             xs = [categories.index(p["value"]) if categorical else p["value"] for p in ranked]
             rho = _spearman(xs, fitnesses)
             strength, sign = (abs(rho) if rho is not None else None), ((1 if rho > 0 else -1) if rho else 0)
+            p_value = _permutation_p(xs, fitnesses, rounds=rounds) if strength is not None else None
         labels = [str(c).lower() if isinstance(c, bool) else str(c) for c in categories] or None
         low, high = _number(item.get("low")), _number(item.get("high"))
         if item.get("type") == "int" and low is not None and high is not None and 0 <= high - low < COVERAGE_BINS:
@@ -1564,7 +1647,8 @@ class _Run:
             "coverage": bins,
             "coverage_labels": labels,
             "levels": levels if categorical else None,
-            "importance": {"method": method, "value": strength, "sign": sign, "n": len(ranked)},
+            "importance": {"method": method, "value": strength, "sign": sign, "n": len(ranked),
+                           "p": p_value, "shuffles": PERMUTATIONS},
             "points": points,
         }
 

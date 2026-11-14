@@ -548,6 +548,136 @@ def test_parameters_are_ranked_by_how_strongly_they_go_with_the_score(tmp_path):
     assert "interactions" in parameters["why"]
 
 
+TYPED = [
+    {"name": "K", "type": "int", "low": 1, "high": 20, "default": 1},
+    {"name": "MODE", "type": "choice", "choices": ["a", "b", "c"], "default": "a"},
+]
+
+
+def _typed_run(path: Path, rows: list[tuple[int, int, str, float]], *, parameters=TYPED) -> dict:
+    """A typed run: one row per (generation, K, MODE, cost)."""
+    run = RunDir(path)
+    run.started(1000, parameters=parameters)
+    for i, (generation, k, mode, cost) in enumerate(rows, start=1):
+        run.row(f"g{generation:03d}-c{i:04d}", generation, cost, params={"K": k, "MODE": mode},
+                **({"parent_id": "g000-c0001"} if generation else {}))
+    return build_status(path, now=NOW)
+
+
+ORDERED = [(0, 1, "a", 80.0), *[(1, k, mode, 80.0 - 10 * i)
+                                for i, (k, mode) in enumerate([(2, "a"), (3, "a"), (4, "b"), (5, "b"),
+                                                               (6, "b"), (7, "c"), (8, "c")], start=1)]]
+
+
+def test_importance_carries_a_permutation_p_with_999_shuffles(tmp_path):
+    """A4.3 (S9): beside |rho|, how often 999 shuffles of the scores within each round go with the
+    value as strongly: p = (1 + count) / 1000; none under five fully evaluated combinations."""
+    from evolvekit import status
+
+    assert status.PERMUTATIONS == 999 and status.PERMUTATION_MIN_N == 5
+    items = {i["name"]: i for i in _typed_run(tmp_path / "eight", ORDERED)["parameters"]["items"]}
+    k = items["K"]["importance"]
+    assert k["value"] == pytest.approx(1.0) and k["n"] == 8 and k["shuffles"] == 999
+    assert k["p"] <= 0.01 and round(k["p"] * 1000) == pytest.approx(k["p"] * 1000)
+    mode = items["MODE"]["importance"]
+    assert mode["value"] > 0.8 and mode["shuffles"] == 999 and mode["p"] is not None and mode["p"] < 0.1, \
+        "a three-way choice gets a p too"
+    few = {i["name"]: i for i in _typed_run(tmp_path / "four", ORDERED[:4])["parameters"]["items"]}
+    assert few["K"]["importance"]["value"] == pytest.approx(1.0) and few["K"]["importance"]["n"] == 4
+    assert few["K"]["importance"]["p"] is None and few["K"]["importance"]["shuffles"] == 999
+
+
+def test_the_permutation_p_is_the_same_whatever_order_the_settings_come_in(tmp_path):
+    from evolvekit import status
+
+    a = ([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [3.0, 1.0, 4.0, 1.5, 5.0, 9.0, 2.0])
+    b = ([7.0, 1.0, 2.0, 6.0, 3.0, 5.0, 4.0], [2.0, 7.0, 1.0, 8.0, 2.5, 8.5, 0.5])
+    first = (status._permutation_p(*a), status._permutation_p(*b))
+    second = (status._permutation_p(*b), status._permutation_p(*a))
+    assert first == second[::-1]
+    forward = {i["name"]: i["importance"]["p"] for i in _typed_run(tmp_path / "f", ORDERED)["parameters"]["items"]}
+    backward = {i["name"]: i["importance"]["p"]
+                for i in _typed_run(tmp_path / "b", ORDERED, parameters=TYPED[::-1])["parameters"]["items"]}
+    assert forward == backward
+
+
+def _null_rate(rng, rows: int, trials: int) -> float:
+    from evolvekit import status
+
+    hits = 0
+    for _ in range(trials):
+        xs = [rng.random() for _ in range(rows)]
+        ys = [rng.gauss(0.0, 1.0) for _ in range(rows)]
+        hits += status._permutation_p(xs, ys) < 0.1
+    return hits / trials
+
+
+def test_the_permutation_p_is_below_0_1_in_about_10_percent_of_null_studies():
+    """Independent value and score, 8 ranked rows, 2000 seeded trials (random.Random(20261114)).
+    Builder check 9.35 % +- 0.65; measured here 9.65 % +- 0.66; asserts [7.5, 11.5] %. At 5 rows the
+    discreteness gives less (builder 8.0 % +- 0.6, here 8.40 % +- 0.62): asserts <= 11 %."""
+    import random
+
+    rng = random.Random(20261114)
+    eight, five = _null_rate(rng, 8, 2000), _null_rate(rng, 5, 2000)
+    se8, se5 = math.sqrt(eight * (1 - eight) / 2000), math.sqrt(five * (1 - five) / 2000)
+    print(f"P(p < 0.1) under the null: 8 rows {eight:.2%} +- {se8:.2%}; 5 rows {five:.2%} +- {se5:.2%}")
+    assert 0.075 <= eight <= 0.115
+    assert five <= 0.11
+
+
+def test_a_setting_that_drifts_along_the_rounds_is_below_0_1_in_about_10_percent_when_shuffled_within_rounds():
+    """S9's round-to-round confounding (decision 3): a setting that does nothing but drifts along the
+    lineage, while the search improves through other settings, 10 rounds of 8, 1000 seeded trials
+    (random.Random(20261115)). Builder check (400 trials): within-round shuffles 9.8 % +- 1.5, a shuffle
+    over the whole run 72.5 % +- 2.2; measured here 11.0 % +- 1.0 and 76.0 % +- 1.4. Asserts within
+    rounds [7, 14] % and the whole-run shuffle >= 70 %."""
+    import random
+
+    from evolvekit import status
+
+    rng = random.Random(20261115)
+    trials, within, whole = 1000, 0, 0
+    rounds = [g for g in range(10) for _ in range(8)]
+    for _ in range(trials):
+        xs, ys, x = [], [], 0.5
+        for g in range(10):
+            x = min(1.0, max(0.0, x + rng.gauss(0.0, 0.08)))
+            for _ in range(8):
+                xs.append(min(1.0, max(0.0, x + rng.gauss(0.0, 0.05))))
+                ys.append(0.3 * g + rng.gauss(0.0, 1.0))
+        within += status._permutation_p(xs, ys, rounds=rounds) < 0.1
+        whole += status._permutation_p(xs, ys) < 0.1
+    a, b = within / trials, whole / trials
+    print(f"P(p < 0.1), drifting null: within rounds {a:.2%} +- {math.sqrt(a * (1 - a) / trials):.2%}; "
+          f"whole run {b:.2%} +- {math.sqrt(b * (1 - b) / trials):.2%}")
+    assert 0.07 <= a <= 0.14
+    assert b >= 0.70
+
+
+@pytest.mark.slow
+def test_the_permutation_p_on_300_rows_and_8_settings_takes_under_a_second():
+    """Review focus 5: a long run's status page stays quick -- precomputed ranks, one dot product per
+    shuffle, the shuffles drawn once per run's rounds."""
+    import random
+    import time
+
+    from evolvekit import status
+
+    rng = random.Random(7)
+    rounds = [g for g in range(30) for _ in range(10)]
+    ys = [rng.gauss(0.0, 1.0) for _ in rounds]
+    settings = [[rng.random() for _ in rounds] for _ in range(7)] + [[rng.choice("abc") for _ in rounds]]
+    status._shuffles.cache_clear()
+    started = time.perf_counter()
+    ps = [status._permutation_p(xs, ys, None if i < 7 else status._correlation_ratio, rounds=rounds)
+          for i, xs in enumerate(settings)]
+    took = time.perf_counter() - started
+    print(f"8 settings x 300 rows: {took:.3f} s")
+    assert all(p is not None for p in ps)
+    assert took < 1.0
+
+
 def test_a_problem_without_declared_parameters_says_so(tmp_path):
     run = RunDir(tmp_path)
     run.started(10)

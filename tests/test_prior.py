@@ -102,7 +102,8 @@ def test_warm_start_values_inside_the_study_range(tmp_path):
     assert config["problem"]["parameters"]["neighbours"]["default"] == 16, "the start wins over the file"
 
 
-IMPORTANCE = {"accept_worse": (0.7, 20), "init": (0.6, 20), "neighbours": (0.5, 20), "restart_after": (0.1, 20)}
+IMPORTANCE = {"accept_worse": (0.7, 20, 0.01), "init": (0.6, 20, 0.02), "neighbours": (0.5, 20, 0.03),
+              "restart_after": (0.1, 20, 0.5)}
 
 
 def test_warm_reranks_recommended_after_three(tmp_path, capsys, monkeypatch):

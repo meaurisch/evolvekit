@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import math
+import random
 import shutil
 from pathlib import Path
+from statistics import fmean
 
 import pytest
 import yaml
@@ -12,6 +16,8 @@ from test_app_results import finished_run
 
 from evolvekit.app.store import Home
 from evolvekit.harness import memory
+from evolvekit.harness.manifest import load_harness
+from evolvekit.harness.study import load_study
 
 STARTS = {"neighbours": 8, "restart_after": 2000, "accept_worse": 0.0, "init": "random"}
 
@@ -29,7 +35,9 @@ def finished(home, docs, name, *, decision, best=None, importance=None, finished
     (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     items = [{"name": n, "default": start.get(n), "best": best.get(n),
               "importance": {"value": importance[n][0] if n in importance else None,
-                             "n": importance[n][1] if n in importance else 0}}
+                             "n": importance[n][1] if n in importance else 0,
+                             # (value, n, p); a pair is a status item from before A4.3, without `p`
+                             **({"p": importance[n][2]} if len(importance.get(n, ())) > 2 else {})}}
              for n in [*importance, *[b for b in best if b not in importance]]]
     docs[run_dir] = {"parameters": {"available": True, "items": items}}
     return root
@@ -40,15 +48,99 @@ def again(root, **kw):
     finished_run(root / "runs" / "r1", started="2026-10-01T00:00:00+00:00", **kw)
 
 
-def test_learned_counts_and_importance_mean(tmp_path):
+def test_importance_pools_only_studies_whose_correlation_beat_chance(tmp_path):
+    """Decision 2 (A4.3, S9): a setting's strength is shown when its studies' permutation p's,
+    combined by Fisher's rule, are under 0.1; it is then the mean |rho| over every study with at
+    least five fully evaluated combinations, not only over those that beat chance on their own."""
     home, docs = Home(tmp_path / "my home"), {}
-    finished(home, docs, "One", decision="keep", importance={"neighbours": (0.6, 20)}, finished_at="2026-10-01")
-    finished(home, docs, "Two", decision="keep", importance={"neighbours": (0.2, 20)}, finished_at="2026-10-08")
-    finished(home, docs, "Three", decision="keep", importance={"neighbours": (0.9, 3)}, finished_at="2026-10-15")
+    finished(home, docs, "One", decision="keep", importance={"neighbours": (0.6, 20, 0.01), "init": (0.3, 20, 0.5)},
+             finished_at="2026-10-01")
+    finished(home, docs, "Two", decision="keep", importance={"neighbours": (0.2, 20, 0.4), "init": (0.4, 20, 0.3)},
+             finished_at="2026-10-08")
+    finished(home, docs, "Three", decision="keep", importance={"neighbours": (0.9, 3, 0.001)}, finished_at="2026-10-15")
     got = memory.learned(home, "demo-tour", document_of=docs.get)
     n = got["settings"]["neighbours"]
     assert n["tuned_in"] == 3 and n["importance"] == pytest.approx(0.4) and n["importance_n"] == 2
+    assert n["importance_of"] == 2, "the study of three combinations is too small to count"
+    assert n["importance_p"] == pytest.approx(0.004 * (1 - math.log(0.004)))  # Fisher's rule, two studies
+    init = got["settings"]["init"]
+    assert init["importance"] is None and init["importance_n"] == 0 and init["importance_of"] == 2
+    assert init["importance_p"] >= memory.IMPORTANCE_P == 0.1
     assert [s["name"] for s in got["studies"]] == ["One", "Two", "Three"]
+
+
+def test_a_status_item_from_before_the_permutation_p_counts_as_not_shown(tmp_path):
+    """Legacy split: an item without `importance.p` joins Fisher's rule as p = 1 -- it is counted, and
+    it tells nothing from chance."""
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "One", decision="keep", importance={"neighbours": (0.6, 20)}, finished_at="2026-10-01")
+    n = memory.learned(home, "demo-tour", document_of=docs.get)["settings"]["neighbours"]
+    assert n["importance"] is None and n["importance_of"] == 1 and n["importance_p"] == pytest.approx(1.0)
+    assert memory._combined_p([0.01, None]) == pytest.approx(memory._combined_p([0.01, 1.0]))
+    assert memory._combined_p([]) is None
+
+
+def test_a_setting_no_study_could_tell_from_chance_is_not_reranked(tmp_path):
+    """Three studies, the template tunes `recommended`: restart_after went with the measure most
+    strongly (0.9) but never beat chance, so it keeps the harness's rank order behind the settings
+    with a strength."""
+    home, docs = Home(tmp_path / "my home"), {}
+    shown = {"accept_worse": (0.7, 20, 0.01), "init": (0.6, 20, 0.02), "neighbours": (0.5, 20, 0.03),
+             "restart_after": (0.9, 20, 0.6)}
+    finished(home, docs, "Spring", decision="use", best={"neighbours": 12}, importance=shown, finished_at="2026-10-01")
+    finished(home, docs, "Summer", decision="keep", importance=shown, finished_at="2026-10-08")
+    finished(home, docs, "Autumn", decision="keep", importance=shown, finished_at="2026-10-15")
+    facts = memory.learned(home, "demo-tour", document_of=docs.get)["settings"]
+    assert facts["restart_after"]["importance"] is None and facts["restart_after"]["importance_of"] == 3
+    slug = home.create_study("demo-tour", "tune", "Winter")
+    winter = home.study_root(slug)
+    warmed, _ = memory.warm_start(home, load_harness(winter / "harness"), load_study(winter), document_of=docs.get)
+    assert warmed.warm.ranked == ["accept_worse", "init", "neighbours", "restart_after"]
+
+
+@functools.cache
+def _null_studies(trials: int = 2000, studies: int = 3, rows: int = 8) -> tuple:
+    """`trials` sets of `studies` null studies of `rows` ranked rows (independent value and score),
+    each as (|rho|, p) through `status._permutation_p`; random.Random(20261114), the draws of the
+    builder check's `sim_perm.py pool` (rho = 0, three studies)."""
+    from evolvekit import stats, status
+
+    rng = random.Random(20261114)
+    out = []
+    for _ in range(trials):
+        one = []
+        for _ in range(studies):
+            xs = [rng.random() for _ in range(rows)]
+            ys = [rng.gauss(0.0, 1.0) for _ in range(rows)]
+            one.append((abs(stats.spearman(xs, ys)), status._permutation_p(xs, ys)))
+        out.append(tuple(one))
+    return tuple(out)
+
+
+def test_a_setting_that_does_nothing_is_shown_in_about_8_percent_after_three_studies():
+    """The product's rule (decision 2): three null studies of 8 rows each through status._permutation_p
+    and `memory._pooled` (Fisher's combined p < 0.1); 2000 seeded trials. Measured 8.50 % +- 0.62, the
+    builder check's figure to the trial; asserts [6.0, 11.0] %."""
+    trials = _null_studies()
+    shown = sum(memory._pooled([(r, 20, p) for r, p in one])["importance"] is not None for one in trials)
+    rate = shown / len(trials)
+    print(f"null setting shown after three studies (Fisher): {rate:.2%} +- {math.sqrt(rate * (1 - rate) / len(trials)):.2%}")
+    assert 0.06 <= rate <= 0.11
+
+
+def test_under_the_designs_rule_a_setting_that_does_nothing_would_be_shown_in_about_26_percent_after_three_studies():
+    """The design's rule, kept as a measured comparison (decision 2 departs from it): pool |rho| over
+    the studies whose own p < 0.1. Same 2000 seeded trials as the Fisher test. Measured
+    25.65 % +- 0.98 (the builder check's figure), the pooled |rho| when shown 0.75 (a real rho = 0.5
+    setting's is 0.77); asserts [23, 30] %."""
+    trials = _null_studies()
+    pooled = [[r for r, p in one if p < memory.IMPORTANCE_P] for one in trials]
+    shown = [fmean(rs) for rs in pooled if rs]
+    rate = len(shown) / len(trials)
+    print(f"null setting shown after three studies (design's rule): {rate:.2%} +- "
+          f"{math.sqrt(rate * (1 - rate) / len(trials)):.2%}; pooled |rho| when shown {fmean(shown):.2f}")
+    assert 0.23 <= rate <= 0.30
+    assert fmean(shown) > 0.6, "what it would rank: noise as strong as a real effect"
 
 
 def test_winners_only_from_use_studies(tmp_path):
@@ -224,7 +316,7 @@ def test_a_study_whose_search_did_not_run_is_listed_and_adds_up_nothing(tmp_path
     """Persona p5 fix round 1, I2: a run that stopped before its first round "found" the starting point; it
     stays in the studies with its line, and is no study that tuned, ranked or leaned anywhere."""
     home, docs = Home(tmp_path / "my home"), {}
-    finished(home, docs, "One", decision="keep", best={"neighbours": 4}, importance={"neighbours": (0.6, 20)},
+    finished(home, docs, "One", decision="keep", best={"neighbours": 4}, importance={"neighbours": (0.6, 20, 0.01)},
              finished_at="2026-10-01")
     root = finished(home, docs, "Idle", decision="keep", best={"neighbours": 8}, importance={"neighbours": (0.1, 20)},
                     finished_at="2026-10-08")
