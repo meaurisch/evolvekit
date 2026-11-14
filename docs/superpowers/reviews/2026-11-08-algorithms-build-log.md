@@ -360,3 +360,19 @@ benchmark's solvers have no `{seed}`, so it cannot see A2.1–A2.4 (σ̂ = 0 the
 - The parameter grid does not yet hold configurations apart in the search (typed parents come from
   the flat top-4); drawing them from grid cells needs its own benchmark.
 - On resume the stop policy and the archive replay with today's noise (documented).
+- A run dying while it breeds, before `pending.json` exists, skips the hypercube rows that round took.
+
+### Whole-branch review and gate
+
+- A whole-branch review (read-only, across the seams between tasks) found one Important — two
+  `promote.adapt` stages shared one `work/screening.json` and overwrote each other on resume — and
+  nine Minor (resume windows for the noise, screening and hypercube files; the replayed epsilon;
+  λ recomputed on every row in the views; `promote.adapt` in places it cannot act now an error; the
+  `init` template writes `epsilon: null`; dead code). Fixed in 1141625.
+- The first gate (493b019) failed two slow tests the task implementers had not run: a fake
+  `evaluate_generation` without A2.3b's `stage_scores`, and a run count that did not include the
+  seed's repeatability runs (by design; the concurrency check now covers them too). Fixed in 1141625.
+- Gate: `python tasks.py check` on 1141625, nothing else running, the PyVRP harness tests pointed at
+  the main checkout's `.venv-pyvrp`: **3243 passed, 1 failed, 5 skipped** in 36:35. The one failure is
+  the worktree's path (step 0).
+- The benchmark re-run on 1141625 gives the "after" table above to the digit.
