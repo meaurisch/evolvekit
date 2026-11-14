@@ -892,11 +892,17 @@ def _searched(job: Job, summary: Any, generations: int) -> dict[str, Any]:
     """`job.json`'s `search` once the driver has returned: how it stopped, and,
     when the round hook ended it because it settled (`summary.converged`),
     what the hook wrote of that (`CONVERGED_KEYS`) -- kept, not overwritten,
-    and `converged: true` even when the hook's write failed; a search that did
-    not settle this session keeps none of them."""
+    and `converged: true` even when the hook's write failed. A resumed session
+    that ran no round (the settled search had no round left) keeps what the
+    session before it wrote: the search it continues is the one that settled.
+    A search that ran rounds this session and did not settle keeps none of them."""
     earlier = job.state.get("search") or {}
-    kept = ({**{k: earlier[k] for k in CONVERGED_KEYS if k in earlier}, "converged": True}
-            if getattr(summary, "converged", False) else {})
+    if getattr(summary, "converged", False):
+        kept = {**{k: earlier[k] for k in CONVERGED_KEYS if k in earlier}, "converged": True}
+    elif not getattr(summary, "generations", 0) and earlier.get("converged") is True:
+        kept = {k: earlier[k] for k in CONVERGED_KEYS if k in earlier}
+    else:
+        kept = {}
     return {"stop_reason": summary.stop_reason, "generations": generations,
             "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted, **kept}
 

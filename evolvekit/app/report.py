@@ -219,6 +219,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         # Fewer rounds ran than the plan said: the sentence says how many of how many, and why.
         ran.append(verdict["how_it_ran"].rstrip("."))
         rounds = tried = None
+    if (verdict.get("converged") or {}).get("line"):
+        ran.append(str(verdict["converged"]["line"]).rstrip("."))  # a settled search: where the time it saved went
     if candidates:
         # No search, so nothing was learned from: the branches are the candidates, and the more there are, the
         # likelier one looks ahead by chance.

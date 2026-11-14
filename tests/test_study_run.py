@@ -677,6 +677,59 @@ def test_the_saved_time_is_not_spent_when_the_first_read_answered_or_no_run_coul
     assert overspent["final"]["saved"]["s"] == 0, "never below none"
 
 
+def test_a_resumed_settled_search_with_no_round_left_keeps_what_it_said_and_its_saved_time(tmp_path, monkeypatch):
+    """M3: the session that settled wrote `search.converged` and died in its final check; the
+    resumed session's search has no round left (the driver runs none, so the hook says
+    nothing). The run keeps `converged` and its check still records `final.saved`."""
+    from evolvekit.harness import execute
+
+    folder = _study(tmp_path)
+    study = load_study(folder)
+    study.test = ["cases/region-60.json", "cases/town-40.json", "cases/county-50.json"]
+    study.training = ["cases/north-south-30.json"]
+    save_study(study, folder)
+    run_dir = folder / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "evolvekit.yaml").write_text("{}\n", encoding="utf-8")
+    (run_dir / "runs.jsonl").write_text(json.dumps({"id": "g003-c0001", "generation": 3}) + "\n", encoding="utf-8")
+    _flat_events(run_dir / "events.jsonl", 3)
+    plan = {**_plan_with().to_json(), "search_s": 1800.0}
+    settled = {"stop_reason": "converged: no round gained beyond the noise for 3 rounds", "generations": 3,
+               "best_id": None, "aborted": False, "converged": True, "flat_rounds": 3, "window": 3, "used_s": 600.0}
+    (run_dir / "job.json").write_text(json.dumps({"phase": "check", "run_id": "r1", "study": "s", "plan": plan,
+                                                  "started_at": "2026-11-14T10:00:00+00:00", "search": settled}),
+                                      encoding="utf-8")
+    monkeypatch.setattr(execute, "load_config", lambda path: None)
+
+    class NoRoundLeft:
+        def __init__(self, config, *, run_dir, on_round=None, **kwargs):
+            pass
+
+        def run(self):
+            return SimpleNamespace(stop_reason="generations exhausted", generations=0, best=None, aborted=False,
+                                   converged=False)
+
+    monkeypatch.setattr("evolvekit.search.driver.Driver", NoRoundLeft)
+    calls: list[int] = []
+    monkeypatch.setattr(execute, "_extend_check",
+                        lambda *a, **kw: _extend_check(*a, **kw, confirm=_confirm_recording(calls, 3)))
+    monkeypatch.setattr(execute, "rank", lambda rows, n: [{"operator": "param_tpe"}])
+    monkeypatch.setattr(execute, "read_rows", lambda run_dir: [])
+    monkeypatch.setattr(execute, "_write_exports", lambda *args: None)
+    job = resume_study(folder, "r1", log=lambda _m: None)
+    assert job["phase"] == "done" and calls == [3]
+    assert {k: job["search"][k] for k in ("converged", "flat_rounds", "window", "used_s")} == {
+        "converged": True, "flat_rounds": 3, "window": 3, "used_s": 600.0}
+    assert job["final"]["saved"] == {"s": 1200, "spent": False, "why": "answered"}
+    # A resumed session that ran rounds and did not settle keeps none of it.
+    from evolvekit.harness.execute import Job as RunJob, _searched
+
+    fresh = RunJob(tmp_path, run_id="r", study="s", plan={})
+    fresh.update(search=settled)
+    ran = SimpleNamespace(stop_reason="time limit reached", generations=2, best=None, aborted=False, converged=False)
+    assert "converged" not in _searched(fresh, ran, 5)
+
+
 def _settled_null_rate(setting: str, studies: int) -> tuple[float, float, int]:
     """The share of `studies` seeded null studies (`random.Random(20261114)`) that the real
     `execute._extend_check` answers "use": 4 held-back cases x 3 runs, each case's true log

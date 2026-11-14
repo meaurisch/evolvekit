@@ -797,6 +797,8 @@
         ${spent ? html`<div class="fact"><span class="type-label">AI spend</span><span id="details-spent">${spent.line}</span></div>` : ""}</div>`);
       // How much of the plan ran, when less did: the verdict document's own sentence.
       if (r.how_it_ran) parts.push(html`<p class="type-small">${r.how_it_ran}</p>`);
+      // A search that settled: where the time it saved went, in the verdict's own words.
+      if (r.saved_line) parts.push(html`<p class="type-small">${r.saved_line}</p>`);
       if (r.final && r.final.next) parts.push(html`<p class="type-small ink-2">${r.final.next}</p>`);
       if (r.final && r.final.read_twice) parts.push(html`<p class="type-small ink-2">${r.final.read_twice}</p>`);
       if (r.final && r.final.recheck) parts.push(html`<div class="actions">${EK.button(r.final.recheck.label, { kind: r.final.recheck.over ? "quiet" : "secondary", act: "recheck" })}</div><p class="type-small ink-2">${r.final.recheck.why}</p>`);

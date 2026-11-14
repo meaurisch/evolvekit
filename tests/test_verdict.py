@@ -503,6 +503,56 @@ def test_a_search_that_did_not_settle_has_no_converged_key(tmp_path):
         "settled, but the final check said nothing of the time (stopped, or skipped)"
 
 
+def _settled_run(tmp_path: Path, saved: dict) -> tuple[Path, str]:
+    root, run = _short_run(tmp_path, ai=False, stop="converged: no round gained beyond the noise for 3 rounds",
+                           generations=5)
+    job_path = root / "runs" / run / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["search"].update(converged=True, flat_rounds=3, window=3, used_s=600.0)
+    job["final"]["saved"] = saved
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    return root, run
+
+
+def test_where_the_saved_time_went_is_said_wherever_the_verdict_is_read(tmp_path, capsys):
+    """Right after `how_it_ran`: the page's results (and its HTML report), the report's How it ran,
+    and `study verdict`."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import _say_verdict
+
+    root, run = _settled_run(tmp_path, {"s": 1200, "spent": False, "why": "cases"})
+    v = build_verdict(root, run)
+    line = v["converged"]["line"]
+    assert line.startswith("The time the search saved (about 20 min) was not spent")
+    page = jobs.results(root, run, document_of)
+    assert page["saved_line"] == line
+    html = jobs.report_html(page)
+    assert html.index(v["how_it_ran"].split(":")[0]) < html.index("The time the search saved")
+    how = render_report(v).split("## How it ran", 1)[1]
+    assert how.index(v["how_it_ran"].rstrip(".")) < how.index(line.rstrip("."))
+    capsys.readouterr()
+    _say_verdict(v)
+    out = capsys.readouterr().out.splitlines()
+    assert out[out.index(v["how_it_ran"]) + 1] == line
+
+
+def test_nothing_saved_is_nothing_to_say(tmp_path, capsys):
+    """M2: with 0 s saved the line is empty: never "about 0 min", never time that went to the check."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import _say_verdict
+
+    for why in ("extended", "cases", "answered", "at_cap"):
+        root, run = _settled_run(tmp_path / why, {"s": 0, "spent": why == "extended", "why": why})
+        v = build_verdict(root, run)
+        assert v["converged"]["saved_s"] == 0 and v["converged"]["line"] == "", why
+        page = jobs.results(root, run, document_of)
+        assert "saved_line" not in page
+        assert "The time the search saved" not in render_report(v) + jobs.report_html(page)
+        capsys.readouterr()
+        _say_verdict(v)
+        assert "The time the search saved" not in capsys.readouterr().out
+
+
 def _two_held_back(tmp_path: Path, changes: tuple[float, ...] = (3.1, 8.2), ci: tuple[float, float] = (-26.7, 37.9),
                    decision: str = "keep", direction: str | None = None) -> tuple[Path, str]:
     """Persona p4's Monday answer: a keep on held-back cases that each came out better, with a range

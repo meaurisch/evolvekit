@@ -842,7 +842,8 @@ def converged_of(job: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | 
     them (`final.saved`), and the sentence that says where that time went
     (`SAVED_LINES`). "Settled" is a fact about the search, never about the
     result. While the final check has said nothing of the time (it was
-    stopped, or skipped) `saved_s` is None and the line empty."""
+    stopped, or skipped) `saved_s` is None and the line empty; with nothing
+    saved (`saved_s` 0) the line is empty too."""
     from evolvekit.harness.plan import _minutes
 
     search = job.get("search") or {}
@@ -850,7 +851,8 @@ def converged_of(job: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | 
         return None
     saved = (job.get("final") or {}).get("saved") or {}
     seconds = saved.get("s") if isinstance(saved.get("s"), (int, float)) else None
-    line = SAVED_LINES.get(saved.get("why"), "") if seconds is not None else ""
+    # Nothing saved is nothing to say: never "about 0 min", never time that "went to the final check".
+    line = SAVED_LINES.get(saved.get("why"), "") if seconds is not None and seconds > 0 else ""
     return {"rounds": search.get("generations"), "planned": plan.get("rounds"), "saved_s": seconds,
             "spent": saved.get("spent") is True, "line": line.replace("{m}", _minutes(float(seconds or 0)))}
 

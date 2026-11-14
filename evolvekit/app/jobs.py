@@ -1634,6 +1634,8 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
     for key in ("how_it_ran", "time_note", "planned", "spent", "why_keep"):  # how much of the plan ran, what the AI spent, why keep
         if verdict.get(key):
             data[key] = verdict[key]
+    if (verdict.get("converged") or {}).get("line"):
+        data["saved_line"] = verdict["converged"]["line"]  # a settled search: where the time it saved went
     if "candidates" in verdict:  # a bake-off: every branch with its own decision and line
         data["candidates"], data["bakeoff"] = verdict["candidates"], job.get("bakeoff")
     data["summary_text"] = _summary_text(data)
@@ -1789,6 +1791,8 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
                       and context["tried"] >= 1 else str(context["tried"])))
     if data.get("time_note") and not data.get("how_it_ran"):
         facts.append(("How it ran", str(data["time_note"])))  # a time below the harness's own (persona p5, K2)
+    if data.get("saved_line"):
+        facts.append(("Time saved", str(data["saved_line"])))  # a settled search: where the time it saved went
     if context.get("took"):
         facts.append(("It took", context["took"]))
     if context.get("started_at"):

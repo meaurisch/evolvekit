@@ -373,6 +373,8 @@ def test_a_code_study_speaks_of_code_not_settings():
     assert 'what: "settings"' not in COMPARE_PAGE and "s.what" in COMPARE_PAGE, "two runs compared: each in its own words"
     details = _page_function(STUDY_PAGE, "details")
     assert "r.how_it_ran" in details, "how much of the plan ran, where the page says how the run went"
+    assert "r.saved_line" in details and details.index("r.how_it_ran") < details.index("r.saved_line"), \
+        "a settled search: where its saved time went, right after how it ran"
     assert "Math.max(0, c.tried - 1)" in details and "plus " in details, "the starting point is no combination tried"
     assert 'whatOf() === "code" ? "today’s code"' in details and "today’s settings" in details
 
