@@ -137,9 +137,14 @@ class Candidate:
     """Cosine similarity to `near_twin_id`, by whichever method
     `search.novelty.near.method` names."""
     behaviour_twin_id: str | None = None
-    """The earlier candidate whose behaviour this one reproduced exactly."""
+    """The earlier candidate whose behaviour this one reproduced: exactly, or
+    within the run's noise on a noisy stage (`evaluate/signature.py`)."""
     behaviour_signatures: dict[str, str] = field(default_factory=dict)
     """One fingerprint per command stage reached, keyed by stage id."""
+    behaviour_values: dict[str, dict] = field(default_factory=dict)
+    """Per command stage reached, the numbers the noise twin rule compared and
+    the stage score (`{"kpis", "vectors", "score"}`): what a resumed run
+    compares later children with. Empty on a row written before it."""
     params: dict[str, Any] | None = None
     """The configuration this candidate resolved to, as data, when the problem
     declares `problem.parameters`. Validated by the static stage; what the
@@ -155,6 +160,14 @@ class Candidate:
     """`"holdout below the seed's <value>"` when the candidate finished the
     final stage but its private score is below the seed's
     (`evaluate.holdout_veto`): it does not compete. `None` otherwise."""
+    holdout_margin: float | None = None
+    """The noise margin the veto judged its hold-out with (`0.0`: the literal
+    rule). `None` on a row that did not finish with a hold-out score, and on
+    a row written before the margin existed, which is judged literally."""
+    replicates: int = 0
+    """How many runs its final-stage score is the mean of: the final stage's
+    `seeds` when recorded. 0 is unknown (a row written before it), read as the
+    final stage's `seeds`; the archive's elite rule reads it as equal to any."""
     competes: bool = True
     """False when the candidate did not finish the final stage -- a failed
     evaluation, a proxy-only candidate, a final stage skipped by the daily cap,

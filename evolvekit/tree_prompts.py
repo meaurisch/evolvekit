@@ -27,12 +27,13 @@ from evolvekit.evaluate.types import EvalResult
 from evolvekit.prompts import (
     _DIFF_FORMAT,
     _REWRITE_FORMAT,
-    FAILURE_LIMIT,
     FEEDBACK_LIMIT,
     FEEDBACK_LINES,
     OPERATOR_INSTRUCTIONS,
     Inspiration,
+    LedgerEntry,
     _feedback_section,
+    _ledger_section,
     _scratchpad_section,
     _score_breakdown,
     problem_sections,
@@ -258,6 +259,7 @@ def tree_messages(
     block: tuple[str, str] | None = None,
     refusals: Sequence[Refusal] = (),
     prefix: str = "",
+    ledger: Sequence[LedgerEntry] = (),
 ) -> list[dict[str, str]]:
     """The system message (the protocol, then the problem's sections: identical
     for every call of a run) and the bounded user message. `prefix` (`Repo.prefix`)
@@ -278,9 +280,6 @@ def tree_messages(
     instruction = OPERATOR_INSTRUCTIONS.get(operator, OPERATOR_INSTRUCTIONS["diff"])
     if extra_instruction:
         instruction = f"{instruction}\n\n{extra_instruction.strip()}"
-    failure = (result.last_failure if result is not None else parent.last_failure) or ""
-    failure_section = (f"\n## Last failure artefact (truncated)\n{_fence(failure[-FAILURE_LIMIT:])}\n"
-                       if failure.strip() else "")
     context = ""
     current = result.score if result is not None else parent.score
     if best_score is not None and current is not None:
@@ -290,7 +289,7 @@ def tree_messages(
         f"{shown}\n"
         f"## How it scored\n{_score_breakdown(result, parent)}\n"
         f"{_feedback_section(result, parent)}{context}{_refusal_section(refusals)}"
-        f"{_inspiration_section(inspirations, prefix)}{_scratchpad_section(scratchpad)}{failure_section}\n"
+        f"{_inspiration_section(inspirations, prefix)}{_scratchpad_section(scratchpad)}{_ledger_section(ledger)}\n"
         f"## Your task\n{instruction}\n\n{fmt}"
     )
     return [{"role": "system", "content": for_model(system)}, {"role": "user", "content": for_model(user)}]

@@ -45,12 +45,21 @@ from typing import Any, Callable, Mapping, Sequence
 
 from evolvekit.economics import DEFAULT_WINDOW, series
 from evolvekit.evaluate.levels import K as LEVEL_STEPS
+from evolvekit.evaluate.noise import NOISE_FILE, Noise
 from evolvekit.events import TERMINAL_EVENTS, _jsonable, read_events, read_heartbeat
-from evolvekit.leaderboard import competes, fitness_of, rank, replay_veto
+from evolvekit.leaderboard import (
+    competes,
+    fitness_of,
+    rank,
+    read_reevaluations,
+    read_rows,
+    run_holdout_penalty,
+    view_rows,
+)
 from evolvekit.ledger import read_jsonl
 from evolvekit.lock import lock_owner_alive, pid_alive
 from evolvekit.search.params import current_values, declared_ranges
-from evolvekit.stats import log_gain, paired_summary, pct_from_log, per_instance_means
+from evolvekit.stats import log_gain, paired_summary, pct_from_log, per_instance_means, ranks, spearman
 
 __all__ = ["SCHEMA", "build_status", "candidate_detail", "candidate_details", "render_text"]
 
@@ -98,12 +107,18 @@ def build_status(
         }
         return document
 
-    # The hold-out veto as a resumed run applies it: no view names a candidate
-    # the search keeps out.
-    rows = replay_veto(list(read_jsonl(directory / "runs.jsonl")))
+    # Pooled with the best's re-evaluations, and the hold-out veto as a resumed
+    # run applies it: no view names a candidate the search keeps out. The
+    # rounds read the rows as written, with each re-evaluation from its round on.
+    raw = list(read_jsonl(directory / "runs.jsonl"))
+    reevaluations = read_reevaluations(directory)
+    penalty = run_holdout_penalty(directory) if reevaluations else 0.0
+    rows = view_rows(raw, reevaluations, holdout_penalty=penalty)
     usage = list(read_jsonl(directory / "usage.jsonl"))
     events = read_events(directory)
-    run = _Run(directory, rows, usage, events, moment)
+    run = _Run(directory, rows, usage, events, moment,
+               written=view_rows(raw, []) if reevaluations else rows,
+               reevaluations=reevaluations, holdout_penalty=penalty)
 
     sections: tuple[tuple[str, Callable[[], Any]], ...] = (
         ("objective", run.objective),
@@ -178,30 +193,8 @@ def _spread(values: Sequence[float]) -> dict[str, Any]:
     return {"n": n, "mean": mean, "sd": sd, "sem": sd / math.sqrt(n)}
 
 
-def _ranks(values: Sequence[float]) -> list[float]:
-    order = sorted(range(len(values)), key=lambda i: values[i])
-    ranks = [0.0] * len(values)
-    i = 0
-    while i < len(order):
-        j = i
-        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
-            j += 1
-        shared = (i + j) / 2.0 + 1.0
-        for k in range(i, j + 1):
-            ranks[order[k]] = shared
-        i = j + 1
-    return ranks
-
-
-def _spearman(xs: Sequence[float], ys: Sequence[float]) -> float | None:
-    """Rank correlation. `None` when either side does not vary."""
-    if len(xs) < 3 or len(set(xs)) < 2 or len(set(ys)) < 2:
-        return None
-    rx, ry = _ranks(xs), _ranks(ys)
-    mx, my = fmean(rx), fmean(ry)
-    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
-    den = math.sqrt(sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry))
-    return num / den if den else None
+# The rank correlation lives in `stats`, which the screening controller reads too.
+_ranks, _spearman = ranks, spearman
 
 
 def _correlation_ratio(groups: Sequence[Any], ys: Sequence[float]) -> float | None:
@@ -352,9 +345,19 @@ class _Run:
         usage: list[dict[str, Any]],
         events: list[dict[str, Any]],
         now: datetime,
+        *,
+        written: list[dict[str, Any]] | None = None,
+        reevaluations: Sequence[Mapping[str, Any]] = (),
+        holdout_penalty: float = 0.0,
     ) -> None:
         self.directory = directory
         self.rows = rows
+        """Pooled with the best's re-evaluations (`leaderboard.view_rows`)."""
+        self.written = rows if written is None else written
+        """The rows as written (the veto replayed), which the rounds read."""
+        self.reevaluations = list(reevaluations)
+        self.holdout_penalty = holdout_penalty
+        self._as_of: dict[int, list[dict[str, Any]]] = {}
         self.usage = usage
         self.events = events
         self.now = now
@@ -854,14 +857,42 @@ class _Run:
             limits.append({"name": "budget.max_full_evals_per_day", "used": used, "cap": budget["max_full_evals_per_day"], "unit": "today"})
         stop = self.described.get("stop") or {}
         if _number(stop.get("patience")) is not None:
-            limits.append({"name": "stop.patience", "used": self._flat_generations(float(stop.get("epsilon") or 0.0)), "cap": stop["patience"], "unit": "flat generations"})
+            limits.append({"name": "stop.patience", "used": self._flat_generations(stop.get("epsilon")), "cap": stop["patience"], "unit": "flat generations"})
         return limits
 
-    def _flat_generations(self, epsilon: float) -> int:
+    def _flat_generations(self, configured: Any) -> int:
+        """The stop policy's own flat count, from the last `generation_finished`
+        event (`flat_generations`, with the epsilon it used as `stop_epsilon`).
+        A run whose events predate it: the series read with the configured
+        epsilon, or the automatic one's floor (1e-6) when it is automatic."""
+        last = next((e for e in reversed(self.events) if e.get("type") == "generation_finished"), None)
+        recorded = None if last is None else last.get("flat_generations")
+        if isinstance(recorded, int) and not isinstance(recorded, bool):
+            return recorded
+        epsilon = _number(configured)
+        if epsilon is None:
+            epsilon = 1e-6
         flat = 0
-        for point in series(self.rows, self.usage, window=DEFAULT_WINDOW, epsilon=epsilon):
+        for point in self._series(epsilon):
             flat = 0 if point.improved else flat + 1
         return flat
+
+    def _series(self, epsilon: float) -> list[Any]:
+        """The economics series the search's stop policy reads (`economics.series`):
+        the rows as written, each re-evaluation of the best from its round on."""
+        return series(self.written, self.usage, window=DEFAULT_WINDOW, epsilon=epsilon,
+                      reevaluations=self.reevaluations, holdout_penalty=self.holdout_penalty)
+
+    def _rows_as_of(self, generation: int) -> list[dict[str, Any]]:
+        """The rows as they stood at the end of round `generation`: pooled with
+        the re-evaluations made up to it (earlier rounds keep their values)."""
+        count = sum(1 for e in self.reevaluations if _round_of(e) <= generation)
+        if count == len(self.reevaluations):
+            return self.rows
+        if count not in self._as_of:
+            self._as_of[count] = view_rows(self.written, self.reevaluations[:count],
+                                           holdout_penalty=self.holdout_penalty)
+        return self._as_of[count]
 
     # -- progress ----------------------------------------------------------
 
@@ -1034,11 +1065,23 @@ class _Run:
         running: Mapping[str, Any] | None = None
         generations = sorted({int(r.get("generation", 0)) for r in self.rows if isinstance(r.get("generation"), int)})
         for generation in generations:
-            for row in self.rows:
-                if row.get("generation") != generation or not competes(row) or fitness_of(row) is None:
-                    continue
-                if running is None or fitness_of(row) > fitness_of(running):
-                    running = row
+            if self.reevaluations:
+                # As the search saw it at the end of the round: its best among
+                # the rows of this round or earlier, pooled as of then.
+                running = None
+                for row in self._rows_as_of(generation):
+                    if not isinstance(row.get("generation"), int) or row["generation"] > generation:
+                        continue
+                    if not competes(row) or fitness_of(row) is None:
+                        continue
+                    if running is None or fitness_of(row) > fitness_of(running):
+                        running = row
+            else:
+                for row in self.rows:
+                    if row.get("generation") != generation or not competes(row) or fitness_of(row) is None:
+                        continue
+                    if running is None or fitness_of(row) > fitness_of(running):
+                        running = row
             measured = self._measured(running)
             per_generation.append(
                 {
@@ -1079,7 +1122,24 @@ class _Run:
             "spread": self._spread_basis(),
             "screening": self._screening_agreement(),
             "levels": self._levels(),
+            "noise": self._noise(),
         }
+
+    def _noise(self) -> dict[str, Any]:
+        """The run's noise estimate at the final stage (`work/noise.json`,
+        `evaluate/noise.py`): per measure the one-side noise of one run the
+        search's comparisons read, the across-seed one, the relative one, and
+        where it came from. No file: `source: none`, nothing measured."""
+        final = self._final_stage
+        described = next(
+            (s for s in self.described.get("stages") or [] if isinstance(s, Mapping) and s.get("id") == final), {}
+        )
+        seeds = described.get("seeds")
+        runs = seeds if isinstance(seeds, int) and not isinstance(seeds, bool) and seeds >= 1 else 1
+        view = Noise.load(self.directory / "work" / NOISE_FILE).to_status(final) if final else {
+            "repeatable": None, "source": "none", "sd": {}, "sd_across": {}, "cv": {},
+        }
+        return {"stage": final, **view, "runs_per_candidate": runs}
 
     def _levels(self) -> dict[str, Any]:
         """`evaluate.score.levels`, level by level: the baseline against the
@@ -1367,6 +1427,7 @@ class _Run:
             "is_seed": bool(self.seed) and row.get("id") == self.seed.get("id"),
             "kpis": row.get("kpis") or {},
             "kpi_cv": row.get("kpi_cv") or {},
+            "replicates": int(row.get("replicates") or 0),
             "public_score": _number(row.get("public_score")),
             "private_score": _number(row.get("private_score")),
             "generalization_gap": _number(row.get("generalization_gap")),
@@ -1828,7 +1889,7 @@ def candidate_details(
     a time re-read `runs.jsonl` and the event log per candidate, which grew
     quadratically -- about 35 minutes for a run of 2,900 candidates."""
     directory = Path(run_dir)
-    rows = {str(r.get("id")): r for r in replay_veto(list(read_jsonl(directory / "runs.jsonl")))}
+    rows = {str(r.get("id")): r for r in read_rows(directory)}
     seed = next((r for r in reversed(list(rows.values())) if r.get("operator") == SEED_OPERATOR), None)
     events = read_events(directory)
     finished: dict[str, list[dict[str, Any]]] = {}
@@ -2052,3 +2113,10 @@ def render_text(document: Mapping[str, Any]) -> str:
     for error in document.get("errors") or []:
         lines.append(f"view error   : {error}")
     return "\n".join(lines)
+
+
+def _round_of(entry: Mapping[str, Any]) -> int:
+    try:
+        return int(entry.get("generation") or 0)
+    except (TypeError, ValueError):
+        return 0

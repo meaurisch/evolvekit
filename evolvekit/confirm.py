@@ -57,8 +57,7 @@ from evolvekit.evaluate.cache import EvalCache
 from evolvekit.evaluate.fanout import Job, run_instance_stage
 from evolvekit.evaluate.stages import Configuration, on_tree, restore_build, run_build_stage, run_static_stage
 from evolvekit.events import EventLog, Heartbeat
-from evolvekit.leaderboard import rank
-from evolvekit.ledger import read_jsonl
+from evolvekit.leaderboard import rank, read_reevaluations, read_rows
 from evolvekit.lock import run_lock
 from evolvekit.stats import _betainc, _t95, paired_summary, t_cdf, wilcoxon_signed_rank  # noqa: F401  (re-exported: importers below)
 from evolvekit.stats import holm, log_gain, margin_log, pct_from_log, posterior_mean_t
@@ -449,7 +448,7 @@ def _find(rows: list[dict[str, Any]], spec: str, option: str) -> dict[str, Any]:
     other_dir = Path(other)
     if not (other_dir / "runs.jsonl").is_file():
         raise ValueError(f"{option}: {other_dir} holds no run (there is no runs.jsonl in it)")
-    row = next((r for r in read_jsonl(other_dir / "runs.jsonl") if str(r.get("id")) == cid), None)
+    row = next((r for r in read_rows(other_dir, veto=False) if str(r.get("id")) == cid), None)
     if row is None:
         raise ValueError(f"{option}: {other_dir} holds no candidate {cid!r}")
     return {**row, "id": f"{cid}@{other_dir.resolve().name}", "_id": cid, "_run_dir": str(other_dir.resolve())}
@@ -485,6 +484,17 @@ def _disambiguate(rows: Sequence[dict[str, Any]]) -> None:
             depth[id(row)] += 1
     for row in others:
         row["id"] = name(row)
+
+
+def selected_seeds(run_dir: Path, stage: StageConfig) -> set[int]:
+    """The seeds the search selected on at `stage`: its own `0 .. seeds-1`,
+    and every seed the best was re-evaluated on (`reevaluations.jsonl`)."""
+    seeds = set(range(stage.seeds))
+    for entry in read_reevaluations(run_dir):
+        seed = entry.get("seed")
+        if isinstance(seed, int) and not isinstance(seed, bool) and entry.get("stage", stage.id) == stage.id:
+            seeds.add(seed)
+    return seeds
 
 
 def _select(rows: list[dict[str, Any]], wanted: str) -> list[dict[str, Any]]:
@@ -545,7 +555,9 @@ def confirm(
     `family`: the candidates are a choice among several (a bake-off), so each
     pays for it (`apply_holm`); `candidates="top:N"` with N > 1 always is."""
     run_dir = Path(run_dir)
-    rows = list(read_jsonl(run_dir / "runs.jsonl"))
+    # Pooled with the best's re-evaluations (the ranking `_select` reads); the
+    # veto is `rank`'s, as before.
+    rows = read_rows(run_dir, holdout_penalty=config.evaluate.holdout_penalty, veto=False)
     if against is not None:
         seed_row = _find(rows, against.strip(), "--against")
     else:
@@ -569,7 +581,7 @@ def confirm(
         )
     if "{seed}" not in stage.command:
         raise ConfigError(f"stage {stage.id!r}: the command has no {{seed}} placeholder, so every seed would be the same run")
-    searched = set(range(stage.seeds))
+    searched = selected_seeds(run_dir, stage)
     reused = sorted(searched & set(seeds))
     if reused and instances is None:
         log(f"warning: seed(s) {reused} are the ones the search selected on; a confirmation on them is not one")

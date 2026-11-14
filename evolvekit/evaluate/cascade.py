@@ -15,18 +15,36 @@ import json
 import math
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from statistics import fmean, quantiles
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from evolvekit.budget import BudgetGuard
 from evolvekit.candidate import SEED_OPERATOR, Candidate
-from evolvekit.config import Config, PromoteRule, StageConfig
+from evolvekit.config import DEFAULT_SIGNATURE_DIGITS, Config, PromoteRule, StageConfig
 from evolvekit.evaluate.cache import EvalCache
-from evolvekit.evaluate.fanout import Job, Race, per_instance_key, run_instance_stage
+from evolvekit.evaluate.fanout import Job, Race, per_instance_key, race_looks, run_instance_stage
 from evolvekit.evaluate.levels import Anchor, level_score, make_anchor
+from evolvekit.evaluate.noise import (
+    NOISE_FILE,
+    Noise,
+    about_pct,
+    check_seeds,
+    check_stage,
+    measurable,
+    record_check,
+    run_duration,
+)
 from evolvekit.evaluate.scoring import compute_score, ranking_score
-from evolvekit.evaluate.signature import BehaviourIndex, behaviour_signature
+from evolvekit.evaluate.signature import (
+    Behaviour,
+    BehaviourIndex,
+    behaviour_signature,
+    compared_numbers,
+    round_significant,
+    twin_margins,
+)
 from evolvekit.evaluate.stages import (
     FEEDBACK_LIMIT,
     STDERR_LIMIT,
@@ -40,6 +58,7 @@ from evolvekit.evaluate.stages import (
 from evolvekit.evaluate.types import EvalResult, StageOutcome
 from evolvekit.leaderboard import veto_reason
 from evolvekit.ledger import _atomic_write
+from evolvekit.stats import t_scale
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only for a tree problem
     from evolvekit.tree import Repo, Tree
@@ -54,18 +73,21 @@ __all__ = [
 ]
 
 
-def holdout_veto(config: Config, private_score: float | None, seed_private: float | None) -> str | None:
+def holdout_veto(
+    config: Config, private_score: float | None, seed_private: float | None, margin: float = 0.0
+) -> str | None:
     """Why a candidate's hold-out keeps it from competing, or `None`.
 
     With `evaluate.holdout_veto` on, a candidate whose private score is below
-    the seed's private score does not compete. The rule is the literal
-    comparison, with no allowance for noise. Without a seed hold-out to
-    compare with (the seed's own hold-out run failed, or there is none),
-    nobody is vetoed."""
+    the seed's private score by more than `margin` does not compete:
+    `private < seed_private - margin`. The margin is the hold-out's noise
+    (`Cascade.holdout_margin`); at 0 -- no noise estimate -- the rule is the
+    literal comparison. Without a seed hold-out to compare with (the seed's
+    own hold-out run failed, or there is none), nobody is vetoed."""
     if not config.evaluate.holdout_veto or private_score is None or seed_private is None:
         return None
-    if private_score < seed_private:
-        return veto_reason(seed_private)
+    if private_score < seed_private - margin:
+        return veto_reason(seed_private, margin)
     return None
 
 
@@ -78,6 +100,7 @@ def finished_final_stage(
     private_score: float | None,
     gated: str | None = None,
     seed_private: float | None = None,
+    holdout_margin: float = 0.0,
 ) -> bool:
     """Whether a candidate's score may be compared with anybody else's.
 
@@ -98,7 +121,8 @@ def finished_final_stage(
       score with no discount -- the one thing the hold-out is there to prevent.
 
     And one case that finished: a hold-out **below the seed's**
-    (`seed_private`), when `evaluate.holdout_veto` is on; see `holdout_veto`.
+    (`seed_private`) by more than `holdout_margin`, when `evaluate.holdout_veto`
+    is on; see `holdout_veto`.
 
     Takes plain values rather than an `EvalResult` so that a `runs.jsonl` row
     written before the `competes` field existed can be judged by the same rule.
@@ -111,7 +135,7 @@ def finished_final_stage(
     held_out = final.private_inputs or final.private_instances
     if final.kind == "command" and held_out and private_score is None:
         return False
-    return holdout_veto(config, private_score, seed_private) is None
+    return holdout_veto(config, private_score, seed_private, holdout_margin) is None
 
 
 def race_warnings(config: Config) -> list[str]:
@@ -133,6 +157,18 @@ def race_warnings(config: Config) -> list[str]:
     return warnings
 
 
+def _incumbent_by_seed(held: Mapping[str, Any]) -> dict[int, dict[str, float]]:
+    """`incumbent.json`'s per-seed values of one stage, `{seed: {instance:
+    value}}`; empty for a file from before they were kept, or a broken entry."""
+    raw = held.get("by_seed")
+    if not isinstance(raw, dict):
+        return {}
+    try:
+        return {int(seed): {str(k): float(v) for k, v in row.items()} for seed, row in raw.items()}
+    except (TypeError, ValueError, AttributeError):
+        return {}
+
+
 def archive_threshold(scores: Sequence[float], percentile: float) -> float | None:
     """The `percentile`-th percentile of prior archive scores, or None if empty."""
     finite = [float(s) for s in scores]
@@ -150,20 +186,32 @@ def select_promoted(
     scored: Sequence[tuple[str, float]],
     rule: PromoteRule,
     archive_scores: Sequence[float] = (),
+    *,
+    band: float = 0.0,
 ) -> list[str]:
     """Apply one promote rule to `(candidate_id, score)` pairs.
 
     An empty rule promotes everything. When both sub-rules are set a candidate
     only needs to satisfy one, matching the proposal's `top_k … or score >= p`.
+
+    `band` is the stage's noise (twice one candidate's score sd): with
+    `top_k_per_generation = k`, every candidate within `band` of the k-th
+    score is promoted beside the top k, the two together capped at `2k` by
+    score (ties by id). The `archive_percentile` union is outside the cap.
+    A band of 0 -- no noise estimate -- is the top k exactly.
     """
     ids = [cid for cid, _ in scored]
     if rule.top_k_per_generation is None and rule.archive_percentile is None:
         return ids
 
     chosen: set[str] = set()
-    if rule.top_k_per_generation is not None:
+    k = rule.top_k_per_generation
+    if k is not None:
         ranked = sorted(scored, key=lambda item: (-item[1], item[0]))
-        chosen.update(cid for cid, _ in ranked[: rule.top_k_per_generation])
+        chosen.update(cid for cid, _ in ranked[:k])
+        if k > 0 and len(ranked) > k and math.isfinite(band) and band > 0:
+            floor = ranked[k - 1][1] - band
+            chosen.update(cid for cid, score in ranked[: 2 * k] if score >= floor)
     if rule.archive_percentile is not None:
         threshold = archive_threshold(archive_scores, rule.archive_percentile)
         if threshold is None:
@@ -186,8 +234,11 @@ class Cascade:
         on_event: Callable[..., Any] | None = None,
         stop: threading.Event | None = None,
         time_left: Callable[[], float | None] | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
+        self.log = log
+        """A console line for the run (the driver's `log`); `None` says nothing."""
         self.stop = stop
         """The run's own stop (`evolvekit/stopping.py`): once set, evaluations
         in flight are stopped, none is started, and what did not finish is
@@ -226,12 +277,26 @@ class Cascade:
         }
         """Per stage, what `evaluate.score.levels` are measured from: the
         seed's values (`evaluate/levels.py`). On disk for the same reason."""
+        self.noise: Noise = Noise.load(self.work_dir / NOISE_FILE)
+        """The run's noise estimate (`evaluate/noise.py`): every command-stage
+        outcome adds to it, and it is saved after every generation. A run from
+        before the file starts with none."""
         self.seed_private: float | None = None
         """The seed's private score: what `evaluate.holdout_veto` compares every
         hold-out with. Set whenever a seed is evaluated (the last one wins: an
         aborted seed is evaluated again), `None` when its hold-out did not
         score; a resumed run rebuilds it from `runs.jsonl`
         (`leaderboard.seed_private`)."""
+        self.seed_public: float | None = None
+        """The same seed's public score, set and rebuilt with `seed_private`:
+        what `holdout_margin` rescales the public run's noise by."""
+        self.promote_k: dict[str, int] = {}
+        """Per stage, the `top_k_per_generation` the run has moved it to
+        (`search/screening.py`, a stage with `promote.adapt`); a stage not
+        here promotes its configured k."""
+        self.skipped: set[str] = set()
+        """Stages passed over (a screen switched off): their candidates go
+        straight to the next stage, with no score of their own there."""
         self._trees: dict[str, Tree] = {}
         """Per candidate, its worktree (`problem.tree`): made by `_materialise`."""
         self._tree_errors: dict[str, str] = {}
@@ -249,9 +314,18 @@ class Cascade:
         self,
         candidates: Sequence[Candidate],
         archive_scores: Iterable[float] = (),
+        *,
+        stage_scores: Mapping[str, Sequence[float]] | None = None,
     ) -> dict[str, EvalResult]:
-        """Evaluate a whole generation; returns results keyed by candidate id."""
+        """Evaluate a whole generation; returns results keyed by candidate id.
+
+        A stage's `promote.archive_percentile` is read over `stage_scores[stage.id]`
+        -- the archive members' own scores at that stage -- when it has any,
+        else over `archive_scores` (their fitness: a caller from before stage
+        scores were handed over). Its top k is widened by the stage's noise
+        band (`select_promoted`), twice one candidate's score sd there."""
         prior = list(archive_scores)
+        own = stage_scores or {}
         results: dict[str, EvalResult] = {
             c.id: EvalResult(score=self.config.evaluate.failure_score) for c in candidates
         }
@@ -274,6 +348,8 @@ class Cascade:
                 for cid in alive:
                     results[cid].abandoned = "the run was stopped before this candidate finished"
                 break
+            if stage.id in self.skipped and index < len(stages) - 1:
+                continue  # a screen switched off: everyone goes on to the next stage
             survivors: list[str] = []
             began = self._stage_started(stage, alive, private=False)
             outcomes = (
@@ -298,6 +374,7 @@ class Cascade:
                 elif not outcome.ok:
                     failed += 1
                 self._absorb(results[cid], outcome, stage)
+                self._note_noise(stage, by_id[cid], outcome, private=False)
                 if outcome.params is not None:
                     self._configure(cid, paths[cid], outcome.params)
                 if not outcome.ok:
@@ -305,7 +382,7 @@ class Cascade:
                 # A candidate that behaved exactly like one already evaluated
                 # at this stage keeps its score, but buys nothing further: no
                 # deeper stage, no hold-out run, no archive entry.
-                if self._note_behaviour(results[cid], outcome, stage, cid):
+                if self._note_behaviour(results[cid], outcome, stage, cid, generation=by_id[cid].generation):
                     continue
                 # So does one that broke a gate: not a failure, not a contender.
                 if self._gate(results[cid], outcome, stage):
@@ -321,14 +398,25 @@ class Cascade:
                 break
 
             scored = [(cid, results[cid].score) for cid in survivors]
-            alive = select_promoted(scored, stage.promote, prior)
+            members = list(own.get(stage.id) or ()) or prior
+            band = self._noise_margin(stage.id, stage.seeds)
+            rule = stage.promote
+            if stage.id in self.promote_k and rule.top_k_per_generation is not None:
+                rule = replace(rule, top_k_per_generation=self.promote_k[stage.id])
+            alive = select_promoted(scored, rule, members, band=band)
 
         for cid, candidate in by_id.items():
             # The last seed evaluated is the reference, as `leaderboard.seed_private`
             # reads it back on a resume: one whose hold-out failed leaves none.
             if candidate.operator == SEED_OPERATOR and not results[cid].abandoned:
                 self.seed_private = results[cid].private_score
+                self.seed_public = results[cid].public_score
+                self._check_noise(candidate, paths, results)
+                self.noise.save()
 
+        # One margin for the whole generation, from the estimate as it stands
+        # once this generation's hold-out runs and the seed's are in.
+        margin = self.holdout_margin()
         for result in results.values():
             # `finished_final_stage(..., seed_private=...)` in two halves, so
             # that a vetoed candidate's row can say why it does not compete.
@@ -340,12 +428,71 @@ class Cascade:
                 private_score=result.private_score,
                 gated=result.gated,
             )
-            result.veto = holdout_veto(self.config, result.private_score, self.seed_private) if finished else None
+            judged = finished and result.private_score is not None
+            result.holdout_margin = margin if judged else None
+            result.veto = (
+                holdout_veto(self.config, result.private_score, self.seed_private, margin) if finished else None
+            )
             result.competes = finished and result.veto is None
+        self.noise.save()
         return results
 
     def _stopping(self) -> bool:
         return self.stop is not None and self.stop.is_set()
+
+    def reevaluate(
+        self, candidate: Candidate, seed: int, *, earlier_kpis: Mapping[str, float] | None = None
+    ) -> StageOutcome | None:
+        """Run `candidate` once more at the final stage, public inputs only, on
+        `seed` (`search.reevaluate_best_every`): normalised against the run's
+        reference and scored as `_absorb` scores -- over `earlier_kpis` (the
+        candidate's measures as first written, never its pooled ones; its own
+        `kpis` without them) with this run's on top -- the score of this run
+        alone in `outcome.score`. No generation's results, no race, no incumbent, no
+        behaviour index and no noise entry are touched (the driver pools the
+        run, `Noise.pool`); no `eval_*` events (it is not a candidate of the
+        search), and the cache is used (a resumed run re-reads a run it made).
+        Counted against `budget.max_full_evals_per_day` when it starts. `None`
+        when it does not start: the cap says no, or the run is stopping."""
+        final = self.config.final_stage
+        if final.kind != "command" or self._stopping():
+            return None
+        if self.budget is not None:
+            if not self.budget.check_full_eval().allowed:
+                return None
+            self.budget.record_full_eval()
+        path = self._materialise(candidate)
+        space = self.config.problem.parameters
+        if candidate.params is not None and space is not None and candidate.id not in self._configurations:
+            self._configure(candidate.id, path, dict(candidate.params))  # a resumed run's best
+        out = self.work_dir / "stage_out" / "reevaluate"
+        if final.fans_out:
+            job = Job(candidate_id=candidate.id, candidate_path=path,
+                      configuration=self._configurations.get(candidate.id), **self._on_tree(candidate.id))
+            outcome = run_instance_stage(
+                [job], final, out_dir=out, cwd=self.config.base_dir,
+                required_kpis=self.config.evaluate.required_kpis, cache=self.cache, seeds=(seed,), stop=self.stop,
+            )[candidate.id]
+        else:
+            outcome = run_command_stage(
+                path, final, inputs=final.inputs, out_path=out / f"{candidate.id}.{final.id}.{seed}.json",
+                cwd=self.config.base_dir, required_kpis=self.config.evaluate.required_kpis,
+                configuration=self._configurations.get(candidate.id), cache=self.cache, cancel=self.stop,
+                seeds=(seed,), **self._on_tree(candidate.id),
+            )
+        if not outcome.ok or outcome.abandoned:
+            return outcome
+        if final.fans_out:  # as `_run_instances`: only a per-instance stage is normalised
+            self._normalise(final, candidate, outcome, private=False)
+            if not outcome.ok:
+                return outcome
+        written = candidate.kpis if earlier_kpis is None else earlier_kpis
+        kpis = {**written, **outcome.kpis}  # as `_absorb` scores: earlier stages' measures too
+        if self.config.evaluate.score.levels:
+            outcome.score = self._level_score(final.id, kpis, outcome.vector_kpis)
+        else:
+            outcome.score, _, _ = compute_score(kpis, self.config.evaluate.score, self.config.evaluate.penalties)
+        return outcome
 
     # -- levels ----------------------------------------------------------
 
@@ -488,6 +635,13 @@ class Cascade:
         generation -- a long stage is otherwise a progress bar with no length."""
         if self.on_event is not None and stage.kind == "command":
             instances = stage.private_instances if private else stage.instances
+            extra: dict[str, Any] = {}
+            if stage.race is not None and not private:
+                # The race's own n (`Race.population`): the instances the
+                # incumbent is above 0 on, once there is one.
+                held = (self.incumbent.get(stage.id) or {}).get("values") or {}
+                n = sum(1 for v in held.values() if float(v) > 0) if held else len(instances)
+                extra["race_looks"] = list(race_looks(stage.race.after, min(n, len(instances))))
             self.on_event(
                 "stage_started",
                 stage=stage.id,
@@ -495,6 +649,7 @@ class Cascade:
                 candidates=list(candidates),
                 runs_per_candidate=max(1, len(instances)) * stage.seeds,
                 workers=stage.workers,
+                **extra,
             )
         return time.perf_counter()
 
@@ -579,16 +734,40 @@ class Cascade:
         return payload if isinstance(payload, dict) else {}
 
     def _race_for(self, stage: StageConfig, candidates: Sequence[Candidate], *, private: bool) -> Race | None:
+        """The stage's race against its incumbent (Decision 17a): a
+        challenger's prefix is compared with the incumbent's values on the same
+        seeds (`by_seed`), so the noise is that of one run on each side --
+        paired on a repeatable stage, across seeds otherwise. An incumbent file
+        from before the per-seed values were kept has only the means over the
+        incumbent's S seeds: a one-seed prefix against such a mean differs by
+        `cv_across² · (1 + 1/S)` at most (exactly, on a stage that is not
+        repeatable), so the across cv is scaled to the one side that gives
+        the same difference, `cv_across · √((1 + 1/S)/2)` -- 1 at `seeds: 1`."""
         held = self.incumbent.get(stage.id)
         if stage.race is None or private or not held:
             return None  # nothing to race against yet: the first candidate through always finishes
+        objective = self.config.evaluate.score.objective
+        name = per_instance_key(objective)
+        by_seed = _incumbent_by_seed(held)
+        if stage.seeds > 1 and not all(seed in by_seed for seed in range(stage.seeds)):
+            by_seed = {}
+            cv = self.noise.vector_cv(stage.id, name, across=True) * math.sqrt((1.0 + 1.0 / stage.seeds) / 2.0)
+            df = self.noise.vector_cv_df(stage.id, name, across=True)
+        else:
+            cv, df = self.noise.vector_cv(stage.id, name), self.noise.vector_cv_df(stage.id, name)
         return Race(
-            objective=self.config.evaluate.score.objective,
+            objective=objective,
             minimize=self.config.evaluate.score.direction == "minimize",
             incumbent={str(k): float(v) for k, v in held["values"].items()},
             after=stage.race.after,
             margin_pct=stage.race.margin_pct,
             exempt=frozenset(c.id for c in candidates if c.operator == SEED_OPERATOR),
+            # Raw per-instance values on both sides (decision 4); a ratio, so
+            # raw and percent of the seed agree.
+            cv=cv,
+            instances=len(stage.instances),
+            df=df,
+            by_seed=by_seed,
         )
 
     def _note_incumbent(self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome) -> None:
@@ -607,7 +786,15 @@ class Cascade:
             score < held["score"] if self.config.evaluate.score.direction == "minimize" else score > held["score"]
         )
         if better:
-            self.incumbent[stage.id] = {"id": candidate.id, "score": score, "values": values}
+            held = {"id": candidate.id, "score": score, "values": values}
+            rows = outcome.seed_vectors.get(per_instance_key(objective)) or []
+            if len(rows) == len(outcome.seed_list) and all(len(r) == len(outcome.instance_names) for r in rows):
+                # Its own values per seed, what a challenger's prefix on the
+                # same seeds is compared with (Decision 17a).
+                held["by_seed"] = {
+                    str(seed): dict(zip(outcome.instance_names, row)) for seed, row in zip(outcome.seed_list, rows)
+                }
+            self.incumbent[stage.id] = held
             # Atomically: half a file reads back as "nothing to race against",
             # and a resumed run would quietly stop racing.
             _atomic_write(self.work_dir / "incumbent.json", json.dumps(self.incumbent, indent=2, sort_keys=True) + "\n")
@@ -674,7 +861,190 @@ class Cascade:
         relative = [100.0 * values[name] / reference[name] for name in shared]
         outcome.kpis[f"{objective}_raw"] = outcome.kpis[objective]
         outcome.kpis[objective] = fmean(relative)
-        outcome.vector_kpis[f"{objective}_pct_of_baseline"] = relative
+        pct = f"{objective}_pct_of_baseline"
+        outcome.vector_kpis[pct] = relative
+        # The noise in the units each number is in: `<obj>_per_instance` stays
+        # raw (the race and the twin rule compare raw values), the percent
+        # vector's is scaled by (100 / ref_i)², and the stage-level objective
+        # -- now a mean of M' percentages -- has the variance of one run
+        # fmean(pct variances) / M'; `<obj>_raw` keeps the raw one.
+        position = {name: i for i, name in enumerate(outcome.instance_names)}
+        raw_var = outcome.vector_var.get(per_instance_key(objective))
+        if raw_var is not None and len(raw_var) == len(outcome.instance_names):
+            pct_var = [(100.0 / reference[name]) ** 2 * raw_var[position[name]] for name in shared]
+            outcome.vector_var[pct] = pct_var
+            outcome.kpi_var[f"{objective}_raw"] = fmean(raw_var) / len(raw_var)
+            outcome.kpi_var[objective] = fmean(pct_var) / len(pct_var)
+        rows = outcome.seed_vectors.get(per_instance_key(objective))
+        if rows and all(len(row) == len(outcome.instance_names) for row in rows):
+            # Per seed in percent too, so that paired differences exist in the score's unit.
+            pct_rows = [[100.0 * row[position[name]] / reference[name] for name in shared] for row in rows]
+            outcome.seed_vectors[pct] = pct_rows
+            if objective in outcome.seed_runs:
+                outcome.seed_runs[f"{objective}_raw"] = outcome.seed_runs[objective]
+            outcome.seed_runs[objective] = [fmean(row) for row in pct_rows]
+
+    # -- noise -----------------------------------------------------------
+
+    def holdout_margin(self) -> float:
+        """How far below the seed's hold-out score a candidate's may lie before
+        the veto keeps it out: `2 · σ_priv`, twice the sd of one candidate's
+        hold-out score (`Noise.score_sd`, a mean over the final stage's
+        `seeds`; the hold-out runs as many as the public stage). The
+        difference of two equal candidates then has sd `√2 · σ_priv`, and an
+        equal candidate is kept out with P(Z < -√2), about 8 %.
+
+        `σ_priv` is the hold-out's own estimate when it has one -- on a
+        repeatable hold-out, a paired one (`Noise.read_known`). Otherwise
+        (a hold-out that replicates nothing, which calibration does not
+        cover) the public run's noise, rescaled to the hold-out's size by
+        `|seed_private / seed_public|` -- only when both seed scores are
+        non-zero and of one sign: across a change of sign the ratio says
+        nothing about scale. Else 0, the literal rule; always 0 with
+        `score.levels`. On a repeatable stage both estimates are the paired
+        ones, 0 at `seeds: 1`.
+
+        `σ_priv` is estimated: with its degrees of freedom the margin's normal
+        quantile becomes Student's t (`_noise_margin`), so an equal candidate
+        is kept out in about 8 % at any df -- not 15 % on a calibration's 2."""
+        final, score = self.config.final_stage, self.config.evaluate.score
+        if score.levels:
+            return 0.0
+        private_key = f"{final.id}/private"
+        if self.noise.read_known(private_key):
+            return self._noise_margin(private_key, final.seeds)
+        public, private = self.seed_public, self.seed_private
+        if public is None or private is None or public == 0 or private == 0 or (public > 0) != (private > 0):
+            return 0.0
+        return self._noise_margin(final.id, final.seeds) * abs(private / public)
+
+    def _noise_margin(self, key: str, seeds: int) -> float:
+        """`2 · score_sd` at `key`, widened to Student's t at the estimate's
+        degrees of freedom: two equal candidates' scores differ by `√2 ·
+        score_sd` sd, so the margin is `z = √2` sd of the difference
+        (`stats.t_scale(√2, score_df)`, 1.57 at 2 df, 1 at infinite df). What
+        the hold-out veto and the promotion band read."""
+        score = self.config.evaluate.score
+        sd = self.noise.score_sd(key, score, seeds)
+        if sd <= 0:
+            return 0.0
+        return 2.0 * sd * t_scale(math.sqrt(2.0), self.noise.score_df(key, score))
+
+    def _note_noise(
+        self, stage: StageConfig, candidate: Candidate, outcome: StageOutcome, *, private: bool
+    ) -> None:
+        """Add a command stage's outcome to the run's noise estimate."""
+        if stage.kind != "command":
+            return
+        key = f"{stage.id}/private" if private else stage.id
+        self.noise.observe(key, candidate.id, outcome, is_seed=candidate.operator == SEED_OPERATOR)
+
+    def _check_noise(self, seed: Candidate, paths: dict[str, Path], results: dict[str, EvalResult]) -> None:
+        """The seed run again at every command stage it reached, once per run
+        and stage (`evaluate/noise.py`, Decision 17d): seed 0 once more with
+        the cache bypassed -- a lookup would read the first run back and call
+        every evaluator repeatable -- and, at `seeds: 1`, seed 1, on the
+        instance whose seed run took the median time. It says whether the
+        stage is repeatable and, where nothing replicates, calibrates the
+        noise. Until a stage's repeatability is measured its twin rule is the
+        exact hash. Not counted against `budget.max_full_evals_per_day`: it
+        is a measurement, not a candidate."""
+        result = results[seed.id]
+        if result.abandoned:
+            return
+        for stage in self.config.evaluate.stages:
+            if self._stopping():
+                return
+            if stage.kind != "command" or self.noise.repeatable(stage.id) is not None:
+                continue
+            if stage.id in result.stages_reached:
+                self._check_stage_noise(stage, seed, paths[seed.id], result)
+
+    def _check_stage_noise(self, stage: StageConfig, seed: Candidate, path: Path, result: EvalResult) -> None:
+        """`_check_noise` at one stage; the log line names the stage when it
+        is not the final one."""
+        said_where = "noise" if stage.id == self.config.final_stage.id else f"noise at stage {stage.id}"
+        if not measurable(stage):
+            if stage.seeds > 1:
+                # Defensive: `config.py` refuses `seeds > 1` without `{seed}`, so
+                # this is not reached through a config. Such runs would be
+                # repeats of one command: whatever differs between them is noise.
+                for key in (stage.id, f"{stage.id}/private"):
+                    self.noise.set_repeatable(key, False)
+            return  # seeds: 1 and no {seed}: nothing to measure, σ̂ = 0 as before
+        first = next(
+            (o for o in result.outcomes if o.stage_id == stage.id and not o.private and o.ok), None
+        )
+        if first is None:
+            return
+        where = self._check_where(stage, first)
+        left = self.time_left() if self.time_left is not None else None
+        needed = run_duration(stage, first)
+        if left is not None and left < needed:
+            self._say(
+                f"{said_where}: the seed was not run again{where}: {left:.0f} s of the run's time is left, "
+                f"less than one of its runs ({needed:.0f} s); the noise stays unmeasured"
+            )
+            return
+        try:
+            extra = self._run_again(stage, seed, path, first)
+        except Exception as exc:  # noqa: BLE001 - a measurement must not end the run
+            self._say(f"{said_where}: the seed could not be run again{where} ({exc}); the noise stays unmeasured")
+            return
+        check = None
+        if extra.ok and not extra.abandoned:
+            check = record_check(
+                self.noise, stage.id, stage, first, extra,
+                objective=self.config.evaluate.score.objective,
+                digits=self.config.evaluate.signature_digits,
+                ignore=self.config.evaluate.signature_ignore,
+            )
+        if check is None:
+            why = extra.failure or ("it was stopped" if extra.abandoned else "its measures could not be compared")
+            self._say(f"{said_where}: the seed could not be run again{where} ({why}); the noise stays unmeasured")
+            return
+        cv = self.noise.cv(stage.id, self.config.evaluate.score.objective)
+        if self.on_event is not None:
+            self.on_event("noise_checked", stage=stage.id, instance=check.instance,
+                          repeatable=check.repeatable, runs=check.runs, cv=cv)
+        if check.repeatable:
+            said = "the evaluator gives the same numbers for the same seed (comparisons are paired by seed)"
+        else:
+            said = f"one run varies by about {about_pct(cv)} % (the search's comparisons allow for it)"
+        self._say(f"{said_where}: the seed run again{where}: {said}")
+
+    def _run_again(self, final: StageConfig, seed: Candidate, path: Path, first: StageOutcome) -> StageOutcome:
+        """The extra runs of `_check_noise`: no cache, no observer (they are
+        not evaluations of the search), no budget entry."""
+        stage, seeds = check_stage(final, first), check_seeds(final)
+        on_tree_args = self._on_tree(seed.id)
+        if stage.fans_out:
+            job = Job(candidate_id=seed.id, candidate_path=path,
+                      configuration=self._configurations.get(seed.id), **on_tree_args)
+            return run_instance_stage(
+                [job], stage, out_dir=self.work_dir / "stage_out" / "noise-check", cwd=self.config.base_dir,
+                required_kpis=self.config.evaluate.required_kpis, cache=None, seeds=seeds, stop=self.stop,
+            )[seed.id]
+        return run_command_stage(
+            path, stage, inputs=stage.inputs,
+            out_path=self.work_dir / "stage_out" / "noise-check" / f"{seed.id}.{stage.id}.json",
+            cwd=self.config.base_dir, required_kpis=self.config.evaluate.required_kpis,
+            configuration=self._configurations.get(seed.id), cache=None, cancel=self.stop,
+            seeds=seeds, **on_tree_args,
+        )
+
+    @staticmethod
+    def _check_where(stage: StageConfig, outcome: StageOutcome) -> str:
+        picked = check_stage(stage, outcome)
+        if picked is stage or not picked.instances:
+            return ""
+        index = stage.instances.index(picked.instances[0])
+        names = outcome.instance_names or stage.instance_names()
+        return f" on {names[index]}" if index < len(names) else ""
+
+    def _say(self, line: str) -> None:
+        if self.log is not None:
+            self.log(line)
 
     def _observer(
         self, candidate_id: str, stage: StageConfig, *, private: bool
@@ -712,36 +1082,107 @@ class Cascade:
         outcome: StageOutcome,
         stage: StageConfig,
         candidate_id: str,
+        *,
+        generation: int | None = None,
     ) -> bool:
         """Fingerprint what the candidate did at `stage`. True == twin.
 
         The static stage is skipped on purpose: it reports size, not
         behaviour, and every syntactically valid candidate would look alike.
-        `search.novelty.behavioural` can skip a stage too: `off` always does,
-        `auto` does on a stochastic stage, where this filter is proven inert.
+        `search.novelty.behavioural` can skip a stage too: `off` always does;
+        `auto` does not check a stochastic stage while it knows neither a noise
+        nor that the stage is repeatable, but keeps what it saw.
+
+        Two rules (`evaluate/signature.py`): on a stage measured not to be
+        repeatable (the seed run again, Decision 17d) that has a noise
+        estimate (`noise.sd` of the objective > 0), the child
+        is a twin of the best candidate of an earlier round (`generation`:
+        never one of its own round, whose order of evaluation is arbitrary,
+        Decision 15) it is within the noise of on every compared number,
+        among those that scored at least as well. On a repeatable stage, one
+        whose repeatability is not measured yet, and with no noise, the
+        9-digit hash. Either way the
+        candidate's hash and numbers are kept, so the seed is a target in both.
         """
         if stage.kind != "command" or outcome.private:
             return False
         mode = self.config.search.novelty.behavioural
-        if mode == "off" or (mode == "auto" and stage.stochastic):
+        if mode == "off":
             return False
+        evaluate = self.config.evaluate
+        objective = evaluate.score.objective
+        repeatable = self.noise.repeatable(stage.id)
+        # The noise rule only where the stage is known not to repeat
+        # (Decision 17d): an unmeasured stage may be deterministic per seed,
+        # where the across-seed spread is the seed's, not noise.
+        noisy = repeatable is False and self.noise.sd(stage.id, objective) > 0
+        skip = mode == "auto" and stage.stochastic and repeatable is not True and not noisy
         signature = behaviour_signature(
             outcome.kpis,
             outcome.vector_kpis,
-            ignore=self.config.evaluate.signature_ignore,
-            # Coarser on a stochastic stage: see
-            # `config.DEFAULT_SIGNATURE_DIGITS_STOCHASTIC`. At nine digits a
-            # noisy evaluator makes every candidate look novel, which turns
-            # the behavioural filter off exactly where it is most expensive to
-            # be without.
-            digits=self.config.evaluate.digits_for(stage),
+            ignore=evaluate.signature_ignore,
+            digits=evaluate.signature_digits,
         )
-        if not signature:
+        seen = compared_numbers(
+            outcome, ignore=evaluate.signature_ignore, per_instance=stage.fans_out, objective=objective
+        )
+        digits = evaluate.signature_digits
+        score = float(result.stage_scores.get(stage.id, result.score))
+        # Compared as measured: `within` rounds (at `signature_digits`) only the
+        # numbers it compares exactly. Kept at nine digits at least, whatever
+        # `signature_digits` says, so that what a later child is compared with
+        # -- live or after a resume -- is the number, not a coarse rounding of it.
+        behaviour = Behaviour(seen.kpis, seen.vectors, score)
+        keep = max(DEFAULT_SIGNATURE_DIGITS, digits)
+        kept = Behaviour(
+            {k: round_significant(v, keep) for k, v in seen.kpis.items()},
+            {k: [round_significant(x, keep) for x in v] for k, v in seen.vectors.items()},
+            score,
+        )
+        if not signature and not (behaviour.kpis or behaviour.vectors):
             return False
-        result.behaviour_signatures[stage.id] = signature
-        verdict = self.signatures.check(stage.id, signature)
+        # Nothing to compare number by number (every measure ignored but a
+        # derived one): the hash, which then says no more than it did before.
+        noisy = noisy and bool(behaviour.kpis or behaviour.vectors)
+        if signature:
+            result.behaviour_signatures[stage.id] = signature
+        result.behaviour_values[stage.id] = kept.to_json()
+        if skip:
+            self.signatures.add(candidate_id, stage.id, signature, kept, generation=generation)
+            return False
+        if noisy:
+            margins = twin_margins(
+                behaviour,
+                {k: self.noise.sd(stage.id, k) for k in behaviour.kpis},
+                {
+                    k: [self.noise.vector_sd(stage.id, k, i) for i in range(len(v))]
+                    for k, v in behaviour.vectors.items()
+                },
+                stage.seeds,
+                cvs={
+                    **{k: self.noise.cv(stage.id, k) for k in behaviour.kpis},
+                    **{k: self.noise.vector_cv(stage.id, k) for k in behaviour.vectors},
+                },
+                dfs={k: self.noise.df(stage.id, k) for k in behaviour.kpis},
+                vector_dfs={
+                    k: [self.noise.vector_df(stage.id, k, i) for i in range(len(v))]
+                    for k, v in behaviour.vectors.items()
+                },
+                cv_dfs={
+                    **{k: self.noise.cv_df(stage.id, k) for k in behaviour.kpis},
+                    **{k: self.noise.vector_cv_df(stage.id, k) for k in behaviour.vectors},
+                },
+            )
+            # Earlier rounds within the noise; this round's only when every
+            # number is the same as measured (`keep` digits: an exact duplicate
+            # is a twin in any order, and `signature_digits` rounds nothing here).
+            verdict = self.signatures.check_values(
+                stage.id, behaviour, margins, digits, exclude=candidate_id, before=generation, exact_digits=keep
+            )
+        else:
+            verdict = self.signatures.check(stage.id, signature)
         if not verdict.duplicate or verdict.twin_id == candidate_id:
-            self.signatures.add(candidate_id, stage.id, signature)
+            self.signatures.add(candidate_id, stage.id, signature, kept, generation=generation)
             return False
         result.behaviour_twin_id = verdict.twin_id
         result.rejected = True
@@ -855,6 +1296,7 @@ class Cascade:
             )
             result = results[cid]
             result.outcomes.append(outcome)
+            self._note_noise(stage, by_id[cid], outcome, private=True)
             if outcome.abandoned:
                 result.abandoned = outcome.failure or "the run was stopped during its hold-out run"
                 continue

@@ -8,6 +8,8 @@ from evolvekit.leaderboard import (
     rank,
     render_html,
     render_markdown,
+    replay_veto,
+    veto_reason,
 )
 
 
@@ -174,6 +176,26 @@ def test_the_holdout_flag_marks_the_row_in_both_renderers():
     bad = row("bad", public_score=-4.0, private_score=-9.0, ranking_score=-9.0)
     assert "bad !" in render_markdown([seed, bad])
     assert 'class="flag"' in render_html([seed, bad])
+
+
+def test_the_holdout_flag_follows_the_rows_noise_margin():
+    seed = row("seed", operator="human-seed", public_score=-5.0, private_score=-5.0)
+    within = row("within", public_score=-4.0, private_score=-5.5, holdout_margin=1.0)
+    legacy = row("legacy", public_score=-4.0, private_score=-5.5)
+    assert "within !" not in render_markdown([seed, within]), "0.5 below, inside its margin of 1"
+    assert 'within <span class="flag">' not in render_html([seed, within])
+    assert "legacy ! score -5: holdout below the seed&#x27;s -5" in render_html([seed, legacy]), "kept out"
+    assert "legacy !" in render_markdown([seed, legacy]), "no margin on the row: the literal rule"
+    replayed = {r["id"]: r for r in replay_veto([{**seed, "competes": True}, {**within, "competes": True},
+                                                 {**legacy, "competes": True}])}
+    assert replayed["within"]["competes"] is True and "veto" not in replayed["within"]
+    assert replayed["legacy"]["veto"] == "holdout below the seed's -5"
+
+
+def test_the_veto_reason_names_the_margin_only_when_there_is_one():
+    assert veto_reason(-1.0) == "holdout below the seed's -1"
+    assert veto_reason(-1.0, 0.0) == "holdout below the seed's -1"
+    assert veto_reason(-1.0, 0.123456) == "holdout below the seed's -1 by more than its noise margin 0.123"
 
 
 # -- Phase C: grids with more than two axes -------------------------------
