@@ -129,9 +129,9 @@ evaluate:
   # whose fingerprint matches one already seen at that stage is a re-expression
   # of something already paid for, and is stopped there. Both values are the
   # built-in defaults, spelled out here because they are worth knowing about.
-  # On a noisy evaluator (`seeds: N > 1`, or a solver bounded by wall-clock
-  # time) twins are judged by the run's own noise instead of by the digits:
-  # docs/reference.md, "The novelty filters".
+  # On an evaluator that gives different numbers for the same seed (a solver
+  # bounded by wall-clock time, say) twins are judged by the run's own noise
+  # instead of by the digits: docs/reference.md, "The novelty filters".
   signature_digits: 9
   signature_ignore: [runtime_s, complexity, static_problems]
 

@@ -145,7 +145,8 @@ evaluate:
       # {seed}, so a candidate that searches randomly would be measured on a
       # single roll of its dice here. Raise this to 3 once candidates start
       # doing that: the KPIs become means, `kpi_cv` records the spread, and
-      # behaviour twins are judged by the run's noise. The timeout is per
+      # the search's comparisons allow for the noise (paired by seed, since
+      # the same seed gives the same numbers here). The timeout is per
       # run, so `seeds: 3` is up to 90 s of wall clock.
       seeds: 1
 

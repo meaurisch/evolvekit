@@ -549,16 +549,18 @@ file starts at 0.15.
 Which to use depends on how good the defaults already are. Measured at equal
 budget, five search seeds each, on two stand-in solvers
 (`python benchmarks/operator_mixes.py` reproduces it): with defaults far from
-the optimum and 36 evaluations, `param_lhs` alone does as well as any mix (mean
-best 1031.6 vs 1034.3; defaults 1225, optimum 1000) and `param_local` alone is
-clearly worse (1106.4). With a *mature* solver — 25 parameters, defaults close
-to good, most random settings harmful, noisy, 78 evaluations — `param_lhs`
-alone returned the defaults in three runs of five (mean true cost of the
-reported best 102.20, defaults 102.57), while `param_local` alone reached
-100.05 and `{param_lhs: 0.15, param_local: 0.45, param_tpe: 0.3, param_cross:
-0.1}` reached 100.30, of a possible 98.20. For a solver somebody has already
-tuned, lead with `param_local`; keep some `param_lhs` when you do not know which
-of the two cases you are in.
+the optimum and 36 evaluations, `param_lhs` alone and the mix `{param_lhs: 0.2,
+param_local: 0.4, param_tpe: 0.3, param_cross: 0.1}` end close together (mean
+best 1043.3 and 1035.4; defaults 1225, optimum 1000 — five seeds do not tell
+them apart), and `param_local` alone is well behind both (1098.0). With a
+*mature* solver — 25 parameters, defaults close to good, most random settings
+harmful, noisy, 78 evaluations — `param_lhs` alone barely moved from the
+defaults (mean true cost of the reported best 102.52, defaults 102.57), while
+`param_local` alone reached 100.30 and `{param_lhs: 0.15, param_local: 0.45,
+param_tpe: 0.3, param_cross: 0.1}` reached 99.89, of a possible 98.20 (the gap
+between those two is within what five seeds can show). For a solver somebody
+has already tuned, lead with `param_local`, alone or as the mix's largest share;
+keep some `param_lhs` when you do not know which of the two cases you are in.
 
 **A run without any model.** When only model-free operators (`param_*`) have a share,
 nothing in the run calls a model, and nothing may: no big steps are planned
@@ -905,7 +907,9 @@ pool (per element for a per-instance list, in that list's own units; under
 `normalize: baseline` the objective's is in percent of the seed, its
 `_per_instance` list's raw). A candidate that failed, was raced out or was
 abandoned contributes nothing. The file is saved after every generation and read
-back on resume; a run written before it starts with no noise.
+back on resume; a run written before it starts with no noise. It carries
+`"schema": 2` (each candidate's per-seed runs, for the paired estimate below);
+a schema-1 file still loads.
 
 *Is the evaluator repeatable?* Once per run and per command stage, after the
 seed has passed that stage, and only when the stage's command has a `{seed}`
@@ -3371,9 +3375,10 @@ Known gaps, all deliberate:
   against a real embeddings endpoint — only against mocked clients and `fake`.
 - **The behaviour signature is exact** on a deterministic stage. Two rules that
   differ only on instances outside the current input set look like twins. That
-  is the trade the filter makes on purpose. On a stochastic stage the trade
-  moves the other way: three significant digits will call two genuinely
-  different programs twins if their means agree to a tenth of a percent.
+  is the trade the filter makes on purpose. On a stage that is not repeatable
+  the noise rule replaces it, and trades the other way: a real difference
+  smaller than the noise margin can be called a twin (about 8 % at four noise
+  sd, never a real gain; see [the novelty filters](#the-novelty-filters--structural-near-and-behavioural)).
 - **`preflight` measures the seed, once.** Its timeout advice is as good as the
   assumption that the seed's cost is representative, which on a problem whose
   candidates can pick their own effort it is not. The 1.5× headroom is the
