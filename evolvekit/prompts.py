@@ -195,12 +195,20 @@ OPERATOR_INSTRUCTIONS = {
 }
 
 
-def big_step_reason(*, scheduled: bool, every: int, stagnant: int) -> str:
+def big_step_reason(
+    *, scheduled: bool, every: int, stagnant: int, previous: LedgerEntry | None = None
+) -> str:
     """Why this big step is being taken: the trigger that fired. The schedule
-    wins when both hold, since the step would have come anyway."""
+    wins when both hold, since the step would have come anyway. With an
+    earlier big step in the run, its ledger line follows: what it tried and
+    what came of it."""
     if scheduled:
-        return f"This big step is scheduled: one every {every} generation(s)."
-    return f"This big step is due because the search has not improved for {stagnant} generation(s)."
+        reason = f"This big step is scheduled: one every {every} generation(s)."
+    else:
+        reason = f"This big step is due because the search has not improved for {stagnant} generation(s)."
+    if previous is None:
+        return reason
+    return f"{reason} The previous big step: {previous.line()}."
 
 
 def _bullet_section(title: str, items: "tuple[str, ...] | list[str]") -> str:

@@ -88,7 +88,7 @@ live run is built from:
   | `type` | When | Carries |
   |---|---|---|
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
-  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force) |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned` and `plateau` (whether the generation was planned on a plateau; a resumed run reads it back to space its big steps, and an event from before it was recorded falls back to replaying the stop policy); then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force) |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
@@ -435,11 +435,24 @@ rescaling, not candidates being lost.
 | `diff` | small | the parent block, its score breakdown, change summaries of 1 to `search.inspirations` (default 2) inspirations, and what was tried on this parent |
 | `rewrite` | small | the same, and asks for the whole block back |
 | `crossover` | small | the parent **and** one inspiration's block, both with score breakdowns |
-| `big_step` | strong | scheduled every `big_step_every` generations, or on plateau |
+| `big_step` | strong | scheduled every `big_step_every` generations, or on plateau — then no plateau big step for `big_step_every` generations unless the search improved |
 | `param_lhs` | none | the next row of the run's Latin hypercube over the block's own constants |
 | `param_local` | none | a good configuration; moves one to three of its parameters a little |
 | `param_cross` | none | two good configurations; each parameter from one of them |
 | `param_tpe` | none | every configuration evaluated so far, the failed ones included |
+
+**Big steps on a plateau.** A plateau buys one big step, then waits: the next
+plateau big step comes `big_step_every` generations after the last big step
+that applied while the plateau held (a scheduled one included), or sooner if
+the search improved since. A big step whose reply never applied does not start
+the wait. A plateau held open by `stop.min_big_steps` is not made to wait: the
+run cannot stop until enough big steps were tried, so it takes them (this never
+fires at the default `min_big_steps: 0`). Scheduled big steps keep their
+schedule. The big step's prompt names the trigger that fired and, from the
+second big step of the run on, the previous big step's line from "What was
+tried on this parent": what it changed and what came of it. A resumed run
+spaces its big steps as the uninterrupted run would; it reads the plateau each
+generation was planned with from `events.jsonl` (`generation_started`).
 
 Shares come from `search.operators`. Inspirations are drawn from cells other
 than the parent's and are shown as one-line change summaries — a unified-diff

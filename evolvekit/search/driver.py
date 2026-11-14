@@ -80,7 +80,8 @@ from evolvekit.search.lhs import latin_hypercube, rows_for_params
 from evolvekit.search.params import current_values, declared_ranges, has_params
 from evolvekit.search.scratchpad import Scratchpad
 from evolvekit.search.screening import SCREENING_FILE, ScreenControl
-from evolvekit.search.tried import parent_ledger
+from evolvekit.search.tried import _counter as _id_counter
+from evolvekit.search.tried import entry_for, parent_ledger
 from evolvekit.search.tuning import Observation
 from evolvekit.space import STEP_SCALE
 from evolvekit.stopping import RunStop, active_seconds, ai_seconds
@@ -294,6 +295,12 @@ class Driver:
         """Why no more AI changes are written (`_ai_room`): the search ends after its round."""
         self._big_step_reason: str | None = None
         """Which trigger planned this round's big step (`_plan_operators`), told to the model."""
+        self._plateau_step_at: int | None = None
+        """The generation of the last applied big step planned while the plateau
+        held, whichever trigger fired: no plateau big step for `big_step_every`
+        generations after it (`_plateau_step_allowed`). Rebuilt on resume."""
+        self._big_step_on_plateau: bool = False
+        """Whether this round's big step was planned on the plateau (`_plan_operators`)."""
 
     # -- what the run says about itself ----------------------------------
 
@@ -908,12 +915,12 @@ class Driver:
             self._refresh_noise()
 
             began = self._generation_started(
-                generation, children=self.children_per_generation
+                generation, children=self.children_per_generation, plateau=decision.plateau
             )
             # Last generation's pressure on its parents counts half now
             # (`Archive.from_records` replays the same on resume).
             self.grid.decay()
-            children = self._adopt_pending(generation)
+            children = self._adopt_pending(generation, plateau=decision.plateau)
             if children is None:
                 children = self._breed(generation, plateau=decision.plateau)
                 self._write_pending(generation, children)
@@ -1116,7 +1123,21 @@ class Driver:
         scratch.write_text(json.dumps(payload), encoding="utf-8")
         scratch.replace(self._pending_path)
 
-    def _adopt_pending(self, generation: int) -> list[Candidate] | None:
+    def _adopt_pending(self, generation: int, *, plateau: bool = False) -> list[Candidate] | None:
+        """The children `pending.json` holds for `generation`, or `None`.
+
+        Adopted children skip `_plan_operators` and `_breed_one`, so their big
+        step is counted here, as the replay counts a recorded one (`plateau`: what
+        this round is planned with)."""
+        children = self._read_pending(generation)
+        for child in children or []:
+            if str(child.operator).startswith("big_step"):
+                self._count_big_step(
+                    generation, tried=True, applied=self._big_step_applied(child), plateau=plateau
+                )
+        return children
+
+    def _read_pending(self, generation: int) -> list[Candidate] | None:
         try:
             payload = json.loads(self._pending_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1234,32 +1255,31 @@ class Driver:
 
         Two counts, as live: every big-step row was tried (planned), and it
         applied unless it has the shape `_breed_one` gives a failed apply --
-        rejected, no novelty verdict, and its parent's block written back.
+        rejected, no novelty verdict, and its parent's block written back. An
+        applied one planned on the plateau reopens the spacing window
+        (`_plateau_step_at`), counted before that round's update, as live.
         """
-        by_id = {c.id: c for c in self.archive}
         tried: set[int] = set()
         applied: set[int] = set()
         for c in self.archive:
             if not str(c.operator).startswith("big_step"):
                 continue
             tried.add(int(c.generation))
-            # A missing parent counts the row as applied. It cannot occur today: a
-            # big step's parent is always the archive best, which is in the archive.
-            parent = by_id.get(c.parent_id) if c.parent_id else None
-            failed = (
-                c.rejected
-                and c.novelty is None
-                and parent is not None
-                and c.block == parent.block
-            )
-            if not failed:
+            if self._big_step_applied(c):
                 applied.add(int(c.generation))
+        # The plateau each round was planned with, as recorded (exact on a noisy
+        # run whose noise moved since); a run from before it was recorded falls
+        # back on the policy's own state, which is where it stood when that round
+        # was planned while the noise is unchanged.
+        recorded = _generation_plateaus(read_events(self.ledger.run_dir))
         decision = StopDecision(False)
         for point in self._economics():
             if point.generation in tried:
-                self.stop_policy.note_big_step()
-            if point.generation in applied:
-                self.stop_policy.note_big_step_applied()
+                plateau = recorded.get(point.generation, self.stop_policy.plateau)
+                self._count_big_step(
+                    point.generation, tried=True, applied=point.generation in applied,
+                    plateau=plateau,
+                )
             # As live: the round by its own candidates, then the bar moved to
             # the pooled best where the best was re-evaluated at its end.
             decision = self.stop_policy.update(point.measured_best, point)
@@ -1267,12 +1287,27 @@ class Driver:
                 self.stop_policy.rebase(point.best)
         return decision
 
+    def _big_step_applied(self, child: Candidate) -> bool:
+        """A big-step row applied unless it has the shape `_breed_one` gives a
+        failed apply: rejected, no novelty verdict, its parent's block written
+        back. A missing parent counts it as applied; it cannot occur today (a
+        big step's parent is the archive best, which is in the archive)."""
+        parent = self.by_id.get(child.parent_id) if child.parent_id else None
+        return not (
+            child.rejected
+            and child.novelty is None
+            and parent is not None
+            and child.block == parent.block
+        )
+
     # -- generation internals -------------------------------------------
 
-    def _generation_started(self, generation: int, *, children: int) -> float:
+    def _generation_started(self, generation: int, *, children: int, plateau: bool = False) -> float:
         self._generation_now = generation
+        # `plateau`: what the round was planned with, read back by `_restore_stop_policy`.
         self.events.emit(
-            "generation_started", generation=generation, children_planned=children
+            "generation_started", generation=generation, children_planned=children,
+            plateau=bool(plateau),
         )
         self.heartbeat.update(
             phase="breeding" if children else "evaluating",
@@ -1377,7 +1412,11 @@ class Driver:
         return total + children * (rest + ai_seconds(self.config.search.operators)[0])
 
     def _plan_operators(self, generation: int, plateau: bool) -> list[str]:
-        """One operator name per child. The big step, when due, takes slot 0."""
+        """One operator name per child. The big step, when due, takes slot 0.
+
+        A big step is due on the schedule, or on the plateau at most once per
+        `big_step_every` generations after one applied (Q8: on a plateau every
+        generation spent a strong-model call), see `_plateau_step_allowed`."""
         count = self.children_per_generation
         weights = self.config.search.operators
         sweepable = self.config.problem.parameters is not None or has_params(self.seed_block)
@@ -1401,14 +1440,60 @@ class Driver:
         every = self.config.search.big_step_every
         scheduled = every > 0 and generation % every == 0
         self._big_step_reason = None
-        if self.config.search.takes_big_steps and (scheduled or plateau):
+        self._big_step_on_plateau = plateau
+        if self.config.search.takes_big_steps and (
+            scheduled or (plateau and self._plateau_step_allowed(generation))
+        ):
             plan[0] = "big_step"
             # Tried counts here, for `min_big_steps`; applied counts in `_breed_one`.
-            self.stop_policy.note_big_step()
+            self._count_big_step(generation, tried=True, applied=False, plateau=plateau)
             self._big_step_reason = big_step_reason(
-                scheduled=scheduled, every=every, stagnant=self.stop_policy.stagnant
+                scheduled=scheduled, every=every, stagnant=self.stop_policy.stagnant,
+                previous=self._previous_big_step(),
             )
         return plan
+
+    def _plateau_step_allowed(self, generation: int) -> bool:
+        """Whether the plateau may buy a big step this generation (Q8: on a
+        plateau every generation spent a strong-model call): once one applied,
+        the next waits `big_step_every` generations -- unless the search
+        improved since, or the plateau is held open by `stop.min_big_steps`
+        (the run cannot stop before a big step is tried, so it does not wait)."""
+        at = self._plateau_step_at
+        if at is None or generation - at >= self.config.search.big_step_every:
+            return True
+        policy = self.stop_policy
+        if generation - 1 - policy.stagnant >= at:
+            return True  # the last improving generation is at or after it
+        stop = self.config.stop
+        return policy.stagnant >= stop.patience and policy.big_steps_in_window < stop.min_big_steps
+
+    def _count_big_step(self, generation: int, *, tried: bool, applied: bool, plateau: bool) -> None:
+        """A0's two counts and the plateau's spacing, from one place: planning
+        and applying live, the replay on resume, and an adopted `pending.json`
+        generation. A big step tried counts for `min_big_steps`; one that applied
+        counts for the economics guard and, planned on the plateau, opens the
+        spacing window."""
+        if tried:
+            self.stop_policy.note_big_step()
+        if applied:
+            self.stop_policy.note_big_step_applied()
+            if plateau:
+                self._plateau_step_at = generation
+
+    def _previous_big_step(self) -> LedgerEntry | None:
+        """The run's latest big step (applied or not) as its ledger line, for the hint."""
+        steps = [c for c in self.archive if str(c.operator).startswith("big_step")]
+        if not steps:
+            return None
+        row = max(steps, key=lambda c: (_id_counter(c), c.id))
+        best = self.best
+        return entry_for(
+            row, self.by_id.get(row.parent_id) if row.parent_id else None,
+            best_id=best.id if best else None,
+            twin=self.by_id.get(row.behaviour_twin_id) if row.behaviour_twin_id else None,
+            final_stage=self.config.final_stage.id, tree=self.repo is not None,
+        )
 
     # -- tuning a declared space: who is worth starting from -------------
 
@@ -1855,7 +1940,9 @@ class Driver:
             self._taken.append(dict(outcome.meta["params"]))
         if operator == "big_step" and outcome.ok:
             # The response parsed and applied; `_restore_stop_policy` reads the same from the row.
-            self.stop_policy.note_big_step_applied()
+            self._count_big_step(
+                generation, tried=False, applied=True, plateau=self._big_step_on_plateau
+            )
 
         child = Candidate(
             id=candidate_id,
@@ -2472,6 +2559,18 @@ def _generation_durations(events: Sequence[dict]) -> dict[int, float]:
                 and isinstance(value, (int, float)) and not isinstance(value, bool):
             durations[event["generation"]] = float(value)
     return durations
+
+
+def _generation_plateaus(events: Sequence[dict]) -> dict[int, bool]:
+    """`generation -> plateau` from every `generation_started` event that
+    records it (the last one counts when a generation was started twice);
+    events from before it was recorded give nothing."""
+    plateaus: dict[int, bool] = {}
+    for event in events:
+        if event.get("type") == "generation_started" and isinstance(event.get("generation"), int) \
+                and isinstance(event.get("plateau"), bool):
+            plateaus[event["generation"]] = event["plateau"]
+    return plateaus
 
 
 def _seed_stage_durations(events: Sequence[dict]) -> dict[str, float]:
