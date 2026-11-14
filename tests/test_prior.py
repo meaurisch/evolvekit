@@ -320,13 +320,13 @@ def test_a_prior_pulls_tpe_towards_its_value_by_at_least_a_tenth():
 def test_a_local_step_from_the_seed_starts_at_the_prior_value_at_its_weight():
     """Decision 11: one parameter, default 0.2, prior value 0.8, weight w = 0.5, 4000 seeds;
     "near" = within one step (0.15) of the prior value. Expected share
-    w * 0.68 + (1 - w) * plain: 0.68 = P(|N(0, 0.15)| <= 0.15) is a step from the prior
-    value landing near it (a step past 1 is clamped onto 1, 0.2 away: not near), and
-    plain = P(N(0, 0.15) >= 0.45) = 0.0013, the share of plain steps from 0.2 that land
-    near 0.8. So about 34.2 %; measured 35.0 % (SE 0.75 points), plain 0.18 %;
-    assert 0.30 <= share <= 0.40. When A2.6c reflects a step at the end of the range
-    instead of clamping it, 0.68 becomes 0.73 (a step of 0.25..0.55 past 0.8 comes
-    back near it) and the share about 36.6 %: re-measure this test then."""
+    w * 0.73 + (1 - w) * plain: 0.73 is a step from the prior value landing near it,
+    P(|N(0, 0.15)| <= 0.15) = 0.683 plus, since a step past 1 is reflected back inside
+    (A2.6c), P(0.25 <= N(0, 0.15) <= 0.55) = 0.048 (0.8 + s comes back to 1.2 - s); and
+    plain = P(0.45 <= N(0, 0.15) <= 0.75) = 0.0013, the share of plain steps from 0.2
+    that land near 0.8 (reflected ones from 0.2 reach it only past 0.85: negligible).
+    So about 36.6 %; measured 37.8 % (SE 0.77 points; before reflection 35.0 % against
+    34.2 %, the same seeds' prior starts), plain 0.18 %; assert 0.30 <= share <= 0.40."""
     def near(space) -> float:
         start = seed_candidate(space)
         return sum(abs(param_local(space, start, seed=s).meta["params"]["x"] - 0.8) <= 0.15 for s in range(4000)) / 4000

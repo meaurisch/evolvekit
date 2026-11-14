@@ -622,3 +622,106 @@ def test_a_model_free_run_uses_all_four_operators_and_none_of_them_needs_a_model
     by_id = {r["id"]: r for r in rows}
     steps = [sum(1 for k, v in r["params"].items() if by_id[r["parent_id"]]["params"][k] != v) for r in local]
     assert steps and max(steps) <= 3, "a local step stays local"
+
+
+# -- the local step's size: the 1/5 rule (Q6, A2.6c) ------------------------
+
+
+def _step_driver(tmp_path):
+    driver = _driver(tmp_path, operators={"param_local": 1.0}, children=3, generations=40, space={"x": (0.0, 1.0)})
+    parent = driver._seed_candidate()
+    parent.score = 10.0
+    driver.by_id[parent.id] = parent
+    return driver, parent
+
+
+def _local_children(driver, parent, generation: int, scores: list[float], operator: str = "param_local"):
+    return [
+        Candidate(id=f"g{generation:03d}-c{i}", generation=generation, block="", source="", operator=operator,
+                  parent_id=parent.id, score=score, params={"x": 0.5})
+        for i, score in enumerate(scores)
+    ]
+
+
+def _perturb_state(tmp_path) -> dict:
+    return json.loads((tmp_path / "run" / "work" / "perturb.json").read_text(encoding="utf-8"))
+
+
+def test_the_step_grows_after_a_round_of_successes_and_shrinks_after_failures(tmp_path):
+    """The 1/5 rule: 1 of 3 children improved (33 % >= 20 %) -> 0.15 x 1.2 = 0.18;
+    then 0 of 3 -> 0.18 / 1.2 = 0.15. `work/perturb.json` holds both rounds, and a
+    new Driver on the same run starts from the last size."""
+    driver, parent = _step_driver(tmp_path)
+    assert driver.step_scale == 0.15, "no perturb.json yet: the default"
+    driver._adapt_step(1, _local_children(driver, parent, 1, [11.0, 9.0, 10.0]))
+    assert driver.step_scale == pytest.approx(0.18)
+    driver._adapt_step(2, _local_children(driver, parent, 2, [9.0, 9.5, 10.0]))
+    assert driver.step_scale == pytest.approx(0.15)
+    state = _perturb_state(tmp_path)
+    assert state["scale"] == driver.step_scale
+    assert [(h["generation"], h["improved"], h["tried"]) for h in state["history"]] == [(1, 1, 3), (2, 0, 3)]
+    assert [h["scale"] for h in state["history"]] == pytest.approx([0.18, 0.15])
+    again, _ = _step_driver(tmp_path)
+    assert again.step_scale == driver.step_scale, "a resumed run takes the size up exactly"
+
+
+def test_a_round_without_local_steps_leaves_the_size_and_a_recorded_round_is_not_counted_twice(tmp_path):
+    driver, parent = _step_driver(tmp_path)
+    driver._adapt_step(1, _local_children(driver, parent, 1, [11.0, 11.0], operator="param_tpe"))
+    assert driver.step_scale == 0.15 and not (tmp_path / "run" / "work" / "perturb.json").exists()
+    fallbacks = _local_children(driver, parent, 2, [11.0])  # param_cross / param_tpe fallbacks record param_local
+    driver._adapt_step(2, fallbacks)
+    assert driver.step_scale == pytest.approx(0.18)
+    driver._adapt_step(2, fallbacks)  # the same round again (a resumed run finishing it): once only
+    assert driver.step_scale == pytest.approx(0.18)
+    rejected = _local_children(driver, parent, 3, [None])
+    rejected[0].rejected = True  # never evaluated: neither a success nor a failure of the step
+    driver._adapt_step(3, rejected)
+    assert driver.step_scale == pytest.approx(0.18)
+
+
+def test_the_step_stays_within_its_limits(tmp_path):
+    driver, parent = _step_driver(tmp_path)
+    for generation in range(1, 21):
+        driver._adapt_step(generation, _local_children(driver, parent, generation, [9.0, 9.0, 9.0]))
+    assert driver.step_scale == 0.03
+    for generation in range(21, 41):
+        driver._adapt_step(generation, _local_children(driver, parent, generation, [11.0, 11.0, 11.0]))
+    assert driver.step_scale == 0.4
+
+
+def test_a_gain_inside_the_noise_is_not_a_success(tmp_path):
+    """Decision 11, Q22: improved = fitness > parent.fitness + noise_sd, the elite
+    rule's margin. With noise_sd = 1.0 three children at parent + 0.5 are 0 of 3:
+    0.15 / 1.2 = 0.125. With no noise (today) the same children are 3 of 3."""
+    driver, parent = _step_driver(tmp_path)
+    driver.grid.noise_sd = 1.0
+    driver._adapt_step(1, _local_children(driver, parent, 1, [10.5, 10.5, 10.5]))
+    assert driver.step_scale == pytest.approx(0.125)
+    quiet, quiet_parent = _step_driver(tmp_path / "quiet")
+    quiet._adapt_step(1, _local_children(quiet, quiet_parent, 1, [10.5, 10.5, 10.5]))
+    assert quiet.step_scale == pytest.approx(0.18)
+
+
+def test_a_malformed_perturb_file_is_the_default(tmp_path):
+    (tmp_path / "run" / "work").mkdir(parents=True)
+    (tmp_path / "run" / "work" / "perturb.json").write_text('{"scale": "big"}', encoding="utf-8")
+    driver, _ = _step_driver(tmp_path)
+    assert driver.step_scale == 0.15
+
+
+def test_the_local_steps_take_the_drivers_size(tmp_path):
+    """`param_local`, and the local-step fallbacks of `param_cross` and `param_tpe`,
+    step with `scale`; the driver hands them `step_scale`."""
+    space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}})
+    parent = Candidate(id="p", generation=1, block="", source="", operator="param_local", params={"x": 0.5})
+    for seed in range(20):
+        expected = space.perturb({"x": 0.5}, random.Random(seed), scale=0.03)
+        assert param_local(space, parent, seed=seed, scale=0.03).meta["params"] == expected
+        assert param_cross(space, parent, None, seed=seed, scale=0.03).meta["params"] == expected
+        assert param_tpe(space, parent, [], seed=seed, scale=0.03).meta["params"] == expected
+    driver, seed_candidate = _step_driver(tmp_path)
+    driver.step_scale = 0.03
+    moves = [abs(driver._invoke("param_local", seed_candidate, [], "none", None, f"g001-c{i}").meta["params"]["x"] - 0.5)
+             for i in range(200)]
+    assert max(moves) < 0.15, "steps of sd 0.03 stay within five sd"

@@ -81,6 +81,7 @@ from evolvekit.search.params import current_values, declared_ranges, has_params
 from evolvekit.search.scratchpad import Scratchpad
 from evolvekit.search.screening import SCREENING_FILE, ScreenControl
 from evolvekit.search.tuning import Observation
+from evolvekit.space import STEP_SCALE
 from evolvekit.stopping import RunStop, active_seconds, ai_seconds
 
 __all__ = ["Driver", "RunSummary", "SEED_OPERATOR"]
@@ -223,6 +224,14 @@ class Driver:
         self._lhs: dict[str, dict] = self._read_lhs()
         """The run's Latin hypercubes (`work/lhs.json`), one per space: what
         `param_lhs` children take their rows from, in order (`_next_lhs_row`)."""
+        self.step_scale: float
+        self._step_history: list[dict]
+        self.step_scale, self._step_history = self._read_perturb()
+        """The sd of a local step, as a share of each parameter's range
+        (`ParameterSpace.perturb`; `STEP_SCALE` at first): what `param_local`
+        and the local-step fallbacks of `param_cross` and `param_tpe` step with.
+        Adapted after each round by the 1/5 rule (`_adapt_step`), kept with one
+        line per round in `work/perturb.json`."""
         self._taken: list[dict] = []
         """The configurations proposed so far in this generation (`_breed`):
         what `param_tpe` counts as bad before they are evaluated."""
@@ -920,6 +929,9 @@ class Driver:
             for child in children:
                 if child.rejected and child.id not in self.results:
                     self._record(child)
+            # The local step's size, from this round's local steps as they
+            # measured (before a re-evaluation pools the best in place).
+            self._adapt_step(generation, children)
             self._pending_path.unlink(missing_ok=True)
             summary.generations = offset
             # The round is judged by what its own candidates measured; a
@@ -1410,6 +1422,66 @@ class Driver:
         others = [c for c in self._tuning_elites() if c.id != parent.id and c.params != parent.params]
         return self.rng.choice(others) if others else None
 
+    # -- the local step's size: the 1/5 rule (`work/perturb.json`) ----------
+
+    STEP_LIMITS = (0.03, 0.4)
+    """The smallest and the largest local step, as a share of the range."""
+    STEP_FACTOR = 1.2
+    STEP_SUCCESS = 0.2
+    """The share of a round's local steps that must improve on their parent
+    for the step to grow (Rechenberg's 1/5 rule)."""
+
+    def _perturb_path(self) -> Path:
+        return self.ledger.run_dir / "work" / "perturb.json"
+
+    def _read_perturb(self) -> tuple[float, list[dict]]:
+        """`work/perturb.json`'s step size and history; the default size and no
+        history for a run written before it, or when it is malformed."""
+        try:
+            data = json.loads(self._perturb_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return STEP_SCALE, []
+        scale = data.get("scale") if isinstance(data, dict) else None
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
+            return STEP_SCALE, []
+        history = data.get("history")
+        kept = [h for h in history if isinstance(h, dict)] if isinstance(history, list) else []
+        return float(scale), kept
+
+    def _adapt_step(self, generation: int, children: Sequence[Candidate]) -> None:
+        """The 1/5 rule, once per recorded round: of the round's evaluated
+        children that took a local step (`operator == "param_local"`, the
+        fallbacks of `param_cross` and `param_tpe` included), `improved` are
+        those that compete with a fitness above their parent's by more than the
+        elite rule's noise margin (`grid.noise_sd`; 0 with no noise estimate).
+        `improved / tried >= 0.2` grows the step by 1.2, less shrinks it by 1.2,
+        within `STEP_LIMITS`. A round without such children leaves it; a round
+        already in the history (a resumed run finishing it) is not counted again."""
+        if any(h.get("generation") == generation for h in self._step_history):
+            return
+        local = [c for c in children if c.operator == "param_local" and not c.rejected]
+        if not local:
+            return
+        margin = self.grid.noise_sd
+        improved = 0
+        for child in local:
+            parent = self.by_id.get(child.parent_id or "")
+            fitness = child.fitness
+            if not _competes(child) or fitness is None:
+                continue
+            if parent is None or parent.fitness is None or fitness > parent.fitness + margin:
+                improved += 1
+        low, high = self.STEP_LIMITS
+        grown = self.step_scale * self.STEP_FACTOR if improved / len(local) >= self.STEP_SUCCESS \
+            else self.step_scale / self.STEP_FACTOR
+        self.step_scale = min(high, max(low, grown))
+        self._step_history.append(
+            {"generation": generation, "improved": improved, "tried": len(local), "scale": self.step_scale}
+        )
+        path = self._perturb_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, json.dumps({"scale": self.step_scale, "history": self._step_history}, indent=1) + "\n")
+
     # -- one Latin hypercube for the run (`param_lhs`) ----------------------
 
     LHS_ROWS = (4, 64)
@@ -1885,11 +1957,12 @@ class Driver:
             seed = self.rng.randrange(1 << 30)
             space = self.config.problem.parameters
             assert space is not None  # `config._check_typed_operators`
+            scale = self.step_scale
             if operator == "param_local":
-                return param_local(space, parent, seed=seed)
+                return param_local(space, parent, seed=seed, scale=scale)
             if operator == "param_cross":
-                return param_cross(space, parent, self._mate_for(parent), seed=seed)
-            return param_tpe(space, parent, self._observations(), seed=seed, taken=self._taken)
+                return param_cross(space, parent, self._mate_for(parent), seed=seed, scale=scale)
+            return param_tpe(space, parent, self._observations(), seed=seed, taken=self._taken, scale=scale)
         if operator == "agent_patch":
             return self._agent_patch(parent, role, candidate_id)
         return run_operator(

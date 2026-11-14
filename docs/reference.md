@@ -479,9 +479,13 @@ evenly and never looks at a score — the right first move and the wrong tenth
 one. `param_local` starts from one of the best four configurations (the best
 most often, not always: on a noisy objective the single best is partly luck)
 and moves one parameter twice as often as two, two twice as often as three; an
-integer moves by at least one, a boolean flips. A step from the starting point
-first moves each parameter that has a `prior` to the prior's value, with the
-prior's weight as its chance (the record's `prior` names them), and steps from
+integer moves by at least one, a boolean flips. A number takes a Gaussian step
+on its own 0..1 scale, and a step past an end of the range is **reflected**
+back inside rather than clamped onto the end (clamping put about 45 % of the
+steps from 0.98 on 1.0 exactly, the same configuration again and again); how
+large the step is, is below. A step from the starting point first moves each
+parameter that has a `prior` to the prior's value, with the prior's weight as
+its chance (the record's `prior` names them), and steps from
 there. `param_cross` tries gains
 together that were found separately. `param_tpe` is a Tree-structured Parzen
 Estimator: it models, parameter by parameter, where good configurations are
@@ -513,6 +517,19 @@ observations until they are evaluated (a "constant liar"), so several
 `param_tpe` children of one generation spread out instead of proposing the same
 neighbourhood. Until there are eight observations it takes a local step
 instead, and the record says so.
+
+**The step's size follows the 1/5 rule.** It starts at 0.15 of the range (the
+sd of the step) and is adapted after every round that had local steps — those
+of `param_local` and the local-step fallbacks of `param_cross` and `param_tpe`,
+counted when they were evaluated. A child counts as an improvement when it
+competes and beats its parent's fitness by more than the noise margin the
+[elite rule](#the-archive) uses (0 without a noise estimate). If at least 20 %
+of the round's local steps improved, the step grows by 1.2; otherwise it
+shrinks by 1.2; it stays between 0.03 and 0.4. A round without local steps
+leaves it. The size and one line per round are kept in `work/perturb.json`
+(`{"scale": 0.18, "history": [{"generation": 3, "improved": 1, "tried": 3,
+"scale": 0.18}]}`), so a resumed run takes the size up where it was; a run
+without the file starts at 0.15.
 
 Which to use depends on how good the defaults already are. Measured at equal
 budget, five search seeds each, on two stand-in solvers

@@ -27,7 +27,7 @@ from evolvekit.prompts import Inspiration, build_messages
 from evolvekit.providers.base import Completion, Provider, ProviderError
 from evolvekit.search.params import apply_params, current_values, declared_ranges
 from evolvekit.search.tuning import Observation, propose_tpe
-from evolvekit.space import PRIOR_BAND, Parameter, ParameterSpace
+from evolvekit.space import PRIOR_BAND, STEP_SCALE, Parameter, ParameterSpace
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only when a tree problem is handled
     from evolvekit.tree import Repo
@@ -374,7 +374,9 @@ def _rendered(space: ParameterSpace, values: dict, operator: str, **meta) -> Ope
     )
 
 
-def param_local(space: ParameterSpace, parent: Candidate, *, seed: int) -> OperatorResult:
+def param_local(
+    space: ParameterSpace, parent: Candidate, *, seed: int, scale: float = STEP_SCALE
+) -> OperatorResult:
     """A neighbour of the parent's configuration: one to three parameters moved
     a little (`ParameterSpace.perturb`). The exploiting half of a model-free
     search -- most of what can be won from a mature solver's defaults is next
@@ -394,12 +396,17 @@ def param_local(space: ParameterSpace, parent: Candidate, *, seed: int) -> Opera
             if parameter.prior is not None and rng.random() < parameter.prior[1]:
                 base[parameter.name] = parameter.prior[0]
                 started.append(parameter.name)
-    child = space.draw(lambda: space.perturb(base, rng))
+    child = space.draw(lambda: space.perturb(base, rng, scale=scale))
     return _rendered(space, child, "param_local", **({"prior": started} if started else {}))
 
 
 def param_cross(
-    space: ParameterSpace, parent: Candidate, mate: Candidate | None, *, seed: int
+    space: ParameterSpace,
+    parent: Candidate,
+    mate: Candidate | None,
+    *,
+    seed: int,
+    scale: float = STEP_SCALE,
 ) -> OperatorResult:
     """Each parameter from the parent or from `mate`, so gains found separately
     are tried together. Without a second configuration worth crossing with --
@@ -409,7 +416,7 @@ def param_cross(
     other = dict(mate.params) if mate is not None and mate.params else {}
     differing = [p.name for p in space if p.name in other and other[p.name] != base[p.name]]
     if len(differing) < 2:  # any cross of these two is one of the two
-        child = space.draw(lambda: space.perturb(base, rng))
+        child = space.draw(lambda: space.perturb(base, rng, scale=scale))
         return _rendered(space, child, "param_local", fallback_of="param_cross")
 
     def cross() -> dict:
@@ -428,6 +435,7 @@ def param_tpe(
     *,
     seed: int,
     taken: Sequence[Mapping[str, Any]] = (),
+    scale: float = STEP_SCALE,
 ) -> OperatorResult:
     """The configuration a Tree-structured Parzen Estimator rates highest, given
     every configuration evaluated so far (`search/tuning.py`) and the siblings
@@ -437,7 +445,7 @@ def param_tpe(
     proposal = propose_tpe(space, observations, rng, taken=taken)
     if proposal is None:
         base = dict(parent.params or space.defaults())
-        child = space.draw(lambda: space.perturb(base, rng))
+        child = space.draw(lambda: space.perturb(base, rng, scale=scale))
         return _rendered(space, child, "param_local", fallback_of="param_tpe")
     return _rendered(space, proposal, "param_tpe", observations=len(observations))
 
