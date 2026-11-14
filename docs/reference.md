@@ -960,7 +960,10 @@ with the estimate's degrees of freedom (across seeds Σ(nᵢ − 1) over the
 candidates pooled; paired (C − 1)(S − 1); a calibration 2). Each rate quoted
 below then holds whether the noise rests on three runs or three hundred: an
 equal candidate is kept out by the veto in about 8 % either way, not 15 %, and
-a true twin is caught in about 84 %, not 70 %. It is shown by `status` (`progress.noise`) and
+a true twin is caught in about 84 %, not 70 %. A limit: a run resumed from a
+`noise.json` written before the per-seed runs were kept pools its old
+differences to the seed with their full degrees of freedom, though they share
+the seed's runs, so its estimate is a little less certain than its df say. It is shown by `status` (`progress.noise`) and
 [`preflight`](#before-you-spend-anything-preflight). Each rule that reads the
 estimate says so in its own section and is listed here:
 
@@ -1108,9 +1111,12 @@ own, and the framework knows what it could not know before:
   before, and it does not compete — the standing of a candidate that was not
   promoted, not of one that failed. With ten-minute runs, `after: 4` of ten
   instances saves an hour of solver time per losing candidate. The margin is
-  the largest of three: `margin_pct`; twice the run-to-run noise in percent
-  (the objective's relative noise from [the run's estimate](#stochastic-evaluators-seeds-n),
-  measured by the run — 0 without one, which leaves `margin_pct`); and twice
+  the largest of three: `margin_pct`; the run-to-run noise term
+  `100 · t_ν(0.9975) · √2 · cv/√m` percent at a look over m cases — the 99.75 %
+  quantile of the mean ratio's noise, 0.25 % a look (`cv` the objective's
+  relative noise from [the run's estimate](#stochastic-evaluators-seeds-n),
+  measured by the run, ν its degrees of freedom; about 2·cv at m = 4 with the
+  noise well measured; 0 without an estimate, which leaves `margin_pct`); and twice
   the standard error of the per-case differences seen so far, shrinking to
   nothing as the last cases come in (the factor √(1 − m/n) over the m of n
   instances compared). The race asks whether a candidate is behind *on this
@@ -1121,17 +1127,19 @@ own, and the framework knows what it could not know before:
   seed's own effect is the same on both sides and the paired noise is the right
   one; an incumbent file from before that keeps only its means over its S
   seeds, and the race then reads the across-seed noise scaled by
-  √((1 + 1/S)/2). The noise term is widened to Student's t at the estimate's
-  degrees of freedom. A candidate exactly as good as the incumbent is raced out in
-  under 1 % of runs against a fresh incumbent — whether the run noise is well
-  measured or calibrated from the seed's three runs, and on a repeatable
-  evaluator at `seeds: 3` — rising to about 3 % against the
-  best of a long run (the best of 50; about 1.4 % against the best of eight),
-  with 2 % run noise. One that trades cases (per-case differences of 3 %, no
-  run noise) and is not behind on the mean over the stage's cases is raced out
-  in about 3 %; over all such candidates the rate is about 19 %, nearly all of
-  them really behind on the stage's cases. A candidate 5 % behind is stopped in
-  about 88 %. The reason names the margin it used, and the `raced_out` event
+  √((1 + 1/S)/2). With 2 % run noise, a candidate exactly as good as the
+  incumbent is raced out in under 1 % of runs against a fresh incumbent (about
+  0.5 % with the noise well measured, 0.2 % on a calibration's three runs, and
+  none in 4000 on a repeatable evaluator at `seeds: 3`), and in under 3 %
+  against the best of eight (about 2.7 %; 0.8 % calibrated), rising to about
+  7 % against the best of 50. One that trades cases (per-case differences of
+  3 %, no run noise) and is not behind on the mean over the stage's cases is
+  raced out in about 3 %; over all such candidates the rate is about 19 %,
+  nearly all of them really behind on the stage's cases. A candidate 5 %
+  behind is stopped in about 97 % with the noise well measured. At `seeds: 1`,
+  where the noise rests on the seed's three runs, the race can only stop large
+  deficits: 5 % behind is stopped in about 11 %, 10 % in about 36 %, 20 % in
+  about 82 %. The reason names the margin it used, and the `raced_out` event
   the `looks`. The baseline always finishes (it is the yardstick),
   so does the first candidate through a stage, and the best so far is kept in
   `work/incumbent.json` for a resumed run. `confirm` never races. `after` must be
@@ -1290,8 +1298,13 @@ any order.
   calibrated estimate in about 94 % (measures whose noise is one estimate
   miss together, which is why the catch is *at least* 84 %).
 - A real difference of four noise sd (twice the margin) is still called a twin
-  about **8 %** of the time when σ̂ is well measured (more often on few
-  degrees of freedom, where the margin is wider).
+  about **8 %** of the time when σ̂ is well measured. On few degrees of freedom
+  the margin is wider, and where many numbers share one estimate they miss
+  together: a real gain of four run-sd on every one of ten cases is called a
+  twin in about **70 %** of trials when the noise is a calibration's (three
+  runs, 2 degrees of freedom) — the one estimate sometimes comes out large
+  enough to cover every case at once. More replicates (`seeds: 3`, or more
+  candidates with their own runs) shrink it.
 - Where many earlier candidates sit close together, a child truly one run-sd
   better than all of them is evaluated about 95 % of the time at `seeds: 3`
   (about 84 % at `seeds: 1`), with the noise well measured. When those candidates' own scores are noisy, the
@@ -1345,7 +1358,12 @@ it is read back, by the resumed run and by every view alike.
 The comparison is `private < seed's private − margin`. The margin is twice the
 sd of one candidate's hold-out score as the run's noise estimate
 (`work/noise.json`) gives it: `2 · σ̂/√seeds`, σ̂ the sd of one run of the
-score and `seeds` the final stage's, the seed's own runs included. When the
+score and `seeds` the final stage's, the seed's own runs included. With
+`score.weights` over several measures, σ̂ is the spread of the score's own
+per-run values (Σ wₖ·xₖ of each run), so measures that move together, or
+against each other, count as they do; where the runs are not kept (a
+calibration) it is `√(Σ wₖ² σ̂ₖ²)` on the smallest of the measures' degrees of
+freedom. When the
 hold-out has no estimate of its own (it replicates nothing, e.g. at `seeds: 1`),
 the public stage's noise stands in, rescaled by `|seed's private / seed's
 public|` — only when both are non-zero and of one sign; otherwise the margin is

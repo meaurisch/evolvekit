@@ -104,7 +104,11 @@ def test_a_race_not_told_the_stages_instances_counts_the_incumbents():
 def test_the_margin_grows_with_the_noise_and_never_falls_below_margin_pct():
     quiet = Race(objective="cost", minimize=True, incumbent={"a": 1.0}, after=1, margin_pct=1.0, cv=0.001, instances=4)
     noisy = Race(objective="cost", minimize=True, incumbent={"a": 1.0}, after=1, margin_pct=1.0, cv=0.02, instances=4)
-    assert quiet.margin_at([0.5]) == 1.0 and noisy.margin_at([0.5]) == pytest.approx(4.0)
+    # Decision 18a: 100 * t(0.9975) * sqrt(2) * cv / sqrt(m), the normal's 2.807 at a known cv.
+    assert quiet.margin_at([0.5]) == 1.0 and noisy.margin_at([0.5]) == pytest.approx(100 * 2.8070337683 * 2**0.5 * 0.02)
+    assert noisy.margin_at([0.0] * 4) == pytest.approx(100 * 2.8070337683 * 2**0.5 * 0.02 / 2), "a mean of 4: half"
+    few = Race(objective="cost", minimize=True, incumbent={"a": 1.0}, after=1, margin_pct=1.0, cv=0.02, instances=4, df=2)
+    assert few.margin_at([0.5]) == pytest.approx(100 * 14.0890472756 * 2**0.5 * 0.02, rel=1e-5), "Student's t at 2 df"
 
 
 def test_the_margin_knows_the_spread_between_cases_and_drops_it_at_the_end():
@@ -160,9 +164,10 @@ def _race(incumbent: list[float], **rule) -> Race:
 
 def test_an_equal_candidate_against_a_fresh_incumbent_is_raced_out_in_under_1_percent():
     """10 instances, after 4 (looks 4, 7), one run per instance on both sides, cv 2 %:
-    margin at least 4 %; the mean ratio over 4 instances has sd 2.83/2 = 1.41 %:
-    z >= 2.83, 0.23 %, the second look adds about 0.01 %. The spread term can only
-    raise the margin. 20 000 trials: SE about 0.03 %."""
+    the mean ratio over m instances has sd 2.83 %/√m, and the noise term is its
+    99.75 % quantile at each look (Decision 18a): 0.25 % a look, about 0.5 % over
+    both, less where the spread term raises the margin. 20 000 trials: SE 0.05 %;
+    measured 0.47 %."""
     rng, trials = random.Random(21), 20_000
     out = sum(_raced_out(_race(_noisy(rng, 100.0)), _noisy(rng, 100.0)) for _ in range(trials))
     rate = out / trials
@@ -177,8 +182,8 @@ def _best_of(rng: random.Random, count: int) -> list[float]:
 def test_an_equal_candidate_against_the_best_of_eight_is_raced_out_in_under_3_percent():
     """The incumbent is the best of eight equal candidates by its mean over 10
     instances: each of its values is biased by 1.42 * 2 % / sqrt(10) = 0.90 %.
-    Look 1: z = (4 - 0.90) / 1.41 = 2.19, about 1.4 % before the spread term. Printed
-    beside it: the best of 50 -- the docs' "about 3 % against the best of a long run"."""
+    Look 4: z = (3.97 - 0.90) / 1.41 = 2.17; look 7: (2.65 - 0.90) / 1.07 = 1.64 --
+    measured 2.73 % (SE 0.12 %). Printed beside it: the best of 50 (about 7 %)."""
     rng, trials = random.Random(22), 20_000
     rates = {}
     for count in (8, 50):
@@ -190,8 +195,9 @@ def test_an_equal_candidate_against_the_best_of_eight_is_raced_out_in_under_3_pe
 
 
 def test_a_candidate_five_percent_behind_is_raced_out_in_over_80_percent():
-    """Behind 5 %, margin 4 %, sd 1.41 % at look 1: P(Z > -0.71) = 76 %; look 2 (sd 1.07 %)
-    brings it to about 88 % before the spread term, which can only lower it."""
+    """Behind 5 %, margin 3.97 % at look 4 (sd 1.41 %): P(Z > -0.73) = 77 %; look 7
+    (margin 2.65 %, sd 1.07 %) brings it to about 97 % (measured 97.1 %); the spread
+    term can only lower it."""
     rng, trials = random.Random(24), 20_000
     out = sum(_raced_out(_race(_noisy(rng, 100.0)), _noisy(rng, 105.0)) for _ in range(trials))
     rate = out / trials
@@ -234,8 +240,8 @@ def test_an_instance_at_zero_is_left_out_of_the_relative_noise():
     race = Race(objective="cost", minimize=True, incumbent={"a": 100.0, "b": 100.0, "z": 0.0}, after=1,
                 margin_pct=1.0, cv=cv, instances=3)
     assert race.behind_pct({"a": 103.0, "z": 50.0}) == (1, pytest.approx(3.0)), "z is skipped"
-    assert race.decide({"a": 103.0, "z": 50.0}) is None, "3 % is inside twice the noise"
-    assert race.decide({"a": 105.0, "z": 0.0}).startswith("raced out after 1 of 3 instances: 5.00 %")
+    assert race.decide({"a": 103.0, "z": 50.0}) is None, "3 % is inside the noise term (7.9 % at one instance)"
+    assert race.decide({"a": 110.0, "z": 0.0}).startswith("raced out after 1 of 3 instances: 10.00 %")
     nothing = Race(objective="cost", minimize=True, incumbent={"z": 0.0}, after=1, margin_pct=1.0, instances=2)
     assert nothing.decide({"z": 5.0}) is None, "nothing to compare on"
 

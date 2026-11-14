@@ -42,6 +42,15 @@ def _se(p: float, n: int) -> float:
     return math.sqrt(p * (1 - p) / n)
 
 
+def _sizes(slow_band: tuple[float, float], fast_band: tuple[float, float], *, slow: int = 20_000, fast: int = 4000):
+    """Each rate twice: `slow` trials with the tight band (marked slow) and
+    `fast` trials in the fast loop, with a band wide enough to stay 2 SE away."""
+    return pytest.mark.parametrize(("trials", "band"), [
+        pytest.param(slow, slow_band, marks=pytest.mark.slow, id="slow"),
+        pytest.param(fast, fast_band, id="fast"),
+    ])
+
+
 def _report(what: str, hits: int, trials: int) -> float:
     rate = hits / trials
     print(f"{what}: {rate:.2%} (SE {_se(rate, trials):.2%}, {trials} trials)")
@@ -101,7 +110,8 @@ def _replicated(rng: random.Random, seeds: int = 3) -> tuple[Noise, float, float
     return noise, fmean(public), fmean(private)
 
 
-def _cascade(tmp_path: Path, seeds: int, *, instances: bool = False, race: bool = False, proxy: bool = False):
+def _cascade(tmp_path: Path, seeds: int, *, instances: bool = False, race: bool = False, proxy: bool = False,
+             weights: dict[str, float] | None = None):
     from evolvekit.evaluate import Cascade
 
     full = {"id": "full", "kind": "command", "kpis_from": "stdout", "seeds": seeds,
@@ -118,7 +128,9 @@ def _cascade(tmp_path: Path, seeds: int, *, instances: bool = False, race: bool 
     config = build_config(
         {
             "problem": {"parameters": {"x": {"type": "float", "low": -1.0, "high": 1.0, "default": 0.0}}},
-            "evaluate": {"stages": stages, "score": {"objective": "cost", "direction": "minimize"}},
+            "evaluate": {"stages": stages, "score": (
+                {"objective": "cost", "direction": "minimize"} if weights is None
+                else {"objective": next(iter(weights)), "direction": "maximize", "weights": weights})},
             "search": {"operators": {"param_lhs": 1.0}, "novelty": {"behavioural": "on"}},
         },
         base_dir=tmp_path,
@@ -149,17 +161,67 @@ def _veto_rate(tmp_path: Path, seeds: int, trials: int, rng: random.Random) -> f
     return _report(f"veto, equal candidate kept out, seeds: {seeds}, sigma estimated (2 df)", kept, trials)
 
 
-def test_with_a_calibrated_noise_an_equal_candidate_is_kept_out_in_about_8_percent(tmp_path):
+EIGHT = _sizes((0.070, 0.088), (0.065, 0.095))
+"""About 7.9 %: SE 0.19 % at 20 000 trials, 0.43 % at 4000."""
+
+
+@EIGHT
+def test_with_a_calibrated_noise_an_equal_candidate_is_kept_out_in_about_8_percent(tmp_path, trials, band):
     """Statistician round 1: 14.7 % with the normal quantile on a 2-df calibration
     (t_2 theory 14.6 %). With Student's t: P(t_2 < -t_2(Φ(-√2))) = 7.86 %."""
-    rate = _veto_rate(tmp_path, 1, 20_000, random.Random(7))
-    assert 0.070 <= rate <= 0.088
+    rate = _veto_rate(tmp_path, 1, trials, random.Random(7))
+    assert band[0] <= rate <= band[1]
 
 
-def test_at_seeds_3_with_the_seeds_own_replicates_an_equal_candidate_is_kept_out_in_about_8_percent(tmp_path):
+@EIGHT
+def test_at_seeds_3_with_the_seeds_own_replicates_an_equal_candidate_is_kept_out_in_about_8_percent(
+        tmp_path, trials, band):
     """The hold-out's own estimate, from the seed's three hold-out runs (2 df)."""
-    rate = _veto_rate(tmp_path, 3, 20_000, random.Random(8))
-    assert 0.070 <= rate <= 0.088
+    rate = _veto_rate(tmp_path, 3, trials, random.Random(8))
+    assert band[0] <= rate <= band[1]
+
+
+def _correlated_veto_rate(tmp_path: Path, rho: float, trials: int, rng: random.Random) -> float:
+    """score = a + b (weights 1, 1), seeds: 3, not repeatable; one run's a and b
+    have sd 1 each and correlation `rho`. The hold-out's estimate from 10
+    candidates' runs (`observe`); an equal candidate against the seed."""
+    from evolvekit.evaluate.cascade import holdout_veto
+
+    cascade = _cascade(tmp_path, 3, weights={"a": 1.0, "b": 1.0})
+
+    def runs3():
+        out = []
+        for _ in range(3):
+            z1, z2 = rng.gauss(0, 1), rng.gauss(0, 1)
+            out.append((z1, rho * z1 + math.sqrt(1 - rho**2) * z2))
+        return out
+
+    def outcome(rs):
+        a, b = [r[0] for r in rs], [r[1] for r in rs]
+        return StageOutcome(stage_id="full", ok=True, kpis={"a": fmean(a), "b": fmean(b)},
+                            kpi_var={"a": variance(a), "b": variance(b)}, seed_runs={"a": a, "b": b},
+                            seed_list=(0, 1, 2), runs=3, private=True)
+
+    kept = 0
+    for _ in range(trials):
+        cascade.noise = Noise()
+        cascade.noise.set_repeatable("full/private", False)
+        for c in range(10):
+            cascade.noise.observe("full/private", f"c{c}", outcome(runs3()), is_seed=(c == 0))
+        seed, mine = (fmean(x + y for x, y in runs3()) for _ in range(2))
+        cascade.seed_public, cascade.seed_private = 1.0, seed
+        kept += holdout_veto(cascade.config, mine, seed, cascade.holdout_margin()) is not None
+    return _report(f"veto, equal candidate kept out, two measures at correlation {rho}", kept, trials)
+
+
+@pytest.mark.parametrize("rho", [0.8, 0.0, -0.5])
+@_sizes((0.070, 0.088), (0.065, 0.095), slow=20_000, fast=4000)
+def test_with_two_correlated_measures_an_equal_candidate_is_kept_out_in_about_8_percent(tmp_path, rho, trials, band):
+    """Decision 18b: the score's noise from its own per-run values (Σ w·x per run),
+    so the measures' covariance is in. Statistician round 2, with Σ w² sd² and
+    Welch-Satterthwaite: 14.8 % at correlation 0.8, 2.3 % at -0.5."""
+    rate = _correlated_veto_rate(tmp_path, rho, trials, random.Random(int(10 * rho) + 40))
+    assert band[0] <= rate <= band[1]
 
 
 # -- the promotion band: a level candidate falls below it in about 8 % ----------------
@@ -177,16 +239,18 @@ def _band_rate(tmp_path: Path, seeds: int, trials: int, rng: random.Random) -> f
     return _report(f"promotion, candidate level with the k-th left out, seeds: {seeds}", left, trials)
 
 
-def test_with_a_calibrated_noise_a_candidate_level_with_the_kth_is_left_out_in_about_8_percent(tmp_path):
+@EIGHT
+def test_with_a_calibrated_noise_a_candidate_level_with_the_kth_is_left_out_in_about_8_percent(tmp_path, trials, band):
     """It is left out only when it measures more than the band below the k-th:
     P(D < -2·score_sd·t) = 7.86 % at any df (15 % with the normal band at 2 df)."""
-    rate = _band_rate(tmp_path, 1, 20_000, random.Random(9))
-    assert 0.070 <= rate <= 0.088
+    rate = _band_rate(tmp_path, 1, trials, random.Random(9))
+    assert band[0] <= rate <= band[1]
 
 
-def test_at_seeds_3_a_candidate_level_with_the_kth_is_left_out_in_about_8_percent(tmp_path):
-    rate = _band_rate(tmp_path, 3, 20_000, random.Random(10))
-    assert 0.070 <= rate <= 0.088
+@EIGHT
+def test_at_seeds_3_a_candidate_level_with_the_kth_is_left_out_in_about_8_percent(tmp_path, trials, band):
+    rate = _band_rate(tmp_path, 3, trials, random.Random(10))
+    assert band[0] <= rate <= band[1]
 
 
 # -- behaviour twins: one number in about 84 %, many in at least about 84 % -----------
@@ -201,20 +265,26 @@ def _twin_one_number(noise: Noise, seeds: int, rng: random.Random) -> bool:
     return within(x, y, margins, 9)
 
 
-def test_with_a_calibrated_noise_a_true_twin_is_caught_in_about_84_percent():
+EIGHTY_FOUR = _sizes((0.825, 0.86), (0.815, 0.87))
+"""About 84.3 %: SE 0.26 % at 20 000 trials, 0.57 % at 4000."""
+
+
+@EIGHTY_FOUR
+def test_with_a_calibrated_noise_a_true_twin_is_caught_in_about_84_percent(trials, band):
     """Statistician round 1: 70 % with the normal c_1 = √2 on 2 df (t_2 theory 70.7 %).
     With Student's t at the same probability: erf(1) = 84.27 % at any df."""
-    rng, trials = random.Random(11), 20_000
+    rng = random.Random(11)
     caught = sum(_twin_one_number(_calibrated(rng)[0], 1, rng) for _ in range(trials))
     rate = _report("true twin caught, one number, calibrated", caught, trials)
-    assert 0.825 <= rate <= 0.86
+    assert band[0] <= rate <= band[1]
 
 
-def test_at_seeds_3_with_the_seeds_own_replicates_a_true_twin_is_caught_in_about_84_percent():
-    rng, trials = random.Random(12), 20_000
+@EIGHTY_FOUR
+def test_at_seeds_3_with_the_seeds_own_replicates_a_true_twin_is_caught_in_about_84_percent(trials, band):
+    rng = random.Random(12)
     caught = sum(_twin_one_number(_replicated(rng)[0], 3, rng) for _ in range(trials))
     rate = _report("true twin caught, one number, seeds: 3", caught, trials)
-    assert 0.825 <= rate <= 0.86
+    assert band[0] <= rate <= band[1]
 
 
 def _calibrated_instances(rng: random.Random, scale: list[float], cv: float) -> Noise:
@@ -236,18 +306,16 @@ def _calibrated_instances(rng: random.Random, scale: list[float], cv: float) -> 
     return noise
 
 
-def test_with_a_calibrated_noise_a_true_twin_on_ten_instances_is_caught_in_at_least_about_84_percent():
-    """Statistician round 1: 55 % on 10 instances (the normal c_10 on 2 df). The ten
-    margins rest on one cv, so their misses are positively correlated and the
-    catch is above erf(1): "at least about 84 %"."""
-    rng, trials = random.Random(13), 10_000
+def _ten_instance_twins(rng: random.Random, trials: int, gain_sd: float) -> int:
+    """True twins (`gain_sd` 0) or a real gain of `gain_sd` run-sd on every one
+    of 10 instances, under a calibrated noise (one cv, 2 df)."""
     scale = [100.0 * (1 + k) for k in range(10)]
     caught = 0
     for _ in range(trials):
         noise = _calibrated_instances(rng, scale, 0.02)
         name = "cost_per_instance"
         x = Behaviour({}, {name: [s * (1 + rng.gauss(0, 0.02)) for s in scale]})
-        y = Behaviour({}, {name: [s * (1 + rng.gauss(0, 0.02)) for s in scale]})
+        y = Behaviour({}, {name: [s * (1 + 0.02 * gain_sd + rng.gauss(0, 0.02)) for s in scale]})
         margins = twin_margins(
             x, {}, {name: [noise.vector_sd("full", name, i) for i in range(10)]}, 1,
             cvs={name: noise.vector_cv("full", name)},
@@ -255,8 +323,28 @@ def test_with_a_calibrated_noise_a_true_twin_on_ten_instances_is_caught_in_at_le
             cv_dfs={name: noise.vector_cv_df("full", name)},
         )
         caught += within(x, y, margins, 9)
-    rate = _report("true twin caught, 10 instances, calibrated", caught, trials)
-    assert rate >= 0.825
+    return caught
+
+
+@_sizes((0.825, 1.0), (0.815, 1.0), slow=10_000, fast=2000)
+def test_with_a_calibrated_noise_a_true_twin_on_ten_instances_is_caught_in_at_least_about_84_percent(trials, band):
+    """Statistician round 1: 55 % on 10 instances (the normal c_10 on 2 df). The ten
+    margins rest on one cv, so their misses are positively correlated and the
+    catch is above erf(1): "at least about 84 %" (measured 93.8 %)."""
+    rate = _report("true twin caught, 10 instances, calibrated", _ten_instance_twins(random.Random(13), trials, 0.0),
+                   trials)
+    assert band[0] <= rate <= band[1]
+
+
+@_sizes((0.67, 0.74), (0.65, 0.75), slow=10_000, fast=2000)
+def test_with_a_calibrated_noise_a_gain_of_four_sd_on_ten_instances_is_a_twin_in_about_70_percent(trials, band):
+    """Decision 18c: the price of the shared estimate. A real gain of four run-sd on
+    every one of ten cases is called a twin when the one calibrated cv (2 df) came
+    out large enough to cover it everywhere -- far more often than the 8 % one
+    number has at a known sd: measured 70.3 % (SE 0.46 %); the docs quote it."""
+    rate = _report("gain of 4 sd on 10 instances called a twin, calibrated",
+                   _ten_instance_twins(random.Random(17), trials, 4.0), trials)
+    assert band[0] <= rate <= band[1]
 
 
 # -- the race: under 1 % against a fresh incumbent ---------------------------------
@@ -298,21 +386,45 @@ def _race_out(cascade, mine: list[list[float]], seeds: list[int]) -> bool:
     return False
 
 
-def test_with_a_calibrated_cv_an_equal_candidate_is_raced_out_in_under_1_percent(tmp_path):
-    """Statistician round 1: 4.3 % with the normal noise term on a 2-df cv. The
-    noise term `200·cv` is z = √(2m) sd of the mean ratio at look m; widened to
-    t_2 at that tail it is about 0.25 % again (the true-cv rate)."""
+def _calibrated_race_rate(tmp_path: Path, trials: int, rng: random.Random, *, best_of: int = 1,
+                          behind: float = 0.0) -> float:
+    """`seeds: 1`, cv 2 % per run, 10 cases, a calibrated cv (2 df), through
+    `Cascade._race_for`: the incumbent is the best of `best_of` equal
+    candidates by its mean, the challenger `behind` (a fraction) worse."""
     cascade = _cascade(tmp_path, 1, instances=True, race=True)
-    rng, trials, out = random.Random(14), 10_000, 0
-    scale = [100.0] * 10
+    scale, out = [100.0] * 10, 0
     for _ in range(trials):
         cascade.noise = _calibrated_instances(rng, scale, 0.02)
         cascade.incumbent = {}
-        cascade._note_incumbent(cascade.config.final_stage, _candidate("inc"),
-                                _instance_outcome([[s * (1 + rng.gauss(0, 0.02)) for s in scale]], [0]))
-        out += _race_out(cascade, [[s * (1 + rng.gauss(0, 0.02)) for s in scale]], [0])
-    rate = _report("equal candidate raced out, fresh incumbent, calibrated cv", out, trials)
-    assert rate < 0.01
+        rows = min(([s * (1 + rng.gauss(0, 0.02)) for s in scale] for _ in range(best_of)), key=fmean)
+        cascade._note_incumbent(cascade.config.final_stage, _candidate("inc"), _instance_outcome([rows], [0]))
+        out += _race_out(cascade, [[s * (1 + behind) * (1 + rng.gauss(0, 0.02)) for s in scale]], [0])
+    return _report(f"raced out, calibrated cv, incumbent best of {best_of}, {behind:.0%} behind", out, trials)
+
+
+@_sizes((0.0, 0.01), (0.0, 0.015), slow=20_000, fast=4000)
+def test_with_a_calibrated_cv_an_equal_candidate_is_raced_out_in_under_1_percent(tmp_path, trials, band):
+    """Statistician round 1: 4.3 % with the normal noise term on a 2-df cv. The
+    noise term is the 99.75 % quantile of the mean ratio's noise at each look,
+    Student's t at the cv's df (Decision 18a): 0.25 % a look."""
+    rate = _calibrated_race_rate(tmp_path, trials, random.Random(14))
+    assert band[0] <= rate < band[1]
+
+
+@_sizes((0.0, 0.03), (0.0, 0.03), slow=20_000, fast=4000)
+def test_with_a_calibrated_cv_an_equal_candidate_against_the_best_of_eight_is_raced_out_in_under_3_percent(
+        tmp_path, trials, band):
+    rate = _calibrated_race_rate(tmp_path, trials, random.Random(15), best_of=8)
+    assert band[0] <= rate < band[1]
+
+
+@pytest.mark.slow
+def test_with_a_calibrated_cv_the_race_stops_only_large_deficits(tmp_path):
+    """The power the docs quote at `seeds: 1` (three runs behind the noise): a
+    candidate 5 %, 10 % and 20 % behind, 4000 trials each (with the cv known it
+    is about 97 % at 5 %, `test_racing`)."""
+    rates = {b: _calibrated_race_rate(tmp_path, 4000, random.Random(16), behind=b) for b in (0.05, 0.10, 0.20)}
+    assert rates[0.05] < rates[0.10] < rates[0.20] and rates[0.20] > 0.75
 
 
 def _repeatable_world(rng: random.Random, g: list[list[float]], f: float = 1.0, e: float = 0.002):
@@ -343,21 +455,23 @@ def _paired_race_rate(tmp_path: Path, trials: int, rng: random.Random, *, legacy
                    out, trials)
 
 
-def test_on_a_repeatable_stage_at_seeds_3_an_equal_candidate_is_raced_out_in_under_1_percent(tmp_path):
+@_sizes((0.0, 0.01), (0.0, 0.01), slow=4000, fast=1000)
+def test_on_a_repeatable_stage_at_seeds_3_an_equal_candidate_is_raced_out_in_under_1_percent(tmp_path, trials, band):
     """Decision 17a. rev_a2_race_paired: the seed-0 prefix against the incumbent's
     means over three seeds with the paired cv (about 0.2 %) raced out 10 % of equal
     challengers. Against the incumbent's own seed-0 values the seed's effect
     cancels and the paired cv is the right noise."""
-    rate = _paired_race_rate(tmp_path, 4000, random.Random(11), legacy=False)
-    assert rate < 0.01
+    rate = _paired_race_rate(tmp_path, trials, random.Random(11), legacy=False)
+    assert band[0] <= rate < band[1]
 
 
-def test_with_a_legacy_incumbent_file_the_race_reads_the_across_noise(tmp_path):
+@_sizes((0.0, 0.01), (0.0, 0.01), slow=4000, fast=1000)
+def test_with_a_legacy_incumbent_file_the_race_reads_the_across_noise(tmp_path, trials, band):
     """Without the per-seed values, the across cv scaled to √((1 + 1/S)/2): the
     difference of a one-seed prefix and a mean of S seeds is at most
     cv_across²·(1 + 1/S). Conservative on a repeatable stage."""
-    rate = _paired_race_rate(tmp_path, 4000, random.Random(12), legacy=True)
-    assert rate < 0.01
+    rate = _paired_race_rate(tmp_path, trials, random.Random(12), legacy=True)
+    assert band[0] <= rate < band[1]
 
 
 def test_the_incumbent_file_keeps_its_values_per_seed(tmp_path):
@@ -383,28 +497,32 @@ def _score_noise(rng: random.Random, seeds: int, cascade) -> tuple[float, float]
 
 
 @pytest.mark.parametrize("seeds", [1, 3])
-def test_with_the_noise_estimated_an_equal_candidate_reads_as_an_improvement_in_about_36_percent(tmp_path, seeds):
+@_sizes((0.345, 0.385), (0.335, 0.39))
+def test_with_the_noise_estimated_an_equal_candidate_reads_as_an_improvement_in_about_36_percent(
+        tmp_path, seeds, trials, band):
     """x, b two equal candidates' scores: P(x - b > 0.5·sd·t) = P(Z > 0.354) = 36.2 %
-    at any df (40 % with the normal half-sd at 2 df)."""
+    at any df (40 % with the normal half-sd at 2 df). SE 0.34 % / 0.76 %."""
     from evolvekit.budget import StopPolicy
 
-    cascade, rng, trials, hits = _cascade(tmp_path, seeds), random.Random(51 + seeds), 20_000, 0
+    cascade, rng, hits = _cascade(tmp_path, seeds), random.Random(51 + seeds), 0
     for _ in range(trials):
         policy = StopPolicy(StopConfig(patience=9, epsilon=None))
         policy.noise_sd, policy.noise_df = _score_noise(rng, seeds, cascade)
         policy.update(-fmean(rng.gauss(MU, SIGMA) for _ in range(seeds)))
         hits += policy.update(-fmean(rng.gauss(MU, SIGMA) for _ in range(seeds))).stagnant_generations == 0
     rate = _report(f"equal candidate read as an improvement, seeds: {seeds}", hits, trials)
-    assert 0.345 <= rate <= 0.385
+    assert band[0] <= rate <= band[1]
 
 
 @pytest.mark.parametrize("seeds", [1, 3])
-def test_with_the_noise_estimated_an_equal_challenger_takes_the_cell_in_about_24_percent(tmp_path, seeds):
+@_sizes((0.228, 0.252), (0.215, 0.265))
+def test_with_the_noise_estimated_an_equal_challenger_takes_the_cell_in_about_24_percent(tmp_path, seeds, trials, band):
     """P(x - e > sd·t) = P(Z > 0.707) = 24.0 % at any df (29 % with the normal margin
-    at 2 df). The 1/5 rule's "improved" reads the same margin (`Archive.margin`)."""
+    at 2 df). The 1/5 rule's "improved" reads the same margin (`Archive.margin`).
+    SE 0.30 % / 0.68 %."""
     from evolvekit.search.archive import Archive
 
-    cascade, rng, trials, taken = _cascade(tmp_path, seeds), random.Random(61 + seeds), 20_000, 0
+    cascade, rng, taken = _cascade(tmp_path, seeds), random.Random(61 + seeds), 0
     config = ArchiveConfig(descriptors=(DescriptorConfig("complexity", 4, 0.0, 40.0),))
     for i in range(trials):
         archive = Archive.from_config(config)
@@ -415,7 +533,7 @@ def test_with_the_noise_estimated_an_equal_challenger_takes_the_cell_in_about_24
                                            score=score, ranking_score=score, kpis={"complexity": 10.0}))
         taken += placed.displaced is not None
     rate = _report(f"equal challenger took the cell, seeds: {seeds}", taken, trials)
-    assert 0.228 <= rate <= 0.252
+    assert band[0] <= rate <= band[1]
 
 
 def test_an_infinite_df_is_todays_rule_in_every_margin():

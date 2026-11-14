@@ -50,7 +50,7 @@ from evolvekit.evaluate.stages import (
     _run_once,
 )
 from evolvekit.evaluate.types import StageOutcome
-from evolvekit.stats import t_scale
+from evolvekit.stats import t_quantile
 from evolvekit.stopping import AnyEvent
 
 __all__ = ["Job", "Race", "race_looks", "run_instance_stage", "per_instance_key"]
@@ -68,6 +68,15 @@ class Job:
     """For a tree problem: what `{app}` is, the program inside this tree."""
     source_id: str | None = None
     """For a tree problem: the tree's commit, which keys the cache."""
+
+
+RACE_TAIL = 0.9975
+"""The race's noise term at each look: the 99.75 % quantile of the mean
+ratio's noise, so an equal candidate crosses it in 0.25 % per look at any df.
+Decision 18a named 0.995; at a known cv that raced out 1.0 % of equal
+candidates against a fresh incumbent and 4.5 % against the best of eight
+(the targets: under 1 % and under 3 %), so the tail is halved: 0.6 % and
+2.6 %, and on a calibration's 2 df 0.3 % and 0.8 %."""
 
 
 @dataclass(frozen=True)
@@ -150,21 +159,21 @@ class Race:
 
     def margin_at(self, diffs: Sequence[float]) -> float:
         """How far behind, in percent, a candidate may be at a look over
-        `diffs` (`_diffs`, fractions): the largest of `margin_pct`, twice the
-        run-to-run noise of the mean's ratio (`200·cv`: one side at
-        `cv`, the other at `cv`, a mean over m instances at `√2·cv/√m`,
-        so this is `z = √(2m)` sd of it, 2.8 at m = 4; with `cv` estimated
-        on `df` degrees of freedom it is widened by `stats.t_scale(z, df)`,
-        so that it is crossed as rarely as at a known cv), and twice the
-        standard error of the cases' own spread, with the finite-population
-        factor that makes it 0 once every instance is in."""
+        `diffs` (`_diffs`, fractions): the largest of `margin_pct`; the
+        run-to-run noise term `100 · t_ν(0.995) · √2·cv/√m` -- one side at
+        `cv`, the other at `cv`, so the mean ratio over m instances has sd
+        `√2·cv/√m`, and the term is its one-sided `1 - RACE_TAIL` tail at each
+        look, with Student's t at the cv's `df` (Decision 18a; 2.81 at infinite
+        df, 1.98·cv at m = 4, 14.1 on a calibration's 2 df); and twice the standard error
+        of the cases' own spread, with the finite-population factor that makes
+        it 0 once every instance is in."""
         m, n = len(diffs), self.population
         spread = 0.0
         if m >= 2 and n > 0:
             spread = 200.0 * stdev(diffs) / math.sqrt(m) * math.sqrt(max(0.0, 1.0 - m / n))
-        noise = 200.0 * self.cv
-        if noise > 0 and m >= 1:
-            noise *= t_scale(math.sqrt(2.0 * m), self.df)
+        noise = 0.0
+        if self.cv > 0 and m >= 1:
+            noise = 100.0 * t_quantile(RACE_TAIL, self.df) * math.sqrt(2.0) * self.cv / math.sqrt(m)
         return max(self.margin_pct, noise, spread)
 
     def judge(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> tuple[str, float] | None:

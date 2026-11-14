@@ -247,13 +247,35 @@ def test_every_estimate_says_its_degrees_of_freedom():
     assert calibrated.cv_df("full", "cost") == calibrated.vector_cv_df("full", "cost_per_instance") == 2
 
 
-def test_a_weighted_score_has_the_welch_satterthwaite_df():
+def test_a_weighted_score_reads_the_noise_of_its_own_per_run_values():
+    """Decision 18b: Σ w·x per run, so the measures' covariance is in and the df is
+    the runs': cost and time move together here, which Σ w² sd² would miss."""
+    noise = Noise()
+    runs = {"a": ([10.0, 12.0, 14.0], [5.0, 6.0, 7.0]), "b": ([9.0, 9.5, 13.0], [4.0, 4.5, 6.0])}
+    for cid, (cost, time) in runs.items():
+        noise.observe("full", cid, _out({"cost": statistics.fmean(cost), "time": statistics.fmean(time)},
+                                        kpi_var={"cost": statistics.variance(cost), "time": statistics.variance(time)},
+                                        seed_runs={"cost": cost, "time": time}))
+    score = _score({"cost": 2.0, "time": 0.5})
+    per_run = [statistics.variance([2 * c + 0.5 * t for c, t in zip(*runs[cid])]) for cid in runs]
+    assert noise.score_sd("full", score, 1) == pytest.approx(math.sqrt(statistics.fmean(per_run)))
+    assert noise.score_df("full", score) == 4
+    noise.set_repeatable("full", True)
+    rows = [[2 * c + 0.5 * t for c, t in zip(*runs[cid])] for cid in runs]
+    d = [x - y for x, y in zip(*rows)]
+    assert noise.score_sd("full", score, 1) ** 2 == pytest.approx(statistics.variance(d) / 2), "two-way, two rows"
+    assert noise.score_df("full", score) == 2
+
+
+def test_without_per_run_values_a_weighted_score_falls_back_to_its_measures():
+    """A calibration (or a file from before the runs were kept): √(Σ w² sd²), on the
+    smallest of the measures' df."""
     noise = Noise()
     noise.observe("full", "a", _out({"cost": 10.0, "time": 5.0}, kpi_var={"cost": 4.0, "time": 1.0}, runs=3))
     noise.observe("full", "b", _out({"cost": 10.0, "time": 5.0}, kpi_var={"cost": 4.0}, runs=5))
-    a_cost, a_time = 4.0 * 4.0, 0.25 * 1.0  # w² sd²: cost (w 2) on 6 df, time (w 0.5) on 2 df
-    expected = (a_cost + a_time) ** 2 / (a_cost**2 / 6 + a_time**2 / 2)
-    assert noise.score_df("full", _score({"cost": 2.0, "time": 0.5})) == pytest.approx(expected)
+    score = _score({"cost": 2.0, "time": 0.5})
+    assert noise.score_sd("full", score, 1) == pytest.approx(math.sqrt(4.0 * 4.0 + 0.25 * 1.0))
+    assert noise.score_df("full", score) == 2, "time's 2 df, below cost's 6"
     assert Noise().score_df("full", _score()) == math.inf
 
 

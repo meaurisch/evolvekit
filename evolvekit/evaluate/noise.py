@@ -726,30 +726,70 @@ class Noise:
         """The degrees of freedom behind `vector_cv`."""
         return _df_or_inf(sum(df for _, df in self._vector_ratios(key, vector_key, across=across)))
 
+    def _score_runs(self, key: str, weights: Mapping[str, float]) -> list[tuple[list[int], list[float]]]:
+        """Per candidate that kept runs of every weighted KPI on the same
+        seeds: `(seeds, Σ w_k · x_k per run)`, the score's own per-run values."""
+        entries = [self._stages.get(key, {}).get("kpis", {}).get(kpi) for kpi in weights]
+        if any(entry is None for entry in entries):
+            return []
+        tables = []
+        for cid, first in entries[0]["runs"].items():  # type: ignore[index]
+            rows = [entry["runs"].get(cid) for entry in entries]  # type: ignore[index]
+            if any(row is None or row["seeds"] != first["seeds"] for row in rows):
+                continue
+            values = [sum(w * row["values"][j] for w, row in zip(weights.values(), rows))
+                      for j in range(len(first["seeds"]))]
+            tables.append((list(first["seeds"]), values))
+        return tables
+
+    def _score_estimate(self, key: str, score: "ScoreConfig") -> tuple[float, float]:
+        """One run's score variance and its df (Decision 18b). One KPI: its
+        own (`sd`, `df`). A weighted sum: from the score's own per-run values
+        -- across seeds per candidate (`Σ (nᵢ - 1)`), or two-way on a
+        repeatable stage -- so the covariance of the measures is in, and the
+        df is exact. Without such runs (a calibration, a file from before
+        them): `Σ w_k² sd_k²`, on the smallest of the measures' df."""
+        weights = dict(score.weights or {score.objective: 1.0})
+        if len(weights) == 1:
+            (kpi, w), = weights.items()
+            return w * w * self.sd(key, kpi) ** 2, self.df(key, kpi)
+        cached = self._paired_cache.get(("score", key, tuple(sorted(weights.items())), bool(self.repeatable(key))))
+        if cached is not None:
+            return cached.var or 0.0, _df_or_inf(cached.df)
+        tables = self._score_runs(key, weights)
+        var: float | None
+        if self.repeatable(key):
+            ss, df, _, _ = _two_way(tables)
+            var = ss / df if df > 0 else None
+        else:
+            replicated = [values for _, values in tables if len(values) >= 2]
+            var = fmean(variance(v) for v in replicated) if replicated else None
+            df = sum(len(v) - 1 for v in replicated)
+        if var is None:
+            var = sum(w * w * self.sd(key, kpi) ** 2 for kpi, w in weights.items())
+            dfs = [self.df(key, kpi) for kpi in weights if self.sd(key, kpi) > 0]
+            df = min(dfs) if dfs else 0  # type: ignore[assignment]
+        found = _Paired(var, df, None)  # type: ignore[arg-type]
+        self._paired_cache[("score", key, tuple(sorted(weights.items())), bool(self.repeatable(key)))] = found
+        return var, _df_or_inf(df)
+
     def score_sd(self, key: str, score: "ScoreConfig", seeds: int) -> float:
-        """One candidate's stage score, a mean over `seeds` runs: the weighted
-        sum's sd, `sqrt(Σ w_k² · sd_k²) / √seeds`, over `score.weights` only:
-        the penalty terms are taken to carry no noise. Levels compare goal by
-        goal and have no such sum: 0."""
+        """One candidate's stage score, a mean over `seeds` runs: the sd of
+        one run's weighted sum (`_score_estimate`) over `√seeds`, over
+        `score.weights` only: the penalty terms are taken to carry no noise.
+        Levels compare goal by goal and have no such sum: 0."""
         if score.levels:
             return 0.0
-        weights = score.weights or {score.objective: 1.0}
-        total = sum(w * w * self.sd(key, kpi) ** 2 for kpi, w in weights.items())
-        return math.sqrt(total) / math.sqrt(max(1, seeds))
+        var, _ = self._score_estimate(key, score)
+        return math.sqrt(max(0.0, var)) / math.sqrt(max(1, seeds))
 
     def score_df(self, key: str, score: "ScoreConfig") -> float:
-        """The degrees of freedom behind `score_sd`: one KPI's own; for a
-        weighted sum, Welch-Satterthwaite's `(Σ aₖ)² / Σ (aₖ² / νₖ)` with
-        `aₖ = wₖ² sdₖ²`. `math.inf` with no noise (and with levels)."""
+        """The degrees of freedom behind `score_sd` (`_score_estimate`);
+        `math.inf` with no noise (and with levels)."""
         if score.levels:
             return math.inf
-        weights = score.weights or {score.objective: 1.0}
-        parts = [(w * w * self.sd(key, kpi) ** 2, self.df(key, kpi)) for kpi, w in weights.items()]
-        total = sum(a for a, _ in parts)
-        if total <= 0:
-            return math.inf
-        spread = sum(a * a / df for a, df in parts if a > 0 and not math.isinf(df))
-        return total * total / spread if spread > 0 else math.inf
+        var, df = self._score_estimate(key, score)
+        return df if var > 0 else math.inf
 
     def known(self, key: str) -> bool:
         """Any estimate, across or paired, with at least one degree of freedom."""
