@@ -140,6 +140,8 @@ class RunSummary:
     best: Candidate | None = None
     seed_score: float | None = None
     stop_reason: str = "generations exhausted"
+    converged: bool = False
+    """The run's `on_round` hook ended the search: it has settled (`stop_reason` says how)."""
     totals: dict[str, float] = field(default_factory=dict)
     economics: list[GenerationPoint] = field(default_factory=list)
     """One point per generation: cumulative spend, best, and what the last
@@ -185,8 +187,14 @@ class Driver:
         providers: dict[str, Provider] | None = None,
         log: Callable[[str], None] | None = None,
         allow_changed_problem: bool = False,
+        on_round: Callable[[int], str | None] | None = None,
     ) -> None:
         self.config = config
+        self.on_round = on_round
+        """Called after every recorded round that did not end the run (never for
+        the starting point or a round cut short) with its generation: a reason
+        it returns ends the search there (`RunSummary.converged`). A study's
+        re-plan (`harness.execute._round_hook`)."""
         self.allow_changed_problem = allow_changed_problem
         self.ledger = Ledger(run_dir)
         self._reevaluations: list[dict] = read_reevaluations(self.ledger.run_dir)
@@ -856,7 +864,8 @@ class Driver:
                     "run is resumed"
                 )
                 return self._finalise(summary)
-            self._generation_finished(0, began, [seed])
+            self._generation_finished(0, began, [seed], breed_s=0.0,
+                                      round_best=self.best.fitness if self.best is not None else None)
             summary.seed_score = seed.score
             summary.candidates += 1
             self.log(f"gen 0  seed        score={_fmt(seed.score)}")
@@ -923,10 +932,15 @@ class Driver:
             # Last generation's pressure on its parents counts half now
             # (`Archive.from_records` replays the same on resume).
             self.grid.decay()
+            bred_at = time.perf_counter()
             children = self._adopt_pending(generation, plateau=decision.plateau)
+            adopted = children is not None
             if children is None:
                 children = self._breed(generation, plateau=decision.plateau)
                 self._write_pending(generation, children)
+            # The round's writing time: what the plan re-estimates the AI's seconds from. 0 marks an
+            # adopted round only (`plan.replan`), so a written one says at least a millisecond.
+            breed_s = 0.0 if adopted else max(0.001, round(time.perf_counter() - bred_at, 3))
             viable = [c for c in children if not c.rejected]
             for child in viable:
                 # Handed to the cascade: a refused or failed child cost its
@@ -966,7 +980,9 @@ class Driver:
             best = self.best
             if rebased and best is not None:
                 self.stop_policy.rebase(best.fitness)
-            self._generation_finished(generation, began, children)
+            # The breadth moves before the event, which says where it ended.
+            change = self.breadth.update(decision.stagnant_generations == 0) if self.breadth is not None else None
+            self._generation_finished(generation, began, children, breed_s=breed_s, round_best=measured)
 
             if self._provider_is_dead():
                 summary.stop_reason = (
@@ -983,8 +999,7 @@ class Driver:
                 f"cells={len(self.grid.cells)}  "
                 f"spent=${self.budget.state.usd:.4f}"
             )
-            if self.breadth is not None:
-                change = self.breadth.update(decision.stagnant_generations == 0)
+            if change is not None:
                 self.log(f"        {change}")
             if point is not None:
                 self.log(
@@ -997,6 +1012,10 @@ class Driver:
                 break
             if decision.stop:
                 summary.stop_reason = decision.reason or "stop policy"
+                break
+            reason = self.on_round(generation) if self.on_round is not None else None
+            if reason:
+                summary.stop_reason, summary.converged = reason, True
                 break
 
         return self._finalise(summary)
@@ -1323,8 +1342,12 @@ class Driver:
         return time.perf_counter()
 
     def _generation_finished(
-        self, generation: int, began: float, children: Sequence[Candidate]
+        self, generation: int, began: float, children: Sequence[Candidate], *,
+        breed_s: float, round_best: float | None,
     ) -> None:
+        """`round_best`: the best as the round measured it, before a
+        re-evaluation pooled it (`best_fitness` is after); `breed_s`: the
+        round's writing time, 0 for an adopted round."""
         best = self.best
         duration = round(time.perf_counter() - began, 3)
         self._durations[generation] = duration
@@ -1339,6 +1362,11 @@ class Driver:
             spent_usd=self.budget.state.usd,
             flat_generations=self.stop_policy.stagnant,
             stop_epsilon=self.stop_policy.epsilon_now(),
+            round_best=round_best,
+            breed_s=breed_s,
+            noise_sd=self.stop_policy.noise_sd,
+            tpe_ratio=None,
+            breadth_at_ceiling=(self.breadth.current >= self.breadth.config.max) if self.breadth is not None else None,
         )
         self._snapshot_archive()
 

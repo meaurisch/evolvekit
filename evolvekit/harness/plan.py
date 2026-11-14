@@ -28,21 +28,35 @@ that leaves at least 6 rounds, else at least 3; with fewer than 3 the plan
 is blocked, with three concrete ways out. The engine gets `generations = ceil((S - B) / R) + 2`, `budget.max_hours
 = S / 3600` -- which is what stops the search -- and `stop.patience` equal to
 the generations, so the run uses the time it is given.
+
+Re-planned from the rounds measured (`replan`, after every round of a study's
+search): over the rounds so far (the starting point not among them)
+
+    evaluation       E = median(duration - breed)          breed: the round's writing time
+    AI per child     A' = sum(breed) / sum(children)       adopted and pre-A4 rounds left out
+    one round        R' = E + c * A'
+    rounds left      floor((S - used) / R')                used: the active seconds so far
+
+`used` is what `budget.max_hours` counts (`stopping.active_seconds`). The
+planned numbers stay as planned; `rounds_done`, `rounds_left` and the measured
+round go beside them in `job.json`.
 """
 
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from evolvekit.cpus import plan_workers
 # The AI's time per change is the engine's too: the run's first round is projected with it (`stopping`).
 from evolvekit.stopping import AGENT_CHANGE_S, AI_CHANGE_S, ai_seconds
 
 __all__ = ["Plan", "make_plan", "ai_seconds", "plan_notes", "AI_CHANGE_S", "AGENT_CHANGE_S", "CHECK_SEEDS",
-           "CHECK_SHARE", "DEFAULT_CHECK_SEEDS", "THIN_CHECK_CASES"]
+           "CHECK_SHARE", "DEFAULT_CHECK_SEEDS", "THIN_CHECK_CASES", "RoundRecord", "Measured", "round_records",
+           "replan"]
 
 CHECK_SEEDS = tuple(range(1001, 1013))
 """The seeds of the final check: never among the search's own (0 .. r-1).
@@ -121,6 +135,14 @@ class Plan:
     """The seconds the plan assumes for each AI change (`ai_seconds`); 0 without AI."""
     ai_child_s: float = 0.0
     """The AI's seconds per child of a round, on average: what each round pays for it."""
+    rounds_done: int = 0
+    """The rounds the search has finished (`replan`); 0 before the first."""
+    rounds_left: int | None = None
+    """The rounds the time left buys at the measured pace (`replan`); None before the first round."""
+    measured_round_s: float | None = None
+    """One round as the rounds so far measured it (`replan`): their median evaluation plus the AI's seconds."""
+    measured_ai_child_s: float | None = None
+    """The AI's seconds per child as the rounds so far measured them (`replan`)."""
 
     @property
     def notes(self) -> list[str]:
@@ -177,7 +199,94 @@ class Plan:
             "ways_out": list(self.ways_out), "way_fixes": [dict(fix) for fix in self.way_fixes],
             "adjusted": list(self.adjusted),
             "ai_change_s": self.ai_change_s, "notes": self.notes,
+            **self.measured_json(),
         }
+
+    def measured_json(self) -> dict[str, Any]:
+        """The keys `replan` fills: `rounds_done`, `rounds_left` and `measured`
+        (null until the first round)."""
+        measured = None
+        if self.measured_round_s is not None:
+            measured = {"round_s": self.measured_round_s, "ai_child_s": self.measured_ai_child_s}
+        return {"rounds_done": self.rounds_done, "rounds_left": self.rounds_left, "measured": measured}
+
+
+@dataclass(frozen=True)
+class RoundRecord:
+    """One round as its `generation_finished` event recorded it (`round_records`)."""
+    generation: int
+    duration_s: float
+    breed_s: float
+    children: int
+    best: float | None
+    """The best as the round measured it (`round_best`; before A4 `best_fitness`)."""
+    rebased: float | None
+    """`best_fitness` when it differs from `round_best` (a re-evaluation pooled the best), else None."""
+    noise_sd: float
+    """The noise the round was judged with (before A4: 0.0)."""
+    tpe_ratio: float | None
+    breadth_at_ceiling: bool | None
+    legacy: bool
+    """The event is from before A4 (it has no `round_best`)."""
+
+
+@dataclass(frozen=True)
+class Measured:
+    records: tuple[RoundRecord, ...]
+    """Every round recorded, the starting point's (generation 0) included when present."""
+    used_s: float
+    """The search's active seconds so far (`stopping.active_seconds`): what `budget.max_hours` counts."""
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def round_records(events: Iterable[Mapping[str, Any]]) -> list[RoundRecord]:
+    """One record per generation from its last `generation_finished` event (a
+    resumed generation counts once), ordered by generation. An event from
+    before A4 reads as `legacy`: its best is `best_fitness`, its writing time
+    and noise 0, nothing else known -- it invents no progress."""
+    last: dict[int, Mapping[str, Any]] = {}
+    for event in events:
+        generation = event.get("generation")
+        if event.get("type") == "generation_finished" and isinstance(generation, int) \
+                and not isinstance(generation, bool):
+            last[generation] = event
+    records = []
+    for generation in sorted(last):
+        event = last[generation]
+        legacy = "round_best" not in event
+        fitness = _number(event.get("best_fitness"))
+        best = fitness if legacy else _number(event.get("round_best"))
+        ceiling = event.get("breadth_at_ceiling")
+        records.append(RoundRecord(
+            generation=generation, duration_s=_number(event.get("duration_s")) or 0.0,
+            breed_s=_number(event.get("breed_s")) or 0.0, children=int(_number(event.get("children")) or 0),
+            best=best, rebased=fitness if fitness is not None and fitness != best else None,
+            noise_sd=_number(event.get("noise_sd")) or 0.0, tpe_ratio=_number(event.get("tpe_ratio")),
+            breadth_at_ceiling=ceiling if isinstance(ceiling, bool) else None, legacy=legacy,
+        ))
+    return records
+
+
+def replan(plan: Plan, measured: Measured) -> Plan:
+    """`plan` with the rounds done, the rounds left and the measured round (the
+    module docstring); unchanged before the first round. An adopted round (its
+    children written by an earlier session: no writing time, children) and a
+    round from before A4 paid no measured AI time, so they stay out of the AI's
+    seconds per child; their evaluation counts."""
+    rounds = [r for r in measured.records if r.generation >= 1]
+    if not rounds:
+        return plan
+    eval_s = statistics.median(r.duration_s - r.breed_s for r in rounds)
+    paid = [r for r in rounds if not r.legacy and not (r.breed_s == 0.0 and r.children > 0)]
+    children = sum(r.children for r in paid)
+    ai_child_s = sum(r.breed_s for r in paid) / children if children else 0.0
+    round_s = eval_s + plan.children * ai_child_s
+    left = max(0, math.floor((plan.search_s - measured.used_s) / round_s)) if round_s > 0 else 0
+    return replace(plan, rounds_done=max(r.generation for r in rounds), rounds_left=left,
+                   measured_round_s=round_s, measured_ai_child_s=ai_child_s)
 
 
 def _minutes(seconds: float) -> str:

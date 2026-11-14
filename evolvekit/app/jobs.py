@@ -2031,7 +2031,12 @@ def pace(series: list[dict[str, Any]], plan: dict[str, Any], job: dict[str, Any]
     does: no round is started that the longest of the last two would not let
     finish within `plan.max_hours`. None for a run whose rounds were set by hand
     (they, not the hours, stop it), continued or resumed (its plan is not this
-    session's), or not searching. It claims nothing about any result."""
+    session's), or not searching. It claims nothing about any result.
+
+    A run that re-plans after every round (`plan.replan`, A4) writes
+    `plan.rounds_done` and `plan.rounds_left` into `job.json`: then those give
+    the rounds (one source for the number); a run from before it keeps the
+    reading of the series."""
     if job.get("phase") != "search" or _continued(job) or job.get("resumed_at") or job.get("bakeoff"):
         return None
     if {"rounds", "generations"} & set(plan.get("adjusted") or ()):
@@ -2041,6 +2046,10 @@ def pace(series: list[dict[str, Any]], plan: dict[str, Any], job: dict[str, Any]
     limit_s = float(limit) * 3600.0 if isinstance(limit, (int, float)) else float(plan.get("search_s") or 0.0)
     if not isinstance(planned, int) or planned <= 0 or limit_s <= 0:
         return None
+    left, done_so_far = plan.get("rounds_left"), plan.get("rounds_done")
+    if isinstance(left, int) and not isinstance(left, bool):
+        rounds = (done_so_far if isinstance(done_so_far, int) else 0) + left
+        return _pace_of(rounds, planned)
     ends = {int(s["generation"]): float(s["elapsed_s"]) for s in series
             if isinstance(s.get("generation"), int) and isinstance(s.get("elapsed_s"), (int, float))}
     done = sorted(g for g in ends if g >= 1 and g - 1 in ends)
@@ -2050,7 +2059,11 @@ def pace(series: list[dict[str, Any]], plan: dict[str, Any], job: dict[str, Any]
     longest = max(ends[g] - ends[g - 1] for g in done[-2:])
     if longest <= 0:
         return None
-    rounds = last + max(0, math.floor((limit_s - ends[last]) / longest))
+    return _pace_of(last + max(0, math.floor((limit_s - ends[last]) / longest)), planned)
+
+
+def _pace_of(rounds: int, planned: int) -> dict[str, Any] | None:
+    """`pace`'s answer for `rounds` of the `planned`: None when they buy the plan."""
     if rounds >= planned:
         return None
     return {"rounds": rounds, "planned": planned,

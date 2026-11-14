@@ -57,7 +57,7 @@ from evolvekit.harness.compile import (
     write_run,
 )
 from evolvekit.harness.manifest import Harness, load_harness
-from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS, Plan, make_plan
+from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS, Measured, Plan, make_plan, replan, round_records
 from evolvekit.harness.sql import schema_database, sql_problem
 from evolvekit.harness.study import Study, load_study, load_study_file, require_valid, resolve_kpi
 from evolvekit.leaderboard import rank, read_rows
@@ -374,7 +374,8 @@ def run_study(
     job = Job(run_dir, run_id=run_id, study=study.name, plan=plan.to_json())
     try:
         config = load_config(run_dir / CONFIG)
-        summary = Driver(config, run_dir=run_dir, log=log).run()
+        summary = Driver(config, run_dir=run_dir, log=log,
+                         on_round=_round_hook(run_dir, job, plan, uses_tpe=_uses_tpe(config))).run()
         job.update(search={
             "stop_reason": summary.stop_reason, "generations": summary.generations,
             "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
@@ -556,7 +557,8 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
             group_job = _GroupJob(folder, job, run_id=run_id, study=study.name, group=name,
                                   plan=plans[name].to_json())
             config = load_config(folder / CONFIG)
-            summary = Driver(config, run_dir=folder, log=log).run()
+            summary = Driver(config, run_dir=folder, log=log,
+                             on_round=_round_hook(folder, group_job, plans[name], uses_tpe=_uses_tpe(config))).run()
             group_job.update(search={
                 "stop_reason": summary.stop_reason, "generations": summary.generations,
                 "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
@@ -876,6 +878,43 @@ def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
     return job.state
 
 
+def _uses_tpe(config: Any) -> bool:
+    """Whether the compiled search proposes with `param_tpe` (False for a config without operators)."""
+    operators = getattr(getattr(config, "search", None), "operators", None) or {}
+    return operators.get("param_tpe", 0) > 0
+
+
+def _round_hook(run_dir: Path, job: Job, plan: Plan, *, uses_tpe: bool) -> Callable[[int], str | None]:
+    """The driver's `on_round` for a study's search: after every round, the
+    plan re-estimated from the rounds measured (`plan.replan`) goes into
+    `job.json`'s plan -- `rounds_done`, `rounds_left`, `measured`, beside the
+    planned numbers, which stay -- and the answer is whether to end the search
+    (None: go on). `uses_tpe`: the search proposes with `param_tpe`."""
+
+    from evolvekit.events import read_events
+    from evolvekit.stopping import active_seconds
+
+    def on_round(_generation: int) -> str | None:
+        events = read_events(run_dir)
+        replanned = replan(plan, Measured(tuple(round_records(events)), used_s=active_seconds(events)))
+        job.update(plan={**(job.state.get("plan") or {}), **replanned.measured_json()})
+        return None
+
+    return on_round
+
+
+def _stored_plan(stored: dict[str, Any], config: Any) -> Plan:
+    """The plan a resumed run re-estimates from, as far as `replan` reads it:
+    its children per round and its seconds of search (`job.json`'s plan, else
+    the compiled run's own numbers)."""
+    children = stored.get("children")
+    search_s = stored.get("search_s")
+    if not isinstance(search_s, (int, float)):
+        search_s = (config.budget.max_hours or 0.0) * 3600.0
+    return replace(Plan.fixed(children=int(children) if isinstance(children, int) and children > 0
+                              else config.search.children_per_generation), search_s=float(search_s))
+
+
 def _check_plan(stored: dict[str, Any], study: Study, *, check_seeds: int | None = None) -> Plan:
     """The plan a run was started with, as far as the final check reads it
     (`plan.json`, or the copy in `job.json`): its runs per case, workers,
@@ -927,7 +966,8 @@ def resume_study(
         job.state.pop(old, None)
     try:
         config = load_config(run_dir / CONFIG)
-        summary = Driver(config, run_dir=run_dir, log=log).run()
+        hook = _round_hook(run_dir, job, _stored_plan(stored, config), uses_tpe=_uses_tpe(config))
+        summary = Driver(config, run_dir=run_dir, log=log, on_round=hook).run()
         job.update(search={
             "stop_reason": summary.stop_reason, "generations": before + summary.generations,
             "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,

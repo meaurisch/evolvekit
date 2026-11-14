@@ -228,3 +228,85 @@ def test_too_few_held_back_cases_for_a_firm_answer_is_a_note_with_the_plan():
     assert plan.notes == [THIN] and plan.to_json()["notes"] == [THIN]
     assert plan.summary(datetime(2026, 11, 8, 5, 38)).endswith("; done around 05:48. " + THIN)
     assert THIN not in _plan().summary(), "three held back: no note"
+
+
+# -- the plan re-estimated from the rounds measured (A4.1, P3) ----------------
+
+def _record(generation, duration_s, breed_s=10.0, children=4, *, legacy=False):
+    from evolvekit.harness.plan import RoundRecord
+
+    return RoundRecord(generation, duration_s, breed_s, children, -9.0, None, 0.0, None, None, legacy)
+
+
+def test_replan_reads_the_median_round_and_the_measured_ai_seconds():
+    from dataclasses import replace
+
+    from evolvekit.harness.plan import Measured, Plan, RoundRecord, replan
+
+    plan = replace(Plan.fixed(children=4), search_s=3600.0)
+    records = [RoundRecord(0, 50.0, 0.0, 0, -10.0, None, 0.0, None, None, False)] + [
+        RoundRecord(g, d, 10.0, 4, -9.0, None, 0.0, None, None, False) for g, d in ((1, 100.0), (2, 120.0), (3, 300.0))]
+    got = replan(plan, Measured(tuple(records), used_s=600.0))
+    # eval median(90, 110, 290) = 110; AI 30 s over 12 children = 2.5 s; a round 110 + 4 * 2.5 = 120 s
+    assert got.measured_round_s == 120.0 and got.measured_ai_child_s == 2.5
+    assert got.rounds_done == 3 and got.rounds_left == 25 and got.rounds == plan.rounds
+    assert got.to_json()["rounds_left"] == 25 and got.to_json()["measured"] == {"round_s": 120.0, "ai_child_s": 2.5}
+    assert (got.round_s, got.ai_child_s, got.children, got.search_s) == (
+        plan.round_s, plan.ai_child_s, plan.children, plan.search_s), "the planned numbers stay as planned"
+
+
+def test_replan_before_the_first_round_changes_nothing():
+    from evolvekit.harness.plan import Measured, Plan, replan
+
+    plan = Plan.fixed()
+    assert replan(plan, Measured((), used_s=0.0)) == plan and plan.to_json()["rounds_left"] is None
+    assert plan.to_json()["rounds_done"] == 0 and plan.to_json()["measured"] is None
+    assert replan(plan, Measured((_record(0, 50.0, 0.0, 0),), used_s=50.0)) == plan, "the starting point is no round"
+
+
+def test_replan_leaves_adopted_and_legacy_rounds_out_of_the_ai_seconds():
+    """Decision 9: an adopted round (its children were written by the session
+    before: `breed_s` 0 with children) and a round from before A4 (no `breed_s`)
+    paid no measured AI time; counting their children would understate it."""
+    from dataclasses import replace
+
+    from evolvekit.harness.plan import Measured, Plan, replan
+
+    plan = replace(Plan.fixed(children=4), search_s=3600.0)
+    records = (_record(1, 110.0, 10.0), _record(2, 90.0, 0.0), _record(3, 120.0, 0.0, legacy=True))
+    got = replan(plan, Measured(records, used_s=1000.0))
+    # AI 10 s over round 1's 4 children = 2.5 s; eval median(100, 90, 120) = 100; a round 100 + 4 * 2.5 = 110 s
+    assert got.measured_ai_child_s == 2.5 and got.measured_round_s == 110.0
+    assert got.rounds_done == 3 and got.rounds_left == 23  # floor(2600 / 110)
+    only_adopted = replan(plan, Measured((_record(1, 90.0, 0.0),), used_s=100.0))
+    assert only_adopted.measured_ai_child_s == 0.0 and only_adopted.measured_round_s == 90.0
+    spent = replan(plan, Measured((_record(1, 90.0, 0.0),), used_s=4000.0))
+    assert spent.rounds_left == 0, "never fewer than none"
+
+
+def test_round_records_read_legacy_events_without_inventing_progress():
+    from evolvekit.harness.plan import round_records
+
+    events = [{"type": "generation_finished", "generation": 1, "duration_s": 5.0, "children": 4, "best_fitness": -3.0}]
+    (r,) = round_records(events)
+    assert r.legacy and r.best == -3.0 and r.breed_s == 0.0 and r.noise_sd == 0.0 and r.tpe_ratio is None
+    assert r.rebased is None and r.breadth_at_ceiling is None
+
+
+def test_round_records_count_a_resumed_round_once_from_its_last_event():
+    from evolvekit.harness.plan import round_records
+
+    events = [
+        {"type": "generation_finished", "generation": 2, "duration_s": 7.0, "children": 4, "best_fitness": -1.0,
+         "round_best": -2.0, "breed_s": 1.5, "noise_sd": 0.3, "tpe_ratio": None, "breadth_at_ceiling": None},
+        {"type": "generation_started", "generation": 1},
+        {"type": "generation_finished", "generation": 1, "duration_s": 5.0, "children": 4, "best_fitness": -3.0,
+         "round_best": -3.0, "breed_s": 1.0, "noise_sd": 0.2, "tpe_ratio": 0.5, "breadth_at_ceiling": False},
+        {"type": "generation_finished", "generation": 1, "duration_s": 6.0, "children": 4, "best_fitness": -3.0,
+         "round_best": -3.0, "breed_s": 0.0, "noise_sd": 0.2, "tpe_ratio": None, "breadth_at_ceiling": False},
+        {"type": "generation_finished", "generation": "x"},
+    ]
+    first, second = round_records(events)
+    assert (first.generation, first.duration_s, first.breed_s, first.legacy) == (1, 6.0, 0.0, False)
+    assert (second.best, second.rebased, second.noise_sd) == (-2.0, -1.0, 0.3), "a re-evaluation pooled the best"
+    assert first.rebased is None and first.breadth_at_ceiling is False

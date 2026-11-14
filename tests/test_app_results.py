@@ -587,6 +587,22 @@ def test_after_its_first_round_a_live_search_says_how_many_planned_rounds_its_pa
     assert jobs.status(root, run_dir.name, _rounds_done(5.0, 50.0, 250.0))["pace"]["rounds"] == 3
 
 
+def test_the_pace_reads_rounds_left_from_job_json():
+    """A4.1: the run re-plans after every round and writes `plan.rounds_left`;
+    the pace says that number (one source), not its own reading of the series."""
+    job = {"phase": "search"}
+    series = [{"generation": 0, "elapsed_s": 5.0}, {"generation": 1, "elapsed_s": 50.0},
+              {"generation": 2, "elapsed_s": 95.0}]
+    plan = {"rounds": 11, "rounds_done": 2, "rounds_left": 3, "max_hours": 1}
+    assert jobs.pace(series, plan, job) == {
+        "rounds": 5, "planned": 11, "line": "At this pace about 5 of the 11 planned rounds will run."}
+    assert jobs.pace(series, {**plan, "rounds_left": 9}, job) is None, "the plan's rounds will run"
+    legacy = {"rounds": 11, "max_hours": 1}  # a run from before A4: the series estimate stays
+    assert jobs.pace(series, legacy, job) is None  # 2 + floor(3505 / 45) rounds buy the plan
+    assert jobs.pace(series, {**legacy, "max_hours": 0.05}, job)["rounds"] == 3  # 2 + floor(85 / 45)
+    assert jobs.pace(series, {**plan, "adjusted": ["rounds"]}, job) is None, "rounds set by hand stop it"
+
+
 def test_a_search_without_a_time_plan_or_set_by_hand_has_no_pace(tmp_path, monkeypatch):
     root, run_dir = _live_search(tmp_path, monkeypatch, plan={**GATE_PLAN, "adjusted": ["rounds"]})
     assert jobs.status(root, run_dir.name, _rounds_done(5.077, 232.789))["pace"] is None

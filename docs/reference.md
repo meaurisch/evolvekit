@@ -88,7 +88,7 @@ live run is built from:
   | `type` | When | Carries |
   |---|---|---|
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
-  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned` and `plateau` (whether the generation was planned on a plateau; a resumed run reads it back to space its big steps, and an event from before it was recorded falls back to replaying the stop policy); then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force) |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned` and `plateau` (whether the generation was planned on a plateau; a resumed run reads it back to space its big steps, and an event from before it was recorded falls back to replaying the stop policy); then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force); and what a study re-plans from: `round_best` (the best's fitness as the generation measured it, before a re-evaluation pooled it; `best_fitness` is after), `breed_s` (the wall seconds of writing the generation's children, 0 for the seed and for children adopted from `pending.json`), `noise_sd` (the noise sd the stop policy judged it with), `tpe_ratio` (`null` until the TPE reading fills it) and `breadth_at_ceiling` (whether `adaptive_children` ended the generation at its `max`; `null` without it). An event from before these fields reads as a generation with no writing time and no noise, its best `best_fitness` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
@@ -2449,7 +2449,15 @@ stops `wait` and `watch`, never the run.
   as it was when the run started (its results and any later final check
   read that copy, so editing the study afterwards changes nothing about the
   run) and `job.json`, which says where the job is: `search`, `check`,
-  `done`, `stopped` or `failed`.
+  `done`, `stopped` or `failed`. Its `plan` is the plan the run started
+  with; after every round the search re-plans from the rounds measured and
+  adds `rounds_done`, `rounds_left` (the rounds the search time left buys:
+  `floor((search_s - active seconds) / measured round)`, `null` until the
+  first round) and `measured` (`{"round_s", "ai_child_s"}`: the median
+  round's evaluation seconds plus `children` times the AI's measured seconds
+  per child, adopted and older rounds left out of that ratio; `null` until
+  the first round). The planned numbers stay; "At this pace about k of N
+  rounds" reads `rounds_done + rounds_left`.
   `python -m evolvekit study stop depot-a` ends it cleanly.
 - **The final check** runs the best combination against the starting point
   on the held-back cases, several runs per case (the plan says how many),

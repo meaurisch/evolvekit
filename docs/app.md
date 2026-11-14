@@ -392,7 +392,16 @@ run's sentence the strip gives two facts as the status document says them:
 what the AI has spent of its cap (*AI: $0.42 of $1.00*, or *AI: 4 requests*
 for a provider that counts requests), and after the first round, when the
 pace so far buys fewer rounds than planned, *At this pace about 2 of the 11
-planned rounds will run.* Neither is a claim about the result. Details shows
+planned rounds will run.* Neither is a claim about the result. The number is
+the run's own: after every round the search re-plans from what its rounds
+measured and writes it into `job.json`'s `plan`, beside the planned numbers
+(which stay): `rounds_done` (the rounds finished), `rounds_left` (the rounds
+the search time left buys at the measured pace; `null` until the first round)
+and `measured` (`{"round_s", "ai_child_s"}`: one round as measured, the median
+round's runs plus the children's AI writing time, and the AI's seconds per
+child, from the rounds whose changes this session wrote; `null` until the
+first round). The pace is `rounds_done + rounds_left`; a run from before
+these keys keeps reading the pace from its rounds' times. Details shows
 the spend too, and once the run is finished the verdict's own figure among
 its facts.
 
