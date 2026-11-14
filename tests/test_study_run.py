@@ -718,6 +718,7 @@ def test_a_resumed_settled_search_with_no_round_left_keeps_what_it_said_and_its_
     monkeypatch.setattr(execute, "_write_exports", lambda *args: None)
     job = resume_study(folder, "r1", log=lambda _m: None)
     assert job["phase"] == "done" and calls == [3]
+    assert job["search"]["stop_reason"] == settled["stop_reason"], "the settled reason, so how it ran says so"
     assert {k: job["search"][k] for k in ("converged", "flat_rounds", "window", "used_s")} == {
         "converged": True, "flat_rounds": 3, "window": 3, "used_s": 600.0}
     assert job["final"]["saved"] == {"s": 1200, "spent": False, "why": "answered"}
