@@ -34,10 +34,7 @@ rule read before.
 `Σ (nᵢ - 1)`, paired `Σ (C - 1)(S - 1)`, the calibration 2 -- and a rule that
 reads σ̂ widens its normal quantile to Student's t at that df
 (`stats.t_scale`); with nothing estimated the df is `math.inf` (the noise is
-0: nothing to widen). A file written before the per-seed runs were kept has
-per-candidate differences to the seed (`paired`, `v_d` with its df): each is
-still an unbiased `2σ²`, so it joins the pool as `df · v_d / 2`, and the seed's
-own runs, which that file kept, become its row of the two-way.
+0: nothing to widen).
 
 Vectors are pooled the same way, per vector key and per element
 (`<kpi>_per_instance`, `<obj>_pct_of_baseline`, an evaluator's own list), each
@@ -75,7 +72,6 @@ __all__ = [
     "NOISE_FILE",
     "Check",
     "Noise",
-    "SEED_ID",
     "about_pct",
     "check_seeds",
     "check_stage",
@@ -87,11 +83,10 @@ __all__ = [
 NOISE_FILE = "noise.json"
 CALIBRATION_ID = "(calibration)"
 """The entry the seed's extra calibration runs are kept under (A2.1b)."""
-SEED_ID = "(seed)"
-"""The seed's own runs: the reference of every paired difference."""
 SCHEMA = 2
-"""2: per-seed `runs` per candidate (the two-way paired estimate). A schema-1
-file still loads: its `paired` differences and the seed's runs are read."""
+"""2: per-seed `runs` per candidate (the two-way paired estimate). A file of
+another schema is no noise (no run was ever written with schema 1 outside the
+A2 branch)."""
 
 
 @dataclass(frozen=True)
@@ -151,18 +146,11 @@ def _two_way(tables: Iterable[tuple[Sequence[int], Sequence[float]]]) -> tuple[f
     return ss, df, total, count
 
 
-def _combined(ss: float, df: int, legacy: Iterable[tuple[int, float]], mean: float | None) -> _Paired:
-    """The two-way residual pooled with a schema-1 file's per-candidate
-    differences to the seed, `(df, v_d)`: each `v_d / 2` is unbiased for the
-    one-side variance, so it adds `df · v_d / 2` and its df."""
-    total_ss, total_df = ss, df
-    for d, v in legacy:
-        if d >= 1:
-            total_ss += d * v / 2.0
-            total_df += d
-    if total_df <= 0:
+def _combined(ss: float, df: int, mean: float | None) -> _Paired:
+    """The two-way residual's one-side variance, `SS / df`."""
+    if df <= 0:
         return _Paired(None, 0, mean)
-    return _Paired(total_ss / total_df, total_df, mean)
+    return _Paired(ss / df, df, mean)
 
 
 def _df_or_inf(df: float) -> float:
@@ -259,10 +247,6 @@ def _across_element(e: list) -> list:
     return [_optional(e[0]), _variance(e[1]), _count(e[2])]
 
 
-def _paired_element(e: list) -> list:
-    return [_count(e[0]), _variance(e[1])]
-
-
 def _seeds(value: Any) -> list[int]:
     return [_count(s) for s in _sequence(value)]
 
@@ -291,43 +275,21 @@ def _kpi_group(entry: Any) -> dict[str, Any]:
             entry.get("across", {}),
             lambda e: {"runs": _count(_mapping(e)["runs"]), "mean": _optional(e.get("mean")), "var": _variance(e["var"])},
         ),
-        "paired": _entries(
-            entry.get("paired", {}), lambda e: {"df": _count(_mapping(e)["df"]), "var": _variance(e["var"])}
-        ),
         "runs": _entries(entry.get("runs", {}), _kpi_runs),
     }
 
 
 def _vector_group(entry: Any) -> dict[str, Any]:
     entry = _mapping(entry)
-    across, paired = _element(_across_element), _element(_paired_element)
+    across = _element(_across_element)
     return {
         "across": _entries(entry.get("across", {}), lambda es: [across(e) for e in _sequence(es)]),
-        "paired": _entries(entry.get("paired", {}), lambda es: [paired(e) for e in _sequence(es)]),
         "runs": _entries(entry.get("runs", {}), _vector_runs),
     }
 
 
 def _group(stage: dict[str, Any], kind: str, name: str) -> dict[str, Any]:
-    return stage[kind].setdefault(name, {"across": {}, "paired": {}, "runs": {}})
-
-
-def _seed_as_row(stage: dict[str, Any]) -> None:
-    """A schema-1 file kept the seed's runs per seed but no candidate's: the
-    seed's become its row of the two-way table (`SEED_ID`), where its KPI is
-    already in the file, so its interaction term averages out with the rest."""
-    seed = stage.get("seed")
-    if not seed or "id" in seed:
-        return
-    seeds = seed["seeds"]
-    if len(seeds) >= 2:
-        for kpi, values in seed["kpis"].items():
-            if kpi in stage["kpis"] and len(values) == len(seeds):
-                stage["kpis"][kpi]["runs"].setdefault(SEED_ID, {"seeds": list(seeds), "values": list(values)})
-        for name, rows in seed["vectors"].items():
-            if name in stage["vectors"] and len(rows) == len(seeds):
-                stage["vectors"][name]["runs"].setdefault(SEED_ID, {"seeds": list(seeds), "rows": [list(r) for r in rows]})
-    seed["id"] = SEED_ID
+    return stage[kind].setdefault(name, {"across": {}, "runs": {}})
 
 
 def _seed(raw: Any) -> dict[str, Any]:
@@ -358,8 +320,10 @@ def _clean_stage(raw: Any) -> dict[str, Any]:
         try:
             stage["seed"] = _seed(raw["seed"])
         except _BAD:
-            pass  # no reference: the candidates' paired entries already made stay
-    _seed_as_row(stage)
+            pass  # no reference: the candidates' entries already made stay
+    pooled = raw.get("pooled")
+    if isinstance(pooled, list):
+        stage["pooled"] = [p for p in pooled if isinstance(p, str)]
     return stage
 
 
@@ -382,6 +346,8 @@ class Noise:
             payload = _mapping(json.loads(Path(path).read_text(encoding="utf-8")))
         except (OSError, ValueError):
             return noise
+        if payload.get("schema") != SCHEMA:
+            return noise
         stages = _entries(payload.get("stages", {}), _clean_stage)
         noise._stages = stages
         return noise
@@ -401,7 +367,6 @@ class Noise:
         for group in ("kpis", "vectors"):
             for entry in stage[group].values():
                 entry["across"].pop(candidate_id, None)
-                entry["paired"].pop(candidate_id, None)
                 entry["runs"].pop(candidate_id, None)
 
     def observe(self, key: str, candidate_id: str, outcome: "StageOutcome", *, is_seed: bool = False) -> None:
@@ -420,8 +385,6 @@ class Noise:
             return
         stage = self._stage(key)
         if is_seed:
-            if stage.get("seed") and "id" not in stage["seed"]:
-                self._forget(stage, SEED_ID)  # a schema-1 seed's row, now observed again
             stage["seed"] = {
                 "id": candidate_id,
                 "seeds": list(outcome.seed_list),
@@ -480,12 +443,22 @@ class Noise:
         the merged entry's variance is about 11 % high (its sd about 5 %) --
         the earlier runs' own variance is unbiased (a normal sample's variance
         does not depend on its mean), the new run's distance to the lucky mean
-        is not: E[(x - mean)²] = σ²(1 + (1.42² + 0.34)/3)."""
+        is not: E[(x - mean)²] = σ²(1 + (1.42² + 0.34)/3).
+
+        Each pooled run is remembered in the stage's `pooled` list
+        (`"<candidate>@<seed>"`, saved with the file), and the same run is never
+        pooled twice: the driver saves the noise before it records the
+        re-evaluation, so a run that died between the two pools it again on the
+        same seed after the resume, and it must not count twice."""
         if not outcome.ok or outcome.raced_out or outcome.abandoned:
             return
         stage = self._stages.get(key)
         if stage is None:
             return
+        mark = f"{candidate_id}@{','.join(str(int(s)) for s in outcome.seed_list)}"
+        if mark in stage.setdefault("pooled", []):
+            return
+        stage["pooled"].append(mark)
         self._paired_cache.clear()
 
         def merged(mean: float, var: float, runs: int, x: float) -> tuple[float, float, int]:
@@ -543,9 +516,8 @@ class Noise:
         return _Pool([es[index][1] for es in group.values()], [es[index][2] - 1 for es in group.values()])
 
     def _kpi_paired(self, key: str, kpi: str) -> _Paired:
-        """The two-way paired estimate of `kpi` at `key` (with a schema-1
-        file's differences, `_combined`); its mean is the cells' grand mean,
-        or the seed's when only differences are known."""
+        """The two-way paired estimate of `kpi` at `key`; its mean is the
+        cells' grand mean, or the seed's runs' when no cell is known."""
         cached = self._paired_cache.get(("kpi", key, kpi))
         if cached is not None:
             return cached
@@ -560,7 +532,7 @@ class Noise:
         if mean is None:
             base = (stage.get("seed") or {}).get("kpis", {}).get(kpi)
             mean = fmean(base) if base else None
-        found = _combined(ss, df, ((e["df"], e["var"]) for e in entry["paired"].values()), mean)
+        found = _combined(ss, df, mean)
         self._paired_cache[("kpi", key, kpi)] = found
         return found
 
@@ -589,19 +561,14 @@ class Noise:
             rows = (stage.get("seed") or {}).get("vectors", {}).get(name) or []
             column = [row[index] for row in rows if index < len(row)]
             mean = fmean(column) if column else None
-        legacy = [
-            (es[index][0], es[index][1])
-            for es in entry["paired"].values()
-            if index < len(es) and es[index] is not None
-        ]
-        return _combined(ss, df, legacy, mean)
+        return _combined(ss, df, mean)
 
     def _width(self, key: str, name: str) -> int:
         """How many elements the vector `name` has anywhere at `key`."""
         entry = self._stages.get(key, {}).get("vectors", {}).get(name)
         if entry is None:
             return 0
-        widths = [len(es) for es in entry["across"].values()] + [len(es) for es in entry["paired"].values()]
+        widths = [len(es) for es in entry["across"].values()]
         widths += [len(row) for e in entry["runs"].values() for row in e["rows"]]
         return max(widths, default=0)
 
@@ -700,7 +667,7 @@ class Noise:
     def _cv_ratios(self, key: str, kpi: str) -> tuple[list[tuple[float, int]], bool]:
         name = f"{kpi}_per_instance"
         entry = self._stages.get(key, {}).get("vectors", {}).get(name)
-        if entry is not None and (entry["across"] or entry["paired"] or entry["runs"]):
+        if entry is not None and (entry["across"] or entry["runs"]):
             return self._vector_ratios(key, name), bool(self.repeatable(key))
         return self._scalar_ratios(key, kpi), bool(self.repeatable(key))
 

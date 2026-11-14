@@ -50,8 +50,18 @@ def test_pooling_recomputes_the_ranking_score_and_then_the_veto():
 def test_rows_without_reevaluations_are_returned_as_they_are():
     rows = [{"id": "a", "score": 1.0, "kpis": {"cost": 1.0}}, {"id": "b", "score": 2.0}]
     pooled = pool_rows(rows, [{"id": "b", "prior_runs": 1, "kpis": {}, "score": 4.0}])
-    assert pooled[0] is rows[0]
+    assert pooled[0] == {**rows[0], "ranking_score": 1.0} and rows[0] == {"id": "a", "score": 1.0, "kpis": {"cost": 1.0}}
     assert all(p is r for p, r in zip(pool_rows(rows, []), rows))
+
+
+def test_every_row_is_ranked_with_the_runs_lambda_beside_a_pooled_one():
+    """A row written at λ = 1 (ranking 8 for a public 10 and a private 8) beside
+    a re-evaluated one: both are ranked with the run's λ = 0, as the driver's
+    `_rerank` ranks them, not one at each λ."""
+    rows = [{"id": "old", "score": 10.0, "ranking_score": 8.0, "public_score": 10.0, "private_score": 8.0},
+            {"id": "b", "score": 9.0, "ranking_score": 9.0, "public_score": 9.0, "private_score": 9.0}]
+    old, b = pool_rows(rows, [{"id": "b", "prior_runs": 1, "kpis": {}, "score": 9.0}], holdout_penalty=0.0)
+    assert old["ranking_score"] == pytest.approx(10.0) and b["ranking_score"] == pytest.approx(9.0)
 
 
 def _write(path, rows):
@@ -130,6 +140,26 @@ def test_a_new_run_joins_the_candidates_own_runs_in_the_noise(tmp_path):
     noise.save()
     again = Noise.load(tmp_path / "noise.json")
     assert again.sd_across("full", "cost") == pytest.approx((14 / 3) ** 0.5)
+
+
+def test_the_same_run_is_never_pooled_twice(tmp_path):
+    """The driver saves the noise before it writes the re-evaluation's entry: a run
+    that dies between the two makes the same run, on the same seed, after the
+    resume, and the noise -- read back from its file -- must not count it twice."""
+    from evolvekit.evaluate.noise import Noise
+    from evolvekit.evaluate.types import StageOutcome
+
+    noise = Noise(tmp_path / "noise.json")
+    noise.observe("full", "a", StageOutcome(stage_id="full", ok=True, kpis={"cost": 10.0}, kpi_var={"cost": 1.0},
+                                            runs=3, seed_list=(0, 1, 2)))
+    again = StageOutcome(stage_id="full", ok=True, kpis={"cost": 14.0}, seed_list=(2000,))
+    noise.pool("full", "a", again)
+    noise.save()
+    resumed = Noise.load(tmp_path / "noise.json")
+    resumed.pool("full", "a", again)
+    assert resumed.sd_across("full", "cost") == pytest.approx((14 / 3) ** 0.5), "one pooled run, not two"
+    resumed.pool("full", "a", StageOutcome(stage_id="full", ok=True, kpis={"cost": 11.0}, seed_list=(2001,)))
+    assert resumed.sd_across("full", "cost") != pytest.approx((14 / 3) ** 0.5), "another seed is another run"
 
 
 def test_a_candidate_with_one_run_adds_nothing_to_the_noise(tmp_path):

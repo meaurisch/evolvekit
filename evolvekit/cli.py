@@ -148,7 +148,7 @@ budget:
 
 stop:
   patience: 4
-  epsilon: 0.001
+  epsilon: null            # null: automatic -- max(1e-6, 1e-9 x the best, half the noise)
   target: null
   # Economics stops, both off by default. Either one only fires after at least
   # one big step has been applied since the last improvement. In a run that

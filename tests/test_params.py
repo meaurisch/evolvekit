@@ -25,7 +25,6 @@ from evolvekit.search.params import (
     current_values,
     declared_ranges,
     has_params,
-    param_variant,
 )
 
 BLOCK = '''\
@@ -86,25 +85,6 @@ def test_apply_params_rewrites_only_the_assignment_lines():
     assert '# PARAMS: {"ALPHA": [0.0, 10.0], "STEPS": [1, 9]}' in updated
     assert 'return -abs(ALPHA - 8.0) - abs(STEPS - 7)' in updated
     assert current_values(updated, {"ALPHA", "STEPS"}) == {"ALPHA": 8.25, "STEPS": 7}
-
-
-def test_a_variant_is_inside_the_declared_ranges_and_keeps_integer_types():
-    block, values = param_variant(BLOCK, seed=3)
-    assert 0.0 <= values["ALPHA"] <= 10.0
-    assert 1 <= values["STEPS"] <= 9 and isinstance(values["STEPS"], int)
-    assert values != {"ALPHA": 5.0, "STEPS": 3}, "variant 0 is the base point"
-    assert current_values(block, {"ALPHA", "STEPS"}) == values
-
-
-def test_variants_are_reproducible_from_the_seed():
-    assert param_variant(BLOCK, seed=11) == param_variant(BLOCK, seed=11)
-    assert param_variant(BLOCK, seed=11) != param_variant(BLOCK, seed=12)
-
-
-def test_a_block_with_nothing_to_sweep_yields_no_variant():
-    assert param_variant("def f():\n    return 1\n", seed=1) is None
-    # Declared but never assigned: still nothing to rewrite.
-    assert param_variant('# PARAMS: {"A": [0, 1]}\n\n\ndef f():\n    return 1\n', seed=1) is None
 
 
 # -- the operator ----------------------------------------------------------

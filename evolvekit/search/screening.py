@@ -21,8 +21,9 @@ restricted, and ρ reads low (a screen at 0.8 shows about 0.65). The thresholds
 allow for that: an agreeing screen (0.8) is switched off in about 1 % of runs,
 one that does not predict (0) grows `k` in about 91 % (`tests/test_screening.py`).
 
-The state is `work/screening.json`, saved after every check, so a resumed run
-keeps the `k` and the off it had.
+The state is `work/screening.json`, one entry per adapting stage
+(`{"stages": {id: {k, off, below_zero, history}}}`), saved after every check,
+so a resumed run keeps the `k` and the off each stage had.
 """
 
 from __future__ import annotations
@@ -49,6 +50,22 @@ CONTRARY_ROUNDS = 2
 """Checks running with ρ < 0 before the screen is switched off."""
 
 
+def _read_stages(path: Path) -> dict[str, dict[str, Any]]:
+    """`{stage id: state}` from the file at `path`; also its first shape, one
+    stage's state with the id under `stage`. Empty when missing or unreadable."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    if isinstance(payload.get("stages"), dict):
+        return {str(sid): state for sid, state in payload["stages"].items() if isinstance(state, dict)}
+    if isinstance(payload.get("stage"), str):
+        return {payload["stage"]: {k: v for k, v in payload.items() if k != "stage"}}
+    return {}
+
+
 class ScreenControl:
     """The `k` and the on/off of one adapting stage, with the checks that set them."""
 
@@ -69,14 +86,12 @@ class ScreenControl:
 
     @classmethod
     def load(cls, path: Path, stage_id: str, k: int, cap: int, *, later: str = "full") -> "ScreenControl":
-        """The state kept at `path`; the configured `k`, on, when the file is
-        missing, unreadable or of another stage (a run from before the file)."""
+        """This stage's state kept at `path`; the configured `k`, on, when the
+        file is missing, unreadable or holds no entry for the stage (a run
+        from before the file)."""
         control = cls(stage_id, k, cap, path, later=later)
-        try:
-            payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return control
-        if not isinstance(payload, dict) or payload.get("stage") != stage_id:
+        payload = _read_stages(Path(path)).get(stage_id)
+        if payload is None:
             return control
         try:
             control.k = max(1, int(payload.get("k", k)))
@@ -89,11 +104,13 @@ class ScreenControl:
         return control
 
     def save(self) -> None:
+        """This stage's entry written into the file, every other stage's kept."""
         if self.path is None:
             return
-        payload = {"stage": self.stage_id, "k": self.k, "off": self.off, "below_zero": self.below_zero,
-                   "history": self.history}
-        _atomic_write(self.path, json.dumps(payload, indent=1) + "\n")
+        stages = _read_stages(self.path)
+        stages[self.stage_id] = {"k": self.k, "off": self.off, "below_zero": self.below_zero,
+                                 "history": self.history}
+        _atomic_write(self.path, json.dumps({"stages": stages}, indent=1) + "\n")
 
     def after_round(self, generation: int, pairs: Sequence[tuple[float, float]]) -> str | None:
         """Read the check after a round over `(screen score, next stage's score)`

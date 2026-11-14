@@ -143,6 +143,25 @@ def test_the_automatic_epsilon_has_a_relative_floor_and_an_explicit_one_ignores_
     assert fixed.epsilon_now() == 0.25
 
 
+def test_the_replayed_series_judges_each_round_with_the_epsilon_it_had_live():
+    """`_restore_stop_policy` builds the series before the policy has a best:
+    with `epsilon_now()` then (1e-6) a gain of 0.005 on a best of 1e7 read as an
+    improvement, while the live round, at 1e-9·|best| = 0.01, called it flat."""
+    from evolvekit.economics import series
+
+    rows = [{"id": "s", "generation": 0, "score": 1e7}, {"id": "a", "generation": 1, "score": 1e7 + 0.005}]
+    usage = [{"generation": 1, "usd": 0.5}]
+    replaying = StopPolicy(StopConfig(patience=9, epsilon=None))
+    points = series(rows, usage, epsilon=replaying.epsilon_at)
+    assert [p.improved for p in points] == [True, False]
+    assert points[-1].usd_since_improvement == pytest.approx(0.5)
+    live = StopPolicy(StopConfig(patience=9, epsilon=None))
+    for point in points:
+        decision = live.update(point.measured_best, point)
+    assert decision.stagnant_generations == 1, "the policy and the series agree"
+    assert [p.improved for p in series(rows, usage, epsilon=replaying.epsilon_now())] == [True, True], "the old reading"
+
+
 def test_with_no_noise_the_automatic_epsilon_is_todays_default():
     automatic = StopPolicy(StopConfig(patience=3, epsilon=None))
     today = StopPolicy(StopConfig(patience=3, epsilon=1e-6))

@@ -190,9 +190,15 @@ class StopPolicy:
         P(Z > 0.5/√2), about 36 %. With `noise_sd` estimated on `noise_df`
         degrees of freedom the half is widened by `stats.t_scale(0.5/√2, df)`,
         so the 36 % holds at any df (exactly 0.5 at infinite df)."""
+        return self.epsilon_at(self.best)
+
+    def epsilon_at(self, best: float | None) -> float:
+        """`epsilon_now` with `best` as the run's best: the epsilon a round
+        whose bar is `best` is judged with (`economics.series` replays each
+        round with its own bar, as the live round was)."""
         if self.config.epsilon is not None:
             return self.config.epsilon
-        scale = abs(self.best) if self.best is not None else 0.0
+        scale = abs(best) if best is not None else 0.0
         half = 0.5 * self.noise_sd
         if half > 0:
             half *= t_scale(EPSILON_Z, self.noise_df)

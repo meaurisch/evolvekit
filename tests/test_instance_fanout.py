@@ -445,18 +445,25 @@ def test_workers_run_side_by_side_but_never_more_than_asked_for(tmp_path):
     elapsed = time.perf_counter() - started
     assert all(r.competes for r in results.values())
 
-    calls = _calls(tmp_path)
-    assert len(calls) == 12
+    calls = sorted(_calls(tmp_path), key=lambda call: call[2])
+    # Twelve runs for the two candidates, then the seed's noise check (A2,
+    # decision 17d): the seed run again on seed 0 and, at `seeds: 1`, on seed 1,
+    # on one instance, after the generation. The check's runs count towards
+    # the peak below too: they must not exceed `workers` either.
+    assert len(calls) == 14
+    generation, check = calls[:12], calls[12:]
+    assert sorted(seed for _name, seed, *_ in check) == [0, 1] and len({name for name, *_ in check}) == 1
+    assert min(a for *_, a, _b in check) >= max(b for *_, _a, b in generation), "the check runs after the generation"
     moments = sorted([(a, 1) for *_, a, _b in calls] + [(b, -1) for *_, _a, b in calls])
     in_flight = peak = 0
     for _moment, change in moments:
         in_flight += change
         peak = max(peak, in_flight)
     assert peak == 3, "three at a time: not two, and never four"
-    assert elapsed < 12 * 0.8, "twelve runs of 0.8 s took less than they would in a row"
+    assert elapsed < 12 * 0.8, "fourteen runs of 0.8 s took less than twelve would in a row"
     # Instance by instance across candidates: the first three runs to start are
     # both candidates' s0 and one s1 -- not one candidate's s0, s1 and s2.
-    order = [name for name, *_ in sorted(calls, key=lambda call: call[2])]
+    order = [name for name, *_ in generation]
     assert sorted(order[:3]) == ["s0", "s0", "s1"] and sorted(order[-3:]) == ["s4", "s5", "s5"]
 
 

@@ -76,7 +76,7 @@ a larger body is left unread and the connection is closed instead."""
 _RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DASHBOARD = re.compile(r"^/studies/(?P<slug>[^/]+)/runs/(?P<run>[^/]+)(?:/groups/(?P<group>[^/]+))?/dashboard/(?P<rest>.*)$")
 """A run's dashboard; a per-group run's group folder has its own (`runs/<id>/groups/<slug>/dashboard/`)."""
-STATUS_FILES = ("events.jsonl", "runs.jsonl", "heartbeat.json")
+STATUS_FILES = ("events.jsonl", "runs.jsonl", "heartbeat.json", "reevaluations.jsonl", "work/noise.json")
 """The files of a run the status document is built from; a change to any
 of them is a reason to build it again."""
 

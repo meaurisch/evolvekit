@@ -115,7 +115,13 @@ def pool_rows(
     pooled score with `holdout_penalty` (`scoring.ranking_score`; the private
     score is never re-run). The pooled score is the mean of the runs' scores,
     not the score of the pooled KPIs. The veto is the caller's, after this
-    (`read_rows`). Rows without a re-evaluation are returned as they are."""
+    (`read_rows`). Every other row with a score has its ranking score
+    recomputed with the same `holdout_penalty` (as the driver's `_rerank`
+    does), so that a row written at another λ is not ranked on another scale
+    beside the pooled ones. Without re-evaluations the rows are returned as
+    they are."""
+    from evolvekit.evaluate.scoring import ranking_score  # here: `evaluate` imports this module
+
     if not reevaluations:
         return list(rows)
     by_id: dict[str, list[Mapping[str, Any]]] = {}
@@ -125,8 +131,13 @@ def pool_rows(
     result = []
     for row in rows:
         extra = by_id.get(str(row.get("id")))
-        if not extra or _finite(row.get("score")) is None:
+        score = _finite(row.get("score"))
+        if score is None:
             result.append(row)
+            continue
+        if not extra:
+            private = _finite(row.get("private_score"))
+            result.append({**row, "ranking_score": ranking_score(score, score, private, holdout_penalty)})
             continue
         result.append(_pooled(row, extra, holdout_penalty))
     return result

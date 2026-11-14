@@ -67,7 +67,7 @@ def test_fewer_than_eight_pairs_change_nothing(tmp_path):
     flat = [(1.0, float(i)) for i in range(9)]  # a screen that does not vary: no rank correlation
     assert control.after_round(3, flat) is None and (control.k, control.off) == (2, False)
     saved = json.loads((tmp_path / "screening.json").read_text(encoding="utf-8"))
-    assert saved == {"stage": "screen", "k": 2, "off": False, "below_zero": 0, "history": []}
+    assert saved == {"stages": {"screen": {"k": 2, "off": False, "below_zero": 0, "history": []}}}
 
 
 def test_a_check_at_or_above_zero_resets_the_count_of_contrary_rounds():
@@ -131,6 +131,31 @@ def test_a_missing_or_foreign_file_starts_from_the_configured_k(tmp_path):
     assert ScreenControl.load(path, "screen", 2, 6).k == 2
 
 
+def test_each_adapting_stage_keeps_its_own_entry_in_the_file(tmp_path):
+    """Two adapting stages share `screening.json`: each save writes its own entry
+    and keeps the other's (before, each save replaced the whole file)."""
+    path = tmp_path / "screening.json"
+    proxy, screen = ScreenControl("proxy", 3, 6, path), ScreenControl("screen", 2, 6, path)
+    proxy.k, proxy.below_zero = 4, 1
+    proxy.save()
+    screen.off = True
+    screen.save()
+    assert (ScreenControl.load(path, "proxy", 3, 6).k, ScreenControl.load(path, "proxy", 3, 6).below_zero) == (4, 1)
+    assert ScreenControl.load(path, "screen", 2, 6).off is True
+
+
+def test_a_file_of_the_first_shape_still_reads(tmp_path):
+    path = tmp_path / "screening.json"
+    path.write_text(json.dumps({"stage": "screen", "k": 4, "off": False, "below_zero": 1, "history": []}),
+                    encoding="utf-8")
+    control = ScreenControl.load(path, "screen", 2, 6)
+    assert (control.k, control.below_zero) == (4, 1)
+    other = ScreenControl("proxy", 3, 6, path)
+    other.save()
+    assert ScreenControl.load(path, "screen", 2, 6).k == 4, "a save of another stage keeps it, in the new shape"
+    assert set(json.loads(path.read_text(encoding="utf-8"))["stages"]) == {"screen", "proxy"}
+
+
 def _run(rng, rho0, rounds=10, children=6):
     control, pairs = ScreenControl("screen", k=2, cap=children, path=None), []
     grew = False
@@ -179,6 +204,25 @@ def test_adapt_is_read_with_a_top_k_and_refused_without_one():
     assert PromoteRule.parse({"top_k_per_generation": 2}, "p").adapt is False
     with pytest.raises(ConfigError, match=r"evaluate\.stages\[1\]\.promote\.adapt"):
         PromoteRule.parse({"archive_percentile": 50, "adapt": True}, "evaluate.stages[1].promote")
+
+
+def test_adapt_on_the_final_stage_is_refused_and_says_why(tmp_path):
+    raw = _raw(tmp_path)
+    raw["evaluate"]["stages"][2]["promote"] = {"top_k_per_generation": 2, "adapt": True}
+    with pytest.raises(ConfigError, match=r"evaluate\.stages\[2\]\.promote\.adapt: the final stage promotes to no later"):
+        build_config(raw, base_dir=tmp_path)
+
+
+def test_adapt_with_a_build_is_refused_and_says_why(tmp_path):
+    from evolvekit.config import _tree_rules
+
+    config = build_config(_raw(tmp_path), base_dir=tmp_path)
+    built = replace(config, problem=replace(config.problem, tree=SimpleNamespace(build="make", build_timeout_s=60.0)))
+    stages = (config.evaluate.stages[0], replace(config.evaluate.stages[1], kind="builtin-build", promote=PromoteRule()),
+              *config.evaluate.stages[1:])
+    built = replace(built, evaluate=replace(config.evaluate, stages=stages))
+    with pytest.raises(ConfigError, match=r"promote\.adapt: cannot be used with `problem\.tree\.build`: candidates are built one at a time"):
+        _tree_rules(built)
 
 
 # -- the cascade -------------------------------------------------------------
@@ -254,7 +298,7 @@ def test_a_screen_that_disagrees_grows_k_then_is_switched_off_in_a_run(tmp_path)
     Driver(config, run_dir=tmp_path / "run", log=lines.append).run()
     run = tmp_path / "run"
     saved = json.loads((run / "work" / SCREENING_FILE).read_text(encoding="utf-8"))
-    assert saved["stage"] == "screen" and saved["k"] == 3 and saved["off"] is True
+    assert saved["stages"]["screen"]["k"] == 3 and saved["stages"]["screen"]["off"] is True
     assert any("screening promotes 3 a round from now on" in line for line in lines)
     assert any("screening off for the rest of the run" in line for line in lines)
     changed = [e for e in read_events(run) if e.get("type") == "screening_changed"]
@@ -273,3 +317,44 @@ def test_a_stage_without_adapt_keeps_its_k(tmp_path):
     raw["evaluate"]["stages"][1]["promote"] = {"top_k_per_generation": 2}
     driver = Driver(build_config(raw, base_dir=tmp_path), run_dir=tmp_path / "run")
     assert driver.screens == {} and driver.cascade.promote_k == {} and not driver.cascade.skipped
+
+
+def test_two_adapting_stages_keep_their_own_state_across_a_resume(tmp_path):
+    """Two `promote.adapt` stages in one run: each restores its own `k` and off
+    from the shared `work/screening.json` (before, the last save won)."""
+    raw = _raw(tmp_path)
+    proxy = dict(raw["evaluate"]["stages"][1], id="proxy", promote={"top_k_per_generation": 3, "adapt": True})
+    raw["evaluate"]["stages"].insert(1, proxy)
+    config = build_config(raw, base_dir=tmp_path)
+    driver = Driver(config, run_dir=tmp_path / "run")
+    assert sorted(driver.screens) == ["proxy", "screen"]
+    driver.screens["proxy"].k = 4
+    driver.screens["proxy"].save()
+    driver.screens["screen"].off = True
+    driver.screens["screen"].save()
+    resumed = Driver(config, run_dir=tmp_path / "run")
+    assert (resumed.screens["proxy"].k, resumed.screens["proxy"].off) == (4, False)
+    assert (resumed.screens["screen"].k, resumed.screens["screen"].off) == (2, True)
+    assert resumed.cascade.promote_k == {"proxy": 4, "screen": 2} and resumed.cascade.skipped == {"screen"}
+
+
+def test_a_check_lost_with_the_run_is_made_again_on_resume(tmp_path):
+    """The run dies after round 4's rows and before `screening.json` has its
+    check (9 pairs: promotes 3). The resumed run makes that check over the same
+    candidates, once."""
+    config = build_config(_raw(tmp_path), base_dir=tmp_path)
+    run = tmp_path / "run"
+    Driver(config, run_dir=run).run(generations=4)
+    path = run / "work" / SCREENING_FILE
+    assert json.loads(path.read_text(encoding="utf-8"))["stages"]["screen"]["k"] == 3
+    path.write_text(json.dumps({"stages": {"screen": {"k": 2, "off": False, "below_zero": 0, "history": []}}}),
+                    encoding="utf-8")
+    resumed = Driver(config, run_dir=run)
+    assert resumed.resume() == 4
+    control = resumed.screens["screen"]
+    assert control.k == 3 and [h["generation"] for h in control.history] == [4]
+    assert resumed.cascade.promote_k == {"screen": 3}
+    assert json.loads(path.read_text(encoding="utf-8"))["stages"]["screen"]["k"] == 3, "saved"
+    again = Driver(config, run_dir=run)
+    again.resume()
+    assert again.screens["screen"].k == 3 and len(again.screens["screen"].history) == 1, "made once"

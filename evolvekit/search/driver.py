@@ -98,8 +98,11 @@ def _random_stream(seed: int, recorded: int) -> random.Random:
     stream of its own that is still a function of the seed and the directory,
     so resuming stays reproducible too. (`param_lhs` rows do not come from
     this stream on resume: the run's hypercube and its next row are kept in
-    `work/lhs.json`, so a resumed run hands out the rows the uninterrupted
-    run would have.)
+    `work/lhs.json`, written as each row is handed out, so a resumed run goes
+    on from the next row. One window is left: a run that dies while it breeds
+    a round, before that round's `pending.json` exists, has handed out rows
+    that no child kept -- the resumed run breeds the round anew from the rows
+    after them, so those rows are skipped.)
     """
     return random.Random(seed if recorded == 0 else f"{seed}/{recorded}")
 
@@ -568,7 +571,10 @@ class Driver:
             self._replayed_rows(self.ledger.runs(), []),
             self.ledger.usage(),
             window=self.config.stop.economics_window,
-            epsilon=self.stop_policy.epsilon_now(),
+            # Each round against its own bar, as the stop policy judged it --
+            # also when `_restore_stop_policy` replays the series before the
+            # policy has a best (`epsilon_now` would then miss `1e-9·|best|`).
+            epsilon=self.stop_policy.epsilon_at,
             reevaluations=self._reevaluations,
             holdout_penalty=self.config.evaluate.holdout_penalty,
         )
@@ -671,6 +677,7 @@ class Driver:
         self._resumed_generation = last_generation
         self._restore_budget(rows)
         self._replay_missing_step()
+        self._replay_missing_screen_checks(last_generation)
         return last_generation
 
     def _settle_competes(self, row: dict, seed_private: float | None = None) -> dict:
@@ -1037,10 +1044,15 @@ class Driver:
             "score": float(outcome.score),
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        self.ledger.record_reevaluation(entry)
-        self._reevaluations.append(entry)
+        # The noise first: it remembers the runs it pooled (`Noise.pool`), so a
+        # run that dies before the entry is written makes the same run on the
+        # same seed after the resume without pooling it twice; the other way
+        # round, the entry would stand in `reevaluations.jsonl` with its run
+        # missing from the noise for good.
         self.cascade.noise.pool(final.id, best.id, outcome)
         self.cascade.noise.save()
+        self.ledger.record_reevaluation(entry)
+        self._reevaluations.append(entry)
         was = best.fitness
         (pooled,) = pool_rows([best.to_record()], [entry], holdout_penalty=self.config.evaluate.holdout_penalty)
         best.kpis = dict(pooled["kpis"])
@@ -2298,12 +2310,13 @@ class Driver:
             if control.off:
                 self.cascade.skipped.add(stage_id)
 
-    def _check_screens(self, generation: int) -> None:
+    def _check_screens(self, generation: int, only: Sequence[str] | None = None) -> None:
         """After a recorded round: each adapting stage's check over every
         candidate scored at it and at the next stage (the seed included, as
-        `status`'s screening agreement counts them), cumulative over the run."""
+        `status`'s screening agreement counts them), cumulative over the run.
+        `only`: these stages' checks alone (`_replay_missing_screen_checks`)."""
         for stage_id, control in self.screens.items():
-            if control.off:
+            if control.off or (only is not None and stage_id not in only):
                 continue
             pairs = screen_pairs(self.archive, stage_id, control.later)
             control.cap = self.children_per_generation
@@ -2315,6 +2328,20 @@ class Driver:
             last = control.history[-1]
             self.events.emit("screening_changed", stage=stage_id, k=control.k, off=control.off,
                              rho=last["rho"], n=last["n"])
+
+    def _replay_missing_screen_checks(self, last_generation: int) -> None:
+        """On resume: the latest recorded round's screening check, for each
+        adapting stage whose `screening.json` history lacks it (the run died
+        between writing the round's rows and the file), made now over the same
+        candidates -- the check reads the archive only, so it says what the
+        lost one said. A check that read no ρ (too few pairs) left no history
+        entry and is made again: it reads none again and changes nothing."""
+        missing = [
+            stage_id for stage_id, control in self.screens.items()
+            if not control.off and all(h.get("generation") != last_generation for h in control.history)
+        ]
+        if missing:
+            self._check_screens(last_generation, only=missing)
 
     def _drop_trees(self, candidates: Sequence[Candidate]) -> None:
         """Each candidate's tree, removed once its evaluation has finished: no

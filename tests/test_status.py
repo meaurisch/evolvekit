@@ -899,7 +899,7 @@ def test_the_rank_correlation_is_the_one_in_stats():
 
 def _noise_file(run_dir: Path, stages: dict) -> None:
     (run_dir / "work").mkdir(parents=True, exist_ok=True)
-    (run_dir / "work" / "noise.json").write_text(json.dumps({"schema": 1, "stages": stages}), encoding="utf-8")
+    (run_dir / "work" / "noise.json").write_text(json.dumps({"schema": 2, "stages": stages}), encoding="utf-8")
 
 
 def test_progress_reports_the_noise_per_measure(tmp_path):
@@ -907,7 +907,7 @@ def test_progress_reports_the_noise_per_measure(tmp_path):
     run.started(100)
     run.row("g000-c0001", 0, 100.0)
     _noise_file(tmp_path, {"full": {"repeatable": False, "kpis": {
-        "cost": {"across": {"g001-c0002": {"runs": 3, "mean": 100.0, "var": 4.0}}, "paired": {}}}, "vectors": {}}})
+        "cost": {"across": {"g001-c0002": {"runs": 3, "mean": 100.0, "var": 4.0}}}}, "vectors": {}}})
     noise = build_status(tmp_path, now=NOW)["progress"]["noise"]
     assert noise["sd"] == {"cost": pytest.approx(2.0)} and noise["source"] == "replicates"
     assert noise["sd_across"] == {"cost": pytest.approx(2.0)} and noise["repeatable"] is False

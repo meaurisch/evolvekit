@@ -67,11 +67,14 @@ def test_the_file_round_trips_and_a_broken_one_is_no_noise(tmp_path):
     assert Noise.load(path).sd("full", "cost") == pytest.approx(2.0)
     path.write_text("{not json", encoding="utf-8")
     assert Noise.load(path).sd("full", "cost") == 0.0
-    path.write_text('{"schema": 1, "stages": {"full": {"kpis": {"cost": {"across": 3}}}}}', encoding="utf-8")
+    path.write_text('{"schema": 2, "stages": {"full": {"kpis": {"cost": {"across": 3}}}}}', encoding="utf-8")
     assert Noise.load(path).sd("full", "cost") == 0.0, "a file of the wrong shape is no noise either"
-    path.write_text('{"schema": 1, "stages": {"full": {"kpis": {"cost": {"across": '
+    path.write_text('{"schema": 2, "stages": {"full": {"kpis": {"cost": {"across": '
                     '{"a": {"runs": 3, "mean": 1.0, "var": -4.0}}}}}}}', encoding="utf-8")
     assert Noise.load(path).sd("full", "cost") == 0.0, "a negative variance is no variance"
+    path.write_text('{"schema": 1, "stages": {"full": {"kpis": {"cost": {"across": '
+                    '{"a": {"runs": 3, "mean": 1.0, "var": 4.0}}}}}}}', encoding="utf-8")
+    assert Noise.load(path).sd("full", "cost") == 0.0, "a file of another schema is no noise"
     assert Noise.load(tmp_path / "missing.json").known("full") is False
 
 
@@ -201,29 +204,6 @@ def test_the_paired_sd_over_200_candidates_is_within_7_percent_of_the_truth_in_9
     assert 0.93 <= low and high <= 1.07
 
 
-def test_a_file_from_before_the_per_seed_runs_still_reads_its_differences(tmp_path):
-    """Schema 1 kept each candidate's differences to the seed (`paired`: v_d with its
-    df) and the seed's runs: each v_d / 2 is still one side's variance, and the
-    seed's runs become its row of the two-way table, which a new candidate joins."""
-    path = tmp_path / "noise.json"
-    path.write_text(json.dumps({"schema": 1, "stages": {"full": {
-        "repeatable": True,
-        "kpis": {"cost": {"across": {"a": {"runs": 3, "mean": 99.0, "var": 16.0}},
-                          "paired": {"a": {"df": 2, "var": 0.04}, "b": {"df": 2, "var": 0.08}}}},
-        "vectors": {},
-        "seed": {"seeds": [0, 1, 2], "kpis": {"cost": [100.0, 104.0, 96.0]}, "vectors": {}}}}}), encoding="utf-8")
-    noise = Noise.load(path)
-    assert noise.sd("full", "cost") == pytest.approx(math.sqrt((2 * 0.02 + 2 * 0.04) / 4))
-    assert noise.df("full", "cost") == 4
-    noise.observe("full", "c", _runs([99.0, 103.0, 95.4]))
-    d = [-1.0, -1.0, -0.6]
-    ss = (len(d) - 1) * statistics.variance(d) / 2  # two rows: SS = Σ(d - d̄)² / 2
-    assert noise.df("full", "cost") == 6
-    assert noise.sd("full", "cost") ** 2 == pytest.approx((ss + 2 * 0.02 + 2 * 0.04) / 6)
-    noise.save()
-    assert Noise.load(path).sd("full", "cost") == pytest.approx(noise.sd("full", "cost")), "read back the same"
-
-
 def _score(weights=None):
     from evolvekit.config import ScoreConfig
 
@@ -316,7 +296,7 @@ def test_one_malformed_entry_is_left_out_and_the_rest_kept(tmp_path):
     import json
 
     path = tmp_path / "noise.json"
-    path.write_text(json.dumps({"schema": 1, "stages": {
+    path.write_text(json.dumps({"schema": 2, "stages": {
         "full": {"repeatable": "yes",
                  "kpis": {"cost": {"across": {"a": {"runs": 3, "mean": 10.0, "var": 4.0},
                                               "b": {"runs": 3, "mean": 10.0, "var": "16"}}},

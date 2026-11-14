@@ -283,10 +283,15 @@ The run log says each change in a sentence (`screening promotes 3 a round from
 now on: it agrees with the full stage only weakly (rho = 0.10 over 9
 candidates)`, `screening off for the rest of the run: …`), and `events.jsonl`
 has `screening_changed` with `stage`, `k`, `off`, `rho` and `n`. The state is
-`work/screening.json` (`stage`, `k`, `off`, `below_zero` — consecutive checks
-with ρ < 0 — and `history`, one entry per check: `generation`, `n`, `rho`, `k`,
-`off`, `said`), saved after every check; a resumed run keeps its `k` and its
-off, and a run from before the file starts from the configured `k`. ρ is over
+`work/screening.json`, one entry per adapting stage under `stages` (`k`,
+`off`, `below_zero` — consecutive checks with ρ < 0 — and `history`, one entry
+per check: `generation`, `n`, `rho`, `k`, `off`, `said`), saved after every
+check; a resumed run keeps each stage's `k` and off, and a run from before the
+file starts from the configured `k`. A run that died between a round's rows and
+its check makes that check on resume, over the same candidates.
+`promote.adapt` needs a later command stage to compare with: on the final
+stage, or with `problem.tree.build` (candidates built one at a time), it is a
+config error. ρ is over
 promoted candidates only, the best by the screen, so the range is restricted
 and ρ reads low: a screen whose scores correlate 0.8 with the next stage's
 shows about 0.65. The thresholds allow for that: in a seeded simulation of ten
@@ -473,8 +478,10 @@ finds a duplicate is asked once more and takes the next row. A typed
 (a parent that declares other ranges gets its own). The cubes and the next row
 of each are kept in `work/lhs.json` (`{"cubes": {"typed" | "params:<ranges as
 JSON>": {"K", "built", "next", "rows"}}}`, with `prior` beside `rows` when a
-parameter has one), so a resumed run hands out the rows the uninterrupted run
-would have; a run without the file builds a cube at its next `param_lhs` child.
+parameter has one), written as each row is handed out, so a resumed run goes on
+from the next row; a run without the file builds a cube at its next `param_lhs`
+child. A run that dies while it breeds a round, before the round's
+`pending.json` is written, skips the rows that round had taken.
 A cube is used up before a new one is built when only the run's size changes
 (generations, children, shares), and is built anew when a resumed run declares
 the space differently (names, types, ranges, scales, choices or priors).
@@ -909,7 +916,7 @@ pool (per element for a per-instance list, in that list's own units; under
 abandoned contributes nothing. The file is saved after every generation and read
 back on resume; a run written before it starts with no noise. It carries
 `"schema": 2` (each candidate's per-seed runs, for the paired estimate below);
-a schema-1 file still loads.
+a file of another schema is no noise.
 
 *Is the evaluator repeatable?* Once per run and per command stage, after the
 seed has passed that stage, and only when the stage's command has a `{seed}`
@@ -929,8 +936,7 @@ minus that seed's mean over the candidates, plus the grand mean, with
 noise of one side (half the residual variance of a difference); every
 candidate's own level and every seed's own effect drop out, so the estimate
 sharpens as candidates come in (`work/noise.json` keeps each candidate's
-per-seed runs; a file written before them keeps its differences to the seed,
-which still count). At `seeds: 1` it is 0: a repeatable evaluator is compared
+per-seed runs). At `seeds: 1` it is 0: a repeatable evaluator is compared
 exactly, as before. On a stage that is not repeatable (a wall-clock solver)
 the noise is the across-seed one.
 
@@ -966,10 +972,7 @@ with the estimate's degrees of freedom (across seeds Σ(nᵢ − 1) over the
 candidates pooled; paired (C − 1)(S − 1); a calibration 2). Each rate quoted
 below then holds whether the noise rests on three runs or three hundred: an
 equal candidate is kept out by the veto in about 8 % either way, not 15 %, and
-a true twin is caught in about 84 %, not 70 %. A limit: a run resumed from a
-`noise.json` written before the per-seed runs were kept pools its old
-differences to the seed with their full degrees of freedom, though they share
-the seed's runs, so its estimate is a little less certain than its df say. It is shown by `status` (`progress.noise`) and
+a true twin is caught in about 84 %, not 70 %. It is shown by `status` (`progress.noise`) and
 [`preflight`](#before-you-spend-anything-preflight). Each rule that reads the
 estimate says so in its own section and is listed here:
 
@@ -1028,6 +1031,11 @@ selected as the best, and paired with a fresh one would overstate the noise —
 about 1.7 times the variance for the best of eight). A limit: at `seeds > 1` the
 merged entry overstates it a little too, since the best's mean was selected
 (about 11 % in the variance, 5 % in the sd, for the best of eight at `seeds: 3`).
+The noise is saved before the row is written, and `noise.json` names each run
+it pooled (`pooled`: `"<id>@<seed>"`), so a run that died between the two makes
+the same run again on resume without counting it twice in the noise. When a
+run has re-evaluations, every view ranks every row with the run's
+`evaluate.holdout_penalty`, the pooled ones and the others alike.
 
 What it costs: one final-stage run per N rounds, counted against
 `budget.max_full_evals_per_day`; skipped, with a line in the run log (`the best
@@ -1488,7 +1496,8 @@ estimate's degrees of freedom: 0.58 σ̂ on a calibration's two). The noise is t
 score: with `evaluate.holdout_penalty > 0` and a candidate whose hold-out falls
 short of its public score, its fitness also carries the hold-out's noise, so
 its real noise differs from the one this rule and the elite rule read. On a resumed run the recorded
-generations are replayed with the noise as it is when the run resumes.
+generations are replayed with the noise as it is when the run resumes, each
+against the best it had then (the `1e-9 × |best|` term as in the live round).
 `stop.target` is checked against the generation's best itself, not the gated
 best: a target reached by a step inside epsilon is reached. The patience stop
 says the epsilon it used: `stop.patience reached: no improvement > 0.25 for 5

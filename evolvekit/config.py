@@ -1201,6 +1201,21 @@ class EvaluateConfig:
                     f"evaluate.stages[{i}].private_inputs: only the final stage "
                     "may declare a private hold-out"
                 )
+        for i, stage in enumerate(stages):
+            if not stage.promote.adapt:
+                continue
+            # The screening controller compares this stage's ranking with the
+            # next command stage's (`search/screening.py`): it needs one.
+            if i == len(stages) - 1:
+                raise ConfigError(
+                    f"evaluate.stages[{i}].promote.adapt: the final stage promotes to no later stage, so "
+                    "there is no ranking to check its screen against; set it on a screening stage before it"
+                )
+            if stages[i + 1].kind != "command":
+                raise ConfigError(
+                    f"evaluate.stages[{i}].promote.adapt: the next stage ({stages[i + 1].id}) is not a "
+                    "command stage, so it gives no score to check this stage's ranking against"
+                )
         return EvaluateConfig(
             stages=stages,
             score=score,
@@ -1993,6 +2008,12 @@ def _tree_rules(config: Config) -> Config:
                        for stage in config.evaluate.stages)
         config = replace(config, evaluate=replace(config.evaluate, stages=stages))
         for index, stage in enumerate(config.evaluate.stages):
+            if stage.promote.adapt:
+                raise ConfigError(
+                    f"evaluate.stages[{index}].promote.adapt: cannot be used with `problem.tree.build`: "
+                    "candidates are built one at a time, so a round's top k is of one and there is no "
+                    "screen to adapt; remove `adapt`"
+                )
             if stage.promote.top_k_per_generation is not None:
                 raise ConfigError(
                     f"evaluate.stages[{index}]: `promote.top_k_per_generation` cannot be used with "

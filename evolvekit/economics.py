@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 __all__ = [
     "GenerationPoint",
@@ -111,11 +111,15 @@ def series(
     usage: Iterable[Mapping[str, Any]] = (),
     *,
     window: int = DEFAULT_WINDOW,
-    epsilon: float = 0.0,
+    epsilon: float | Callable[[float | None], float] = 0.0,
     reevaluations: Sequence[Mapping[str, Any]] = (),
     holdout_penalty: float = 0.0,
 ) -> list[GenerationPoint]:
     """One point per generation that has a row in `runs`, oldest first.
+
+    `epsilon` is a number, or a function of the bar a round is judged
+    against (the best as of the last improvement) -- the search's
+    `StopPolicy.epsilon_at`, whose automatic epsilon scales with the best.
 
     `runs` are the rows as written. With `reevaluations` (`reevaluations.jsonl`,
     in file order), each round g a re-evaluation was made in ends with the best
@@ -191,7 +195,8 @@ def series(
             delta = 0.0 if running_best is None else running_best - previous_best
             # The stop policy's definition: against the best as of the last
             # improvement, not the previous generation's (no ratchet).
-            improved = running_best is not None and (bar is None or running_best > bar + epsilon)
+            margin = epsilon(bar) if callable(epsilon) else epsilon
+            improved = running_best is not None and (bar is None or running_best > bar + margin)
         if improved:
             bar = running_best
             usd_at_last_improvement = cumulative_usd
