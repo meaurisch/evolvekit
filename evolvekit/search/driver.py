@@ -41,7 +41,7 @@ from evolvekit.candidate import (
     splice_block,
 )
 from evolvekit.config import TYPED_SPACE_OPERATORS, Config
-from evolvekit.deltas import delta_summary
+from evolvekit.deltas import change_summary
 from evolvekit.economics import GenerationPoint, series
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage, holdout_veto, race_warnings
 from evolvekit.evaluate.scoring import ranking_score
@@ -58,7 +58,7 @@ from evolvekit.leaderboard import (
 )
 from evolvekit.ledger import Ledger, _atomic_write
 from evolvekit.lock import run_lock
-from evolvekit.prompts import Inspiration, big_step_reason
+from evolvekit.prompts import Inspiration, LedgerEntry, big_step_reason
 from evolvekit.providers import Provider, build_provider
 from evolvekit.providers.base import CallCapped, supports_call_cap
 from evolvekit.search.archive import Archive
@@ -80,6 +80,7 @@ from evolvekit.search.lhs import latin_hypercube, rows_for_params
 from evolvekit.search.params import current_values, declared_ranges, has_params
 from evolvekit.search.scratchpad import Scratchpad
 from evolvekit.search.screening import SCREENING_FILE, ScreenControl
+from evolvekit.search.tried import parent_ledger
 from evolvekit.search.tuning import Observation
 from evolvekit.space import STEP_SCALE
 from evolvekit.stopping import RunStop, active_seconds, ai_seconds
@@ -293,11 +294,6 @@ class Driver:
         """Why no more AI changes are written (`_ai_room`): the search ends after its round."""
         self._big_step_reason: str | None = None
         """Which trigger planned this round's big step (`_plan_operators`), told to the model."""
-        self._parent_notes: dict[str, str] = {}
-        """One artefact per parent that bred a behavioural twin, spent on that
-        parent's next prompt. The parent's children counter has already been
-        incremented, so the archive has made it less attractive; this tells the
-        model *why* the last attempt on it bought nothing."""
 
     # -- what the run says about itself ----------------------------------
 
@@ -1732,10 +1728,23 @@ class Driver:
 
     def _summary_of(self, candidate: Candidate) -> str:
         parent = self.by_id.get(candidate.parent_id or "")
-        return delta_summary(
+        return change_summary(
             candidate.block,
             parent.block if parent else None,
             candidate.parent_id,
+            params=candidate.params,
+            parent_params=parent.params if parent else None,
+            tree=self.repo is not None,
+        )
+
+    def _parent_ledger(self, parent: Candidate) -> tuple[LedgerEntry, ...]:
+        """What was tried on `parent`: its last children, newest first, read from
+        the archive alone (so a resumed run shows the same) and drawing nothing
+        from the run's random stream."""
+        best = self.best
+        return parent_ledger(
+            self.archive, parent, by_id=self.by_id, best_id=best.id if best else None,
+            final_stage=self.config.final_stage.id, tree=self.repo is not None,
         )
 
     def _inspirations(self, parent: Candidate, operator: str) -> list[Inspiration]:
@@ -1771,7 +1780,7 @@ class Driver:
     def _remember_dead_end(self, candidate: Candidate) -> None:
         """Keep a one-line fingerprint of a behavioural twin for every later prompt.
 
-        The per-parent note below only reaches the parent that bred the twin.
+        The parent's ledger (`_parent_ledger`) only reaches the parent that bred the twin.
         The second real Phase C run bred nine twins of best-fit from four
         different parents (`** 0.9`, `sqrt`, `+ 0.01 * b`, tie-break epsilons):
         the lesson has to reach every prompt, not one lineage.
@@ -1785,9 +1794,6 @@ class Driver:
 
     def _compose_hint(self, parent: Candidate) -> str | None:
         parts: list[str] = []
-        note = self._parent_notes.pop(parent.id, None)
-        if note:
-            parts.append(note)
         if self._dead_ends:
             recent = self._dead_ends[-self.DEAD_END_LIMIT :]
             parts.append(
@@ -1941,7 +1947,14 @@ class Driver:
         reason = self._big_step_reason if operator == "big_step" else None
         if reason:
             hint = "\n\n".join(part for part in (reason, hint) if part)
-        outcome = self._invoke(operator, parent, inspirations, role, hint, candidate_id)
+        # What was tried on this parent, for the operators that call a model through
+        # `run_operator`; the others never read it, so it is not built for them.
+        ledger = (
+            self._parent_ledger(parent)
+            if role != "none" and operator != "agent_patch"
+            else ()
+        )
+        outcome = self._invoke(operator, parent, inspirations, role, hint, candidate_id, ledger)
         attempts += 1
         self._bill(outcome, candidate_id, generation, operator, role)
         self._trace(outcome, candidate_id, parent, operator, role, attempt=attempts)
@@ -1969,7 +1982,7 @@ class Driver:
         # cheap call, asking a third time is how v1 built its token bill.
         # A big step's re-prompt still says why it is due, as its first attempt did.
         retry_hint = "\n\n".join(part for part in (reason, verdict.retry_hint) if part)
-        retry = self._invoke(operator, parent, inspirations, role, retry_hint, candidate_id)
+        retry = self._invoke(operator, parent, inspirations, role, retry_hint, candidate_id, ledger)
         attempts += 1
         self._bill(retry, candidate_id, generation, operator, role)
         self._trace(retry, candidate_id, parent, operator, role, attempt=attempts)
@@ -1991,6 +2004,7 @@ class Driver:
         role: str,
         hint: str | None,
         candidate_id: str,
+        ledger: Sequence[LedgerEntry] = (),
     ) -> OperatorResult:
         if operator == "param_lhs":
             taken = self._lhs_take(parent)
@@ -2034,6 +2048,7 @@ class Driver:
             scratchpad=self.scratchpad.text or None,
             extra_instruction=hint,
             tree=self._tree_context(candidate_id),
+            ledger=ledger,
         )
 
     AGENT_FAILURES = 3
@@ -2362,7 +2377,9 @@ class Driver:
         return False
 
     def _note_behavioural_twin(self, candidate: Candidate) -> None:
-        """Log the twin and leave an artefact for the parent's next prompt.
+        """Log the twin and keep it among the run's dead ends (`_compose_hint`).
+        The parent's next prompt learns of it from its ledger (`_parent_ledger`),
+        which a resumed run rebuilds from `runs.jsonl`.
 
         The wording is deliberately problem-agnostic: the loop knows only that
         every number the evaluator reported came back identical, which means
@@ -2372,14 +2389,6 @@ class Driver:
         """
         self.log(f"        {candidate.id}: {candidate.reject_reason}")
         self._remember_dead_end(candidate)
-        if not candidate.parent_id:
-            return
-        self._parent_notes[candidate.parent_id] = (
-            f"Previous child {candidate.id} produced identical behaviour to "
-            f"{candidate.behaviour_twin_id} on every evaluated instance -- it was "
-            "a re-expression of the same rule, not a new one. Change the "
-            "decisions the program makes, not the way it states them."
-        )
 
     def _record(self, candidate: Candidate) -> None:
         usage = [

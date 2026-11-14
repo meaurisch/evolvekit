@@ -4,16 +4,20 @@ Two messages, always in this shape:
 
     system  role + protocol + problem context + the frozen skeleton
             -- byte-identical across a whole run, so prefix caching works
-    user    parent block + score breakdown + last failure + operator instruction
+    user    parent block + score breakdown + what was tried on this parent
+            + operator instruction
             -- bounded; nothing here grows with the number of generations
 
 Deliberately absent, per the post-mortem: verbatim source of the top-3
 candidates, a 400-line brief, and a separate reflection call. The feedback the
-model gets is the parent's own score breakdown and the last failure artefact.
+model gets is the parent's own score breakdown and a ledger of the parent's
+last children: what each changed (computed locally) and what came of it.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from evolvekit.candidate import Candidate
@@ -26,6 +30,9 @@ __all__ = [
     "problem_sections",
     "user_prompt",
     "Inspiration",
+    "LedgerEntry",
+    "LEDGER_LINES",
+    "LEDGER_LINE_LIMIT",
     "OPERATOR_INSTRUCTIONS",
     "big_step_reason",
     "FAILURE_LIMIT",
@@ -65,6 +72,74 @@ class Inspiration:
     summary: str
     score_line: str
     block: str | None = None
+
+
+LEDGER_LINES = 5
+LEDGER_LINE_LIMIT = 160
+"""The ledger of what was tried on a parent: at most five lines, each at most
+160 characters as printed (its `- ` bullet included), so the prompt does not
+grow with the run however many children a parent has had."""
+
+_BULLET = "- "
+_CUT = "..."
+
+
+def _one_line(text: str) -> str:
+    """Every whitespace run -- newlines, U+2028/U+2029, `\\x85` included -- as one space."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+@dataclass(frozen=True)
+class LedgerEntry:
+    """One child of the parent: who it is, which operator made it, what it
+    changed (`None`: nothing was applied) and what came of it, in words."""
+
+    id: str
+    operator: str
+    change: str | None
+    outcome: str
+
+    def line(self) -> str:
+        """One physical line that fits `LEDGER_LINE_LIMIT` once bulleted. Too
+        long, the change is cut first (down to `...`), then the outcome; a cut
+        outcome that was quoted keeps its closing backtick."""
+        limit = LEDGER_LINE_LIMIT - len(_BULLET)
+        head = f"`{_one_line(self.id)}` {_one_line(self.operator)}"
+        outcome = _one_line(self.outcome)
+        if self.change is None:
+            fixed = len(head) + len(" -> ")
+            return f"{head} -> {_cut_outcome(outcome, limit - fixed)}"[:limit]
+        change = _one_line(self.change)
+        fixed = len(head) + len(": ") + len(" -> ") + len(outcome)
+        if fixed + len(change) <= limit:
+            return f"{head}: {change} -> {outcome}"
+        room = limit - fixed
+        if room >= len(_CUT):
+            return f"{head}: {change[: room - len(_CUT)]}{_CUT} -> {outcome}"
+        fixed = len(head) + len(": ") + len(_CUT) + len(" -> ")
+        return f"{head}: {_CUT} -> {_cut_outcome(outcome, limit - fixed)}"[:limit]
+
+
+def _cut_outcome(outcome: str, room: int) -> str:
+    if len(outcome) <= room:
+        return outcome
+    tail = _CUT + "`" if outcome.endswith("`") else _CUT
+    return outcome[: max(0, room - len(tail))] + tail
+
+
+def _ledger_section(ledger: Sequence[LedgerEntry]) -> str:
+    """"## What was tried on this parent", or nothing when the parent has no
+    recorded child: at most `LEDGER_LINES` entries, newest first."""
+    entries = list(ledger)[:LEDGER_LINES]
+    if not entries:
+        return ""
+    lines = "\n".join(f"{_BULLET}{entry.line()}" for entry in entries)
+    return (
+        "\n## What was tried on this parent\n"
+        "Newest first: child, operator, what it changed -> what came of it "
+        "(score change against this parent).\n"
+        f"{lines}\n"
+    )
 
 _PROTOCOL = """\
 You improve one fenced region of a Python file. The rest of the file is fixed \
@@ -333,8 +408,13 @@ def user_prompt(
     inspirations: "list[Inspiration] | tuple[Inspiration, ...]" = (),
     scratchpad: str | None = None,
     extra_instruction: str | None = None,
+    ledger: Sequence[LedgerEntry] = (),
 ) -> str:
-    """The bounded half. Size does not grow with the run."""
+    """The bounded half. Size does not grow with the run.
+
+    The parent's own failure artefact is not shown: a parent always finished
+    its evaluation, so that section was always empty. What failed is what the
+    parent's children did, and `ledger` says it."""
     instruction = OPERATOR_INSTRUCTIONS.get(
         operator, OPERATOR_INSTRUCTIONS["rewrite"]
     )
@@ -342,12 +422,6 @@ def user_prompt(
         instruction = f"{instruction}\n\n{extra_instruction.strip()}"
     fmt = _DIFF_FORMAT if operator == "diff" else _REWRITE_FORMAT
 
-    failure = (result.last_failure if result is not None else parent.last_failure) or ""
-    failure_section = (
-        f"\n## Last failure artefact (truncated)\n```\n{failure[-FAILURE_LIMIT:]}\n```\n"
-        if failure.strip()
-        else ""
-    )
     context = ""
     if best_score is not None and (result.score if result else parent.score) is not None:
         current = result.score if result else parent.score
@@ -368,7 +442,7 @@ def user_prompt(
 {_score_breakdown(result, parent)}
 {_feedback_section(result, parent)}\
 {context}{_inspiration_section(inspirations)}{_scratchpad_section(scratchpad)}\
-{failure_section}
+{_ledger_section(ledger)}
 ## Your task
 {instruction}
 
@@ -387,6 +461,7 @@ def build_messages(
     inspirations: "list[Inspiration] | tuple[Inspiration, ...]" = (),
     scratchpad: str | None = None,
     extra_instruction: str | None = None,
+    ledger: Sequence[LedgerEntry] = (),
 ) -> list[dict[str, str]]:
     return [
         {
@@ -403,6 +478,7 @@ def build_messages(
                 inspirations=inspirations,
                 scratchpad=scratchpad,
                 extra_instruction=extra_instruction,
+                ledger=ledger,
             ),
         },
     ]

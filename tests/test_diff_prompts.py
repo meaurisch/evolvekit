@@ -18,12 +18,19 @@ from evolvekit import tree
 from evolvekit.candidate import Candidate
 from evolvekit.config import ArchiveConfig, ConfigError, DescriptorConfig, build_config
 from evolvekit.diffs import DiffError
-from evolvekit.prompts import Inspiration
+from evolvekit.prompts import LEDGER_LINE_LIMIT, Inspiration, LedgerEntry
 from evolvekit.providers.fake import FakeProvider
 from evolvekit.search.archive import Archive, descriptor_value
 from evolvekit.search.driver import Driver
 from evolvekit.search.operators import TreeContext, run_operator
-from evolvekit.tree_prompts import OPEN_LINES, marked_block, numbered, open_files, parse_diff_response
+from evolvekit.tree_prompts import (
+    OPEN_LINES,
+    marked_block,
+    numbered,
+    open_files,
+    parse_diff_response,
+    tree_messages,
+)
 
 
 @pytest.fixture
@@ -79,6 +86,24 @@ def test_numbered_and_open_files(ctx, parent, project):
         assert list(open_files(made, ("solver.py",))) == ["solver.py"]
     finally:
         tree.remove(ctx.run_dir, "look")
+
+
+def test_the_tree_prompt_carries_the_bounded_ledger(ctx, config, parent):
+    provider = FakeProvider(responses=["no diff here"])
+    ledger = [LedgerEntry(id=f"g001-c000{k}", operator="diff", change="+2/-1 diff lines; files: solver.py",
+                          outcome="failed: `" + "e" * 5000 + "`" if k == 3 else f"+0.{k}") for k in range(6, 0, -1)]
+    failing = Candidate(id=parent.id, generation=0, block=parent.block, source="", operator="human-seed",
+                        last_failure="stage full: exit code 1\nboom")
+    run_operator("diff", config=config, provider=provider, model_role="small", parent=failing,
+                 parent_result=None, skeleton_prefix="", skeleton_suffix="", tree=ctx, ledger=ledger)
+    prompt = provider.calls[0]["messages"][-1]["content"]
+    assert "## Last failure artefact" not in prompt
+    section = prompt[prompt.index("## What was tried on this parent"):prompt.index("## Your task")]
+    bullets = [line for line in section.splitlines() if line.startswith("- ")]
+    assert 0 < len(bullets) <= 5 and all(len(line) <= LEDGER_LINE_LIMIT for line in bullets)
+    assert any(line.endswith("...`") for line in bullets), "the huge outcome was cut, its backtick kept"
+    assert "## What was tried on this parent" not in tree_messages(
+        config, parent=failing, result=None, operator="diff", files={"solver.py": "x = 1\n"})[1]["content"]
 
 
 def test_parse_diff_fenced_and_bare():
