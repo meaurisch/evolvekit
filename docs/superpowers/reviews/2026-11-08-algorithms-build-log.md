@@ -423,4 +423,4 @@ Two tasks, each built by a fresh implementer and reviewed by a fresh reviewer.
   looked for the old failure section's words on the twin's parent's prompt; A3.1 replaced that section
   by the ledger, so the test now looks for the twin's ledger line (8da08a0); its file then passed
   (33 tests). The final gate on the A4 branch runs the whole suite again over A3's code.
-- PR: against `master`, stacked on A2 (#83).
+- PR: [meaurisch/evolvekit#84](https://github.com/meaurisch/evolvekit/pull/84), `algo/3-prompt` against `master`, stacked on #83. **PASS.**
