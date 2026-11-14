@@ -29,6 +29,8 @@ def _row(**fields) -> Candidate:
 
 PARENT_ROW = _row(id="g001-c0001", generation=1, block=PARENT_BLOCK, parent_id=None, score=1.0)
 TWIN = _row(id="g002-c0009", score=1.3, behaviour_signatures={"full": "abc"})
+NUMBERS_TWIN = _row(id="g002-c0009", score=1.3,
+                    behaviour_values={"full": {"kpis": {"bins": 4.0}, "vectors": {}, "score": 1.3}})
 
 ZERO_DIVISION = ("stage full: exit code 1\nTraceback (most recent call last):\n  File \"x.py\", line 3\n"
                  "ZeroDivisionError: division by zero\n")
@@ -60,10 +62,32 @@ CASES = [
                          reject_reason="could not apply response: SEARCH text not found\nmore",
                          last_failure="could not apply response: SEARCH text not found\nmore"), None,
      "not applied: `could not apply response: SEARCH text not found`"),
+    ("not applied, outside the open files", dict(
+        block=PARENT_BLOCK, rejected=True, competes=False,
+        reject_reason="changes files outside the open files: bench.py (only solver.py may change)"), None,
+     "not applied: `changes files outside the open files: bench.py (only solver.py may change)`"),
+    ("not applied, the agent", dict(block=PARENT_BLOCK, rejected=True, competes=False, operator="agent_patch",
+                                    reject_reason="the agent changed nothing"), None,
+     "not applied: `the agent changed nothing`"),
     ("no reply", dict(block=PARENT_BLOCK, rejected=True, competes=False, score=-1e9,
                       reject_reason="provider error: session cap reached",
                       last_failure="provider error: session cap reached"), None,
      "no reply: provider error: session cap reached"),
+    ("no reply, refused before the call", dict(
+        block=PARENT_BLOCK, rejected=True, competes=False,
+        reject_reason="the open files hold 900 lines; a code study shows them whole"), None,
+     "no reply: the open files hold 900 lines; a code study shows them whole"),
+    ("no reply, the agent's time", dict(block=PARENT_BLOCK, rejected=True, competes=False, operator="agent_patch",
+                                        reject_reason="the study has no time left for the agent"), None,
+     "no reply: the study has no time left for the agent"),
+    ("rounding is no change", dict(score=1.0 + 2.2e-16), None, "+0"),
+    ("the score, not the ranking score", dict(score=1.5, ranking_score=1.1), None, "+0.5"),
+    ("noise twin, numbers only", dict(rejected=True, competes=False, behaviour_twin_id="g002-c0009",
+                                      behaviour_values={"full": {"kpis": {"bins": 4.1}, "vectors": {}}}), None,
+     "same behaviour as g002-c0009, within the noise"),
+    ("exact twin, numbers only", dict(rejected=True, competes=False, behaviour_twin_id="g002-c0009",
+                                      behaviour_values={"full": {"kpis": {"bins": 4.0}, "vectors": {}}}), None,
+     "same behaviour as g002-c0009"),
     ("no reply, no text", dict(block=PARENT_BLOCK, rejected=True, competes=False, score=-1e9), None, "no reply"),
     ("no_op", dict(rejected=True, competes=False, novelty="no_op", reject_reason="structurally identical"), None,
      "rejected: no change from this parent"),
@@ -85,8 +109,17 @@ CASES = [
 @pytest.mark.parametrize("name, fields, best_id, words", CASES, ids=[c[0] for c in CASES])
 def test_every_row_shape_has_its_words(name, fields, best_id, words):
     child = _row(**fields)
-    twin = TWIN if child.behaviour_twin_id else None
+    twin = None
+    if child.behaviour_twin_id:
+        twin = TWIN if child.behaviour_signatures else NUMBERS_TWIN
     assert outcome_words(child, PARENT_ROW, best_id=best_id, twin=twin, final_stage="full") == words
+
+
+def test_a_twin_the_archive_does_not_hold_reads_plain():
+    child = _row(rejected=True, competes=False, behaviour_twin_id="g000-c0042",
+                 behaviour_values={"full": {"kpis": {"bins": 4.1}, "vectors": {}}})
+    assert outcome_words(child, PARENT_ROW, best_id=None, twin=None, final_stage="full") == (
+        "same behaviour as g000-c0042")
 
 
 def test_a_parent_without_a_fitness_shows_the_child_s_score():

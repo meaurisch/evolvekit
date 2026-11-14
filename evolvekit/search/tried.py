@@ -25,7 +25,16 @@ __all__ = ["outcome_words", "entry_for", "parent_ledger", "score_text"]
 
 _RACED = re.compile(r"raced out after (\d+)")
 _DAILY_CAP = "daily full-evaluation cap reached"
-_NOT_APPLIED = "could not apply response"
+_NOT_APPLIED = (
+    "could not apply response",  # the model's reply did not apply
+    "changes files outside the open files",  # a tree reply touched what it may not
+    "the agent ",  # agent_patch's own refusals of what the agent did
+)
+"""Failed applies where a reply came back. Every other failed apply had no
+reply to apply: a provider error, a tree checkout, `param_lhs` finding nothing,
+a prompt refused before the call (`the open files hold ...`), no time left."""
+_SAME = 1e-9
+"""A score change below this share of the scores' size is rounding, shown `+0`."""
 _COUNTER = re.compile(r"-c(\d+)$")
 
 
@@ -64,6 +73,21 @@ def _failed_apply(child: Candidate, parent: Candidate | None) -> bool:
     )
 
 
+def _exact_twin(child: Candidate, twin: Candidate) -> bool:
+    """The twin behaved exactly alike at the stage that caught the child: the same
+    signature hash, or -- a stage with nothing hashed -- the same recorded numbers."""
+    stage = child.stages_reached[-1] if child.stages_reached else None
+    if stage is None:
+        return False
+    mine = child.behaviour_signatures.get(stage)
+    if mine:
+        return twin.behaviour_signatures.get(stage) == mine
+    values, theirs = child.behaviour_values.get(stage), twin.behaviour_values.get(stage)
+    if not values or not theirs:
+        return False
+    return all(values.get(k) == theirs.get(k) for k in ("kpis", "vectors"))
+
+
 def _suffixes(child: Candidate, parent: Candidate | None, best_id: str | None) -> str:
     text = " (now the best)" if best_id is not None and child.id == best_id else ""
     if child.novelty == "near":
@@ -94,10 +118,10 @@ def outcome_words(
     if child.novelty == "duplicate":
         return f"rejected: same program as {child.twin_id or 'an earlier candidate'}"
     if child.behaviour_twin_id:
-        stage = child.stages_reached[-1] if child.stages_reached else None
-        mine = child.behaviour_signatures.get(stage) if stage else None
-        if twin is None or (mine is not None and twin.behaviour_signatures.get(stage) == mine):
-            # Exact, or a twin this archive does not hold: the plain words are true either way.
+        if twin is None or _exact_twin(child, twin):
+            # Exact, or a twin this archive does not hold: the plain words are true
+            # either way (the child's own numbers are recorded under both rules,
+            # so they alone cannot tell which rule caught it).
             return f"same behaviour as {child.behaviour_twin_id}"
         return f"same behaviour as {child.behaviour_twin_id}, within the noise"
     if child.gated:
@@ -113,14 +137,19 @@ def outcome_words(
         return f"failed: {_quoted(failure_line(child.last_failure))}"
     if not child.rejected and not child.competes and final_stage not in child.stages_reached:
         return "not promoted"
-    fitness = child.fitness
-    if not child.rejected and not child.competes and fitness is not None:
-        return f"not ranked (score {score_text(fitness, signed=False)})"
-    if not child.rejected and child.competes and fitness is not None:
-        parent_fitness = parent.fitness if parent is not None else None
-        if parent_fitness is not None:
-            return score_text(fitness - parent_fitness, signed=True) + _suffixes(child, parent, best_id)
-        return f"score {score_text(fitness, signed=False)}" + _suffixes(child, parent, best_id)
+    # The score, not the ranking score: the number "## How it scored" shows the
+    # model for the parent (they differ only when `evaluate.holdout_penalty` > 0).
+    score = child.score
+    if not child.rejected and not child.competes and score is not None:
+        return f"not ranked (score {score_text(score, signed=False)})"
+    if not child.rejected and child.competes and score is not None:
+        parent_score = parent.score if parent is not None else None
+        if parent_score is not None:
+            change = score - parent_score
+            if abs(change) < _SAME * max(abs(score), abs(parent_score)):
+                change = 0.0
+            return score_text(change, signed=True) + _suffixes(child, parent, best_id)
+        return f"score {score_text(score, signed=False)}" + _suffixes(child, parent, best_id)
     if child.rejected and child.reject_reason:
         return f"rejected: {_quoted(_first_line(child.reject_reason))}"
     return "no score"

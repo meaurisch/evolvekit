@@ -450,8 +450,9 @@ numbers alone changed is marked `(numbers only)`; on a typed space the
 constants named are the parameters whose values changed. On a tree problem,
 the summary names the files the diff touched. Crossover is the one operator
 that also sees an inspiration's code, because it cannot combine two candidates
-otherwise. The model-free operators (role `none`) read no inspirations, so none are drawn for them: on a
-typed space, adding parameter axes leaves the run's proposals as they were.
+otherwise. The model-free operators (role `none`) read no inspirations, so
+none are drawn for them: on a typed space, adding parameter axes leaves the
+run's proposals as they were.
 
 Each inspiration adds a summary and a score line to the prompt, and on a tree
 problem its whole diff, so raising `search.inspirations` raises the cost of
@@ -461,7 +462,10 @@ every prompt. Crossover is always shown exactly one.
 model also lists the parent's last five children, newest first, one line each:
 the child, its operator, its change summary and what came of it — at most 160
 characters a line, so the prompt does not grow with the run. What came of it is
-one of: a signed score change against the parent as it stands now (with
+one of: a signed score change against the parent as it stands now — the
+score its "How it scored" section shows, not the ranking score
+`evaluate.holdout_penalty` discounts; a change below a billionth of the
+scores reads `+0` (with
 "(now the best)" when the child is the run's best, and ", close to …" for a
 near-duplicate); "score …" when the parent has no score; "failed: `…`" with
 the error's last line (a Python traceback's exception); "same behaviour as …"
@@ -469,8 +473,11 @@ the error's last line (a Python traceback's exception); "same behaviour as …"
 candidate that scored at least as well; "broke the gate `…`"; "raced out after
 N instances"; "kept out by the hold-out"; "not promoted"; "not ranked (score
 …)"; "not evaluated: the daily cap on final evaluations was reached"; "not
-applied: `…`" when the reply could not be applied; "no reply: …" when the
-call itself failed; and "rejected: …" for a no-op or a duplicate. It replaces
+applied: `…`" when a reply came back and was refused (it did not apply, it
+changed a file outside the open files, or the agent's change was empty or
+unreadable); "no reply: …" when there was no reply to apply (a provider error,
+a checkout that failed, open files too long to show, no time left, nothing for
+`param_lhs` to sweep); and "rejected: …" for a no-op or a duplicate. It replaces
 the parent's failure section (a parent always finished its evaluation, so that
 section was always empty), and it is rebuilt from `runs.jsonl` on resume.
 
