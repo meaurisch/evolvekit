@@ -150,6 +150,7 @@ def test_features_make_two_groups_named_by_their_first_feature(tmp_path):
     root = study_with_cases(tmp_path, sizes=sizes, held=2)
     doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
     assert doc["method"] == "features" and doc["k"] == 2 and doc["silhouette"] > 0.5
+    assert doc["format"] == 2 and doc["assigned"] == "stump"
     assert doc["groups"]["group 1"] == {"training": ["cases/c1.json", "cases/c3.json", "cases/c5.json"],
                                         "test": ["cases/c7.json"]}, "group 1 has the lower first feature"
     assert doc["groups"]["group 2"]["test"] == ["cases/c6.json"]
@@ -530,3 +531,223 @@ def test_a_merged_tag_still_gets_a_rule_and_so_does_the_all_merged_case():
                                             "untagged": {"training": ["d", "e"], "test": []}}))
     assert groups.rule_lines(every, {"x": "keep"}) == [
         "For cases tagged x or with no tag, use today's settings (x: not shown to beat today's)."]
+
+
+# ---------------------------------------------------------------------------
+# A4.2: one group unless the cases separate; held-back cases by the rule
+# ---------------------------------------------------------------------------
+
+DEMO_SAMPLES = ROOT / "harnesses" / "demo-tour" / "samples"
+PYVRP_SAMPLES = ROOT / "harnesses" / "pyvrp" / "samples"
+
+
+def samples_study(tmp_path: Path, harness: str, samples: list[Path], held: list[str]) -> Path:
+    """A study of `harness` with the sample files copied into `cases/` (no solve); the names in `held` held back."""
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    slug = home.create_study(harness, "tune", "Samples")
+    root = home.study_root(slug)
+    (root / "cases").mkdir(exist_ok=True)
+    names = []
+    for sample in samples:
+        (root / "cases" / sample.name).write_bytes(sample.read_bytes())
+        names.append(f"cases/{sample.name}")
+    study = load_study(root)
+    study.training = [c for c in names if Path(c).name not in held]
+    study.test = [c for c in names if Path(c).name in held]
+    save_study(study, root)
+    return root
+
+
+def test_the_demo_tour_samples_make_one_group(tmp_path):
+    """Acceptance (§7 A4.2): the four demo-tour samples (30, 40, 50, 60 stops, all learned from).
+    Fast: fake_tables with the samples' own stop counts read from harnesses/demo-tour/samples/*.json
+    (the fake's features equal the real tables': rows_stops, mean_stops_stop_id, mean_stops_weight).
+    Best silhouette 0.455 (k = 2) < 0.5 -> method "one"."""
+    samples = sorted(DEMO_SAMPLES.glob("*.json"))
+    stops = {f"cases/{p.name}": len(json.loads(p.read_text(encoding="utf-8"))["stops"]) for p in samples}
+    assert sorted(stops.values()) == [30, 40, 50, 60]
+    root = samples_study(tmp_path / "all", "demo-tour", samples, held=[])
+    doc = groups.compute(root, tables=fake_tables(stops))
+    assert doc["method"] == "one" and list(doc["groups"]) == ["all"] and doc["format"] == 2
+    assert doc["assigned"] == "one" and "stump" not in doc and doc["min_silhouette"] == 0.5
+    assert doc["silhouette"] == pytest.approx(0.455, abs=0.0005), doc["silhouette"]
+    assert any(n.startswith("the cases do not fall into clear kinds (how well they separate: 0.4")
+               and n.endswith(" of 1, at least 0.5 needed); all cases are one group") for n in doc["notes"]), doc["notes"]
+    # One held back: two groups of two to learn from cannot be made from three.
+    root = samples_study(tmp_path / "held", "demo-tour", samples, held=["town-40.json"])
+    doc = groups.compute(root, tables=fake_tables(stops))
+    assert doc["method"] == "one" and doc["groups"]["all"]["test"] == ["cases/town-40.json"]
+    assert groups.ONE_GROUP in doc["notes"]
+
+
+@pytest.mark.slow
+def test_the_demo_tour_samples_make_one_group_from_a_real_solve(tmp_path):
+    """The same through `Home.use_samples` and `case_tables` (the cli-solver, the preview's time limit)."""
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    slug = home.create_study("demo-tour", "tune", "Samples")
+    root = home.study_root(slug)
+    study = load_study(root)
+    study.application_path = str(SOLVER)
+    save_study(study, root)
+    assert sorted(home.use_samples(slug)) == sorted(p.name for p in DEMO_SAMPLES.glob("*.json"))
+    doc = groups.compute(root)
+    assert doc["method"] == "one" and list(doc["groups"]) == ["all"], doc
+    assert sorted(row["rows_stops"] for row in doc["features"].values()) == [30, 40, 50, 60]
+    assert doc["silhouette"] == pytest.approx(0.455, abs=0.0005), doc["silhouette"]
+
+
+def test_the_pyvrp_samples_keep_their_tag_groups(tmp_path):
+    """Acceptance: the ten pyvrp samples, tagged by the test from each file's meta.scenario.depots
+    ("two depots": city, lake, suburbs, towns, valley; "three depots": the other five), two of each
+    held back. compute(features=False) solves nothing (pyvrp is not installed here): method "tags",
+    groups exactly the tags, held-back cases by their tags, assigned "tags", no stump, no accuracy;
+    merge_small_groups leaves it as it is."""
+    samples = sorted(PYVRP_SAMPLES.glob("*.json"))
+    depots = {p.name: json.loads(p.read_text(encoding="utf-8"))["meta"]["scenario"]["depots"] for p in samples}
+    tag_of = {name: {2: "two depots", 3: "three depots"}[n] for name, n in depots.items()}
+    assert sorted(n for n, t in tag_of.items() if t == "two depots") == [
+        "city-60.json", "lake-140.json", "suburbs-180.json", "towns-80.json", "valley-120.json"]
+    held = [n for t in ("two depots", "three depots") for n in [m for m in sorted(tag_of) if tag_of[m] == t][-2:]]
+    root = samples_study(tmp_path, "pyvrp", samples, held=held)
+    for name, tag in tag_of.items():
+        groups.write_tag(root, f"cases/{name}", tag)
+
+    def no_solve(_root, case, say=None):
+        raise AssertionError(f"{case} was solved")
+
+    doc = groups.compute(root, tables=no_solve, features=False)
+    assert doc["method"] == "tags" and doc["assigned"] == "tags" and doc["format"] == 2
+    assert "stump" not in doc and "accuracy" not in doc
+    assert list(doc["groups"]) == ["three depots", "two depots"]
+    for name, part in doc["groups"].items():
+        assert {Path(c).name for c in part["training"] + part["test"]} == {n for n, t in tag_of.items() if t == name}
+        assert {Path(c).name for c in part["test"]} == {n for n in held if tag_of[n] == name}
+    assert groups.merge_small_groups(doc) == doc
+    assert groups.read_groups(root, load_study(root)) == doc
+
+
+def test_clustering_uses_the_training_cases_only(tmp_path):
+    training = [20, 22, 24, 80, 82, 84]
+    plain = groups.compute(study_with_cases(tmp_path / "plain", training + [83, 21], held=2),
+                           tables=fake_tables(sizes_of(training + [83, 21])))
+    sizes = training + [500, 21]
+    doc = groups.compute(study_with_cases(tmp_path / "outlier", sizes, held=2), tables=fake_tables(sizes_of(sizes)))
+    assert doc["method"] == "features" and doc["silhouette"] == plain["silhouette"]
+    assert [g["training"] for g in doc["groups"].values()] == [g["training"] for g in plain["groups"].values()]
+    assert doc["stump"]["feature"] == "rows_stops" and doc["stump"]["thresholds"] == [52.0]
+    assert doc["groups"]["group 2"]["test"] == ["cases/c6.json"], "500 stops: above 52, so group 2 by the rule"
+    assert doc["groups"]["group 1"]["test"] == ["cases/c7.json"]
+
+
+def test_counts_enter_the_clustering_as_log1p():
+    import math
+
+    assert groups.COUNT_PREFIX == "rows_" and groups.MIN_SILHOUETTE == 0.5
+    assert groups.transformed({"rows_a": 99.0, "mean_a_x": 99.0}) == {"rows_a": math.log1p(99), "mean_a_x": 99.0}
+    got = groups.transformed({"rows_b": -3.0, "rows_c": float("inf")})
+    assert got["rows_b"] == -3.0 and got["rows_c"] == float("inf"), "a value below 0, or not finite, stays raw"
+
+
+def test_held_back_cases_follow_the_stump_and_the_rule_reports_both_accuracies(tmp_path):
+    sizes = [80, 20, 82, 22, 84, 24, 83, 21]
+    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    assert doc["format"] == 2 and doc["assigned"] == "stump" and doc["min_silhouette"] == 0.5
+    assert doc["stump"] == {"feature": "rows_stops", "thresholds": [52.0], "sides": ["group 1", "group 2"],
+                            "misplaced": 0}
+    assert doc["accuracy"] == {"training": {"right": 6, "of": 6}, "held_back": {"right": 2, "of": 2}}
+    assert groups.read_groups(root, load_study(root)) == doc
+    assert groups.assign(doc["stump"], {"rows_stops": 52.0}) == "group 1", "above 52, strictly"
+    assert groups.assign(doc["stump"], {"rows_stops": 52.5}) == "group 2"
+    assert groups.assign(doc["stump"], {"rows_stops": float("nan")}) is None
+    assert groups.assign(doc["stump"], {}) is None
+    assert groups.rule_lines(doc, {"group 1": "use", "group 2": "use"}) == [
+        "If the number of rows in stops is above 52, use the settings of group 2; otherwise those of group 1.",
+        "The rule puts 6 of the 6 cases the search learned from in the group they were found in, "
+        "and 2 of the 2 held-back cases in the group they are nearest to."]
+    no_held = {**doc, "accuracy": {"training": {"right": 5, "of": 6}, "held_back": {"right": 0, "of": 0}}}
+    assert groups.rule_lines(no_held, {})[1] == (
+        "The rule puts 5 of the 6 cases the search learned from in the group they were found in.")
+
+
+def test_a_held_back_case_the_rule_cannot_read_goes_to_the_nearest_group_and_says_so(tmp_path, monkeypatch):
+    """Review Focus 3: c6 has no number of rows (not finite), so the rule cannot read it; its other
+    clustering feature puts it nearest group 2. c7 has none of the features: the first group."""
+    sizes = [80, 20, 82, 22, 84, 24, 83, 21]
+    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    real = groups.features_of
+
+    def features_of(root_, case, *, tables):
+        if case == "cases/c6.json":
+            return {"rows_stops": float("nan"), "mean_stops_stop_id": 41.0, "mean_stops_weight": 1.0}
+        if case == "cases/c7.json":
+            return {}
+        return real(root_, case, tables=tables)
+
+    monkeypatch.setattr(groups, "features_of", features_of)
+    doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    assert doc["method"] == "features" and doc["stump"]["feature"] == "rows_stops"
+    assert doc["groups"]["group 2"]["test"] == ["cases/c6.json"]
+    assert doc["groups"]["group 1"]["test"] == ["cases/c7.json"]
+    assert "cases/c6.json: the rule cannot read it, so it goes to group 2, the nearest" in doc["notes"], doc["notes"]
+    assert "cases/c7.json: the rule cannot read it, so it goes to group 1, the first" in doc["notes"], doc["notes"]
+    assert doc["accuracy"]["held_back"] == {"right": 0, "of": 2}, "the rule placed neither"
+
+
+def test_a_format_1_groups_json_is_computed_again(tmp_path):
+    """Decision 10: a features document of format 1 placed held-back cases by k-means, so it is stale;
+    a tags document means the same under format 2 and is read as is."""
+    sizes = [80, 20, 82, 22, 84, 24, 83, 21]
+    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    old = {key: value for key, value in doc.items() if key not in ("assigned", "stump", "accuracy", "min_silhouette")}
+    (root / groups.GROUPS).write_text(json.dumps({**old, "format": 1}), encoding="utf-8")
+    assert groups.read_groups(root, load_study(root)) is None
+    for i in range(8):
+        groups.write_tag(root, f"cases/c{i}.json", "small" if sizes[i] < 50 else "large")
+    tagged = groups.compute(root, tables=fake_tables(sizes_of(sizes)), features=False)
+    legacy = {key: value for key, value in tagged.items() if key != "assigned"}
+    (root / groups.GROUPS).write_text(json.dumps({**legacy, "format": 1}), encoding="utf-8")
+    assert groups.read_groups(root, load_study(root)) == {**legacy, "format": 1}
+    (root / groups.GROUPS).write_text(json.dumps({**legacy, "format": 3}), encoding="utf-8")
+    assert groups.read_groups(root, load_study(root)) is None, "a format it does not know"
+
+
+def _two_kinds(rng, n: int, gap: float) -> list[list[float]]:
+    return [[rng.gauss(gap if i < n // 2 else 0.0, 1.0)] for i in range(n)]
+
+
+def test_two_clear_kinds_of_case_split_in_over_95_percent():
+    """Eight training cases, one feature, two kinds 4 sd apart (random.Random(20261114), 300 trials),
+    through compute's own steps 2-4 (`groups._choose` over the standardised points).
+    Estimate 98.9 % +- 0.3 (1000 trials; the builder check 98.8 % +- 0.34); asserts > 95 %."""
+    import random
+
+    rng = random.Random(20261114)
+    trials = 300
+    split = sum(groups._choose(groups.standardise(_two_kinds(rng, 8, 4.0)))[1] is not None  # noqa: SLF001
+                for _ in range(trials))
+    rate = split / trials
+    print(f"two kinds 4 sd apart, 8 cases, one feature: split in {rate:.1%}")
+    assert rate > 0.95
+
+
+def test_cases_of_one_kind_split_in_under_10_percent_on_three_features():
+    """Eight training cases from one Gaussian, three features (random.Random(20261114), 500 trials).
+    Estimate 2.2 % (builder check, 2000 trials; 2.1 % +- 0.3 through `_choose`); asserts < 10 %.
+    (On ONE feature the same cases split in about 80 % -- open question 1.)"""
+    import random
+
+    rng = random.Random(20261114)
+    trials = 500
+    split = 0
+    for _ in range(trials):
+        points = groups.standardise([[rng.gauss(0, 1) for _ in range(3)] for _ in range(8)])
+        split += groups._choose(points)[1] is not None  # noqa: SLF001
+    rate = split / trials
+    print(f"one kind, 8 cases, three features: split in {rate:.1%}")
+    assert rate < 0.10

@@ -516,8 +516,31 @@ own page*.
 The Cases view shows each case's group as a small badge before its name:
 for a run per kind of case, the group the run gave it; for any other run,
 the case's group in `groups.json` (from `study groups` or the tags), when
-there is one. On a phone, where the plot has no width to spare, the badges
-show only when the rows are of more than one group.
+there is one. A held-back case's group is the one the rule gives it, not the
+one its features are nearest: the groups are made from the cases to learn
+from alone, and the final check then checks the rule a planner will use.
+On a phone, where the plot has no width to spare, the badges show only when
+the rows are of more than one group.
+
+`groups.json` (`"format": 2`) holds what the grouping found: `method`
+(`features`, `tags` or `one`); `assigned`, how the held-back cases were put
+in groups (`stump` by the rule, `tags`, `one` for a single group, `nearest`
+for an asked-for 4 or 5 groups, which no single split tells apart); `k`;
+`silhouette`, the best one tried (kept on a single group too, when groups
+were tried and did not separate clearly); `min_silhouette` (0.5, not on a
+grouping by tags); `groups`, `{name: {training, test, merged_from}}`;
+`stump`, the rule over the cases to learn from (`{feature, thresholds,
+sides, misplaced}`); `accuracy`, `{training: {right, of}, held_back: {right,
+of}}` (the cases to learn from the rule puts in the group they were found
+in; the held-back cases it puts in the group whose centre is nearest);
+`features`, `describe`, `notes`, `cases`, `tags` and `stamps`. A study's
+file of format 1 grouped by features counts as out of date (the Cases view
+shows no group from it, and the next `study groups` or start of a run per
+kind of case computes the groups again), since it placed the held-back cases
+by k-means; one grouped by tags
+means the same and is read as it is; a finished run's own copy is read
+whatever its format, and its `rule.md` keeps the sentence it was written
+with.
 
 Every figure for a combination is written as the report writes it: one
 decimal and the measure's own direction, never *better* — the chosen

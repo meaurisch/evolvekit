@@ -2389,7 +2389,7 @@ Every command:
 | `study code SLUG [--repo PATH] [--from REF] [--brief TEXT] [--json]` | a code study: where the source is (default: the harness's own folder, while it is there), the commit it starts from (`working`: the files as they are), what to improve; exit 1 when the folder or the ref is not found |
 | `study list [--json]` | every study in the library home: its name, harness and the state line its card shows (`draft · step 3 of 7`, `running · round 2 of 6`, …) |
 | `study cases SLUG --add FILE... [--hold-back N] [--json]` | copies cases into the study, refuses the files the harness cannot read, and holds `N` back for the final check |
-| `study groups SLUG [--k N] [--json]` | groups the cases by their features (or by the tags given in the app's Cases list) and writes `groups.json`; a group needs at least two cases to learn from. `--k` (2 to 5) asks for that many groups; without it, 2 or 3, whichever has the best silhouette. The first time, each case is solved once at the starting values to read its tables (one line per case on stderr). Exit 1 when a case cannot be solved (as `study preview`) or a run of the study is going; 2 when `--k` is outside 2 to 5 |
+| `study groups SLUG [--k N] [--json]` | groups the cases by their features (or by the tags given in the app's Cases list) and writes `groups.json`; a group needs at least two cases to learn from. `--k` (2 to 5) asks for that many groups; without it, 2 or 3, whichever has the best silhouette, and one group unless that silhouette is at least 0.5 (see *Settings per kind of case*). The first time, each case is solved once at the starting values to read its tables (one line per case on stderr). Exit 1 when a case cannot be solved (as `study preview`) or a run of the study is going; 2 when `--k` is outside 2 to 5 |
 | `study check SLUG` | what is still missing; exit 2 while anything is |
 | `study start SLUG [--now] [--more H] [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running; a study with a `schedule` is scheduled instead (`scheduled: next window Sat 00:00`, `--json` `{"scheduled": true, "next", "edge"}`: `edge` `start`, or `end` while a window is open), and `--now` starts it at once, as a session no window's end stops; after a finished campaign, a new one. `--more H` (a scheduled study): its finished run gets H hours more search time (`budget.hours` grows by H), spent in its next window, never now: `Scheduled 18 min more for the next window (Sat 00:00)`, `--json` `{"scheduled", "run", "hours", "next", "edge", "words"}` |
 | `study bakeoff SLUG --ref REF [--ref REF ...] [--wait [--timeout S]] [--json]` | a code study: each branch against the starting point on the held-back cases, with no search; exit 2 when a branch or the study is refused |
@@ -2926,12 +2926,49 @@ python -m evolvekit study groups depot-a            # 2 or 3 groups, whichever k
 python -m evolvekit study groups depot-a --k 3      # or ask for 3 (2 to 5)
 ```
 
+Only the cases to learn from make the groups: their features, every count
+(`rows_*`) on a log scale (`log1p`, so 30 and 60 rows are as far apart as 300
+and 600), each feature standardised, then k-means. The cases are one group
+unless they separate clearly: the best silhouette (how much nearer each case
+is to its own group than to the next, 0 to 1) must be at least **0.5**
+(`MIN_SILHOUETTE`, Kaufman and Rousseeuw's "reasonable structure"); the note
+then says *the cases do not fall into clear kinds (how well they separate:
+0.45 of 1, at least 0.5 needed); all cases are one group*. The four demo-tour
+samples (30, 40, 50 and 60 stops) reach 0.455 and are one group, 0.045 below
+the line. `--k` keeps the groups asked for however clearly they separate,
+and the note gives the silhouette. Then a one-split rule is fitted over the
+cases to learn from (one feature and one or two thresholds, in the case's own
+units), and the held-back cases are put in groups **by that rule**, so the
+final check of each group checks the rule a planner will use. A held-back
+case the rule cannot read (its feature missing or not a number) goes to the
+group whose centre is nearest, else the first group, and a note says so.
+
+What 0.5 does depends on how many cases and features there are. Measured in
+a seeded simulation of the grouping itself (shapeless cases from one
+Gaussian, 2000 studies each; two kinds 4 sd apart in the first feature, the
+other features unrelated, 1000 each), the share of studies that split:
+
+| Cases to learn from | 6 | 8 | 12 |
+|---|--:|--:|--:|
+| one kind, 1 feature | 63 % ± 1.1 | 81 % ± 0.9 | 94 % ± 0.5 |
+| one kind, 2 features | 16 % ± 0.8 | 19 % ± 0.9 | 16 % ± 0.8 |
+| one kind, 3 features | 3.1 % ± 0.4 | 2.1 % ± 0.3 | 0.5 % ± 0.2 |
+| two kinds, 1 feature | 95 % ± 0.7 | 99 % ± 0.3 | 100 % |
+| two kinds, 2 features | 23 % ± 1.3 | 32 % ± 1.5 | 29 % ± 1.4 |
+| two kinds, 3 features | 3.5 % ± 0.6 | 3.4 % ± 0.6 | 0.4 % ± 0.2 |
+
+On one feature, cases of one kind usually split too; on three, two real
+kinds that differ in only one of them are seldom found. No single threshold
+does both at 6 to 12 cases; when you know the kinds, tag the cases.
+
 A group needs at least two cases to learn from, and a kind of case needs at
 least two held-back cases to be checked (`MIN_HELD_BACK`). Before the run, a
 kind of case with fewer is merged into the nearest one (the distance between
 the groups' centres in standardised features; for tagged groups, the group
 with the most held-back cases), and `merged_from` in the run's `groups.json`
-lists what joined it. `study groups` writes
+lists what joined it; for groups by features the rule is then fitted again
+over the merged groups and the held-back cases are placed by it again.
+`study groups` writes
 `groups.json` (the first time it solves each case once to read its tables;
 it refuses while a run of the study is going). Then `per_group: true` in
 `study.yaml` learns settings for each group:
@@ -2973,7 +3010,11 @@ A finished run writes two files into `runs/<id>/downloads/`:
 the search found only where the group's own decision is use, today's
 elsewhere — and `rule.md`, which cases get which settings: for groups by
 features a one-split rule (`If the number of rows in stops is above 51, use
-the settings of group 2; otherwise those of group 1.`), for groups by tags
+the settings of group 2; otherwise those of group 1.`) and how often that
+rule agrees with the groups, the cases to learn from and the held-back
+cases apart (`The rule puts 6 of the 6 cases the search learned from in the
+group they were found in, and 2 of the 2 held-back cases in the group they
+are nearest to.`; a run written before format 2 keeps its own sentence), for groups by tags
 one line per tag (`For cases tagged large, use today's settings (large: not
 shown to beat today's).`); a merged tag is named with its group (`For cases
 tagged large or small, …`).

@@ -306,6 +306,52 @@ def test_rule_lines_by_features():
     assert "The rule puts 1 of the 4 cases to learn from in another group than its own." in lines
 
 
+def test_a_merge_fits_the_rule_again_and_reassigns_the_held_back_cases():
+    """Open question 12: B has one held-back case and joins A, its nearest; the rule over A and C is
+    then g (its gap is the widest), not f, and h -- which the three-group rule put in C by f -- goes to A."""
+    features = {"a1": {"f": 1.0, "g": 0.0}, "a2": {"f": 2.0, "g": 0.5}, "b1": {"f": 10.0, "g": 1.0},
+                "b2": {"f": 11.0, "g": 1.5}, "c1": {"f": 12.0, "g": 100.0}, "c2": {"f": 13.0, "g": 101.0},
+                "a3": {"f": 1.5, "g": 0.2}, "a4": {"f": 1.8, "g": 0.3}, "b3": {"f": 10.5, "g": 1.2},
+                "c3": {"f": 12.5, "g": 100.5}, "c4": {"f": 12.8, "g": 100.2}, "h": {"f": 11.8, "g": 1.2}}
+    labels = {"a1": "A", "a2": "A", "b1": "B", "b2": "B", "c1": "C", "c2": "C"}
+    stump = groups.rule_stump({c: features[c] for c in labels}, labels)
+    assert stump == {"feature": "f", "thresholds": [6.0, 11.5], "sides": ["A", "B", "C"], "misplaced": 0}
+    assert groups.assign(stump, features["h"]) == "C"
+    doc = {"format": 2, "method": "features", "assigned": "stump", "k": 3, "features": features, "notes": [],
+           "cases": list(features), "stump": stump,
+           "accuracy": {"training": {"right": 6, "of": 6}, "held_back": {"right": 5, "of": 6}},
+           "groups": {"A": {"training": ["a1", "a2"], "test": ["a3", "a4"]},
+                      "B": {"training": ["b1", "b2"], "test": ["b3"]},
+                      "C": {"training": ["c1", "c2"], "test": ["c3", "c4", "h"]}}}
+    merged = groups.merge_small_groups(doc)
+    assert list(merged["groups"]) == ["A", "C"] and merged["k"] == 2
+    assert "B has 1 held-back case, so it joins A, the nearest by its features" in merged["notes"]
+    assert merged["stump"] == {"feature": "g", "thresholds": [50.75], "sides": ["A", "C"], "misplaced": 0}
+    assert merged["groups"]["A"] == {"training": ["a1", "a2", "b1", "b2"], "test": ["a3", "a4", "b3", "h"],
+                                     "merged_from": ["B"]}
+    assert merged["groups"]["C"]["test"] == ["c3", "c4"]
+    assert merged["accuracy"] == {"training": {"right": 6, "of": 6}, "held_back": {"right": 6, "of": 6}}
+    assert doc["stump"]["feature"] == "f", "the argument is not changed"
+    assert groups.merge_small_groups(merged) == merged
+    lines = groups.rule_lines(merged, {"A": "use", "C": "use"})
+    assert lines[0] == "If g is above 50.75, use the settings of C; otherwise those of A."
+    one = groups.merge_small_groups({**doc, "groups": {"A": {"training": ["a1", "a2"], "test": ["a3"]},
+                                                       "C": {"training": ["c1", "c2"], "test": ["c3"]}}})
+    assert list(one["groups"]) == ["A"] and one["stump"] is None and "accuracy" not in one
+    assert one["groups"]["A"]["test"] == ["a3", "c3"]
+
+
+def test_rule_lines_of_a_format_1_doc_keep_their_sentence():
+    """A finished run's own copy of format 1 (no `accuracy`) keeps the sentence it was written with."""
+    doc = {"format": 1, "method": "features", "describe": {"rows_stops": "the number of rows in stops"},
+           "features": {"c0": {"rows_stops": 20.0}, "c1": {"rows_stops": 81.0}, "c2": {"rows_stops": 80.0},
+                        "c3": {"rows_stops": 82.0}},
+           "groups": {"group 1": {"training": ["c0", "c1"], "test": []}, "group 2": {"training": ["c2", "c3"], "test": []}}}
+    lines = groups.rule_lines(doc, {"group 1": "use", "group 2": "use"})
+    assert lines[1] == "The rule puts 1 of the 4 cases to learn from in another group than its own."
+    assert not any("held-back" in line for line in lines)
+
+
 def test_the_report_has_per_kind_of_case(tmp_path):
     root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("keep", 2)})
     doc = build_verdict(root, "r1")
