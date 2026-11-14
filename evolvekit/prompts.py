@@ -208,7 +208,10 @@ def big_step_reason(
         reason = f"This big step is due because the search has not improved for {stagnant} generation(s)."
     if previous is None:
         return reason
-    return f"{reason} The previous big step: {previous.line()}."
+    line = previous.line()
+    # A cut line ends in `...`, a quoted failure in its backtick: no full stop after either.
+    end = "" if line.endswith((_CUT, "`")) else "."
+    return f"{reason} The previous big step: {line}{end}"
 
 
 def _bullet_section(title: str, items: "tuple[str, ...] | list[str]") -> str:

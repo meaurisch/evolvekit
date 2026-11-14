@@ -80,7 +80,7 @@ from evolvekit.search.lhs import latin_hypercube, rows_for_params
 from evolvekit.search.params import current_values, declared_ranges, has_params
 from evolvekit.search.scratchpad import Scratchpad
 from evolvekit.search.screening import SCREENING_FILE, ScreenControl
-from evolvekit.search.tried import _counter as _id_counter
+from evolvekit.search.tried import counter as id_counter
 from evolvekit.search.tried import entry_for, parent_ledger
 from evolvekit.search.tuning import Observation
 from evolvekit.space import STEP_SCALE
@@ -301,6 +301,9 @@ class Driver:
         generations after it (`_plateau_step_allowed`). Rebuilt on resume."""
         self._big_step_on_plateau: bool = False
         """Whether this round's big step was planned on the plateau (`_plan_operators`)."""
+        self._recorded_plateaus: dict[int, bool] = {}
+        """`generation -> plateau` as earlier sessions recorded it in `generation_started`,
+        read once by `_restore_stop_policy` (before this session emits its own)."""
 
     # -- what the run says about itself ----------------------------------
 
@@ -1127,8 +1130,10 @@ class Driver:
         """The children `pending.json` holds for `generation`, or `None`.
 
         Adopted children skip `_plan_operators` and `_breed_one`, so their big
-        step is counted here, as the replay counts a recorded one (`plateau`: what
-        this round is planned with)."""
+        step is counted here, as the replay counts a recorded one: with the plateau
+        the session that bred them recorded for the generation, else `plateau`
+        (what this round is planned with)."""
+        plateau = self._recorded_plateaus.get(generation, plateau)
         children = self._read_pending(generation)
         for child in children or []:
             if str(child.operator).startswith("big_step"):
@@ -1271,7 +1276,7 @@ class Driver:
         # run whose noise moved since); a run from before it was recorded falls
         # back on the policy's own state, which is where it stood when that round
         # was planned while the noise is unchanged.
-        recorded = _generation_plateaus(read_events(self.ledger.run_dir))
+        recorded = self._recorded_plateaus = _generation_plateaus(read_events(self.ledger.run_dir))
         decision = StopDecision(False)
         for point in self._economics():
             if point.generation in tried:
@@ -1486,7 +1491,7 @@ class Driver:
         steps = [c for c in self.archive if str(c.operator).startswith("big_step")]
         if not steps:
             return None
-        row = max(steps, key=lambda c: (_id_counter(c), c.id))
+        row = max(steps, key=lambda c: (id_counter(c), c.id))
         best = self.best
         return entry_for(
             row, self.by_id.get(row.parent_id) if row.parent_id else None,

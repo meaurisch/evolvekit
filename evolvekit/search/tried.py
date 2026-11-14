@@ -21,7 +21,7 @@ from evolvekit.candidate import Candidate
 from evolvekit.deltas import change_summary, failure_line
 from evolvekit.prompts import LEDGER_LINES, LedgerEntry
 
-__all__ = ["outcome_words", "entry_for", "parent_ledger", "score_text"]
+__all__ = ["counter", "outcome_words", "entry_for", "parent_ledger", "score_text"]
 
 _RACED = re.compile(r"raced out after (\d+)")
 _DAILY_CAP = "daily full-evaluation cap reached"
@@ -184,7 +184,7 @@ def entry_for(
     return LedgerEntry(id=child.id, operator=_operator(child), change=change, outcome=words)
 
 
-def _counter(candidate: Candidate) -> int:
+def counter(candidate: Candidate) -> int:
     """The run's counter in `g<gen>-c<counter>`: ids sort wrongly as strings
     once the counter passes 9999."""
     match = _COUNTER.search(candidate.id)
@@ -203,7 +203,7 @@ def parent_ledger(
 ) -> tuple[LedgerEntry, ...]:
     """The last `limit` children of `parent`, newest first."""
     children = [c for c in archive if c.parent_id == parent.id and c.id != parent.id]
-    children.sort(key=lambda c: (_counter(c), c.id), reverse=True)
+    children.sort(key=lambda c: (counter(c), c.id), reverse=True)
     return tuple(
         entry_for(
             child, parent, best_id=best_id,

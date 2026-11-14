@@ -449,8 +449,9 @@ the wait. A plateau held open by `stop.min_big_steps` is not made to wait: the
 run cannot stop until enough big steps were tried, so it takes them (this never
 fires at the default `min_big_steps: 0`). Scheduled big steps keep their
 schedule. The big step's prompt names the trigger that fired and, from the
-second big step of the run on, the previous big step's line from "What was
-tried on this parent": what it changed and what came of it. A resumed run
+second big step of the run on, the previous big step as a line in the form of
+"What was tried on this parent" (it may have had another parent): what it
+changed and what came of it. A resumed run
 spaces its big steps as the uninterrupted run would; it reads the plateau each
 generation was planned with from `events.jsonl` (`generation_started`).
 

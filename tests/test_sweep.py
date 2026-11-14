@@ -271,6 +271,34 @@ def test_an_adopted_generation_counts_its_big_step(tmp_path):
     assert _counts(again.stop_policy) == (1, 0) and again._plateau_step_at is None
 
 
+def test_an_adopted_generation_counts_with_the_plateau_its_session_recorded(tmp_path):
+    """The session that bred the pending children recorded the plateau it planned
+    them with; the resumed session reads that, not its own (A3.2 review)."""
+    worst = _WORST_FIT.split("\n", 1)[1].rsplit("```", 1)[0]
+    for recorded, now, expected in ((False, True, None), (True, False, 7)):
+        first, _ = _driver(tmp_path / str(recorded), big_step_every=99, children_per_generation=2)
+        seed = _row(id="g000-c0000", block=first.seed_block, score=1.0)
+        first._generation_started(7, children=1, plateau=recorded)
+        first._write_pending(7, [_row(id="g007-c0020", generation=7, block=worst, operator="big_step/rewrite",
+                                      parent_id=seed.id, stages_reached=[], competes=False)])
+        again, _ = _driver(tmp_path / str(recorded), big_step_every=99, children_per_generation=2)
+        again.archive.append(seed)
+        again.by_id[seed.id] = seed
+        again._restore_stop_policy()
+        assert again._adopt_pending(7, plateau=now)
+        assert _counts(again.stop_policy) == (1, 1) and again._plateau_step_at == expected
+
+
+def test_the_hint_puts_no_full_stop_after_a_backtick_or_a_cut():
+    from evolvekit.prompts import LedgerEntry
+
+    quoted = LedgerEntry(id="g004-c0013", operator="big_step", change=None, outcome="failed: `boom`")
+    assert big_step_reason(scheduled=True, every=3, stagnant=0, previous=quoted).endswith("failed: `boom`")
+    long = LedgerEntry(id="g004-c0013", operator="big_step", change=None, outcome="raced out " * 40)
+    assert big_step_reason(scheduled=True, every=3, stagnant=0, previous=long).endswith(long.line())
+    assert long.line().endswith("...")
+
+
 _NEVER_BETTER = [
     _WORST_FIT,
     _WORST_FIT.replace("[b - item for b in bins]", "[b - item + 1.0 for b in bins]"),
