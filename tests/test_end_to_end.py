@@ -163,8 +163,9 @@ def test_a_behavioural_twin_never_enters_the_archive_or_breeds(demo_run):
 
 
 def test_the_twins_parent_is_told_why_the_child_bought_nothing(demo_run):
-    """The feedback loop: the artefact is problem-agnostic and lands on the
-    parent's next prompt, not on some unrelated candidate's."""
+    """The feedback loop: a twin lands on its parent's next prompt, in the
+    "What was tried on this parent" ledger (A3.1), not on some unrelated
+    candidate's, and in problem-agnostic words."""
     driver, _summary = demo_run
     twins = [c for c in driver.archive if c.novelty == "behavioural"]
     parents = {c.parent_id for c in twins}
@@ -174,17 +175,14 @@ def test_the_twins_parent_is_told_why_the_child_bought_nothing(demo_run):
     for path in driver.ledger.traces_dir.glob("*.json"):
         payload = json.loads(path.read_text(encoding="utf-8"))
         body = payload["messages"][1]["content"] if len(payload["messages"]) > 1 else ""
-        if "produced identical behaviour" in body:
+        if "## What was tried on this parent" in body and "same behaviour as" in body:
             carriers.append(payload)
-    assert carriers, "no later prompt carried the artefact"
+    assert carriers, "no later prompt carried the twin in its ledger"
     for payload in carriers:
         assert payload["meta"]["parent_id"] in parents
         body = payload["messages"][1]["content"]
-        assert "Change the decisions the program makes" in body
         # Generic wording: nothing about bins, items or packing.
-        line = next(
-            l for l in body.splitlines() if "produced identical behaviour" in l
-        )
+        line = next(l for l in body.splitlines() if "same behaviour as" in l)
         assert not any(word in line for word in ("bin", "pack", "item"))
 
 
