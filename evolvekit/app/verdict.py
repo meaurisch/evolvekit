@@ -31,7 +31,8 @@ was used up, says so in a sentence (`how_it_ran`). `why_keep`, only on a
 `keep` whose held-back cases all moved the goal's way while its range still
 allows a loss, says in one sentence why it is still keep (`why_keep`; when the check found
 that only more held-back cases could firm the answer, `limited_by: "cases"` and that sentence is
-its fallback). `spent`, on a run
+its fallback). `converged`, only on a run whose search ended early
+because it settled, says where the time it saved went (`converged_of`). `spent`, on a run
 with AI, is what its AI spent (`ai_spent`): `{usd, cap_usd, line}`, or
 `{requests, line}` for a provider that counts requests. The page
 (`jobs.results`), the command line and the report all render from it, so they
@@ -72,7 +73,7 @@ from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, LIMITED_BY_CASES, RU
                                read_on_row, t_cdf)
 from evolvekit.stats import Posterior, pct_from_log
 
-__all__ = ["DECISIONS", "RANGE_NAME", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
+__all__ = ["DECISIONS", "RANGE_NAME", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "converged_of", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "range90_of", "why_keep"]
 
 SCHEMA = 2
@@ -677,6 +678,9 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                      what=jobs._what(study))
     if ran:
         document["how_it_ran"] = ran
+    settled = converged_of(job, plan)
+    if settled is not None:
+        document["converged"] = settled
     if time_note(study.limits.time_per_case_s, harness):
         document["time_note"] = time_note(study.limits.time_per_case_s, harness)
     spent = ai_spent(run_dir, study, job)
@@ -805,6 +809,10 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
                     f"combinations tried repeated one already tried and {'were' if repeated != 1 else 'was'} "
                     "not measured again.")
         return ""
+    if reason.startswith("converged"):
+        window = search.get("window")
+        span = f" for {window} rounds in a row" if isinstance(window, int) else ""
+        return f"{rounds}{counts}: the search settled (no round gained beyond the noise{span}), so it ended early."
     if reason.startswith("time limit reached"):
         return f"{rounds}{counts}: the search time was used."
     if reason.startswith("time limit"):
@@ -813,6 +821,38 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
     if not reason or reason.startswith("stopped"):
         return f"{rounds}{counts}: stopped."
     return f"{rounds}{counts}: the search stopped early ({reason.rstrip('.')})."
+
+
+SAVED_LINES = {
+    "extended": "The time the search saved went to the final check: more runs per held-back case, read once more.",
+    "cases": "The time the search saved (about {m}) was not spent: only more held-back cases could firm up this "
+             "answer, not more runs.",
+    "answered": "The time the search saved (about {m}) was not spent: the final check's first read already gave "
+                "the answer.",
+    "at_cap": "The time the search saved (about {m}) was not spent: no more runs could be added to the final check.",
+}
+"""`converged.line` by `final.saved.why` (`execute._saved`); `{m}` is the time saved (`plan._minutes`)."""
+
+
+def converged_of(job: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | None:
+    """The verdict's `converged`, only for a search that ended early because it
+    settled (`search.converged`, A4.1): `{"rounds", "planned", "saved_s",
+    "spent", "line"}` -- the rounds it ran of the planned, the seconds of
+    search it left unspent and whether the final check's one extension spent
+    them (`final.saved`), and the sentence that says where that time went
+    (`SAVED_LINES`). "Settled" is a fact about the search, never about the
+    result. While the final check has said nothing of the time (it was
+    stopped, or skipped) `saved_s` is None and the line empty."""
+    from evolvekit.harness.plan import _minutes
+
+    search = job.get("search") or {}
+    if search.get("converged") is not True:
+        return None
+    saved = (job.get("final") or {}).get("saved") or {}
+    seconds = saved.get("s") if isinstance(saved.get("s"), (int, float)) else None
+    line = SAVED_LINES.get(saved.get("why"), "") if seconds is not None else ""
+    return {"rounds": search.get("generations"), "planned": plan.get("rounds"), "saved_s": seconds,
+            "spent": saved.get("spent") is True, "line": line.replace("{m}", _minutes(float(seconds or 0)))}
 
 
 COUNTS_REQUESTS = ("copilot-cli",)

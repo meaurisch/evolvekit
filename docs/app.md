@@ -401,7 +401,18 @@ and `measured` (`{"round_s", "ai_child_s"}`: one round as measured, the median
 round's runs plus the children's AI writing time, and the AI's seconds per
 child, from the rounds whose changes this session wrote; `null` until the
 first round). The pace is `rounds_done + rounds_left`; a run from before
-these keys keeps reading the pace from its rounds' times. Details shows
+these keys keeps reading the pace from its rounds' times. A search that has
+settled -- no round gained beyond the noise for a third of its planned
+rounds in a row, at least 3 -- ends early, unless its rounds were set by hand:
+`job.json`'s `search` then has `converged: true`, `flat_rounds`, `window` and
+`used_s` (the search's active seconds when it ended), and the final check's
+`final.saved` says what became of the time it left: `{"s", "spent", "why"}`,
+the seconds saved, whether the check's one extension spent them on more runs
+per held-back case, and `why` -- `extended` (it did), `cases` (only more
+held-back cases could firm up the answer), `answered` (the first read already
+gave it) or `at_cap` (no run could be added: every case already had 12, or a
+stop was asked for). "Settled" is a fact about the search, never about the
+result. Details shows
 the spend too, and once the run is finished the verdict's own figure among
 its facts.
 
@@ -833,6 +844,7 @@ names:
 | `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
 | `time_note` | only when the study's time per case is below the harness's own: "Tuned at 5 s a case; PyVRP's own time is 1 min: settings found here may not hold at a longer time limit." — Set up says it too (the Time row and the plan's notes), and the report's *How it ran* |
 | `how_it_ran` | whenever fewer rounds ran than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …", with the reason from the stop (*the time ran out*, *the search time was used*, *stopped*, *the search stopped early (…)*, *the AI budget was used up*); when every round ran but some combinations repeated one already tried, "Ran all 17 planned rounds (176 combinations, about 204 planned): 29 of the combinations tried repeated one already tried and were not measured again." (what it knows, not a claim that it is the whole shortfall) — the Study page shows it under Details |
+| `converged` | only when the search ended early because it settled (`search.converged` in `job.json`): `{"rounds", "planned", "saved_s", "spent", "line"}` -- the rounds it ran of the planned, the seconds of search it left (`final.saved.s`; `null` while the final check has not said), whether the final check spent them, and the line: "The time the search saved went to the final check: more runs per held-back case, read once more." when it did, else "The time the search saved (about 20 min) was not spent: …" with the reason (only more held-back cases could firm up this answer, not more runs; the final check's first read already gave the answer; no more runs could be added to the final check). `how_it_ran` then says "…: the search settled (no round gained beyond the noise for 4 rounds in a row), so it ended early." A fact about the search, never about the result |
 | `why_keep` | only on a `keep` whose held-back cases all moved the goal's way while its range still allows a loss: one sentence after `line` that says why it is still keep, "Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer answer." (up to three cases' figures, else "Every one of the N held-back cases was lower"); never on `use`, `worse`, a keep with no difference or a goal with levels (the range there is the level the answer is read on, while the held-back rows are the first measure's), and never a gain; on a check limited by its cases (`limited_by`) a keep says that instead. `results` carries it (and its `final`, and the text to paste after its *Final check* line), a finished card's `verdict`, the report and `study verdict` say it after the line |
 | `spent` | only on a run with AI help: what its AI spent, from the run's `usage.jsonl`: `{"usd", "cap_usd", "line"}` with the line "AI: $0.87 of $1.00", or `{"requests", "line"}` ("AI: 14 requests") for a provider that counts requests; a fact, not a claim |
 

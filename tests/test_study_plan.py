@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 from datetime import datetime
 
 import pytest
@@ -337,7 +338,7 @@ def test_the_round_hook_writes_the_replan_beside_the_planned_numbers(tmp_path):
     _events(tmp_path / "events.jsonl", [_finished(0, "00:00", breed_s=0.0, children=1), _finished(1, "01:40")])
     job = Job(tmp_path, run_id="r", study="s", plan={"rounds": 7, "children": 4, "search_s": 3600.0})
     plan = replace(Plan.fixed(children=4), search_s=3600.0)
-    assert _round_hook(tmp_path, job, plan, uses_tpe=False, log=lambda _m: None)(1) is None
+    assert _round_hook(tmp_path, job, plan, log=lambda _m: None)(1) is None
     # 100 s used; a round 90 + 4 * 2.5 = 100 s -> floor(3500 / 100) = 35
     written = read_job(tmp_path)["plan"]
     assert written == {"rounds": 7, "children": 4, "search_s": 3600.0, "rounds_done": 1, "rounds_left": 35,
@@ -359,14 +360,14 @@ def test_the_round_hook_logs_a_file_it_cannot_read_or_write_and_still_answers(tm
         raise OSError("disk full")
 
     monkeypatch.setattr(job, "update", refuse)
-    assert _round_hook(tmp_path, job, plan, uses_tpe=False, log=said.append)(1) is None
+    assert _round_hook(tmp_path, job, plan, log=said.append)(1) is None
     assert len(said) == 1 and "job.json could not be rewritten" in said[0] and "disk full" in said[0]
 
     def unreadable(_run_dir):
         raise OSError("locked")
 
     monkeypatch.setattr(events_module, "read_events", unreadable)
-    assert _round_hook(tmp_path, job, plan, uses_tpe=False, log=said.append)(2) is None
+    assert _round_hook(tmp_path, job, plan, log=said.append)(2) is None
     assert "events.jsonl could not be read" in said[1] and "locked" in said[1]
 
 
@@ -383,3 +384,140 @@ def test_a_resumed_run_replans_from_its_stored_plan_else_from_the_compiled_run()
     odd = _stored_plan({"children": 0, "search_s": "x"}, SimpleNamespace(budget=SimpleNamespace(max_hours=None),
                                                                         search=SimpleNamespace(children_per_generation=4)))
     assert (odd.children, odd.search_s) == (4, 0.0)
+
+
+# -- a settled search ends early (A4.1, P1) ------------------------------------
+
+def _rec(g, best, *, sd=1.0, tpe=None, ceiling=None, rebased=None, legacy=False, big_steps=0):
+    from evolvekit.harness.plan import RoundRecord
+
+    return RoundRecord(g, 10.0, 1.0, 8, best, rebased, sd, tpe, ceiling, legacy, big_steps=big_steps)
+
+
+def test_convergence_needs_window_flat_rounds():
+    from evolvekit.harness.plan import CONVERGE_MIN_ROUNDS, converged
+
+    assert CONVERGE_MIN_ROUNDS == 3
+    flat = [_rec(0, 0.0)] + [_rec(g, 0.5) for g in range(1, 4)]          # 0.5 < bar + 1 sd: flat
+    got = converged(flat, planned_rounds=6)
+    assert got.converged and (got.flat_rounds, got.window) == (3, 3)      # window max(3, ceil(6 / 3)) = 3
+    assert got.reason == "converged: no round gained beyond the noise for 3 rounds"
+    assert not converged(flat[:3], planned_rounds=6).converged
+    assert converged(flat, planned_rounds=12).window == 4
+    assert not converged(flat, planned_rounds=12).converged
+    gained = flat[:2] + [_rec(2, 1.6)] + flat[3:]
+    assert converged(gained, planned_rounds=6).flat_rounds == 1
+    assert not converged([], planned_rounds=6).converged and not converged(flat[:1], planned_rounds=6).converged
+
+
+def test_a_sub_noise_step_never_moves_the_bar():
+    from evolvekit.harness.plan import converged
+
+    steps = [_rec(0, 0.0)] + [_rec(g, 0.4 * g) for g in range(1, 5)]   # 0.4, 0.8 flat; 1.2 > 0 + 1: counted
+    assert converged(steps, planned_rounds=6).flat_rounds == 1
+
+
+def test_a_re_evaluation_moves_the_bar_never_the_count():
+    from evolvekit.harness.plan import converged
+
+    # Round 1 gains (2.0 > 0 + 1); its re-evaluation pools the best down to 0.5, so 1.6 in round 2 counts.
+    rounds = [_rec(0, 0.0), _rec(1, 2.0, rebased=0.5), _rec(2, 1.6)]
+    assert converged(rounds, planned_rounds=6).flat_rounds == 0
+    # A re-evaluation in a flat round leaves the count as it was.
+    flat = [_rec(0, 0.0), _rec(1, 0.5, rebased=0.2), _rec(2, 0.5)]
+    assert converged(flat, planned_rounds=6).flat_rounds == 2
+
+
+def test_convergence_is_the_first_leg_alone():
+    """Decision 4: neither TPE's proposal scores nor the breadth's ceiling is read."""
+    from evolvekit.harness.plan import converged
+
+    rising_tpe = [_rec(0, 0.0)] + [_rec(g, 0.0, tpe=float(g), ceiling=False) for g in range(1, 4)]
+    assert converged(rising_tpe, planned_rounds=6).converged
+
+
+def test_convergence_waits_until_the_big_steps_have_been_tried():
+    """As `StopPolicy` holds a plateau open (`stop.min_big_steps`): the big steps
+    tried in the flat rounds count; one before the bar last moved does not."""
+    from evolvekit.harness.plan import converged
+
+    flat = [_rec(0, 0.0)] + [_rec(g, 0.0) for g in range(1, 4)]
+    assert converged(flat, planned_rounds=6, min_big_steps=0).converged
+    assert not converged(flat, planned_rounds=6, min_big_steps=1).converged
+    one = flat[:2] + [_rec(2, 0.0, big_steps=1)] + flat[3:]
+    assert converged(one, planned_rounds=6, min_big_steps=1).converged
+    before = [_rec(0, 0.0), _rec(1, 2.0, big_steps=1)] + [_rec(g, 2.0) for g in range(2, 5)]
+    assert not converged(before, planned_rounds=6, min_big_steps=1).converged, "it came before the bar moved"
+
+
+def test_a_legacy_round_in_the_window_never_converges():
+    from evolvekit.harness.plan import converged
+
+    flat = [_rec(0, 0.0)] + [_rec(g, 0.0) for g in range(1, 5)]
+    assert converged(flat, planned_rounds=6).converged
+    assert not converged(flat[:3] + [_rec(3, 0.0, legacy=True)] + flat[4:], planned_rounds=6).converged
+    assert converged([_rec(0, 0.0, legacy=True), _rec(1, 0.0, legacy=True)] + flat[2:],
+                     planned_rounds=6).converged, "only the last `window` rounds are read"
+
+
+def _settles_within(rng, *, step: float, children: int = 8, rounds: int = 6) -> bool:
+    """One simulated search (sd 1 per measured child): the best child's true
+    value rises `step` a round, the others sit |N(0, 1)| below it (`step` 0:
+    every child exactly as good); `round_best` is the running maximum of the
+    measured values, as the driver's archive best is. Whether `converged`
+    holds after some round within `rounds`, as the round hook asks it."""
+    from evolvekit.harness.plan import converged
+
+    best = rng.gauss(0.0, 1.0)
+    records = [_rec(0, best)]
+    for g in range(1, rounds + 1):
+        top = g * step
+        truths = [top] + [top - (abs(rng.gauss(0.0, 1.0)) if step else 0.0) for _ in range(children - 1)]
+        best = max(best, max(t + rng.gauss(0.0, 1.0) for t in truths))
+        records.append(_rec(g, best))
+        if converged(records, planned_rounds=rounds).converged:
+            return True
+    return False
+
+
+def _settled_rate(step: float, trials: int = 4000, **kwargs) -> tuple[float, float]:
+    rng = random.Random(20261114)
+    rate = sum(_settles_within(rng, step=step, **kwargs) for _ in range(trials)) / trials
+    return rate, math.sqrt(rate * (1 - rate) / trials)
+
+
+def test_a_flat_search_is_called_converged_within_its_rounds_in_over_90_percent():
+    """Every child exactly as good as the best (true values 0, one run's measured sd 1), 8 children
+    a round, 6 planned rounds. Estimate 95.4 % +- 0.33 (builder check, 4000 trials); measured here
+    95.45 % +- 0.33 on 4000 trials (random.Random(20261114)); asserts > 90 %, prints the rate."""
+    rate, se = _settled_rate(0.0)
+    print(f"flat search called settled: {rate:.2%} +- {se:.2%}")
+    assert rate > 0.90
+
+
+def test_a_search_gaining_one_noise_sd_a_round_is_called_converged_in_under_10_percent():
+    """The best child's true value rises 1 sd a round, the other seven sit |N(0, 1)| below it;
+    measured with sd 1; 6 planned rounds. Estimate 4.5 % +- 0.33 (0.2-1.2 % at 12 planned
+    rounds); measured here 3.60 % +- 0.29 on 4000 trials; asserts < 10 %, prints the rate."""
+    rate, se = _settled_rate(1.0)
+    print(f"1 sd a round called settled: {rate:.2%} +- {se:.2%}")
+    assert rate < 0.10
+
+
+def test_a_search_gaining_half_a_noise_sd_a_round_is_called_converged_in_about_half():
+    """The same at 0.5 sd a round, 8 children (decision 4: pinned at 8; 4 children measures
+    57 %, too near 60): estimate 50.5 % +- 0.79 (46-57 % over 4-12 children, 6 or 12 planned
+    rounds); measured here 50.38 % +- 0.79 on 4000 trials. Asserts the band [40, 60] % and prints
+    it: the documented cost of a one-sd bar."""
+    rate, se = _settled_rate(0.5)
+    print(f"0.5 sd a round called settled: {rate:.2%} +- {se:.2%}")
+    assert 0.40 <= rate <= 0.60
+
+
+def test_a_search_gaining_a_quarter_noise_sd_a_round_is_called_converged_in_over_70_percent():
+    """Decision 4's documented cost: at 0.25 sd a round (1.5 sd over 6 rounds) the search is
+    called settled in most studies. Estimate 81-84 % at 6 planned rounds (builder check); measured
+    here 81.38 % +- 0.62 on 4000 trials; asserts > 70 %, prints the rate."""
+    rate, se = _settled_rate(0.25)
+    print(f"0.25 sd a round called settled: {rate:.2%} +- {se:.2%}")
+    assert rate > 0.70

@@ -40,6 +40,15 @@ search): over the rounds so far (the starting point not among them)
 `used` is what `budget.max_hours` counts (`stopping.active_seconds`). The
 planned numbers stay as planned; `rounds_done`, `rounds_left` and the measured
 round go beside them in `job.json`.
+
+A search that has settled ends early (`converged`): no round's best gained
+more than the noise sd over the bar for W = max(CONVERGE_MIN_ROUNDS,
+ceil(rounds / 3)) rounds in a row, and in a run that takes big steps
+`stop.min_big_steps` of them were tried in those rounds. One sd, against
+`StopPolicy`'s half sd: the stop policy keeps a run going on any likely
+step, this rule ends one only when the steps have stopped. Its price: a
+search gaining a quarter of the noise sd a round is called settled in most
+studies (`docs/reference.md` gives the measured rates).
 """
 
 from __future__ import annotations
@@ -56,7 +65,7 @@ from evolvekit.stopping import AGENT_CHANGE_S, AI_CHANGE_S, ai_seconds
 
 __all__ = ["Plan", "make_plan", "ai_seconds", "plan_notes", "AI_CHANGE_S", "AGENT_CHANGE_S", "CHECK_SEEDS",
            "CHECK_SHARE", "DEFAULT_CHECK_SEEDS", "THIN_CHECK_CASES", "RoundRecord", "Measured", "round_records",
-           "replan"]
+           "replan", "CONVERGE_MIN_ROUNDS", "Convergence", "converged"]
 
 CHECK_SEEDS = tuple(range(1001, 1013))
 """The seeds of the final check: never among the search's own (0 .. r-1).
@@ -230,6 +239,8 @@ class RoundRecord:
     """The event is from before A4 (it has no `round_best`)."""
     adopted: bool = False
     """The round's children were written by an earlier session (`pending.json`): no writing time measured."""
+    big_steps: int = 0
+    """The round's children planned as big steps (`big_steps`; 0 before A4)."""
 
 
 @dataclass(frozen=True)
@@ -268,7 +279,7 @@ def round_records(events: Iterable[Mapping[str, Any]]) -> list[RoundRecord]:
             best=best, rebased=fitness if fitness is not None and fitness != best else None,
             noise_sd=_number(event.get("noise_sd")) or 0.0, tpe_ratio=_number(event.get("tpe_ratio")),
             breadth_at_ceiling=ceiling if isinstance(ceiling, bool) else None, legacy=legacy,
-            adopted=event.get("adopted") is True,
+            adopted=event.get("adopted") is True, big_steps=int(_number(event.get("big_steps")) or 0),
         ))
     return records
 
@@ -479,3 +490,49 @@ def _ways(shape: _Shape, screening: bool) -> list[tuple[str, dict[str, Any] | No
     amount = f"{round(quarters * 60)} minutes" if quarters < 1.5 else f"{quarters:g} hours"
     ways.append((f"Allow at least {amount} in total.", {"kind": "hours", "hours": quarters, "label": f"Allow {amount}"}))
     return ways
+
+
+CONVERGE_MIN_ROUNDS = 3
+"""The fewest flat rounds in a row that can call a search settled (`converged`)."""
+
+
+@dataclass(frozen=True)
+class Convergence:
+    converged: bool
+    flat_rounds: int
+    """The rounds in a row, up to the last, whose best gained no more than the noise over the bar."""
+    window: int
+    """The flat rounds it takes: max(CONVERGE_MIN_ROUNDS, ceil(planned rounds / 3))."""
+    reason: str
+    """The stop reason when `converged` (engine words: the log and `search.stop_reason`), else empty."""
+
+
+def converged(records: Iterable[RoundRecord], *, planned_rounds: int, min_big_steps: int = 0) -> Convergence:
+    """Whether the search has settled (the module docstring). The bar is the
+    starting point's best; a round whose best beats the bar by more than
+    `max(1e-6, 1e-9 * |bar|, noise_sd)` moves it there and starts the count
+    again, any other round adds one; a re-evaluation (`rebased`) moves the
+    bar, never the count (`StopPolicy.rebase`). Settled: `window` flat rounds,
+    with at least `min_big_steps` big steps tried among them (0 for a run that
+    takes none) and no round from before A4 among the last `window`: no
+    progress is inferred from missing data. TPE's scores and the breadth are
+    not read (decision 4)."""
+    records = list(records)
+    window = max(CONVERGE_MIN_ROUNDS, math.ceil(planned_rounds / 3))
+    start = next((r for r in records if r.generation == 0), None)
+    bar = start.best if start is not None else None
+    flat = big_steps = 0
+    rounds = [r for r in records if r.generation >= 1]
+    for r in rounds:
+        margin = max(1e-6, 1e-9 * abs(bar) if bar is not None else 0.0, r.noise_sd)
+        if r.best is not None and (bar is None or r.best > bar + margin):
+            bar, flat, big_steps = r.best, 0, 0
+        else:
+            flat += 1
+            big_steps += r.big_steps
+        if r.rebased is not None:
+            bar = r.rebased
+    settled = (flat >= window and big_steps >= min_big_steps
+               and not any(r.legacy for r in rounds[-window:]))
+    reason = f"converged: no round gained beyond the noise for {flat} rounds" if settled else ""
+    return Convergence(converged=settled, flat_rounds=flat, window=window, reason=reason)

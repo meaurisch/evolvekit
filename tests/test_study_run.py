@@ -224,6 +224,39 @@ def test_the_round_event_says_whether_adaptive_breadth_ended_at_its_ceiling(tmp_
     assert [(e["generation"], e["breadth_at_ceiling"]) for e in finished] == [(0, False), (1, True), (2, True)]
 
 
+def test_the_round_event_records_the_best_tpe_score_and_the_big_steps_tried(tmp_path):
+    """`tpe_ratio`: the largest log density ratio among the round's TPE proposals (for
+    engineers; convergence does not read it, decision 4), None in a round without one --
+    TPE needs MIN_OBSERVATIONS configurations first. `big_steps`: the round's children
+    planned as big steps (0 here: no model)."""
+    from evolvekit.config import build_config
+    from evolvekit.events import read_events
+    from evolvekit.ledger import read_jsonl
+    from evolvekit.search.driver import Driver
+
+    (tmp_path / "toy.py").write_text(_ROUND_TOY, encoding="utf-8")
+    config = build_config({
+        "problem": {"parameters": {"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.0}}},
+        "evaluate": {
+            "stages": [{"id": "static", "kind": "builtin-static"},
+                       {"id": "full", "kind": "command", "kpis_from": "stdout",
+                        "command": "{python} toy.py --seed {seed} {params}"}],
+            "score": {"objective": "value", "direction": "maximize"},
+        },
+        "search": {"operators": {"param_tpe": 1.0}, "children_per_generation": 4},
+    }, base_dir=tmp_path)
+    Driver(config, run_dir=tmp_path / "run").run(generations=4)
+    finished = {e["generation"]: e for e in read_events(tmp_path / "run") if e["type"] == "generation_finished"}
+    tpe = {int(r["generation"]) for r in read_jsonl(tmp_path / "run" / "runs.jsonl") if r.get("operator") == "param_tpe"}
+    assert tpe, "TPE proposed in some round"
+    for generation, event in finished.items():
+        assert event["big_steps"] == 0
+        if generation in tpe:
+            assert isinstance(event["tpe_ratio"], float), generation
+        else:
+            assert event["tpe_ratio"] is None, generation
+
+
 @pytest.mark.slow
 def test_a_rerun_final_check_uses_the_cases_the_run_held_back(tmp_path):
     folder = _study(tmp_path)
@@ -473,3 +506,235 @@ def test_the_check_adds_runs_when_the_runs_are_what_is_unsure(tmp_path):
                   stop=threading.Event(), time_left_s=lambda: 1e9,
                   confirm=_confirm_of_cases(calls, case_gains=[0.004, 0.0, 0.002], run_sd=0.05))
     assert calls == [3, 12] and "limited_by" not in job.state["check"]
+
+
+# -- a settled search ends early; its time is the check's allowance (A4.1, P1, P2) --
+
+def _flat_events(path: Path, rounds: int, *, session: str = "s") -> None:
+    """`events.jsonl` of a search whose every round measured the same best (noise sd 0.1):
+    round g ends at 100 s * g, so the active seconds after round g are 100 * g."""
+    rows = [{"type": "generation_finished", "session": session, "ts": f"2026-11-14T10:{g * 100 // 60:02d}:"
+             f"{g * 100 % 60:02d}+00:00", "generation": g, "duration_s": 100.0, "breed_s": 0.0 if g == 0 else 10.0,
+             "adopted": False, "children": 1 if g == 0 else 4, "round_best": 1.0, "best_fitness": 1.0,
+             "noise_sd": 0.1, "big_steps": 0} for g in range(rounds + 1)]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def _auto_plan(**changes) -> Plan:
+    return replace(Plan.fixed(children=4, generations=8), search_s=3600.0, **changes)  # 6 rounds planned
+
+
+def test_a_settled_search_ends_and_says_so_in_job_json(tmp_path):
+    from evolvekit.harness.execute import _round_hook
+
+    _flat_events(tmp_path / "events.jsonl", 3)
+    job = Job(tmp_path, run_id="r", study="s", plan={"rounds": 6, "search_s": 3600.0})
+    hook = _round_hook(tmp_path, job, _auto_plan(), log=lambda _m: None)
+    assert hook(3) == "converged: no round gained beyond the noise for 3 rounds"
+    assert read_job(tmp_path)["search"] == {"converged": True, "flat_rounds": 3, "window": 3, "used_s": 300.0}
+    assert read_job(tmp_path)["plan"]["rounds_done"] == 3, "the re-plan is written too"
+    _flat_events(tmp_path / "events.jsonl", 2)
+    (tmp_path / "b").mkdir()
+    fresh = Job(tmp_path / "b", run_id="r", study="s", plan={})
+    assert _round_hook(tmp_path, fresh, _auto_plan(), log=lambda _m: None)(2) is None, "two flat rounds of three"
+    assert "search" not in fresh.state
+
+
+def test_hand_set_rounds_never_end_early(tmp_path):
+    from evolvekit.harness.execute import _round_hook
+
+    _flat_events(tmp_path / "events.jsonl", 5)
+    for adjusted in (("rounds",), ("generations",)):
+        job = Job(tmp_path, run_id="r", study="s", plan={})
+        assert _round_hook(tmp_path, job, _auto_plan(adjusted=adjusted), log=lambda _m: None)(5) is None
+        assert job.state["plan"]["rounds_left"] is not None and "search" not in job.state, adjusted
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    assert _round_hook(tmp_path, job, _auto_plan(adjusted=("children",)), log=lambda _m: None)(5), \
+        "children set by hand: the rounds are still the plan's"
+
+
+def test_a_search_that_takes_big_steps_waits_for_them(tmp_path):
+    from evolvekit.harness.execute import _round_hook
+
+    _flat_events(tmp_path / "events.jsonl", 4)
+    job = Job(tmp_path, run_id="r", study="s", plan={})
+    assert _round_hook(tmp_path, job, _auto_plan(), min_big_steps=1, log=lambda _m: None)(4) is None
+
+
+def test_convergence_is_rebuilt_from_events_on_resume(tmp_path):
+    from evolvekit.harness.execute import _round_hook, _stored_plan
+
+    _flat_events(tmp_path / "events.jsonl", 3)
+    first = Job(tmp_path, run_id="r", study="s", plan=_auto_plan().to_json())
+    said = _round_hook(tmp_path, first, _auto_plan(), log=lambda _m: None)(3)
+    config = SimpleNamespace(budget=SimpleNamespace(max_hours=1.0), search=SimpleNamespace(children_per_generation=4,
+                                                                                          generations=8))
+    resumed = _stored_plan(first.state["plan"], config)
+    assert (resumed.rounds, resumed.adjusted) == (6, ())
+    for name in ("again", "hand"):
+        (tmp_path / name).mkdir()
+    again = Job(tmp_path / "again", run_id="r", study="s", plan=first.state["plan"])
+    assert _round_hook(tmp_path, again, resumed, log=lambda _m: None)(3) == said
+    assert again.state["search"] == first.state["search"]
+    assert again.state["plan"]["rounds_left"] == first.state["plan"]["rounds_left"]
+    hand = _stored_plan({**first.state["plan"], "adjusted": ["rounds"]}, config)
+    assert hand.adjusted == ("rounds",)
+    assert _round_hook(tmp_path, Job(tmp_path / "hand", run_id="r", study="s", plan={}), hand,
+                       log=lambda _m: None)(3) is None, "a hand-set plan stays hand-set when resumed"
+
+
+def test_run_study_keeps_what_the_hook_said_of_a_settled_search(tmp_path, monkeypatch):
+    from evolvekit.harness import execute
+
+    folder = _study(tmp_path)
+    monkeypatch.setattr(execute, "require_valid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execute, "measured", lambda _root: None)
+    monkeypatch.setattr(execute, "plan_for", lambda *args, **kwargs: _auto_plan())
+    monkeypatch.setattr(execute, "write_run", lambda study, harness, plan, root, run_id, **kw:
+                        (root / "runs" / run_id).mkdir(parents=True, exist_ok=True))
+    monkeypatch.setattr(execute, "load_config", lambda path: SimpleNamespace(
+        stop=SimpleNamespace(min_big_steps=0), search=SimpleNamespace(takes_big_steps=False)))
+    checked: list[dict] = []
+    monkeypatch.setattr(execute, "_final_check", lambda study, plan, config, run_dir, job, log, **kw:
+                        (checked.append(dict(job.state["search"])), job.finish("done")))
+
+    class FakeDriver:
+        def __init__(self, config, *, run_dir, on_round=None, **kwargs):
+            self.run_dir, self.on_round = Path(run_dir), on_round
+
+        def run(self):
+            for g in range(1, 7):
+                _flat_events(self.run_dir / "events.jsonl", g)
+                reason = self.on_round(g)
+                if reason:
+                    return SimpleNamespace(stop_reason=reason, generations=g, best=None, aborted=False, converged=True)
+            raise AssertionError("a flat search settles")
+
+    monkeypatch.setattr("evolvekit.search.driver.Driver", FakeDriver)
+    job = execute.run_study(folder, "r1", log=lambda _m: None)
+    assert checked == [job["search"]]
+    assert job["search"] == {"stop_reason": "converged: no round gained beyond the noise for 3 rounds",
+                             "generations": 3, "best_id": None, "aborted": False, "converged": True,
+                             "flat_rounds": 3, "window": 3, "used_s": 300.0}
+
+
+def _settled_check(tmp_path, monkeypatch, *, confirm, time_left: float, search: dict | None = None,
+                   check_seeds: int = 3):
+    """`_final_check` of a run whose search settled after 600 s of a planned 1800 s (1200 s
+    saved), through the real `_extend_check` with `confirm`; `time_left` is what `_time_left`
+    gives (from the run's start, the saved time included)."""
+    from evolvekit.harness import execute
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(execute, "_extend_check", lambda *a, **kw: _extend_check(*a, **kw, confirm=confirm))
+    monkeypatch.setattr(execute, "_time_left", lambda job, plan: (lambda: time_left))
+    monkeypatch.setattr(execute, "rank", lambda rows, n: [{"operator": "param_tpe"}])
+    monkeypatch.setattr(execute, "read_rows", lambda run_dir: [])
+    monkeypatch.setattr(execute, "_write_exports", lambda *args: None)
+    job = Job(tmp_path, run_id="r", study="s", plan={"search_s": 1800.0})
+    job.update(search=search if search is not None else
+               {"stop_reason": "converged: …", "generations": 3, "converged": True, "used_s": 600.0})
+    execute._final_check(_three_held_back(tmp_path), _plan_with(check_seeds=check_seeds), None, tmp_path, job,
+                         lambda _m: None)
+    return job.state
+
+
+def test_a_settled_search_gives_the_check_its_saved_time(tmp_path, monkeypatch):
+    """A run per case costs ceil(2 * 3 / 1) * 20 s = 120 s. 400 s left pays for three more;
+    the settled run's 400 s + the saved 1200 s pays for all nine to the 12-run cap, and the
+    answer is still read twice, never a third time."""
+    calls: list[int] = []
+    plain = _settled_check(tmp_path / "a", monkeypatch, confirm=_confirm_recording(calls, 99), time_left=400.0,
+                           search={"stop_reason": "the plan's rounds are done", "generations": 6})
+    assert calls == [3, 6] and "saved" not in plain["final"], "a search that did not settle saved nothing"
+    calls.clear()
+    settled = _settled_check(tmp_path / "b", monkeypatch, confirm=_confirm_recording(calls, 99), time_left=1600.0)
+    assert calls == [3, 12], "never more than 12 runs a case, never a third read"
+    assert settled["final"]["saved"] == {"s": 1200, "spent": True, "why": "extended"}
+    assert settled["final"]["seeds"] == 12
+
+
+def test_the_saved_time_is_not_spent_when_the_cases_set_the_answer(tmp_path, monkeypatch):
+    calls: list[int] = []
+    state = _settled_check(tmp_path, monkeypatch, time_left=1600.0,
+                           confirm=_confirm_of_cases(calls, case_gains=[0.10, -0.08, 0.01], run_sd=0.001))
+    assert calls == [3] and state["check"]["limited_by"] == "cases"
+    assert state["final"]["saved"] == {"s": 1200, "spent": False, "why": "cases"}
+
+
+def test_the_saved_time_is_not_spent_when_the_first_read_answered_or_no_run_could_be_added(tmp_path, monkeypatch):
+    calls: list[int] = []
+    answered = _settled_check(tmp_path / "a", monkeypatch, confirm=_confirm_recording(calls, 3), time_left=1600.0)
+    assert calls == [3] and answered["final"]["saved"] == {"s": 1200, "spent": False, "why": "answered"}
+    calls.clear()
+    full = _settled_check(tmp_path / "b", monkeypatch, confirm=_confirm_recording(calls, 99), time_left=1600.0,
+                          check_seeds=12)
+    assert calls == [12] and full["final"]["saved"] == {"s": 1200, "spent": False, "why": "at_cap"}
+    calls.clear()
+    overspent = _settled_check(tmp_path / "c", monkeypatch, confirm=_confirm_recording(calls, 3), time_left=1600.0,
+                               search={"stop_reason": "converged: …", "generations": 3, "converged": True,
+                                       "used_s": 2000.0})
+    assert overspent["final"]["saved"]["s"] == 0, "never below none"
+
+
+def _settled_null_rate(setting: str, studies: int) -> tuple[float, float, int]:
+    """The share of `studies` seeded null studies (`random.Random(20261114)`) that the real
+    `execute._extend_check` answers "use": 4 held-back cases x 3 runs, each case's true log
+    gain N(0, case sd), each run noisy by the run sd, and the time allowance of a settled
+    search -- enough for all 12 runs per case. Its `confirm` is the real `confirm._analyse`
+    of `test_confirm._a_study`'s synthetic runs. Returns the rate, its SE and the most reads
+    any study took."""
+    from test_confirm import _a_study
+
+    from evolvekit.confirm import decision_of
+
+    case_sd, run_sd = {"runs noisier than cases": (0.005, 0.02), "pure run noise": (0.0, 0.002)}[setting]
+    rng = random.Random(20261114)
+    study = SimpleNamespace(test=[f"cases/c{i}.json" for i in range(4)])
+    plan = SimpleNamespace(check_seeds=3, workers=1, run_s=1.0)
+    job = SimpleNamespace(update=lambda **fields: None)
+    seed_cost = math.ceil(2 * 4 / 1) * 1.0
+    uses = most = 0
+    for _ in range(studies):
+        look = _a_study(rng, gains=[rng.gauss(0.0, case_sd) for _ in range(4)], run_sd=run_sd)
+        reads: list[int] = []
+
+        def confirm(config, run_dir, *, seeds, instances, label, log, stop):
+            reads.append(len(seeds))
+            return SimpleNamespace(per_candidate={"c": look(len(seeds))}, looks=len(reads))
+
+        comparison, _seeds = _extend_check(study, plan, None, None, job, lambda _m: None, stop=threading.Event(),
+                                           time_left_s=lambda: 9 * seed_cost + 0.5, confirm=confirm)
+        uses += decision_of(comparison.per_candidate["c"]) == "use"
+        most = max(most, len(reads))
+    rate = uses / studies
+    return rate, math.sqrt(rate * (1 - rate) / studies), most
+
+
+@pytest.mark.parametrize("setting", ["runs noisier than cases", "pure run noise"])
+def test_a_settled_null_study_says_use_in_under_10_percent_through_the_real_extension(setting, capsys):
+    """Handoff item 3: the product's procedure, not a copy -- execute._extend_check itself,
+    with the allowance of a settled search (all 12 runs per case). Estimates (builder check,
+    40 000 studies): runs noisier than cases (case sd 0.005, run sd 0.02) 8.78 % +- 0.14; pure
+    run noise (every case 0, run sd 0.002) 8.83 % +- 0.14. 6000 seeded studies each, measured
+    8.28 % +- 0.36 and 9.10 % +- 0.37: 10 % sits 4.8 and 2.4 SE above (decision 7: at 4000 the
+    pure-noise rate was 2.07 SE below, too near). Asserts < 10 %, prints the rate. The recheck
+    is not part of this path."""
+    rate, se, most = _settled_null_rate(setting, 6000)
+    with capsys.disabled():
+        print(f"\n{setting}: settled null 'use' {rate:.2%} +- {se:.2%} (6000 studies)")
+    assert most <= 2, "never a third read"
+    assert rate < 0.10
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("setting", ["runs noisier than cases", "pure run noise"])
+def test_a_settled_null_study_says_use_in_under_10_percent_through_the_real_extension_two_standard_errors_clear(
+        setting, capsys):
+    """The same on 10 000 studies per setting: rate + 2 SE < 10 % (estimate 8.8 % +- 0.29)."""
+    rate, se, most = _settled_null_rate(setting, 10_000)
+    with capsys.disabled():
+        print(f"\n{setting}: settled null 'use' {rate:.2%} +- {se:.2%}, rate + 2 SE {rate + 2 * se:.2%} "
+              "(10 000 studies)")
+    assert most <= 2
+    assert rate + 2 * se < 0.10

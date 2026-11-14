@@ -8,6 +8,7 @@ so far -- all plain arithmetic on a declared `problem.parameters` space.
 from __future__ import annotations
 
 import json
+import math
 import random
 import sys
 from statistics import fmean
@@ -239,6 +240,28 @@ def test_param_tpe_is_a_local_step_until_there_is_something_to_learn_from():
     assert early.mode == "param_local" and early.meta["fallback_of"] == "param_tpe"
     later = param_tpe(space, parent, _history(space, 30, 1), seed=2)
     assert later.mode == "param_tpe" and later.meta["observations"] == 30
+    assert isinstance(later.meta["tpe_ratio"], float) and "tpe_ratio" not in early.meta
+
+
+def test_propose_tpe_scored_returns_the_proposal_and_its_ratio_on_the_same_stream():
+    """The ratio is the one the loop maximises, `sum_p log l(x_p) - log g(x_p)`, and
+    scoring draws nothing more: the same seed gives the same proposal, and the stream after it
+    is where it was."""
+    from evolvekit.search.tuning import _Density, propose_tpe_scored
+
+    space = _wide_space(2)
+    history = _history(space, 30, 1)
+    plain_rng, scored_rng = random.Random(9), random.Random(9)
+    proposal = propose_tpe(space, history, plain_rng)
+    scored = propose_tpe_scored(space, history, scored_rng)
+    assert scored is not None and scored[0] == proposal
+    assert plain_rng.random() == scored_rng.random(), "the same draws"
+    ranked = sorted(history, key=lambda o: -o.fitness)
+    good, bad = ranked[:n_good(len(ranked))], ranked[n_good(len(ranked)):]
+    expected = sum(math.log(_Density(p, good).pdf(proposal[p.name])) - math.log(_Density(p, bad).pdf(proposal[p.name]))
+                   for p in space)
+    assert math.isfinite(scored[1]) and scored[1] == pytest.approx(expected)
+    assert propose_tpe_scored(space, history[:MIN_OBSERVATIONS - 1], random.Random(9)) is None
 
 
 def _screening_driver(tmp_path, *, normalized: bool, middle: bool = False):

@@ -2461,6 +2461,43 @@ stops `wait` and `watch`, never the run.
   starts no round the longest of the last two would not let finish, so after
   a slow round it may run one round fewer than `rounds_left`, which counts the
   median round.
+  **A search that has settled ends early** (`plan.converged`, read from the
+  round events after every round, so a resumed run answers as the
+  uninterrupted one would): the bar is the starting point's best; a round
+  whose best beats it by more than the noise sd (`max(1e-6, 1e-9·|bar|,
+  noise_sd)`) moves the bar there, any other round counts as flat, and a
+  re-evaluation of the best moves the bar, never the count. After
+  `max(3, ⌈rounds / 3⌉)` flat rounds in a row -- with `stop.min_big_steps`
+  big steps tried among them in a run that takes big steps, and no round from
+  before these events among them -- the search ends with the stop reason
+  *converged: no round gained beyond the noise for k rounds*. One sd, where
+  the stop policy's patience uses half a sd: the stop policy keeps a run going
+  on any likely step, this rule ends one only when the steps have stopped.
+  Rounds or generations set by hand (`plan.adjusted`) are a decision: the run
+  re-plans, but never ends early. Measured on seeded simulations (6 planned
+  rounds, 8 combinations a round, measured sd 1, 4000 studies each): a flat
+  search is called settled within its rounds in 95.4 % ± 0.3; one gaining 1 sd
+  a round in 3.6 % ± 0.3; 0.5 sd a round in 50.4 % ± 0.8; and **0.25 sd a round
+  in 81.4 % ± 0.6** -- the cost of a one-sd bar: a slow, steady gain is called
+  settled in most studies. TPE's proposal scores (`tpe_ratio` on each
+  `generation_finished` event, the round's largest log density ratio) are
+  recorded for engineers and not read: TPE first proposes in round 2, and the
+  scores barely tell a settled search from an improving one.
+  `job.json`'s `search` then has `converged: true`, `flat_rounds`, `window`
+  and `used_s` (the active seconds when it ended). **The time saved is the
+  final check's allowance for its one extension**: the check's time left
+  counts from the run's start, so the hours the search did not use pay for
+  more runs per held-back case -- still at most 12 per case, still read at
+  most twice, and only while more runs can help (*more runs, or more cases*,
+  below). `final.saved` records it: `{"s", "spent", "why"}`, the seconds of
+  search left unspent (`search_s − used_s`, never below 0), whether the
+  extension spent them, and `why`: `extended`, `cases` (`check.limited_by`),
+  `answered` (the first read was not *keep*, or every run alike) or `at_cap`
+  (no run could be added: 12 already, no time for one, or a stop). Through
+  the real `execute._extend_check` with that allowance, null studies (no true
+  gain, 4 held-back cases × 3 runs, extended to 12) read *use* in 8.8 % ± 0.14
+  (40 000 studies, runs noisier than cases or pure run noise): under the
+  rule's 10 %. The verdict's `converged` key says where the time went.
   `python -m evolvekit study stop depot-a` ends it cleanly.
 - **The final check** runs the best combination against the starting point
   on the held-back cases, several runs per case (the plan says how many),

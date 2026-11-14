@@ -248,6 +248,9 @@ class Driver:
         self._taken: list[dict] = []
         """The configurations proposed so far in this generation (`_breed`):
         what `param_tpe` counts as bad before they are evaluated."""
+        self._tpe_ratios: list[float] = []
+        """The log density ratios of this round's TPE proposals (`meta["tpe_ratio"]`): the
+        round's largest is its `generation_finished`'s `tpe_ratio`, for engineers."""
         self.breadth = AdaptiveBreadth.from_config(config.search)
         self.screens: dict[str, ScreenControl] = self._screen_controls()
         """Per stage with `promote.adapt` before a command stage, its screening
@@ -933,6 +936,7 @@ class Driver:
             # (`Archive.from_records` replays the same on resume).
             self.grid.decay()
             bred_at = time.perf_counter()
+            self._tpe_ratios = []  # an adopted round proposed nothing this session: no ratio
             children = self._adopt_pending(generation, plateau=decision.plateau)
             adopted = children is not None
             if children is None:
@@ -1348,7 +1352,10 @@ class Driver:
         """`round_best`: the best as the round measured it, before a
         re-evaluation pooled it (`best_fitness` is after); `breed_s`: the
         round's writing time, 0 for an adopted round; `adopted`: its children
-        were written by an earlier session (`pending.json`)."""
+        were written by an earlier session (`pending.json`). `tpe_ratio`: the
+        largest log density ratio among the round's TPE proposals (None
+        without one); `big_steps`: its children planned as big steps -- what a
+        settled search waits for (`plan.converged`, `stop.min_big_steps`)."""
         best = self.best
         duration = round(time.perf_counter() - began, 3)
         self._durations[generation] = duration
@@ -1367,7 +1374,8 @@ class Driver:
             breed_s=breed_s,
             adopted=adopted,
             noise_sd=self.stop_policy.noise_sd,
-            tpe_ratio=None,
+            tpe_ratio=max(self._tpe_ratios) if self._tpe_ratios else None,
+            big_steps=sum(1 for c in children if str(c.operator).startswith("big_step")),
             breadth_at_ceiling=(self.breadth.current >= self.breadth.config.max) if self.breadth is not None else None,
         )
         self._snapshot_archive()
@@ -1973,6 +1981,8 @@ class Driver:
         if outcome.ok and isinstance(outcome.meta.get("params"), dict):
             # Q19: any sibling with a configuration, whichever operator proposed it.
             self._taken.append(dict(outcome.meta["params"]))
+        if outcome.ok and isinstance(outcome.meta.get("tpe_ratio"), float):
+            self._tpe_ratios.append(outcome.meta["tpe_ratio"])
         if operator == "big_step" and outcome.ok:
             # The response parsed and applied; `_restore_stop_policy` reads the same from the row.
             self._count_big_step(

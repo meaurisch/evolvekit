@@ -464,6 +464,45 @@ def test_combinations_that_repeated_one_already_tried_are_said(tmp_path):
         "one already tried and were not measured again."), "what it knows, not the whole shortfall (m6)"
 
 
+@pytest.mark.parametrize("why,line", [
+    ("extended", "The time the search saved went to the final check: more runs per held-back case, read once more."),
+    ("cases", "The time the search saved (about 20 min) was not spent: only more held-back cases could firm up "
+              "this answer, not more runs."),
+    ("answered", "The time the search saved (about 20 min) was not spent: the final check's first read already "
+                 "gave the answer."),
+    ("at_cap", "The time the search saved (about 20 min) was not spent: no more runs could be added to the final "
+               "check."),
+])
+def test_a_settled_search_says_so_and_where_its_time_went(tmp_path, why, line):
+    """A4.1: the search ended early because it settled -- a fact about the search, never about
+    the result -- and the verdict says where the time it saved went (`final.saved.why`)."""
+    root, run = _short_run(tmp_path, ai=False, stop="converged: no round gained beyond the noise for 3 rounds",
+                           generations=5)
+    job_path = root / "runs" / run / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["search"].update(converged=True, flat_rounds=3, window=4, used_s=2400.0)
+    job["final"]["saved"] = {"s": 1200, "spent": why == "extended", "why": why}
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    v = build_verdict(root, run)
+    assert v["how_it_ran"] == ("Ran 5 of the 11 planned rounds (25 combinations, about 132 planned): the search "
+                               "settled (no round gained beyond the noise for 4 rounds in a row), so it ended early.")
+    assert v["converged"] == {"rounds": 5, "planned": 11, "saved_s": 1200, "spent": why == "extended", "line": line}
+    assert "better" not in v["converged"]["line"] and "better" not in v["how_it_ran"]
+
+
+def test_a_search_that_did_not_settle_has_no_converged_key(tmp_path):
+    v = build_verdict(*_short_run(tmp_path, ai=False, stop=TIME_LIMIT))
+    assert "converged" not in v
+    root, run = _short_run(tmp_path / "b", ai=False, stop="converged: no round gained beyond the noise for 3 rounds")
+    job_path = root / "runs" / run / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["search"].update(converged=True, window=3)
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    v = build_verdict(root, run)
+    assert v["converged"] == {"rounds": 2, "planned": 11, "saved_s": None, "spent": False, "line": ""}, \
+        "settled, but the final check said nothing of the time (stopped, or skipped)"
+
+
 def _two_held_back(tmp_path: Path, changes: tuple[float, ...] = (3.1, 8.2), ci: tuple[float, float] = (-26.7, 37.9),
                    decision: str = "keep", direction: str | None = None) -> tuple[Path, str]:
     """Persona p4's Monday answer: a keep on held-back cases that each came out better, with a range
