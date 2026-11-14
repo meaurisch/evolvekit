@@ -376,3 +376,42 @@ benchmark's solvers have no `{seed}`, so it cannot see A2.1–A2.4 (σ̂ = 0 the
   the main checkout's `.venv-pyvrp`: **3243 passed, 1 failed, 5 skipped** in 36:35. The one failure is
   the worktree's path (step 0).
 - The benchmark re-run on 1141625 gives the "after" table above to the digit.
+- PR: [meaurisch/evolvekit#83](https://github.com/meaurisch/evolvekit/pull/83), `algo/2-noise` against
+  `master`. **PASS.**
+
+## Project A3 — what the model is told (2026-11-14)
+
+Branch `algo/3-prompt` from `algo/2-noise` (1141625). Plan:
+[2026-11-14-algo-3-prompt.md](../plans/2026-11-14-algo-3-prompt.md), checked by a fresh builder check
+(read-only; it found eight concrete fixes and five questions, ruled as the plan's eleven decisions).
+Two tasks, each built by a fresh implementer and reviewed by a fresh reviewer.
+
+| Task | Closes | Review rounds | Commits |
+|---|---|---|---|
+| A3.1 a per-parent ledger, one local change summary | Q8 | 2 (one Important: "no reply" for errors where a reply came back) | b8767d3 d23f1c0 |
+| A3.2 big steps with spacing and a true hint | Q8, D6 in part | 1 + minors | 02836df 527c331 |
+
+### Decisions
+
+- **The ledger's words are measured against the rows the engine writes**: a twin of an earlier
+  candidate that scored at least as well reads "same behaviour as" (exact) or "within the noise
+  of"; "raced out after N instances"; "kept out by the hold-out"; "not ranked (score X)" for a
+  finished row that does not compete; "not applied" only where a reply came back and could not be
+  applied, "no reply" where none did. The score change is on the score the parent's breakdown
+  shows, and a float-error difference prints `+0`. A function changed only in its numbers reads
+  `f (numbers only)` (A0 decision 3's definition). The docstring is no longer used in any summary.
+- **Bounded**: five lines of at most 160 characters each including the bullet, every kind of line
+  break collapsed, children ordered by their integer counter; the ledger is built only for operators
+  that call a model, and replaces the old failure section in both prompt builders.
+- **Big steps**: after a plateau big step that applied, none for `big_step_every` generations unless
+  something improved (scheduled steps keep their schedule); the hint names the trigger and the
+  previous big step as a ledger line. One helper keeps A0's two counts and the spacing for the live
+  path, the replay and adopted generations — closing A0's adoption gap. `generation_started` records
+  `plateau`, so the replay is exact when the noise moved since.
+- **Prompts keep the engine's words** (they are read by the model); the people's vocabulary binds the
+  app, the `study` CLI and docs for people.
+
+### Limits logged
+
+- Siblings of the current generation never appear in the ledger.
+- A scheduled big step inside a plateau window still runs (at most two strong-model calls per window).
