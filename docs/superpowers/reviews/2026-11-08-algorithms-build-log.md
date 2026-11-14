@@ -415,3 +415,12 @@ Two tasks, each built by a fresh implementer and reviewed by a fresh reviewer.
 
 - Siblings of the current generation never appear in the ledger.
 - A scheduled big step inside a plateau window still runs (at most two strong-model calls per window).
+
+### Gate and PR
+
+- Gate: `python tasks.py check` on 374a826, nothing else running: **3305 passed, 2 failed, 5 skipped**
+  in 37:13. One failure is the worktree's path (step 0). The other was a slow end-to-end test that
+  looked for the old failure section's words on the twin's parent's prompt; A3.1 replaced that section
+  by the ledger, so the test now looks for the twin's ledger line (8da08a0); its file then passed
+  (33 tests). The final gate on the A4 branch runs the whole suite again over A3's code.
+- PR: against `master`, stacked on A2 (#83).
