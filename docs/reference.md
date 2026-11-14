@@ -440,7 +440,9 @@ Shares come from `search.operators`. Inspirations are drawn from cells other
 than the parent's and are shown as one-line delta summaries — a unified-diff
 stat against their own parent plus the first line of their docstring, both
 computed locally. Crossover is the one operator that also sees an inspiration's
-code, because it cannot combine two candidates otherwise.
+code, because it cannot combine two candidates otherwise. The model-free
+operators (role `none`) read no inspirations, so none are drawn for them: on a
+typed space, adding parameter axes leaves the run's proposals as they were.
 
 Each inspiration adds a summary and a score line to the prompt, and on a tree
 problem its whole diff, so raising `search.inspirations` raises the cost of

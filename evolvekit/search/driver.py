@@ -1727,11 +1727,19 @@ class Driver:
         )
 
     def _inspirations(self, parent: Candidate, operator: str) -> list[Inspiration]:
-        """1 to `search.inspirations` elites from other cells; only crossover is shown their code."""
+        """1 to `search.inspirations` elites from other cells; only crossover is shown their code.
+
+        An operator that calls no model (role "none", the `param_*` ones) never
+        reads them, so none are drawn: on a typed space the parameter axes
+        spread the archive over many cells, and drawing from them would shift
+        every later number of the run (A2 decision 19). The count is still
+        drawn, so the stream is the one a single-cell grid gives."""
         budget = self.config.search.inspirations
         if budget <= 0:
             return []
         wanted = 1 if operator == "crossover" else self.rng.randint(1, budget)
+        if _role_of(operator) == "none":
+            return []
         picks = self.grid.sample_inspirations(parent, wanted, self.rng)
         return [
             Inspiration(
