@@ -398,6 +398,19 @@ def test_cli_groups_prints_the_groups(tmp_path, capsys, monkeypatch):
     assert "note: a group needs at least two cases to learn from; all cases are one group" in said.err
 
 
+def test_cli_groups_says_why_the_cases_are_one_group(tmp_path, capsys, monkeypatch):
+    from evolvekit.cli import main
+
+    sizes = [30, 40, 50, 60]  # the demo tour's samples: 0.455, below 0.5
+    root = study_with_cases(tmp_path, sizes=sizes, held=0)
+    monkeypatch.setattr(groups, "case_tables", fake_tables(sizes_of(sizes)))
+    assert main(["study", "groups", root.name, "--home", str(tmp_path / "home")]) == 0
+    said = capsys.readouterr()
+    assert said.out.splitlines()[:2] == ["1 group:", "  all: 4 cases (4 to learn from, 0 held back)"]
+    assert ("note: the cases do not fall into clear kinds (how well they separate: 0.45 of 1, at least 0.5 "
+            "needed); all cases are one group") in said.err.splitlines()
+
+
 def test_cli_groups_a_case_that_cannot_be_solved_is_exit_1(tmp_path, capsys, monkeypatch):
     from evolvekit.cli import main
 
@@ -676,9 +689,10 @@ def test_held_back_cases_follow_the_stump_and_the_rule_reports_both_accuracies(t
 
 def test_a_held_back_case_the_rule_cannot_read_goes_to_the_nearest_group_and_says_so(tmp_path, monkeypatch):
     """Review Focus 3: c6 has no number of rows (not finite), so the rule cannot read it; its other
-    clustering feature puts it nearest group 2. c7 has none of the features: the first group."""
-    sizes = [80, 20, 82, 22, 84, 24, 83, 21]
-    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    clustering feature puts it nearest group 2. c7 has none of the features: the first group.
+    c8 the rule reads. The held-back accuracy counts only c8; groups.json keeps no NaN."""
+    sizes = [80, 20, 82, 22, 84, 24, 83, 21, 23]
+    root = study_with_cases(tmp_path, sizes=sizes, held=3)
     real = groups.features_of
 
     def features_of(root_, case, *, tables):
@@ -692,10 +706,35 @@ def test_a_held_back_case_the_rule_cannot_read_goes_to_the_nearest_group_and_say
     doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
     assert doc["method"] == "features" and doc["stump"]["feature"] == "rows_stops"
     assert doc["groups"]["group 2"]["test"] == ["cases/c6.json"]
-    assert doc["groups"]["group 1"]["test"] == ["cases/c7.json"]
+    assert doc["groups"]["group 1"]["test"] == ["cases/c7.json", "cases/c8.json"]
     assert "cases/c6.json: the rule cannot read it, so it goes to group 2, the nearest" in doc["notes"], doc["notes"]
     assert "cases/c7.json: the rule cannot read it, so it goes to group 1, the first" in doc["notes"], doc["notes"]
-    assert doc["accuracy"]["held_back"] == {"right": 0, "of": 2}, "the rule placed neither"
+    assert doc["accuracy"]["held_back"] == {"right": 1, "of": 1}, "only the case the rule read is counted"
+    assert doc["features"]["cases/c6.json"]["rows_stops"] is None, "not a finite number: None, never NaN"
+    text = (root / groups.GROUPS).read_text(encoding="utf-8")
+    assert "NaN" not in text and json.loads(text) == doc
+    assert groups.rule_lines(doc, {})[1].endswith("and 1 of the 1 held-back cases in the group they are nearest to.")
+
+
+def test_a_case_to_learn_from_without_a_number_joins_a_group_without_shaping_it(tmp_path, monkeypatch):
+    """c0 (80 stops) has no number of rows: it is left out of the clustering and the rule, and joins
+    group 2 by its other feature, with a note; nothing raises."""
+    sizes = [80, 20, 82, 22, 84, 24, 83, 21]
+    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    real = groups.features_of
+
+    def features_of(root_, case, *, tables):
+        if case == "cases/c0.json":
+            return {"rows_stops": None, "mean_stops_stop_id": 39.5, "mean_stops_weight": 1.0}
+        return real(root_, case, tables=tables)
+
+    monkeypatch.setattr(groups, "features_of", features_of)
+    doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    assert doc["method"] == "features" and doc["stump"]["feature"] == "rows_stops"
+    assert doc["groups"]["group 2"]["training"] == ["cases/c0.json", "cases/c2.json", "cases/c4.json"]
+    assert ("cases/c0.json: some of its features are not numbers, so it did not shape the groups; "
+            "it joins group 2, the nearest") in doc["notes"], doc["notes"]
+    assert doc["accuracy"]["training"] == {"right": 5, "of": 5}, "the rule was fitted without it"
 
 
 def test_a_format_1_groups_json_is_computed_again(tmp_path):

@@ -525,15 +525,19 @@ the rows are of more than one group.
 `groups.json` (`"format": 2`) holds what the grouping found: `method`
 (`features`, `tags` or `one`); `assigned`, how the held-back cases were put
 in groups (`stump` by the rule, `tags`, `one` for a single group, `nearest`
-for an asked-for 4 or 5 groups, which no single split tells apart); `k`;
+to the nearest group's centre when no single split tells the groups apart:
+an asked-for 4 or 5 groups, or 2 or 3 left by a merge whose cases to learn
+from no one split separates); `k`;
 `silhouette`, the best one tried (kept on a single group too, when groups
 were tried and did not separate clearly); `min_silhouette` (0.5, not on a
 grouping by tags); `groups`, `{name: {training, test, merged_from}}`;
 `stump`, the rule over the cases to learn from (`{feature, thresholds,
 sides, misplaced}`); `accuracy`, `{training: {right, of}, held_back: {right,
 of}}` (the cases to learn from the rule puts in the group they were found
-in; the held-back cases it puts in the group whose centre is nearest);
-`features`, `describe`, `notes`, `cases`, `tags` and `stamps`. A study's
+in; of the held-back cases the rule could read, those it puts in the group
+whose centre is nearest — the notes name the others); `features` (a value
+that is not a number is `null`; a case to learn from with one is left out
+of making the groups and joins one afterwards, and a note says so), `describe`, `notes`, `cases`, `tags` and `stamps`. A study's
 file of format 1 grouped by features counts as out of date (the Cases view
 shows no group from it, and the next `study groups` or start of a run per
 kind of case computes the groups again), since it placed the held-back cases

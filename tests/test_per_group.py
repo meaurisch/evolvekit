@@ -312,25 +312,30 @@ def test_a_merge_fits_the_rule_again_and_reassigns_the_held_back_cases():
     features = {"a1": {"f": 1.0, "g": 0.0}, "a2": {"f": 2.0, "g": 0.5}, "b1": {"f": 10.0, "g": 1.0},
                 "b2": {"f": 11.0, "g": 1.5}, "c1": {"f": 12.0, "g": 100.0}, "c2": {"f": 13.0, "g": 101.0},
                 "a3": {"f": 1.5, "g": 0.2}, "a4": {"f": 1.8, "g": 0.3}, "b3": {"f": 10.5, "g": 1.2},
-                "c3": {"f": 12.5, "g": 100.5}, "c4": {"f": 12.8, "g": 100.2}, "h": {"f": 11.8, "g": 1.2}}
+                "c3": {"f": 12.5, "g": 100.5}, "c4": {"f": 12.8, "g": 100.2}, "h": {"f": 11.8, "g": 1.2},
+                "u": {"f": None, "g": 100.7}}
     labels = {"a1": "A", "a2": "A", "b1": "B", "b2": "B", "c1": "C", "c2": "C"}
     stump = groups.rule_stump({c: features[c] for c in labels}, labels)
     assert stump == {"feature": "f", "thresholds": [6.0, 11.5], "sides": ["A", "B", "C"], "misplaced": 0}
-    assert groups.assign(stump, features["h"]) == "C"
-    doc = {"format": 2, "method": "features", "assigned": "stump", "k": 3, "features": features, "notes": [],
+    assert groups.assign(stump, features["h"]) == "C" and groups.assign(stump, features["u"]) is None
+    stale = "u: the rule cannot read it, so it goes to C, the nearest"  # true of the three-group rule only
+    doc = {"format": 2, "method": "features", "assigned": "stump", "k": 3, "features": features,
+           "notes": ["mean_x: the same in every case, so not used to tell them apart", stale],
            "cases": list(features), "stump": stump,
            "accuracy": {"training": {"right": 6, "of": 6}, "held_back": {"right": 5, "of": 6}},
            "groups": {"A": {"training": ["a1", "a2"], "test": ["a3", "a4"]},
                       "B": {"training": ["b1", "b2"], "test": ["b3"]},
-                      "C": {"training": ["c1", "c2"], "test": ["c3", "c4", "h"]}}}
+                      "C": {"training": ["c1", "c2"], "test": ["c3", "c4", "h", "u"]}}}
     merged = groups.merge_small_groups(doc)
     assert list(merged["groups"]) == ["A", "C"] and merged["k"] == 2
     assert "B has 1 held-back case, so it joins A, the nearest by its features" in merged["notes"]
+    assert stale not in merged["notes"], "the rule over A and C reads u: the old note is dropped"
+    assert "mean_x: the same in every case, so not used to tell them apart" in merged["notes"], "other notes stay"
     assert merged["stump"] == {"feature": "g", "thresholds": [50.75], "sides": ["A", "C"], "misplaced": 0}
     assert merged["groups"]["A"] == {"training": ["a1", "a2", "b1", "b2"], "test": ["a3", "a4", "b3", "h"],
                                      "merged_from": ["B"]}
-    assert merged["groups"]["C"]["test"] == ["c3", "c4"]
-    assert merged["accuracy"] == {"training": {"right": 6, "of": 6}, "held_back": {"right": 6, "of": 6}}
+    assert merged["groups"]["C"]["test"] == ["c3", "c4", "u"]
+    assert merged["accuracy"] == {"training": {"right": 6, "of": 6}, "held_back": {"right": 7, "of": 7}}
     assert doc["stump"]["feature"] == "f", "the argument is not changed"
     assert groups.merge_small_groups(merged) == merged
     lines = groups.rule_lines(merged, {"A": "use", "C": "use"})

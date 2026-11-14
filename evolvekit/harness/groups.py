@@ -96,6 +96,9 @@ MIN_SILHOUETTE = 0.5
 (Kaufman & Rousseeuw's "reasonable structure"); below it, all cases are one group."""
 COUNT_PREFIX = "rows_"
 """Features named so are counts: they enter the clustering as `log1p` (`transformed`)."""
+NO_SPLIT_PREFIX = "no one-split rule tells these "
+UNREAD = "the rule cannot read it"
+UNPLACED = "no feature places it"
 NO_RULE = "no single measure tells the kinds apart, so no rule could be checked; all cases are one group"
 
 
@@ -398,13 +401,26 @@ def _space(features: dict[str, dict[str, Any]], training: list[str]) -> Space | 
     """The clustering's space over the cases to learn from: the feature names (the first such
     case's) and `(index, mean, sd)` of each `transformed` one that spreads over the cases that have
     every one of them finite; `None` when there is none."""
-    rows = [features[c] for c in training if isinstance(features.get(c), dict) and features[c]]
-    if not rows:
-        return None
-    names = list(rows[0])
-    points = [[float(transformed(row)[n]) for n in names] for row in rows if all(_finite(row.get(n)) for n in names)]
+    names, usable = _usable(features, training)
+    points = [[float(transformed(features[c])[n]) for n in names] for c in usable]
     columns = _spread(points)
     return (names, columns) if columns else None
+
+
+def _usable(features: dict[str, dict[str, Any]], training: list[str]) -> tuple[list[str], list[str]]:
+    """The feature names (the first case's) that some case to learn from has as a finite number,
+    and the cases to learn from that have every one of them so."""
+    have = [c for c in training if isinstance(features.get(c), dict) and features[c]]
+    if not have:
+        return [], []
+    names = [n for n in features[have[0]] if any(_finite(features[c].get(n)) for c in have)]
+    return names, [c for c in have if all(_finite(features[c].get(n)) for n in names)]
+
+
+def _clean(row: dict[str, Any]) -> dict[str, Any]:
+    """A case's features as `groups.json` keeps them: a value that is not a finite number is `None`
+    (JSON has no NaN)."""
+    return {name: value if _finite(value) else None for name, value in row.items()}
 
 
 def _project(space: Space, row: dict[str, Any]) -> list[float | None]:
@@ -449,30 +465,36 @@ def _place(doc: dict[str, Any]) -> None:
     order = [c for c in doc.get("cases") or [] if c in set(tests)]
     order += [c for c in tests if c not in order]
     first = next(iter(named))
+    # A merge places the cases again: what an earlier placing said no longer holds.
+    said_before = (NO_SPLIT_PREFIX, *(f"{c}: {why}, so it goes to " for c in order for why in (UNREAD, UNPLACED)))
+    notes[:] = [n for n in notes if not n.startswith(said_before)]
     if len(named) == 1:
         named[first]["test"] = order
         doc.update(assigned="one", stump=None)
         doc.pop("accuracy", None)
         return
-    labels = {c: name for name, part in named.items() for c in part.get("training") or []}
-    stump = rule_stump(features, labels) if len(named) <= 3 else None
-    space = _space(features, list(labels))
+    every = {c: name for name, part in named.items() for c in part.get("training") or []}
+    _, fitted = _usable(features, list(every))  # a case to learn from without every feature shapes no rule
+    labels = {c: every[c] for c in fitted}
+    stump = rule_stump(features, labels) if len(named) <= 3 and len(set(labels.values())) == len(named) else None
+    space = _space(features, list(every))
     centres = _centres(space, features, named) if space is not None else {}
     if stump is None:
-        note = f"no one-split rule tells these {len(named)} groups apart, so each held-back case goes to the nearest"
+        note = f"{NO_SPLIT_PREFIX}{len(named)} groups apart, so each held-back case goes to the nearest"
         if note not in notes:
             notes.append(note)
     placed: dict[str, list[str]] = {name: [] for name in named}
-    right = 0
+    right = read = 0
     for case in order:
         row = features.get(case) if isinstance(features.get(case), dict) else {}
         by_rule = assign(stump, row) if stump is not None else None
         near = _nearest(space, centres, row)
+        read += by_rule is not None
         right += by_rule is not None and by_rule == near
         group = by_rule
         if group is None:
             group, how = (near, "the nearest") if near is not None else (first, "the first")
-            said = "the rule cannot read it" if stump is not None else "no feature places it"
+            said = UNREAD if stump is not None else UNPLACED
             note = f"{case}: {said}, so it goes to {group}, {how}"
             if note not in notes:
                 notes.append(note)
@@ -483,9 +505,9 @@ def _place(doc: dict[str, Any]) -> None:
     if stump is None:
         doc.pop("accuracy", None)
         return
-    learned = sum(1 for c in labels if c in features)
-    doc["accuracy"] = {"training": {"right": learned - stump["misplaced"], "of": learned},
-                       "held_back": {"right": right, "of": len(order)}}
+    # Only the cases the rule read: the notes name the others.
+    doc["accuracy"] = {"training": {"right": len(labels) - stump["misplaced"], "of": len(labels)},
+                       "held_back": {"right": right, "of": read}}
 
 
 def _centroids(doc: dict[str, Any]) -> dict[str, list[float]] | None:
@@ -616,6 +638,7 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
             features[case] = features_of(root, case, tables=tables)
         except HarnessError as exc:
             notes.append(f"features left out: {exc}")
+    features = {case: _clean(row) for case, row in features.items()}
     names = list(next(iter(features.values()), {}))
     words = {name: said for name, (_, said) in _features(harness).items()}
     method, named, score = "one", {}, None
@@ -626,11 +649,15 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
         else:
             notes.append(ONE_GROUP)
     else:  # the cases to learn from alone make the groups; counts on a log scale
-        training = list(study.training)
-        raw = [[transformed(features[c])[n] for n in names] for c in training]
+        used, training = _usable(features, list(study.training))
+        if [n for n in names if n not in used] and training:
+            notes.append(f"{', '.join(n for n in names if n not in used)}: not a number in any case to learn from, "
+                         "so not used to tell them apart")
+        left = [c for c in study.training if c not in training]  # placed after the groups are made
+        raw = [[transformed(features[c])[n] for n in used] for c in training]
         spread = _spread(raw)
         kept = {j for j, _, _ in spread}
-        same = [n for j, n in enumerate(names) if j not in kept]
+        same = [n for j, n in enumerate(used) if j not in kept]
         points = standardise(raw)
         if not spread:
             notes.append("the cases' features are the same in every case; all cases are one group")
@@ -654,6 +681,9 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
                 else:
                     method = "features"
                     named[next(iter(named))]["test"] = list(study.test)  # until the rule places them (`_place`)
+                    _join(named, left, features, study, notes)
+        if method != "features":
+            notes += [f"{case}: some of its features are not numbers, so it did not shape the groups" for case in left]
     if method == "one":
         named = {"all": _split(study, set(cases))}
     doc: dict[str, Any] = {
@@ -668,6 +698,30 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
         _place(doc)
     _atomic_write(root / GROUPS, json.dumps(doc, indent=2) + "\n")
     return doc
+
+
+def _join(named: dict[str, dict[str, list[str]]], left: list[str], features: dict[str, dict[str, Any]],
+          study: Study, notes: list[str]) -> None:
+    """Cases to learn from that some feature of theirs left out of the clustering join a group
+    after it is made: the rule's (fitted without them), else the nearest centre's, else the first;
+    a note says each. Every group's cases to learn from stay in the study's order."""
+    if not left:
+        return
+    labels = {c: name for name, part in named.items() for c in part["training"]}
+    stump = rule_stump(features, labels) if len(named) <= 3 else None
+    space = _space(features, list(labels))
+    centres = _centres(space, features, named) if space is not None else {}
+    for case in left:
+        row = features.get(case) or {}
+        group, how = (assign(stump, row) if stump is not None else None), "by the rule"
+        if group is None:
+            near = _nearest(space, centres, row)
+            group, how = (near, "the nearest") if near is not None else (next(iter(named)), "the first")
+        named[group]["training"].append(case)
+        notes.append(f"{case}: some of its features are not numbers, so it did not shape the groups; "
+                     f"it joins {group}, {how}")
+    for part in named.values():
+        part["training"] = [c for c in study.training if c in set(part["training"])]
 
 
 def _choose(points: list[list[float]], *, k: int | None = None) -> tuple[float | None, list[int] | None, list[str]]:
