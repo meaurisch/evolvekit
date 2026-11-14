@@ -648,21 +648,27 @@ def _perturb_state(tmp_path) -> dict:
 
 
 def test_the_step_grows_after_a_round_of_successes_and_shrinks_after_failures(tmp_path):
-    """The 1/5 rule: 1 of 3 children improved (33 % >= 20 %) -> 0.15 x 1.2 = 0.18;
-    then 0 of 3 -> 0.18 / 1.2 = 0.15. `work/perturb.json` holds both rounds, and a
-    new Driver on the same run starts from the last size."""
+    """The 1/5 rule per trial (Decision 16): scale x 1.2 ** (improved - 0.2 tried).
+    1 of 3 improved -> 0.15 x 1.2**0.4; then 0 of 3 -> x 1.2**-0.6, 0.15 x 1.2**-0.2 in
+    all. `work/perturb.json` holds both rounds; a new Driver starts from the last size."""
     driver, parent = _step_driver(tmp_path)
     assert driver.step_scale == 0.15, "no perturb.json yet: the default"
     driver._adapt_step(1, _local_children(driver, parent, 1, [11.0, 9.0, 10.0]))
-    assert driver.step_scale == pytest.approx(0.18)
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** 0.4)
     driver._adapt_step(2, _local_children(driver, parent, 2, [9.0, 9.5, 10.0]))
-    assert driver.step_scale == pytest.approx(0.15)
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** -0.2)
     state = _perturb_state(tmp_path)
     assert state["scale"] == driver.step_scale
     assert [(h["generation"], h["improved"], h["tried"]) for h in state["history"]] == [(1, 1, 3), (2, 0, 3)]
-    assert [h["scale"] for h in state["history"]] == pytest.approx([0.18, 0.15])
+    assert [h["scale"] for h in state["history"]] == pytest.approx([0.15 * 1.2 ** 0.4, 0.15 * 1.2 ** -0.2])
     again, _ = _step_driver(tmp_path)
     assert again.step_scale == driver.step_scale, "a resumed run takes the size up exactly"
+
+
+def test_one_success_in_five_leaves_the_step_where_it_is(tmp_path):
+    driver, parent = _step_driver(tmp_path)
+    driver._adapt_step(1, _local_children(driver, parent, 1, [11.0, 9.0, 9.0, 9.0, 9.0]))
+    assert driver.step_scale == pytest.approx(0.15)
 
 
 def test_a_round_without_local_steps_leaves_the_size_and_a_recorded_round_is_not_counted_twice(tmp_path):
@@ -671,13 +677,23 @@ def test_a_round_without_local_steps_leaves_the_size_and_a_recorded_round_is_not
     assert driver.step_scale == 0.15 and not (tmp_path / "run" / "work" / "perturb.json").exists()
     fallbacks = _local_children(driver, parent, 2, [11.0])  # param_cross / param_tpe fallbacks record param_local
     driver._adapt_step(2, fallbacks)
-    assert driver.step_scale == pytest.approx(0.18)
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** 0.8)
     driver._adapt_step(2, fallbacks)  # the same round again (a resumed run finishing it): once only
-    assert driver.step_scale == pytest.approx(0.18)
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** 0.8)
     rejected = _local_children(driver, parent, 3, [None])
-    rejected[0].rejected = True  # never evaluated: neither a success nor a failure of the step
+    rejected[0].rejected = True  # refused before evaluation: neither a success nor a failure of the step
     driver._adapt_step(3, rejected)
-    assert driver.step_scale == pytest.approx(0.18)
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** 0.8)
+
+
+def test_a_child_whose_parent_has_no_fitness_is_not_tried(tmp_path):
+    driver, parent = _step_driver(tmp_path)
+    orphan = Candidate(id="g000-c9", generation=0, block="", source="", operator="param_local", score=None)
+    driver.by_id[orphan.id] = orphan
+    children = _local_children(driver, orphan, 1, [11.0, 9.0])
+    children[1].parent_id = "nowhere"
+    driver._adapt_step(1, children)
+    assert driver.step_scale == 0.15 and driver._step_history == []
 
 
 def test_the_step_stays_within_its_limits(tmp_path):
@@ -693,14 +709,96 @@ def test_the_step_stays_within_its_limits(tmp_path):
 def test_a_gain_inside_the_noise_is_not_a_success(tmp_path):
     """Decision 11, Q22: improved = fitness > parent.fitness + noise_sd, the elite
     rule's margin. With noise_sd = 1.0 three children at parent + 0.5 are 0 of 3:
-    0.15 / 1.2 = 0.125. With no noise (today) the same children are 3 of 3."""
+    0.15 x 1.2**-0.6. With no noise (today) the same children are 3 of 3: x 1.2**2.4."""
     driver, parent = _step_driver(tmp_path)
     driver.grid.noise_sd = 1.0
     driver._adapt_step(1, _local_children(driver, parent, 1, [10.5, 10.5, 10.5]))
-    assert driver.step_scale == pytest.approx(0.125)
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** -0.6)
     quiet, quiet_parent = _step_driver(tmp_path / "quiet")
     quiet._adapt_step(1, _local_children(quiet, quiet_parent, 1, [10.5, 10.5, 10.5]))
-    assert quiet.step_scale == pytest.approx(0.18)
+    assert quiet.step_scale == pytest.approx(0.15 * 1.2 ** 2.4)
+
+
+def test_the_step_balances_at_one_success_in_five_however_many_children_a_round_has(tmp_path, monkeypatch):
+    """Decision 16, seeded simulation of `_adapt_step` itself: each local child improves
+    with chance p, 1-3 local children a round, 3000 rounds each from 0.15 (no limit is
+    reached in one round). The mean change of ln(scale) per round is
+    (p - 0.2) x tried x ln 1.2: it rises above 20 % and falls below it for every tried,
+    and is about 0 at 20 %. (The per-round threshold it replaces drifted down at
+    p = 0.25 with one child: it balanced at 50 %.)
+    Measured (ln units per round; expected in brackets), tried 1: -0.0185 (-0.018),
+    -0.0095 (-0.009), +0.0014 (0), +0.0105 (+0.009), +0.0150 (+0.018) at p = 0.1, 0.15,
+    0.2, 0.25, 0.3; tried 3: -0.058, -0.028, -0.003, +0.030, +0.056 (+-0.055, +-0.027, 0).
+    SE 0.001-0.003, so every sign holds by at least 7 SE; at 20 % the drift is within
+    1.5 SE of 0 (asserted within 4)."""
+    import math
+
+    import evolvekit.search.driver as driver_module
+
+    monkeypatch.setattr(driver_module, "_atomic_write", lambda *a, **k: None)
+    driver, parent = _step_driver(tmp_path)
+    rng = random.Random(16)
+    rounds = 3000
+    for tried in (1, 2, 3):
+        for p in (0.1, 0.15, 0.2, 0.25, 0.3):
+            changes = []
+            for r in range(rounds):
+                driver.step_scale, driver._step_history = 0.15, []
+                scores = [11.0 if rng.random() < p else 9.0 for _ in range(tried)]
+                driver._adapt_step(1, _local_children(driver, parent, 1, scores))
+                changes.append(math.log(driver.step_scale / 0.15))
+            drift = fmean(changes)
+            se = (sum((c - drift) ** 2 for c in changes) / (rounds - 1)) ** 0.5 / rounds ** 0.5
+            expected = (p - 0.2) * tried * math.log(1.2)
+            print(f"tried {tried}  p {p:.2f}  drift {drift:+.4f} (SE {se:.4f}, expected {expected:+.4f})")
+            if p > 0.2:
+                assert drift > 0
+            elif p < 0.2:
+                assert drift < 0
+            else:
+                assert abs(drift) < 4 * se
+
+
+def _recorded_round(driver, parent, generation: int, scores: list[float]) -> list[Candidate]:
+    children = _local_children(driver, parent, generation, scores)
+    for child in children:
+        driver._record(child)
+    return children
+
+
+def test_a_round_recorded_but_missing_from_the_step_file_is_counted_on_resume(tmp_path):
+    """Decision 16: a crash between a round's rows and `perturb.json` would lose that
+    round's update; the resumed run counts it, once, with the noise as it stands."""
+    driver, parent = _step_driver(tmp_path)
+    driver._record(parent)
+    driver._adapt_step(1, _recorded_round(driver, parent, 1, [11.0, 9.0, 10.0]))
+    _recorded_round(driver, parent, 2, [11.0, 11.0])  # the run dies before the step file is written
+    resumed, _ = _step_driver(tmp_path)
+    resumed.resume()
+    assert [h["generation"] for h in resumed._step_history] == [1, 2]
+    assert resumed.step_scale == pytest.approx(0.15 * 1.2 ** 0.4 * 1.2 ** 1.6)
+    again, _ = _step_driver(tmp_path)
+    again.resume()
+    assert again.step_scale == resumed.step_scale and len(again._step_history) == 2, "counted once"
+
+
+def test_a_run_written_before_the_step_file_keeps_the_default_size_on_resume(tmp_path):
+    """Several rounds of local steps and no `perturb.json`: a run from before A2.6c,
+    not a lost update. Missing file -> 0.15. A lone first round without the file is
+    the crash case, and is counted."""
+    driver, parent = _step_driver(tmp_path)
+    driver._record(parent)
+    _recorded_round(driver, parent, 1, [11.0])
+    _recorded_round(driver, parent, 2, [11.0])
+    legacy, _ = _step_driver(tmp_path)
+    legacy.resume()
+    assert legacy.step_scale == 0.15 and legacy._step_history == []
+    first, first_parent = _step_driver(tmp_path / "first")
+    first._record(first_parent)
+    _recorded_round(first, first_parent, 1, [11.0])
+    crashed, _ = _step_driver(tmp_path / "first")
+    crashed.resume()
+    assert crashed.step_scale == pytest.approx(0.15 * 1.2 ** 0.8)
 
 
 def test_a_malformed_perturb_file_is_the_default(tmp_path):

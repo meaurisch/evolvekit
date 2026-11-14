@@ -666,6 +666,7 @@ class Driver:
                 self._counter = max(self._counter, int(suffix))
         self._resumed_generation = last_generation
         self._restore_budget(rows)
+        self._replay_missing_step()
         return last_generation
 
     def _settle_competes(self, row: dict, seed_private: float | None = None) -> dict:
@@ -1428,8 +1429,8 @@ class Driver:
     """The smallest and the largest local step, as a share of the range."""
     STEP_FACTOR = 1.2
     STEP_SUCCESS = 0.2
-    """The share of a round's local steps that must improve on their parent
-    for the step to grow (Rechenberg's 1/5 rule)."""
+    """The success rate the step balances at (Rechenberg's 1/5 rule): above
+    it the step grows, below it the step shrinks."""
 
     def _perturb_path(self) -> Path:
         return self.ledger.run_dir / "work" / "perturb.json"
@@ -1448,39 +1449,69 @@ class Driver:
         kept = [h for h in history if isinstance(h, dict)] if isinstance(history, list) else []
         return float(scale), kept
 
+    def _local_trials(self, children: Sequence[Candidate]) -> list[tuple[Candidate, Candidate]]:
+        """The round's local steps the 1/5 rule counts, each with its parent:
+        evaluated children with `operator == "param_local"` (the fallbacks of
+        `param_cross` and `param_tpe` included) whose parent has a fitness. A
+        child refused before evaluation says nothing about the step's size."""
+        trials = []
+        for child in children:
+            if child.operator != "param_local" or child.rejected:
+                continue
+            parent = self.by_id.get(child.parent_id or "")
+            if parent is not None and parent.fitness is not None:
+                trials.append((child, parent))
+        return trials
+
     def _adapt_step(self, generation: int, children: Sequence[Candidate]) -> None:
-        """The 1/5 rule, once per recorded round: of the round's evaluated
-        children that took a local step (`operator == "param_local"`, the
-        fallbacks of `param_cross` and `param_tpe` included), `improved` are
-        those that compete with a fitness above their parent's by more than the
-        elite rule's noise margin (`grid.noise_sd`; 0 with no noise estimate).
-        `improved / tried >= 0.2` grows the step by 1.2, less shrinks it by 1.2,
-        within `STEP_LIMITS`. A round without such children leaves it; a round
-        already in the history (a resumed run finishing it) is not counted again."""
+        """The 1/5 rule per trial (Decision 16), once per recorded round: of the
+        round's local steps (`_local_trials`), `improved` are those that compete
+        with a fitness above their parent's by more than the elite rule's noise
+        margin (`grid.noise_sd`; 0 with no noise estimate), and the step is
+        multiplied by `1.2 ** (improved - 0.2 * tried)`, within `STEP_LIMITS`.
+        That balances at a success rate of exactly 20 % however many local
+        children a round has (a threshold on each round's share would settle at
+        50 % with one child, 29 % with two). A round without local steps leaves
+        it; a round already in the history is not counted again."""
         if any(h.get("generation") == generation for h in self._step_history):
             return
-        local = [c for c in children if c.operator == "param_local" and not c.rejected]
-        if not local:
+        trials = self._local_trials(children)
+        if not trials:
             return
         margin = self.grid.noise_sd
-        improved = 0
-        for child in local:
-            parent = self.by_id.get(child.parent_id or "")
-            fitness = child.fitness
-            if not _competes(child) or fitness is None:
-                continue
-            if parent is None or parent.fitness is None or fitness > parent.fitness + margin:
-                improved += 1
+        improved = sum(
+            1 for child, parent in trials
+            if _competes(child) and child.fitness > parent.fitness + margin  # type: ignore[operator]
+        )
         low, high = self.STEP_LIMITS
-        grown = self.step_scale * self.STEP_FACTOR if improved / len(local) >= self.STEP_SUCCESS \
-            else self.step_scale / self.STEP_FACTOR
+        grown = self.step_scale * self.STEP_FACTOR ** (improved - self.STEP_SUCCESS * len(trials))
         self.step_scale = min(high, max(low, grown))
         self._step_history.append(
-            {"generation": generation, "improved": improved, "tried": len(local), "scale": self.step_scale}
+            {"generation": generation, "improved": improved, "tried": len(trials), "scale": self.step_scale}
         )
         path = self._perturb_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, json.dumps({"scale": self.step_scale, "history": self._step_history}, indent=1) + "\n")
+
+    def _replay_missing_step(self) -> None:
+        """On resume: the latest recorded round with local steps, when
+        `perturb.json`'s history lacks it (the run died between writing the
+        round's rows and the file), is counted now, with the noise as it stands.
+        A run written before the file (several such rounds and no history)
+        keeps the default size: only a missing *last* update is replayed."""
+        rounds: dict[int, list[Candidate]] = {}
+        for candidate in self.archive:
+            if int(candidate.generation) >= 1:
+                rounds.setdefault(int(candidate.generation), []).append(candidate)
+        stepped = [g for g in sorted(rounds) if self._local_trials(rounds[g])]
+        if not stepped:
+            return
+        recorded = {h.get("generation") for h in self._step_history}
+        if stepped[-1] in recorded:
+            return
+        if not self._step_history and len(stepped) > 1:
+            return
+        self._adapt_step(stepped[-1], rounds[stepped[-1]])
 
     # -- one Latin hypercube for the run (`param_lhs`) ----------------------
 

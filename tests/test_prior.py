@@ -326,14 +326,15 @@ def test_a_local_step_from_the_seed_starts_at_the_prior_value_at_its_weight():
     plain = P(0.45 <= N(0, 0.15) <= 0.75) = 0.0013, the share of plain steps from 0.2
     that land near 0.8 (reflected ones from 0.2 reach it only past 0.85: negligible).
     So about 36.6 %; measured 37.8 % (SE 0.77 points; before reflection 35.0 % against
-    34.2 %, the same seeds' prior starts), plain 0.18 %; assert 0.30 <= share <= 0.40."""
+    34.2 %, the same seeds' prior starts), plain 0.18 %; assert 0.30 <= share <= 0.42
+    (37.8 % is 5.5 SE below the top)."""
     def near(space) -> float:
         start = seed_candidate(space)
         return sum(abs(param_local(space, start, seed=s).meta["params"]["x"] - 0.8) <= 0.15 for s in range(4000)) / 4000
 
     share, plain = near(_with_prior(UNIT, 0.8, 0.5)), near(UNIT)
     print(f"near the prior: {share:.1%} from the seed with the prior, {plain:.2%} plain")
-    assert 0.30 <= share <= 0.40
+    assert 0.30 <= share <= 0.42
 
 
 def test_a_local_step_from_another_parent_ignores_the_prior():

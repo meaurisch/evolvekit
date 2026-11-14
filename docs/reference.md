@@ -520,16 +520,22 @@ instead, and the record says so.
 
 **The step's size follows the 1/5 rule.** It starts at 0.15 of the range (the
 sd of the step) and is adapted after every round that had local steps — those
-of `param_local` and the local-step fallbacks of `param_cross` and `param_tpe`,
-counted when they were evaluated. A child counts as an improvement when it
-competes and beats its parent's fitness by more than the noise margin the
-[elite rule](#the-archive) uses (0 without a noise estimate). If at least 20 %
-of the round's local steps improved, the step grows by 1.2; otherwise it
-shrinks by 1.2; it stays between 0.03 and 0.4. A round without local steps
-leaves it. The size and one line per round are kept in `work/perturb.json`
-(`{"scale": 0.18, "history": [{"generation": 3, "improved": 1, "tried": 3,
-"scale": 0.18}]}`), so a resumed run takes the size up where it was; a run
-without the file starts at 0.15.
+of `param_local` and the local-step fallbacks of `param_cross` and `param_tpe`
+whose parent has a fitness. Children refused before evaluation (a constraint,
+the novelty filter) are not counted: they say nothing about the step's size. A
+child counts as an improvement when it competes and beats its parent's fitness
+by more than the noise margin the [elite rule](#the-archive) uses (0 without a
+noise estimate). The rule is applied per trial: of `tried` local steps of which
+`improved` improved, the step is multiplied by `1.2 ** (improved − 0.2 × tried)`
+and kept between 0.03 and 0.4, so it grows while more than one step in five
+improves, shrinks while fewer do, and balances at exactly 20 % however many
+local children a round has (one success in five leaves it as it was). A round
+without local steps leaves it. The size and one line per round are kept in
+`work/perturb.json` (`{"scale": 0.161, "history": [{"generation": 3,
+"improved": 1, "tried": 3, "scale": 0.161}]}`), so a resumed run takes the size
+up where it was; a round whose rows were recorded but whose line is missing (the
+run died between the two) is counted when the run resumes. A run without the
+file starts at 0.15.
 
 Which to use depends on how good the defaults already are. Measured at equal
 budget, five search seeds each, on two stand-in solvers
