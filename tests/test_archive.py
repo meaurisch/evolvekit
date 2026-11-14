@@ -397,6 +397,45 @@ def test_a_resumed_run_rebuilds_the_pressure_the_live_run_had(tmp_path):
     assert resumed.grid.temperature == live.grid.temperature == 0.5
 
 
+def test_a_run_stopped_in_generation_2_ends_it_with_the_pressure_of_an_uninterrupted_run(tmp_path):
+    """Killed after generation 2's children were bred and written down: the
+    resumed run adopts them from `pending.json`, and once it has evaluated
+    them its pressure is the uninterrupted run's after generation 2."""
+    from dataclasses import replace
+
+    from evolvekit.events import read_events
+    from evolvekit.search.driver import Driver
+
+    def config_in(directory):
+        directory.mkdir()
+        config = _tuning_config(directory)
+        return replace(config, search=replace(config.search, children_per_generation=3, generations=2))
+
+    whole = Driver(config_in(tmp_path / "whole"), run_dir=tmp_path / "whole" / "run", log=lambda m: None)
+    whole.run()
+
+    config = config_in(tmp_path / "cut")
+    cut = Driver(config, run_dir=tmp_path / "cut" / "run", log=lambda m: None)
+    real = cut.cascade.evaluate_generation
+
+    def dying(candidates, *args, **kwargs):
+        if any(int(c.generation) == 2 for c in candidates):
+            raise KeyboardInterrupt
+        return real(candidates, *args, **kwargs)
+
+    cut.cascade.evaluate_generation = dying
+    with pytest.raises(KeyboardInterrupt):
+        cut.run()
+    assert (tmp_path / "cut" / "run" / "pending.json").exists()
+
+    resumed = Driver(config, run_dir=tmp_path / "cut" / "run", log=lambda m: None)
+    resumed.run()
+    adopted = [e for e in read_events(tmp_path / "cut" / "run") if e["type"] == "generation_adopted"]
+    assert adopted and adopted[0]["generation"] == 2
+    assert whole.grid.pressure, "the children were handed to the cascade"
+    assert resumed.grid.pressure == pytest.approx(whole.grid.pressure)
+
+
 def test_occupancy_reports_the_grid_shape():
     archive = grid(bins=4)
     archive.add(make("a", score=-1.0, complexity=10.0, behaviour=0.1))

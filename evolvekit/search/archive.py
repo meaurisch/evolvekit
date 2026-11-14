@@ -62,7 +62,10 @@ def was_evaluated(candidate: Candidate, parent_block: str | None) -> bool:
     failed to apply -- the row `_breed_one` writes for that is rejected, has no
     novelty verdict, and carries its parent's block (a missing parent: counted
     as evaluated, as the stop policy's replay counts it applied). A static-stage
-    reject and a behavioural twin were evaluated."""
+    reject and a behavioural twin were evaluated. The shape is unambiguous
+    because the novelty filter's `no_op` check comes first: a child whose block
+    equals its parent's never reaches the cascade, so one that did never
+    carries its parent's block."""
     if not candidate.rejected:
         return True
     if candidate.novelty in ("no_op", "duplicate"):

@@ -1843,7 +1843,7 @@ class SearchConfig:
             )
         temperature = _as_float(data.get("selection_temperature", 1.0), "search.selection_temperature")
         if not 0.0 < temperature < float("inf"):
-            raise ConfigError(f"search.selection_temperature: must be > 0, got {temperature:g}")
+            raise ConfigError(f"search.selection_temperature: must be a finite number > 0, got {temperature:g}")
         return SearchConfig(
             children_per_generation=_as_int(
                 data.get("children_per_generation", 4),
