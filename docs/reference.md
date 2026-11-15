@@ -2910,14 +2910,24 @@ bake-off, a study per kind of case, or one that tuned other settings does not
 count), and is dropped below 0.05: once four such studies have finished, or
 sooner when the cases differ. The
 weight also shrinks when the new study's cases are unlike the winner's: it is
-multiplied by exp(−d²/2), where d² is the mean, over the case features both
-studies have, of the squared distance between the two studies' average cases,
-in units of the spread of the cases within each study (counts on a log scale,
-as for groups). Two studies of eight cases of the same kind keep about 86 % of
-the weight on average; one standard deviation apart in every feature, about
-61 %; three, about 1 %, which drops the prior. The features are those `study
-groups` keeps for each case (its kept tables); a warm start never solves a case
-for them, so when either study has none kept the weight does not shrink.
+multiplied by exp(−d²/2). For each case feature both studies have, z² is the
+squared distance between the two studies' average cases in units of the spread
+of the cases within each study (counts on a log scale, as for groups), at most
+9 (three standard deviations); d² is the mean z² less 1/n₁ + 1/n₂ (what chance
+alone puts between two studies of n₁ and n₂ cases of the same kind), and never
+below 0. A feature with no spread inside either study — a fixed fleet size,
+say — cannot be measured this way and is left out (`study-run.json` names it).
+Measured with three features: two studies of the same kind keep about 81 % of
+the weight on average at four cases each, 94 % at eight and 96 % at twelve (not
+all of it: a pair that happens to lie apart shrinks, a close one cannot grow);
+at eight cases, one standard deviation apart in every feature keeps about 54 %,
+three about 2 %, which drops the prior. The features are those `study groups`
+keeps for each case (its kept tables); a warm start never solves a case for
+them, so when either study has none kept the weight does not shrink. Each run's
+`study-run.json` records the priors it applied under `priors`: `{setting:
+{value, weight, studies_since, similarity, left_out}}` (`similarity` the factor
+above, rounded to three places; `left_out` the features it could not measure);
+`"not applied: <why>"` when the other studies could not be read.
 It is only a prior — it never stops the search from trying any value in
 range, and a bool or a choice is drawn as the winner itself. The prior also
 acts on the rest of the search: `param_tpe` counts it as 4 × its weight

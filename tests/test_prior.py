@@ -160,7 +160,7 @@ def test_prior_weight_decays_by_half(tmp_path):
     finished(home, docs, "Spring", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
     study = warm_study(home, docs)
     assert memory.priors_for(home, study, document_of=docs.get) == \
-        {"neighbours": {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0}}
+        {"neighbours": {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0, "left_out": []}}
     finished(home, docs, "Summer", decision="keep", best={"neighbours": 20}, finished_at="2026-10-08")
     assert memory.priors_for(home, study, document_of=docs.get)["neighbours"]["weight"] == 0.25
     for day in ("15", "22", "29"):
@@ -389,7 +389,8 @@ def test_compile_writes_prior_only_for_warm_studies(tmp_path, monkeypatch):
 
 def test_a_prior_reaches_tpe_as_its_pseudo_count(tmp_path, monkeypatch):
     """A4.3b: the weight `priors_for` gives (here shrunk by the cases' similarity) is the one
-    `write_run` compiles, the engine parses, and TPE's density counts as 4 x weight."""
+    `write_run` compiles, the engine parses, and TPE's density counts as 4 x weight; `study-run.json`
+    records each applied prior whole (decision 14)."""
     import math
 
     from evolvekit.harness import groups
@@ -399,13 +400,18 @@ def test_a_prior_reaches_tpe_as_its_pseudo_count(tmp_path, monkeypatch):
     monkeypatch.setattr(memory, "build_status", docs.get)
     study = warm_study(home, docs)
     root = home.study_root("winter")
-    cases = {won: {"c1": {"mean_x": 10.0}, "c2": {"mean_x": 20.0}}, root: {"c3": {"mean_x": 15.0}, "c4": {"mean_x": 25.0}}}
+    # four cases a study, sd 1, correction 1/2: sqrt(1.5) apart is d² = 1; the fixed fleet size is left out
+    cases = {at: {f"c{i}": {"mean_x": v + shift, "mean_fleet": fleet} for i, v in enumerate([9.0, 9.0, 11.0, 11.0])}
+             for at, shift, fleet in ((won, 0.0, 3.0), (root, math.sqrt(1.5), 5.0))}
     monkeypatch.setattr(groups, "study_features", lambda at, _study: cases.get(at))
     weight = memory.priors_for(home, study, slug="winter", document_of=docs.get)["neighbours"]["weight"]
     assert weight == pytest.approx(0.5 * math.exp(-0.5))
     run_dir = write_run(study, load_harness(root / "harness"), Plan.fixed(), root, "r1")
     parameters = yaml.safe_load((run_dir / "evolvekit.yaml").read_text(encoding="utf-8"))["problem"]["parameters"]
     assert parameters["neighbours"]["prior"] == {"value": 12, "weight": weight}
+    recorded = json.loads((run_dir / "study-run.json").read_text(encoding="utf-8"))["priors"]
+    assert recorded == {"neighbours": {"value": 12, "weight": weight, "studies_since": 0,
+                                       "similarity": round(math.exp(-0.5), 3), "left_out": ["mean_fleet"]}}
     space = ParameterSpace.parse(parameters)
     neighbours = next(p for p in space.parameters if p.name == "neighbours")
     assert neighbours.prior == (12, weight)

@@ -793,54 +793,70 @@ def test_cases_of_one_kind_split_in_under_10_percent_on_three_features():
 
 
 def test_similarity_is_one_for_alike_cases_and_falls_with_the_rms_distance():
-    """Decision 5 (A4.3, S11): the distance is standardised by the within-study pooled sd (population
-    form), RMS over the features; the factor is exp(-d²/2)."""
+    """Decisions 5 and 14 (A4.3, S11): z standardised by the within-study pooled sd (population form),
+    each z² capped at 9, d² = max(0, mean z² - (1/n_a + 1/n_b)), the factor exp(-d²/2). Four cases a
+    study: {9, 9, 11, 11} has sd 1 and the correction is 1/4 + 1/4 = 1/2."""
     import math
 
-    a = {"c1": {"rows_s": 10.0}, "c2": {"rows_s": 20.0}}
+    def study(values, shift=0.0, names=("mean_x",), prefix="a"):
+        return {f"{prefix}{i}": {n: v + shift for n in names} for i, v in enumerate(values)}
+
+    base, up = [9.0, 9.0, 11.0, 11.0], math.sqrt(1.5)  # z² = 1.5, d² = 1.5 - 0.5 = 1
+    a = study(base)
     assert groups.similarity(a, a) == 1.0 and groups.similarity(a, None) == 1.0
     assert groups.similarity(None, a) == 1.0 and groups.similarity({}, a) == 1.0
-    # mean_* stays raw: {10, 20} against {15, 25} -> within sd sqrt((25 + 25 + 25 + 25) / 4) = 5, one sd apart
-    one = {"c1": {"mean_x": 10.0}, "c2": {"mean_x": 20.0}}
-    shifted = {"c3": {"mean_x": 15.0}, "c4": {"mean_x": 25.0}}
-    assert groups.similarity(one, shifted) == pytest.approx(math.exp(-0.5), abs=1e-9)
-    three = {c: {"mean_x": v, "mean_y": 2 * v, "mean_z": -v} for c, v in (("c1", 10.0), ("c2", 20.0))}
-    three_shifted = {c: {"mean_x": v, "mean_y": 2 * v, "mean_z": -v} for c, v in (("c3", 15.0), ("c4", 25.0))}
-    assert groups.similarity(three, three_shifted) == pytest.approx(math.exp(-0.5), abs=1e-9), \
-        "one sd in each of three features is still d² = 1: the mean, not the sum"
-    far = {"c3": {"mean_x": 25.0}, "c4": {"mean_x": 35.0}}
-    assert groups.similarity(one, far) == pytest.approx(math.exp(-4.5), abs=1e-12) and math.exp(-4.5) < math.exp(-2), \
-        "three sd apart: no cap at 2 sd, as an sd over both studies (which holds the shift) would give"
+    assert groups.compare(a, study(base, up, prefix="b")) == (pytest.approx(math.exp(-0.5), abs=1e-9), [])
+    three = ("mean_x", "mean_y", "mean_z")
+    assert groups.similarity(study(base, names=three), study(base, up, names=three, prefix="b")) == \
+        pytest.approx(math.exp(-0.5), abs=1e-9), "the same distance in each of three features: the mean, not the sum"
+    assert groups.similarity(a, study(base, 0.5, prefix="b")) == 1.0, \
+        "z² = 0.25 is less than sampling alone gives two studies of the same kind: no shrink"
+    assert groups.similarity(a, study(base, 4.0, prefix="b")) == pytest.approx(math.exp(-(9 - 0.5) / 2), abs=1e-12), \
+        "four sd apart counts as three (z² capped at 9)"
     # counts are read as log1p, as the clustering reads them
-    counts_a = {"c1": {"rows_s": math.expm1(1.0)}, "c2": {"rows_s": math.expm1(3.0)}}
-    counts_b = {"c3": {"rows_s": math.expm1(2.0)}, "c4": {"rows_s": math.expm1(4.0)}}
-    assert groups.similarity(counts_a, counts_b) == pytest.approx(math.exp(-0.5), abs=1e-9)
-    # a feature the same everywhere is left out; one some case lacks is left out; none left -> 1.0
-    flat = {"c1": {"mean_x": 10.0, "mean_w": 1.0}, "c2": {"mean_x": 20.0, "mean_w": 1.0}}
-    flat_shifted = {"c3": {"mean_x": 15.0, "mean_w": 1.0}, "c4": {"mean_x": 25.0, "mean_w": float("nan")}}
-    assert groups.similarity(flat, flat_shifted) == pytest.approx(math.exp(-0.5), abs=1e-9)
-    assert groups.similarity({"c1": {"mean_w": 1.0}}, {"c3": {"mean_w": 1.0}}) == 1.0
-    assert groups.similarity({"c1": {"mean_w": 1.0}}, {"c3": {"mean_w": 2.0}}) == 0.0, \
-        "no spread inside either study but different values: infinitely apart"
+    counts = [math.expm1(v) for v in (1.0, 1.0, 3.0, 3.0)]
+    shifted = [math.expm1(v + up) for v in (1.0, 1.0, 3.0, 3.0)]
+    assert groups.similarity(study(counts, names=("rows_s",)), study(shifted, names=("rows_s",), prefix="b")) == \
+        pytest.approx(math.exp(-0.5), abs=1e-9)
+    # a feature with no spread inside either study cannot be standardised: left out, and named
+    fixed_a = {c: {**row, "mean_fleet": 3.0} for c, row in a.items()}
+    fixed_b = {c: {**row, "mean_fleet": 5.0} for c, row in study(base, up, prefix="b").items()}
+    assert groups.compare(fixed_a, fixed_b) == (pytest.approx(math.exp(-0.5), abs=1e-9), ["mean_fleet"]), \
+        "a fixed fleet size that differs leaves the factor as the other features make it"
+    assert groups.compare({"c1": {"mean_w": 1.0}}, {"c3": {"mean_w": 2.0}}) == (1.0, ["mean_w"])
+    # a feature some case lacks, or has as no number, is left out of the shared features
+    gap = study(base, up, names=("mean_x", "mean_v"), prefix="b")
+    gap["b0"]["mean_v"] = float("nan")
+    assert groups.compare(study(base, names=("mean_x", "mean_v")), gap) == \
+        (pytest.approx(math.exp(-0.5), abs=1e-9), [])
 
 
-def test_two_studies_of_the_same_kind_of_case_keep_about_86_percent_of_the_prior():
-    """Decision 5's figure: two studies of 8 cases from the same kind (three features, standard
-    normal) are about 1/4 sd² apart per feature, and the within-study sd is itself estimated, so the
-    factor averages about 0.856 (20 000 pairs, three seeds: 0.855-0.857; the builder check's 0.88
-    is exp(-1/8), the estimate's noise left out). Seeded; 2000 pairs, SE of the mean about 0.0025;
-    the band [0.84, 0.87] is over 5 SE from the estimate."""
+@pytest.mark.parametrize("cases, shift, low, high, estimate", [
+    (4, 0.0, 0.79, 0.845, 0.818),
+    (8, 0.0, 0.925, 0.95, 0.937),
+    (12, 0.0, 0.957, 0.972, 0.964),
+    (8, 1.0, 0.525, 0.565, 0.546),
+    (8, 3.0, 0.020, 0.0245, 0.0222),
+])
+def test_alike_studies_keep_about_82_94_and_96_percent_and_unlike_ones_far_less(cases, shift, low, high, estimate):
+    """Decision 14's figures, three features, standard normal cases, the second study shifted by
+    `shift` sd in each: the mean factor at 4 / 8 / 12 cases a study, alike, is about 0.818 / 0.937 /
+    0.964; at 8 cases, 1 sd apart about 0.546, 3 sd about 0.022 (20 000 pairs, two seeds each). Not
+    1.0 for alike studies: d² is clipped at 0, so a pair that happens to lie apart shrinks while a
+    close pair cannot grow. Seeded (`Random(15)`), 2000 pairs, measured 0.808 / 0.937 / 0.963 / 0.541 /
+    0.0220; each band is at least 3 SE (SE of the mean 0.0052 / 0.0023 / 0.0014 / 0.0047 / 0.0003)
+    from both the estimate and the measured mean."""
     import random
 
     rng = random.Random(15)
 
-    def study() -> dict[str, dict[str, float]]:
-        return {f"c{i}": {f"mean_{j}": rng.gauss(0, 1) for j in "xyz"} for i in range(8)}
+    def study(centre: float) -> dict[str, dict[str, float]]:
+        return {f"c{i}": {f"mean_{j}": rng.gauss(centre, 1) for j in "xyz"} for i in range(cases)}
 
-    factors = [groups.similarity(study(), study()) for _ in range(2000)]
+    factors = [groups.similarity(study(0.0), study(shift)) for _ in range(2000)]
     mean = sum(factors) / len(factors)
-    print(f"same kind, 8 + 8 cases, three features: mean factor {mean:.3f}")
-    assert 0.84 <= mean <= 0.87
+    print(f"{cases} + {cases} cases, {shift} sd apart, three features: mean factor {mean:.4f} (estimate {estimate})")
+    assert low <= mean <= high
 
 
 def _keep_tables(root: Path, case: str, rows: int) -> None:

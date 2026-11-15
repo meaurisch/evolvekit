@@ -366,14 +366,18 @@ def test_the_prior_decays_only_for_settings_studies_that_tuned_the_setting(tmp_p
     e = finished(home, docs, "E", decision="keep", best={"neighbours": 8}, finished_at="2026-10-29")
     _job(e, search={"generations": 0, "aborted": False, "stop_reason": "time limit: …"},
          final={"skipped": "the search did not run", "not_run": True})
+    f = finished(home, docs, "F", decision="keep", best={"neighbours": 20, "restart_after": 5000},
+                 finished_at="2026-11-05")
+    _job(f, per_group=True)
     assert [(s["name"], s["kind"], s["not_run"]) for s in memory.learned(home, "demo-tour", document_of=docs.get)["studies"]] \
         == [("A", "settings", False), ("B", "settings", False), ("C", "code", False), ("D", "bakeoff", False),
-            ("E", "settings", True)]
+            ("E", "settings", True), ("F", "per_group", False)]
     slug, study = _new_study(home)
     got = memory.priors_for(home, study, slug=slug, document_of=docs.get)
-    assert got == {"neighbours": {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0},
-                   "restart_after": {"value": 13000, "weight": 0.25, "studies_since": 1, "similarity": 1.0}}, \
-        "only B tuned restart_after since A; C is a code study, D a bake-off, E did not search"
+    assert got == {"neighbours": {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0, "left_out": []},
+                   "restart_after": {"value": 13000, "weight": 0.25, "studies_since": 1, "similarity": 1.0,
+                                     "left_out": []}}, \
+        "only B tuned restart_after since A; C is a code study, D a bake-off, E did not search, F per group"
 
 
 def test_the_prior_shrinks_for_unlike_cases(tmp_path):
@@ -381,9 +385,13 @@ def test_the_prior_shrinks_for_unlike_cases(tmp_path):
     won = finished(home, docs, "A", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
     slug, study = _new_study(home)
     new = home.study_root(slug)
-    alike = {"c1": {"mean_x": 10.0}, "c2": {"mean_x": 20.0}}
-    one_sd = {"c3": {"mean_x": 15.0}, "c4": {"mean_x": 25.0}}
-    far = {"c3": {"mean_x": 25.0}, "c4": {"mean_x": 35.0}}  # three sd: exp(-4.5) * 0.5 is under 0.05
+    # four cases a study, sd 1, sampling correction 1/2: a shift of sqrt(1.5) is d² = 1, of 3 is d² = 8.5
+    base = [9.0, 9.0, 11.0, 11.0]
+
+    def cases(shift, fleet=3.0):
+        return {f"c{i}": {"mean_x": v + shift, "mean_fleet": fleet} for i, v in enumerate(base)}
+
+    alike, one_sd, far = cases(0.0), cases(math.sqrt(1.5), fleet=5.0), cases(3.0)
     seen = []
 
     def features(of_new):
@@ -395,12 +403,31 @@ def test_the_prior_shrinks_for_unlike_cases(tmp_path):
     def prior(of_new):
         return memory.priors_for(home, study, slug=slug, document_of=docs.get, features=features(of_new)).get("neighbours")
 
-    assert prior(alike) == {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0}
-    assert set(seen) == {won, new}, "the winner's cases against the new study's"
+    assert prior(alike) == {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0,
+                            "left_out": ["mean_fleet"]}
+    assert sorted(seen) == sorted([won, new]), "the winner's cases against the new study's, each read once"
     shrunk = prior(one_sd)
     assert shrunk["weight"] == pytest.approx(0.5 * math.exp(-0.5)) and shrunk["similarity"] == round(math.exp(-0.5), 3)
-    assert prior(None) == {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0}, \
+    assert shrunk["left_out"] == ["mean_fleet"], "a fixed fleet size that differs is named, and drops nothing"
+    assert prior(None) == {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0, "left_out": []}, \
         "no cases kept on one side: no shrink"
     assert prior(far) is None, "a factor that takes the weight under 0.05 drops the prior"
     assert memory.priors_for(home, study, document_of=docs.get)["neighbours"]["similarity"] == 1.0, \
         "without the study's folder name there is nothing to compare: no shrink"
+
+
+def test_the_new_studys_features_are_read_only_when_a_winner_needs_them(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "A", decision="keep", best={"neighbours": 12}, finished_at="2026-10-01")
+    slug, study = _new_study(home)
+
+    def never(root, s):
+        raise AssertionError("no use study: nothing to compare the cases with")
+
+    assert memory.priors_for(home, study, slug=slug, document_of=docs.get, features=never) == {}
+    finished(home, docs, "B", decision="use", best={"neighbours": 12, "restart_after": 13000}, finished_at="2026-10-08")
+    reads = []
+    got = memory.priors_for(home, study, slug=slug, document_of=docs.get,
+                            features=lambda root, s: reads.append(Path(root)))
+    assert set(got) == {"neighbours", "restart_after"} and reads == [home.study_root(slug)], \
+        "the new study's features once; with none there, the winner's are not read either"

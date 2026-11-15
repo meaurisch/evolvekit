@@ -447,15 +447,17 @@ def _studies_since(finished: list[Finished], winner: Finished, name: str, slug: 
 def priors_for(home: Any, study: Study, *, slug: str | None = None,
                document_of: Callable[[Path], dict] | None = None,
                features: Callable[[Path, Study], dict | None] | None = None) -> dict[str, dict]:
-    """`{name: {"value", "weight", "studies_since", "similarity"}}` for each setting `study` tunes
-    that a `use` study won: the latest winner, at weight `0.5 ** (1 + k) * similarity`. `k`
-    (`studies_since`, `_studies_since`) counts the later finished studies that tuned the setting;
+    """`{name: {"value", "weight", "studies_since", "similarity", "left_out"}}` for each setting
+    `study` tunes that a `use` study won: the latest winner, at weight `0.5 ** (1 + k) * similarity`.
+    `k` (`studies_since`, `_studies_since`) counts the later finished studies that tuned the setting;
     the new study is the first since, counted once (`slug`, its own folder name, is never counted
-    again when it is run again). `similarity` (`groups.similarity`, rounded to three places in the
-    result) compares the cases of the winner's study with the new study's, from the features its
-    kept tables give (`features`, `groups.study_features` when None: never a solve); 1.0 when
-    either has none, or without a `slug`. Dropped below `MIN_PRIOR_WEIGHT`, and when the value is
-    outside the study's range. `compile_study` reads `value` and `weight`."""
+    again when it is run again). `similarity` (`groups.compare`, rounded to three places in the
+    result) compares the cases of the winner's study with the new study's, from the features their
+    kept tables give (`features`, `groups.study_features` when None: never a solve; the new study's
+    read once, at the first winner); 1.0 when either has none, or without a `slug`. `left_out`
+    names the features that could not be standardised (no spread inside either study). Dropped
+    below `MIN_PRIOR_WEIGHT`, and when the value is outside the study's range. `compile_study`
+    reads `value` and `weight`; `write_run` records the applied ones in `study-run.json`."""
     from evolvekit.harness import groups
 
     read = features or groups.study_features
@@ -465,8 +467,8 @@ def priors_for(home: Any, study: Study, *, slug: str | None = None,
     if harness is None:
         return {}
     by_slug = {f.slug: f for f in finished}
-    new = read(Path(home.studies_dir) / slug, study) if slug else None
-    factors: dict[str, float] = {}
+    new: list[Any] = []  # the new study's features, read once, at the first winner (none without a winner)
+    factors: dict[str, tuple[float, list[str]]] = {}
     priors: dict[str, dict] = {}
     for name in study.tuned_settings():
         entry, setting = facts.get(name), harness.settings.get(name)
@@ -477,12 +479,14 @@ def priors_for(home: Any, study: Study, *, slug: str | None = None,
             continue
         value = entry["winners"][-1]["value"]
         k = _studies_since(finished, winner, name, slug)
+        if not new:
+            new.append(read(Path(home.studies_dir) / slug, study) if slug else None)
         if winner.slug not in factors:
-            factors[winner.slug] = groups.similarity(read(winner.root, winner.study), new) if new else 1.0
-        factor = factors[winner.slug]
+            factors[winner.slug] = groups.compare(read(winner.root, winner.study), new[0]) if new[0] else (1.0, [])
+        factor, left_out = factors[winner.slug]
         weight = 0.5 ** (1 + k) * factor
         if weight < MIN_PRIOR_WEIGHT or not _fits(setting.parameter, study.settings[name], value):
             continue
         priors[name] = {"value": setting.parameter.coerce(value), "weight": weight, "studies_since": k,
-                        "similarity": round(factor, 3)}
+                        "similarity": round(factor, 3), "left_out": list(left_out)}
     return priors

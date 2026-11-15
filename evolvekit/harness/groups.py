@@ -67,7 +67,7 @@ __all__ = [
     "SolveFailed", "COUNT_PREFIX", "FORMAT", "GROUPS", "KS", "MIN_HELD_BACK", "MIN_SILHOUETTE", "MIN_TRAINING",
     "RESTARTS", "TAGS", "TAG_MAX",
     "assign", "case_tables", "compute", "features_of", "kmeans", "read_groups", "read_tag", "rule_lines", "rule_stump",
-    "silhouette", "similarity", "study_features", "cache_stump", "stump_of",
+    "silhouette", "compare", "similarity", "study_features", "Z2_CAP", "cache_stump", "stump_of",
     "merge_small_groups", "slug_of",
     "standardise", "transformed", "write_tag",
 ]
@@ -276,37 +276,50 @@ def study_features(root: Path, study: Study) -> dict[str, dict[str, float]] | No
         return None
 
 
-def similarity(a: dict[str, dict[str, float]] | None, b: dict[str, dict[str, float]] | None) -> float:
-    """How alike two studies' cases are, in (0, 1]: `exp(-d² / 2)`, where `d²` is the mean over the
-    features every case of both has as a finite number (`transformed`, so counts on a log scale) of
-    `((centre_a - centre_b) / sd)²`, `sd` the within-study pooled sd (population form: each case's
-    deviation from its own study's centre, decision 5 -- an sd over both studies would contain the
-    shift itself and cap the distance at 2). The mean, not the sum, so the factor does not fall with
-    the number of features. A feature the same in every case of both is left out; one with no
-    spread inside either study but different centres puts them infinitely apart (0.0). 1.0 when
+Z2_CAP = 9.0
+"""Each feature's squared distance counts at most this (three sds), so one nearly fixed feature cannot
+take the whole prior away (decision 14)."""
+
+
+def compare(a: dict[str, dict[str, float]] | None,
+            b: dict[str, dict[str, float]] | None) -> tuple[float, list[str]]:
+    """`(similarity, left_out)` of two studies' cases (`{case: features}`), decisions 5 and 14.
+
+    Over the features every case of both has as a finite number (`transformed`, so counts on a log
+    scale): `z² = ((centre_a - centre_b) / sd)²`, `sd` the within-study pooled sd (population form:
+    each case's deviation from its own study's centre -- an sd over both studies would contain the
+    shift itself), each `z²` capped at `Z2_CAP`; `d² = max(0, mean z² - (1/n_a + 1/n_b))`, the mean
+    so the factor does not fall with the number of features, less what sampling alone gives two
+    studies of the same kind; the similarity is `exp(-d²/2)`, in (0, 1]. A feature with no spread
+    inside either study cannot be standardised: it is left out and named in `left_out`. 1.0 when
     either side is `None` or empty, or no feature is left."""
     if not a or not b:
-        return 1.0
+        return 1.0, []
     rows_a = [transformed(row) for row in a.values() if isinstance(row, dict)]
     rows_b = [transformed(row) for row in b.values() if isinstance(row, dict)]
     if len(rows_a) != len(a) or len(rows_b) != len(b):
-        return 1.0
+        return 1.0, []
     names = [n for n in rows_a[0] if all(_finite(row.get(n)) for row in rows_a + rows_b)]
     z2: list[float] = []
+    left_out: list[str] = []
     for name in names:
         xs, ys = [float(row[name]) for row in rows_a], [float(row[name]) for row in rows_b]
         mean_a, mean_b = sum(xs) / len(xs), sum(ys) / len(ys)
         within = (sum((x - mean_a) ** 2 for x in xs) + sum((y - mean_b) ** 2 for y in ys)) / (len(xs) + len(ys))
         sd, gap = math.sqrt(within), abs(mean_a - mean_b)
-        scale = max(1.0, abs(mean_a), abs(mean_b))
-        if sd <= 1e-12 * scale:
-            if gap <= 1e-12 * scale:
-                continue  # the same value in every case of both: it tells nothing
-            return 0.0
-        z2.append((gap / sd) ** 2)
+        if sd <= 1e-12 * max(1.0, abs(mean_a), abs(mean_b)):
+            left_out.append(name)
+            continue
+        z2.append(min(Z2_CAP, (gap / sd) ** 2))
     if not z2:
-        return 1.0
-    return math.exp(-sum(z2) / len(z2) / 2)
+        return 1.0, left_out
+    d2 = max(0.0, sum(z2) / len(z2) - (1 / len(rows_a) + 1 / len(rows_b)))
+    return math.exp(-d2 / 2), left_out
+
+
+def similarity(a: dict[str, dict[str, float]] | None, b: dict[str, dict[str, float]] | None) -> float:
+    """The similarity of `compare`, without the features it left out."""
+    return compare(a, b)[0]
 
 
 # ---------------------------------------------------------------------------
