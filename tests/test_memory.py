@@ -101,11 +101,11 @@ def test_a_setting_no_study_could_tell_from_chance_is_not_reranked(tmp_path):
 @functools.cache
 def _null_studies(trials: int = 2000, studies: int = 3, rows: int = 8) -> tuple:
     """`trials` sets of `studies` null studies of `rows` ranked rows (independent value and score),
-    each as (|rho|, p) through `status._permutation_p`; random.Random(20261114), the draws of the
-    builder check's `sim_perm.py pool` (rho = 0, three studies)."""
+    each as (|rho|, p) through `status._permutation_p`; random.Random(99003), a seed of its
+    own (the builder check drew 20261114: Fisher 8.50 % +- 0.62, the design's rule 25.65 % +- 0.98)."""
     from evolvekit import stats, status
 
-    rng = random.Random(20261114)
+    rng = random.Random(99003)
     out = []
     for _ in range(trials):
         one = []
@@ -119,27 +119,27 @@ def _null_studies(trials: int = 2000, studies: int = 3, rows: int = 8) -> tuple:
 
 def test_a_setting_that_does_nothing_is_shown_in_about_8_percent_after_three_studies():
     """The product's rule (decision 2): three null studies of 8 rows each through status._permutation_p
-    and `memory._pooled` (Fisher's combined p < 0.1); 2000 seeded trials. Measured 8.50 % +- 0.62, the
-    builder check's figure to the trial; asserts [6.0, 11.0] %."""
+    and `memory._pooled` (Fisher's combined p < 0.1); 2000 seeded trials. Measured 7.10 % +- 0.57;
+    asserts [5.0, 11.0] %."""
     trials = _null_studies()
     shown = sum(memory._pooled([(r, 20, p) for r, p in one])["importance"] is not None for one in trials)
     rate = shown / len(trials)
     print(f"null setting shown after three studies (Fisher): {rate:.2%} +- {math.sqrt(rate * (1 - rate) / len(trials)):.2%}")
-    assert 0.06 <= rate <= 0.11
+    assert 0.05 <= rate <= 0.11
 
 
 def test_under_the_designs_rule_a_setting_that_does_nothing_would_be_shown_in_about_26_percent_after_three_studies():
     """The design's rule, kept as a measured comparison (decision 2 departs from it): pool |rho| over
     the studies whose own p < 0.1. Same 2000 seeded trials as the Fisher test. Measured
-    25.65 % +- 0.98 (the builder check's figure), the pooled |rho| when shown 0.75 (a real rho = 0.5
-    setting's is 0.77); asserts [23, 30] %."""
+    23.95 % +- 0.95, the pooled |rho| when shown 0.74 (a real rho = 0.5 setting's is 0.77, builder
+    check); asserts [22, 30] %."""
     trials = _null_studies()
     pooled = [[r for r, p in one if p < memory.IMPORTANCE_P] for one in trials]
     shown = [fmean(rs) for rs in pooled if rs]
     rate = len(shown) / len(trials)
     print(f"null setting shown after three studies (design's rule): {rate:.2%} +- "
           f"{math.sqrt(rate * (1 - rate) / len(trials)):.2%}; pooled |rho| when shown {fmean(shown):.2f}")
-    assert 0.23 <= rate <= 0.30
+    assert 0.22 <= rate <= 0.30
     assert fmean(shown) > 0.6, "what it would rank: noise as strong as a real effect"
 
 

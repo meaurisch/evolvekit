@@ -39,6 +39,7 @@ import json
 import math
 import operator
 import random
+from array import array
 from datetime import datetime, timezone
 from functools import cached_property, lru_cache
 from pathlib import Path
@@ -233,8 +234,8 @@ PERMUTATION_MIN_N = 5
 """Fewer fully evaluated combinations than this give no p: five values have only 120 orders."""
 
 
-@lru_cache(maxsize=4)
-def _shuffles(rounds: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
+@lru_cache(maxsize=2)
+def _shuffles(rounds: tuple[int, ...]) -> tuple[array, ...]:
     """`PERMUTATIONS` orders of the positions `0..n-1`, each moving positions only among those of the
     same round (`rounds[i]` is position i's round, numbered by first appearance), drawn by
     `random.Random(0)` from scratch: a fresh draw per call would give the same orders, so they are
@@ -255,7 +256,7 @@ def _shuffles(rounds: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
                 rng.shuffle(values)
                 for i, value in zip(positions, values):
                     order[i] = value
-        out.append(tuple(order))
+        out.append(array("I", order))
     return tuple(out)
 
 
@@ -292,7 +293,10 @@ def _permutation_p(
         scale = math.sqrt(sum(c * c for c in cx) * sum((r - my) ** 2 for r in ry))
         observed = abs(sum(map(operator.mul, cx, ry)))
         floor = observed - 1e-12 * scale
-        count = sum(1 for order in orders if abs(sum(map(operator.mul, cx, map(ry.__getitem__, order)))) >= floor)
+        count = sum(
+            1 for order in orders
+            if abs(sum(map(operator.mul, cx, map(ry.__getitem__, order)))) >= floor
+        )
     else:
         first = statistic(xs, ys)
         if first is None:

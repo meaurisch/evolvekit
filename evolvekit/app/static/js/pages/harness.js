@@ -69,7 +69,7 @@
     var table = rows.length ? html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Tuned in</th>
       <th>How strongly it went with the measure (0 to 1, not proof)</th><th>The searches leaned to</th><th>Winning values</th><th>Winners moved it</th></tr></thead><tbody>${rows}</tbody></table></div>
       <p class="type-small ink-2">0 means the setting did not go with the measure in the searches, 1 that it went with it every time. It comes from the searches, not from final checks: it says which settings are worth tuning, not which value wins.
-      A strength is shown only when the studies that measured it, taken together, could tell it from chance: shuffling a search's results within each round goes with the setting as strongly less than 10 % of the time.</p>`
+      A strength is shown only when the studies that measured it, taken together, could tell it from chance (under 10 %).</p>`
       : "";
     var notes = (learned.notes || []).length ? html`<section class="sub-section"><h2 class="type-heading">Left out</h2>
       <ul class="plain-list">${learned.notes.map(function (n) { return html`<li class="type-small ink-2">${n}</li>`; })}</ul></section>` : "";

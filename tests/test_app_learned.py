@@ -93,8 +93,7 @@ def test_harness_page_says_how_many_studies_could_tell_a_setting_from_chance():
     text = _view(LEARNED)
     assert "0.42 · from 2 studies" in text
     assert ("A strength is shown only when the studies that measured it, taken together, could tell it from "
-            "chance: shuffling a search's results within each round goes with the setting as strongly less "
-            "than 10 % of the time.") in text
+            "chance (under 10 %).") in text
     lone = json.loads(json.dumps(LEARNED))
     setting = lone["learned"]["settings"]["neighbours"]
     setting.update(importance=None, importance_n=0, importance_of=3)
