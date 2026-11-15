@@ -610,6 +610,20 @@ design's text are marked **(departs)** and listed in the PR for the owner.
     in plain words (the harness defaults' study chose this study's starting point on the same
     held-back cases, so they cannot tell); the docs state the measured 92 % as the reason; (d) people's
     text names studies by their display name and never shows a raw exception.
+16. **Importance from child-minus-parent differences** (A4 statistician round 1, Important;
+    supersedes decision 3's statistic). Shuffling rows within a round assumes they are exchangeable;
+    in the product children of one elite share both its value of a setting and its quality from the
+    others, so a setting that does nothing read p < 0.1 in 40–63 % of lineage-shaped searches. The
+    statistic is Spearman of Δvalue against Δfitness over the children whose value of the setting
+    moved from their parent's, permuted within rounds (999, `random.Random(0)`, (b+1)/(B+1)); `n` is
+    the number of such children; below 5, no p. `value` reported is that statistic. Re-measured with
+    a lineage simulation (the statistician's `rev_a4\sim_perm_lineage*.py` shapes) and stated in the
+    docs; Fisher's "about 8 %" re-measured on the same path.
+17. **The defaults line is not measured when any from-defaults study in the warm chain held back the
+    same case content** (A4 statistician round 1, Important; extends decision 15c): a configuration's
+    effect on a case is fixed, so a later from-defaults study's runs on those cases carry the case
+    effects an earlier study in the chain selected on (measured 76.5 % false "use" when cases are
+    noisier than runs). Tested with that path beside the 92 % one.
 
 ## Open questions for the builder check
 
