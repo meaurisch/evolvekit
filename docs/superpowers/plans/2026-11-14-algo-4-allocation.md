@@ -604,8 +604,11 @@ design's text are marked **(departs)** and listed in the PR for the owner.
     measured (it ran at another time per case / harness version)"; (c) when the defaults study is in
     the warm study's own chain on the same held-back case content (the usual path: a "use" winner
     of that very study), the comparison reuses cases that chose what is compared and leans toward
-    "use": the line is kept, the note says so in plain words, and that path's null rate is measured
-    through the product's procedure and stated in the docs beside the independent one; (d) people's
+    "use". *Revised after measurement:* through the product's procedure that path read "use" for no
+    true difference in 91.9 % ± 0.7 (the line mostly replays the defaults study's own "use"), so a
+    note cannot make it information. On that path the line is **"not measured"** with the reason
+    in plain words (the harness defaults' study chose this study's starting point on the same
+    held-back cases, so they cannot tell); the docs state the measured 92 % as the reason; (d) people's
     text names studies by their display name and never shows a raw exception.
 
 ## Open questions for the builder check
