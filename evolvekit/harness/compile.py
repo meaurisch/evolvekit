@@ -82,9 +82,9 @@ config still loads without models (decision D13). The operator is never invoked.
 
 UP = "../.."
 GROUP_UP = "../../../.."
+"""From a group's folder of a per-group run (`runs/<id>/groups/<slug>/`) to its study's."""
 PRIOR_KEYS = ("value", "weight", "studies_since", "similarity", "left_out")
 """What `study-run.json`'s `priors` keeps of each prior a warm-started run applied (`memory.priors_for`)."""
-"""From a group's folder of a per-group run (`runs/<id>/groups/<slug>/`) to its study's."""
 GROUPS = "groups"
 """`runs/<id>/groups/`: the group folders of a per-group run."""
 

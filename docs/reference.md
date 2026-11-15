@@ -2915,8 +2915,8 @@ squared distance between the two studies' average cases in units of the spread
 of the cases within each study (counts on a log scale, as for groups), at most
 9 (three standard deviations); d² is the mean z² less what chance alone puts
 between two studies of n₁ and n₂ cases of the same kind, (1/n₁ + 1/n₂) · N /
-(N − 4) with N = n₁ + n₂ (just 1/n₁ + 1/n₂ when N is 4 or less), and never
-below 0. A feature with no spread inside either study — a fixed fleet size,
+(N − 4) with N = n₁ + n₂, and never below 0; with four cases or fewer between
+the two studies the weight does not shrink. A feature with no spread inside either study — a fixed fleet size,
 say — cannot be measured this way and is left out (`study-run.json` names it).
 Measured with three features: two studies of the same kind keep about 90 % of
 the weight on average at four cases each, 95 % at eight and 97 % at twelve (not

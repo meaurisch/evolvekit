@@ -291,10 +291,11 @@ def compare(a: dict[str, dict[str, float]] | None,
     shift itself), each `z²` capped at `Z2_CAP`; `d² = max(0, mean z² - c)`, the mean so the factor does
     not fall with the number of features, less `c`, what sampling alone gives two studies of the
     same kind: `E[z²] = (1/n_a + 1/n_b) * N / (N - 4)` with `N = n_a + n_b` (the shift's variance
-    over the population-form sd's, `N * E[1/chi²(N - 2)]`); for `N <= 4`, where that has no finite
-    value, the plain `1/n_a + 1/n_b` (`_correction`); the similarity is `exp(-d²/2)`, in (0, 1]. A feature with no spread
-    inside either study cannot be standardised: it is left out and named in `left_out`. 1.0 when
-    either side is `None` or empty, or no feature is left."""
+    over the population-form sd's, `N * E[1/chi²(N - 2)]`, `_correction`); the similarity is
+    `exp(-d²/2)`, in (0, 1]. A feature with no spread inside either study cannot be standardised:
+    it is left out and named in `left_out`. 1.0 when either side is `None` or empty, when no
+    feature is left, and when the studies have four cases or fewer between them (`N <= 4`: the
+    correction has no finite value there, and too few cases tell nothing about how alike they are)."""
     if not a or not b:
         return 1.0, []
     rows_a = [transformed(row) for row in a.values() if isinstance(row, dict)]
@@ -313,7 +314,7 @@ def compare(a: dict[str, dict[str, float]] | None,
             left_out.append(name)
             continue
         z2.append(min(Z2_CAP, (gap / sd) ** 2))
-    if not z2:
+    if not z2 or len(rows_a) + len(rows_b) <= 4:
         return 1.0, left_out
     d2 = max(0.0, sum(z2) / len(z2) - _correction(len(rows_a), len(rows_b)))
     return math.exp(-d2 / 2), left_out
@@ -321,10 +322,10 @@ def compare(a: dict[str, dict[str, float]] | None,
 
 def _correction(n_a: int, n_b: int) -> float:
     """The mean z² of one feature between two studies of the same kind, from sampling alone
-    (decision 14): `(1/n_a + 1/n_b) * N / (N - 4)`, `N = n_a + n_b`; for `N <= 4` (two cases or
-    fewer a study) the plain `1/n_a + 1/n_b`, as there the exact one is infinite."""
-    plain, total = 1 / n_a + 1 / n_b, n_a + n_b
-    return plain if total <= 4 else plain * total / (total - 4)
+    (decision 14): `(1/n_a + 1/n_b) * N / (N - 4)`, `N = n_a + n_b > 4` (`compare` does not shrink
+    below five cases, where it is infinite)."""
+    total = n_a + n_b
+    return (1 / n_a + 1 / n_b) * total / (total - 4)
 
 
 def similarity(a: dict[str, dict[str, float]] | None, b: dict[str, dict[str, float]] | None) -> float:

@@ -794,8 +794,8 @@ def test_cases_of_one_kind_split_in_under_10_percent_on_three_features():
 
 def test_similarity_is_one_for_alike_cases_and_falls_with_the_rms_distance():
     """Decisions 5 and 14 (A4.3, S11): z standardised by the within-study pooled sd (population form),
-    each z² capped at 9, d² = max(0, mean z² - (1/n_a + 1/n_b)), the factor exp(-d²/2). Four cases a
-    study: {9, 9, 11, 11} has sd 1 and the correction is (1/4 + 1/4) * 8 / (8 - 4) = 1."""
+    each z² capped at 9, d² = max(0, mean z² - c), c = (1/n_a + 1/n_b) * N / (N - 4), the factor
+    exp(-d²/2). Four cases a study: {9, 9, 11, 11} has sd 1 and the correction is (1/4 + 1/4) * 8 / (8 - 4) = 1."""
     import math
 
     def study(values, shift=0.0, names=("mean_x",), prefix="a"):
@@ -831,20 +831,23 @@ def test_similarity_is_one_for_alike_cases_and_falls_with_the_rms_distance():
         (pytest.approx(math.exp(-0.5), abs=1e-9), [])
 
 
-def test_the_sampling_correction_is_exact_and_plain_where_the_exact_one_is_infinite():
+def test_the_sampling_correction_is_exact_and_there_is_no_shrink_below_five_cases():
     """Decision 14: c = (1/n_a + 1/n_b) * N / (N - 4); at N <= 4 (E[1/chi²(N-2)] is infinite) the
-    plain 1/n_a + 1/n_b, so two studies of two cases still get a factor."""
+    factor is 1.0 however far apart the cases (the plain 1/n_a + 1/n_b kept only about half the
+    weight for alike studies there)."""
     import math
 
     assert groups._correction(4, 4) == pytest.approx(1.0)  # noqa: SLF001
     assert groups._correction(8, 8) == pytest.approx(0.25 * 16 / 12)  # noqa: SLF001
     assert groups._correction(3, 5) == pytest.approx((1 / 3 + 1 / 5) * 2)  # noqa: SLF001
-    assert groups._correction(2, 2) == pytest.approx(1.0) and groups._correction(1, 3) == pytest.approx(4 / 3)  # noqa: SLF001
-    # two cases a study: {10, 20} has sd 5; 5 apart is z² = 1 = c, so no shrink; 10 apart is d² = 4 - 1 = 3
-    two = {"a0": {"mean_x": 10.0}, "a1": {"mean_x": 20.0}}
-    assert groups.similarity(two, {"b0": {"mean_x": 15.0}, "b1": {"mean_x": 25.0}}) == 1.0
-    assert groups.similarity(two, {"b0": {"mean_x": 20.0}, "b1": {"mean_x": 30.0}}) == \
-        pytest.approx(math.exp(-1.5), abs=1e-12)
+    # two cases a study (N = 4), or one and three: no shrink, even 10 sd apart; left-out features still named
+    two = {"a0": {"mean_x": 10.0, "mean_w": 1.0}, "a1": {"mean_x": 20.0, "mean_w": 1.0}}
+    far = {"b0": {"mean_x": 60.0, "mean_w": 2.0}, "b1": {"mean_x": 70.0, "mean_w": 2.0}}
+    assert groups.compare(two, far) == (1.0, ["mean_w"])
+    assert groups.similarity({"a0": {"mean_x": 10.0}}, {f"b{i}": {"mean_x": 50.0 + i} for i in range(3)}) == 1.0
+    # five cases between them: the distance counts again (z² capped at 9, c = (1/2 + 1/3) * 5 / 1)
+    five = {f"b{i}": {"mean_x": 60.0 + 10 * i} for i in range(3)}
+    assert groups.similarity(two, five) == pytest.approx(math.exp(-(9 - (1 / 2 + 1 / 3) * 5) / 2), abs=1e-12)
 
 
 @pytest.mark.parametrize("cases, shift, low, high, estimate", [
