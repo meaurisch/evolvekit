@@ -589,9 +589,12 @@ design's text are marked **(departs)** and listed in the PR for the owner.
     with no spread inside either study cannot be standardised and is left out of the distance, with
     a note naming it (a fixed fleet size must not drop every prior); (b) each feature's z² is capped
     at 9, so one nearly fixed feature cannot zero the factor; (c) the distance is bias-corrected,
-    `d² = max(0, mean z² − (1/n_a + 1/n_b))` — the expected z² of two studies of the same kind from
-    sampling alone — so alike studies keep their weight at any size (the uncorrected factor was
-    0.67 at four cases a study, 0.86 at eight). The docs state the factor's measured mean for alike
+    `d² = max(0, mean z² − c)` with c the exact expected z² of two studies of the same kind from
+    sampling alone under the population-form pooled sd, `c = (1/n_a + 1/n_b)·N/(N − 4)`
+    (N = n_a + n_b; the plain (1/n_a + 1/n_b) left a bias: 0.82 at four cases). Measured mean factor
+    for alike studies: 0.89 / 0.95 / 0.97 at 4 / 8 / 12 cases a study (the clip at 0 keeps it just
+    under 1: a pair apart by chance shrinks, a close pair cannot grow); uncorrected it was 0.67 /
+    0.86. The docs state the factor's measured mean for alike
     studies and at 1 and 3 sd. `study-run.json` records each prior's value, weight, studies_since,
     similarity and left-out features.
 
