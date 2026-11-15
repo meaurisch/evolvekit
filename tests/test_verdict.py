@@ -1056,3 +1056,178 @@ def test_a_keep_line_gives_the_middle_figure_in_the_use_lines_words(tmp_path):
     assert middle.endswith(("lower cost", "lower", "higher", "worse")) or " % " in middle, line
     assert f"{abs(summary['mean']):.1f} %" in middle, line
     assert "a chance of" in line and "its 90 % range is" in line and line.endswith(".")
+
+
+# -- against the harness defaults (A4.3c, S11) ---------------------------------
+
+DEFAULTS_LINE = "On the same held-back cases, against the harness defaults ({whose}): "
+
+
+def _library_study(home, name: str, *, warm: bool = False, held: int = 3) -> Path:
+    """A demo study in `home` with the sample cases, `held` of them held back; `warm` marks it warm-started."""
+    import yaml
+
+    slug = home.create_study("demo-tour", "tune", name)
+    home.use_samples(slug)
+    home.split(slug, held)
+    root = home.study_root(slug)
+    if warm:
+        data = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+        data["warm"] = {"from": "summer", "run": RUN, "at": "2026-01-01T00:12:00+00:00"}
+        (root / "study.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return root
+
+
+def _edited_cases(root: Path) -> None:
+    """The study's case files keep their names but not their content."""
+    for case in (root / "cases").glob("*.json"):
+        case.write_text(case.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+
+def _checked(root: Path, started: str, *, base: list[float], best: list[float], decision: str = "keep",
+             seeds: tuple[int, ...] = (1001, 1002, 1003)) -> tuple[Path, list[dict]]:
+    """A finished run whose final check ran the starting point at `base[i]` and the best (`c1`) at
+    `best[i]` on held-back case i (plus a little per run), naming the cases as `confirm` does."""
+    from evolvekit.harness.study import load_study
+
+    run_dir = root / "runs" / (started[:10].replace("-", "") + "-" + started[11:19].replace(":", ""))
+    finished_run(run_dir, decision=decision, started=started)
+    rows = []
+    for i, case in enumerate(load_study(root).test):
+        for j, seed in enumerate(seeds):
+            rows += [{"configuration": "baseline", "instance": f"../../{case}", "seed": seed, "ok": True,
+                      "kpis": {"tour_length": base[i] + 0.3 * j}},
+                     {"configuration": "c1", "instance": f"../../{case}", "seed": seed, "ok": True,
+                      "kpis": {"tour_length": best[i] + 0.2 * j}}]
+    (run_dir / "confirm" / "final" / "results.json").write_text(json.dumps(rows), encoding="utf-8")
+    return run_dir, rows
+
+
+def _against(root: Path, run_dir: Path, rows: list[dict], decision: str) -> dict:
+    """`execute._against_defaults` after the warm study's final check, then its verdict."""
+    from evolvekit.confirm import Comparison
+    from evolvekit.harness import execute
+    from evolvekit.harness.study import load_study
+
+    study = load_study(root)
+    comparison = Comparison(label="final", objective="tour_length", direction="minimize", stage="full",
+                            seeds=sorted({r["seed"] for r in rows}), instances=[f"../../{c}" for c in study.test],
+                            baseline_id="seed", candidates=["c1"], runs=rows)
+    said: list[str] = []
+    execute._against_defaults(root, run_dir, study, comparison, decision, said.append)
+    assert bool(said) is (study.warm is not None), "the log says what it compared, or why not"
+    return build_verdict(root, run_dir.name)
+
+
+def _paired_chance(theirs: list[dict], ours: list[dict], side: str) -> float:
+    import math
+
+    from evolvekit.confirm import verdict_summary
+
+    gains = []
+    for case in sorted({r["instance"] for r in ours}):
+        d = {r["seed"]: r["kpis"]["tour_length"] for r in theirs
+             if r["instance"] == case and r["configuration"] == "baseline"}
+        mine = {r["seed"]: r["kpis"]["tour_length"] for r in ours if r["instance"] == case and r["configuration"] == side}
+        gains.append(sum(math.log(d[s] / mine[s]) for s in d) / len(d))
+    return verdict_summary(gains, direction="minimize")["chance"]
+
+
+@pytest.mark.parametrize("decision, side", [("use", "c1"), ("keep", "baseline")])
+def test_a_warm_started_verdict_adds_the_line_against_the_defaults(tmp_path, capsys, decision, side):
+    """The side compared is what the verdict tells a person to run: the new settings on use, else the
+    starting point (the warm study's own baseline runs: the previous winner)."""
+    from evolvekit.app.report import render_report
+    from evolvekit.app.store import Home
+    from evolvekit.cli import _say_verdict
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Summer")
+    _, theirs = _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0])
+    autumn = _library_study(home, "Autumn", warm=True)
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0],
+                             decision=decision)
+    plain = build_verdict(autumn, run_dir.name)
+    assert "against_defaults" not in plain, "no line before the final check wrote it"
+    v = _against(autumn, run_dir, ours, decision)
+    got = v["against_defaults"]
+    assert got["measured"] is True and got["line"].startswith(DEFAULTS_LINE.format(whose=got["side"])), got
+    assert got["chance"] == pytest.approx(_paired_chance(theirs, ours, side)), "verdict_summary of the paired log gains"
+    assert got["decision"] in ("use", "keep", "worse") and got["range90_pct"] and got["mean_pct"] is not None
+    assert got["from"] == {"study": summer.name, "run": "20260101-000000", "cases": 3, "seeds": 3}
+    assert got["side"] == ("the new settings" if decision == "use" else "the starting point")
+    assert "does not change what this study recommends" in got["note"]
+    assert {k: v[k] for k in ("decision", "line", "advice")} == {k: plain[k] for k in ("decision", "line", "advice")}, \
+        "information about the same runs: the study's own answer is unchanged"
+    if got["decision"] == "use":
+        assert "than the harness defaults" in got["line"] and "your starting point" not in got["line"]
+    saved = json.loads((run_dir / "confirm" / "final" / "against_defaults.json").read_text(encoding="utf-8"))
+    assert saved["label"] == "against the harness defaults" and saved["looks"] == 1 and saved["baseline_id"] == "defaults"
+    assert saved["numbers_from"] == got["from"]
+    # Wherever the verdict is read, the line is the document's.
+    report = render_report(v)
+    assert report.index(v["advice"]) < report.index(got["line"]) < report.index("## Held-back cases")
+    page = jobs.results(autumn, run_dir.name, document_of)
+    assert page["against_defaults"] == got
+    assert "On the same held-back cases, against the harness defaults" in jobs.report_html(page)
+    capsys.readouterr()
+    _say_verdict(v)
+    out = capsys.readouterr().out.splitlines()
+    assert out[out.index(v["advice"]) + 1] == got["line"], "information after the answer and what to do about it"
+
+
+def _not_measured(tmp_path: Path, why: str) -> dict:
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    if why != "no defaults study":
+        summer = _library_study(home, "Summer", held=1 if why == "other cases" else 3)
+        seeds = (2001, 2002, 2003) if why == "no shared runs" else (1001, 1002, 1003)
+        _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0], seeds=seeds)
+    autumn = _library_study(home, "Autumn", warm=True)
+    if why == "same names other content":
+        _edited_cases(autumn)
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0],
+                             decision="use")
+    return _against(autumn, run_dir, ours, "use")
+
+
+@pytest.mark.parametrize("why, reason", [
+    ("no defaults study", "no finished study on this application started from the harness defaults"),
+    ("other cases", "it held back other cases"),
+    ("same names other content", "it held back other cases"),
+    ("no shared runs", "its final check has no runs on the same cases and runs"),
+])
+def test_against_the_defaults_is_not_measured_when_the_cases_differ(tmp_path, why, reason):
+    v = _not_measured(tmp_path, why)
+    got = v["against_defaults"]
+    assert got == {"measured": False, "why": reason, "line": f"Against the harness defaults: not measured ({reason})."}
+    assert v["decision"] == "use", "the study's own answer stands"
+
+
+def test_the_defaults_study_that_held_back_the_same_cases_is_preferred(tmp_path):
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Summer")
+    _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0])
+    spring = _library_study(home, "Spring", held=1)
+    _edited_cases(spring)
+    _checked(spring, "2026-01-01T06:00:00+00:00", base=[50.0], best=[49.0])
+    autumn = _library_study(home, "Autumn", warm=True)
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0])
+    got = _against(autumn, run_dir, ours, "keep")["against_defaults"]
+    assert got["measured"] is True and got["from"]["study"] == summer.name, "the later Spring held back other cases"
+
+
+def test_a_study_that_is_not_warm_started_has_no_line_against_the_defaults(tmp_path):
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Summer")
+    _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0])
+    plain = _library_study(home, "Autumn")
+    run_dir, ours = _checked(plain, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0],
+                             decision="use")
+    v = _against(plain, run_dir, ours, "use")
+    assert "against_defaults" not in v and not (run_dir / "confirm" / "final" / "against_defaults.json").exists()

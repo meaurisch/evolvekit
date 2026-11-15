@@ -126,6 +126,10 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         out += ["", verdict["why_keep"]]  # why a keep whose held-back cases all improved is still keep
     if verdict.get("advice"):
         out += ["", verdict["advice"]]
+    against = verdict.get("against_defaults") or {}
+    if against.get("line"):
+        # A warm-started study: the same runs against the harness defaults, information beside the answer.
+        out += ["", against["line"] + (f" {against['note']}" if against.get("note") else "")]
     for note in notes:
         out += ["", f"Note: {note}"]
     facts = []

@@ -379,6 +379,16 @@ def test_a_code_study_speaks_of_code_not_settings():
     assert 'whatOf() === "code" ? "today’s code"' in details and "today’s settings" in details
 
 
+def test_the_line_against_the_defaults_is_the_documents_own_under_the_answer():
+    """A4.3c: a warm-started study's line against the harness defaults, rendered from the verdict
+    document only (its `line` and `note`), right under the answer's advice in the status strip."""
+    shown = _page_function(STUDY_PAGE, "againstDefaults")
+    assert "st.results.against_defaults" in shown and "a.line" in shown and "a.note" in shown
+    assert "chance" not in shown and "decision" not in shown, "nothing computed on the page"
+    strip = _page_function(STUDY_PAGE, "statusStrip")
+    assert strip.index('${x.sub || ""}</p>') < strip.index("${againstDefaults(acc)}")
+
+
 def test_no_difference_in_any_run_shows_its_line_and_no_band():
     """Persona round 1, B2: a change whose every run equals today's shows the verdict's line and no
     band or range -- the strip, Compare branches and two runs compared."""

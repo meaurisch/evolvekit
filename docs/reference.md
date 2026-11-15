@@ -2350,7 +2350,8 @@ rounds will run.`). When the latest run does not say use and an earlier run
 did, `study status` adds `An earlier run (<id>) says use: <its verdict
 line>`, and for a run `study pr` made a branch for, `Branch <name> pushed to
 <remote>` (or `made, not pushed`). `study verdict` prints the verdict's own sentence and its
-advice, then how much of the plan ran when less of it did, and for a study
+advice, for a warm-started study the line against the harness defaults (see
+`--warm` below), then how much of the plan ran when less of it did, and for a study
 with AI help what its AI spent (`AI: $0.87 of $1.00`, from the run's
 `usage.jsonl`; `AI: 14 requests` for a provider that counts requests); the
 report's *How it ran* says the same. Nothing else; `--json` prints the whole
@@ -2941,7 +2942,28 @@ each tuned setting at the winner, so there it changes nothing, while
 what it did on stderr, and `study.yaml` records it as `warm: {from, run, at,
 ranked}`. The warm start changes the starting point the final check compares
 with: the result is judged against the winner's values, not the settings in
-use before, so it suits a planner who uses the winner today. With no `use`
+use before, so it suits a planner who uses the winner today. Because the
+starting point is the previous winner, the verdict also says how the result
+stands against the harness defaults when a study that started from them
+held back the same cases: the latest finished settings study on the harness
+that was not warm-started, set no start by hand and gave no setting itself
+(fixed, or from an input settings file), and kept its final check's runs.
+The side the verdict names — the new settings on *use*, else the starting
+point — is paired run by run with that study's starting-point runs on the
+same case content (the case file's sha256, whatever it is called) and the
+same run of the final check, at least two cases, and read once by the same rule (no
+extension, no Holm): "On the same held-back cases, against the harness
+defaults (the new settings): probably better: 5.8 % lower tour length, …".
+Otherwise the line says "Against the harness defaults: not measured (…)"
+with the reason. The comparison is kept in `confirm/final/against_defaults.json`
+and is the verdict's `against_defaults` key. It is information about the
+same runs, not a second answer, and never changes what the study recommends:
+it reuses the runs the main answer was read on, so it is selected on.
+Measured on 10 000 seeded studies with no true difference anywhere (4
+held-back cases, runs noisier than cases), it says use in 6.2 % ± 0.24
+overall, 14.9 % ± 1.2 after a main *use* and 5.4 % ± 0.24 otherwise. The
+two sides also ran in different sessions, so for a solver timed by the clock
+a change of machine is in the difference too. With no `use`
 study it is a plain start, and says so; a template that tunes no setting is
 left as it is. `--warm` needs the library home, not `--dir`, and is a
 command-line option for now.

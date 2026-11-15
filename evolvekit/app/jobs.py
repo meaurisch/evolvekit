@@ -1631,7 +1631,8 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
         "cases": {"training": list(study.training), "test": list(study.test)},
         "can_continue": can_continue(run_dir, job),
     }
-    for key in ("how_it_ran", "time_note", "planned", "spent", "why_keep"):  # how much of the plan ran, what the AI spent, why keep
+    # how much of the plan ran, what the AI spent, why keep; a warm-started study's line against the harness defaults
+    for key in ("how_it_ran", "time_note", "planned", "spent", "why_keep", "against_defaults"):
         if verdict.get(key):
             data[key] = verdict[key]
     if (verdict.get("converged") or {}).get("line"):
@@ -1800,6 +1801,10 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
     facts_html = "".join(f"<div><div class='k'>{esc(k)}</div><div class='v'>{esc(v)}</div></div>" for k, v in facts)
     seeds = final.get("seeds")
     rule_note = f"<div class='help' style='margin-top:6px'>{esc(str(final['rule']))}</div>" if final.get("rule") else ""
+    against = data.get("against_defaults") or {}
+    if against.get("line"):  # a warm-started study: the same runs against the harness defaults, beside the answer
+        rule_note = (f"<div style='margin-top:10px'>{esc(str(against['line']))}</div>"
+                     + (f"<div class='help'>{esc(str(against['note']))}</div>" if against.get("note") else "") + rule_note)
     check_note = (f"<p class='help'>The best and the starting point, each run {'once' if seeds == 1 else f'{seeds} times'} on every "
                   "held-back case: cases the search never saw.</p>") if seeds else ""
     rules_html = ("<h2>Rules every combination kept</h2><div class='card'><ul>"

@@ -792,3 +792,103 @@ def test_a_settled_null_study_says_use_in_under_10_percent_through_the_real_exte
               "(10 000 studies)")
     assert most <= 2
     assert rate + 2 * se < 0.10
+
+
+# -- the line against the harness defaults: information about the same runs (A4.3c, decision 6)
+
+
+def _defaults_line_null_rates(studies: int) -> dict[str, tuple[float, float, int]]:
+    """The selected path as the product takes it, on `studies` seeded null studies
+    (`random.Random(20261114)`, runs noisier than cases: case sd 0.005, run sd 0.02, 4 held-back
+    cases): the main answer through the real `execute._extend_check` (3 runs per case, extended
+    to 12 while it is open), then the line against the defaults through the product's pairing
+    (`execute.defaults_comparison`, the side the verdict names: the new settings on use, else the
+    starting point) against a defaults study's 3 runs per case, read once by `confirm._analyse`
+    and `decision_of`. Every configuration has its own case effects and run noise, none better
+    on average. Returns {"main", "line", "line after use", "line after no use"}: (rate of "use",
+    SE, count it is a share of)."""
+    from evolvekit.confirm import decision_of
+    from evolvekit.harness.execute import defaults_comparison
+
+    cases, case_sd, run_sd = 4, 0.005, 0.02
+    names = [f"c{i}" for i in range(cases)]
+
+    def runs(config: str, value, seeds) -> list[dict]:
+        return [{"configuration": config, "instance": name, "seed": s, "ok": True, "kpis": {"cost": value(i, s)}}
+                for i, name in enumerate(names) for s in seeds]
+
+    def analysed(cand, base, seeds) -> Comparison:
+        comparison = Comparison(label="final", objective="cost", direction="minimize", stage="full", seeds=list(seeds),
+                                instances=list(names), baseline_id="b", candidates=["c"],
+                                runs=runs(BASELINE, base, seeds) + runs("c", cand, seeds))
+        _analyse(comparison)
+        return comparison
+
+    def draw(rng):
+        return [rng.gauss(0, case_sd) for _ in range(cases)]
+
+    rng = random.Random(20261114)
+    study = SimpleNamespace(test=names)
+    plan = SimpleNamespace(check_seeds=3, workers=1, run_s=1.0)
+    job = SimpleNamespace(update=lambda **fields: None)
+    counts = {"main": [0, 0], "line": [0, 0], "line after use": [0, 0], "line after no use": [0, 0]}
+    for _ in range(studies):
+        cb, cc, cd = draw(rng), draw(rng), draw(rng)
+        eb, ec, ed = ([[rng.gauss(0, run_sd) for _ in range(12)] for _ in range(cases)] for _ in range(3))
+
+        def value(effect, noise):
+            return lambda i, s: 100 * math.exp(effect[i] + noise[i][s])
+
+        start, best, defaults = value(cb, eb), value(cc, ec), value(cd, ed)
+
+        def confirm(config, run_dir, *, seeds, instances, label, log, stop):
+            return analysed(best, start, range(len(seeds)))
+
+        comparison, _seeds = _extend_check(study, plan, None, None, job, lambda _m: None, stop=threading.Event(),
+                                           time_left_s=lambda: 1e9, confirm=confirm)
+        decision = decision_of(comparison.per_candidate["c"])
+        against = defaults_comparison(comparison, decision, runs(BASELINE, defaults, range(3)),
+                                      key_of_ours=str, key_of_theirs=str)
+        (result,) = against.per_candidate.values()
+        line = decision_of(result) == "use"
+        for key, counted in (("main", True), ("line", True), ("line after use", decision == "use"),
+                             ("line after no use", decision != "use")):
+            if counted:
+                counts[key][0] += line if key != "main" else decision == "use"
+                counts[key][1] += 1
+    return {key: (hits / max(1, n), math.sqrt((hits / max(1, n)) * (1 - hits / max(1, n)) / max(1, n)), n)
+            for key, (hits, n) in counts.items()}
+
+
+def _say_rates(rates: dict, capsys) -> None:
+    with capsys.disabled():
+        print("\nnull studies, 'use':", "; ".join(f"{key} {rate:.2%} +- {se:.2%} (n={n})"
+                                                   for key, (rate, se, n) in rates.items()))
+
+
+def test_the_line_against_the_defaults_says_use_for_no_difference_in_about_6_percent_and_15_after_a_use(capsys):
+    """Decision 6: the line is read after the main answer, on the same runs, so it is selected on.
+    Estimates (builder check, 10 000 studies, the same seeds): main use 8.6 %; the line says use in
+    6.2 % +- 0.24 overall, 14.9 % +- 1.2 after a main use, 5.4 % +- 0.24 otherwise. 3000 studies,
+    measured 5.40 % +- 0.41 overall, 9.43 % +- 1.87 after a use (244 of them), 5.04 % +- 0.42
+    otherwise: asserts the line overall in [4, 8] %, after a use in [3, 26] %, otherwise in
+    [3.5, 7.5] % (every bound at least 3.4 SE from the measured rate; the slow test pins them)."""
+    rates = _defaults_line_null_rates(3000)
+    _say_rates(rates, capsys)
+    assert 0.04 <= rates["line"][0] <= 0.08
+    assert 0.03 <= rates["line after use"][0] <= 0.26
+    assert 0.035 <= rates["line after no use"][0] <= 0.075
+
+
+@pytest.mark.slow
+def test_the_line_against_the_defaults_says_use_for_no_difference_in_about_6_percent_and_15_after_a_use_on_10000(
+        capsys):
+    """The same on 10 000 studies, the builder check's own draws: measured main use 8.60 % +- 0.28,
+    the line 6.21 % +- 0.24 overall, 14.88 % +- 1.21 after a use (860), 5.39 % +- 0.24 otherwise.
+    Asserts the line overall in [5.5, 7] %, after a use in [11, 19] %, otherwise in [4.6, 6.2] %
+    (every bound at least 2.9 SE from the measured rate)."""
+    rates = _defaults_line_null_rates(10_000)
+    _say_rates(rates, capsys)
+    assert 0.055 <= rates["line"][0] <= 0.07
+    assert 0.11 <= rates["line after use"][0] <= 0.19
+    assert 0.046 <= rates["line after no use"][0] <= 0.062

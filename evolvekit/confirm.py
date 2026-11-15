@@ -69,7 +69,7 @@ __all__ = [
     "confirm", "Comparison", "ConfirmStopped", "paired_summary", "wilcoxon_signed_rank", "render_markdown",
     "t_cdf", "decide", "decision_of", "verdict_summary", "identical_runs", "USE_CHANCE", "USE_MARGIN_PCT",
     "WORSE_CHANCE", "RULE_WORDS", "LEGACY_RULE_WORDS", "is_posterior", "apply_holm", "comparison_of",
-    "read_on_row", "runs_can_help",
+    "read_on_row", "runs_can_help", "analysed",
 ]
 
 BASELINE = "baseline"
@@ -962,6 +962,13 @@ def _analyse(comparison: Comparison) -> None:
                 levels["verdict"] += f"; {failed_words(more)}"
                 if levels["decision"] == "use":
                     levels["decision"], levels["confirmed"] = "keep", False
+
+
+def analysed(comparison: Comparison) -> Comparison:
+    """`comparison`, made of runs it was given rather than ran, analysed by the one rule
+    (`_analyse`); returns it. Nothing is run, written or read again: its `looks` stay as given."""
+    _analyse(comparison)
+    return comparison
 
 
 def _failure_sizes(largest: float | None, direction: str) -> dict[str, float] | None:

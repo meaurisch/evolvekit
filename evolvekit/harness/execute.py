@@ -1372,9 +1372,128 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     _write_exports(run_dir, log, up)
     final = {"candidate": cid, "confirmed": decision == "use", "decision": decision,
              "seeds": seeds, "comparison": "confirm/final/comparison.json"}
+    if up == UP:  # a warm-started study in a library home: the same runs against the harness defaults'
+        _against_defaults(run_dir.parent.parent, run_dir, study, comparison, decision, log)
     if search.get("converged") and extend:
         final["saved"] = _saved(job, plan, search, result, added=seeds - _first_seeds(plan))
     job.finish("done", final=final)
+
+
+AGAINST_DEFAULTS = "against_defaults.json"
+"""In `confirm/final/`: a warm-started study's final check against the harness defaults' runs (A4.3c)."""
+DEFAULTS_LABEL = "against the harness defaults"
+DEFAULTS_ID = "defaults"
+STARTING_POINT = "starting point"
+NO_DEFAULTS = "no finished study on this application started from the harness defaults"
+OTHER_CASES = "it held back other cases"
+NO_SHARED_RUNS = "its final check has no runs on the same cases and runs"
+
+
+def defaults_comparison(comparison: Any, decision: str, theirs: list[dict[str, Any]], *,
+                        key_of_ours: Callable[[str], str | None],
+                        key_of_theirs: Callable[[str], str | None]) -> Any:
+    """The final check's runs of the side its `decision` names -- the candidate on `use`, else the
+    starting point (the warm study's own baseline runs) -- against `theirs`, the baseline runs of a
+    study that started from the harness defaults (its `results.json`), paired run by run on the
+    same case (`key_of_*`: an instance's case content, None when unknown) and the same check seed:
+    a `Comparison` labelled `DEFAULTS_LABEL`, analysed once by the one rule (`confirm.analysed`),
+    never extended, no Holm. It is information about the same runs: its decision decides nothing.
+    Returns why not instead (`OTHER_CASES`: fewer than two held-back cases in common;
+    `NO_SHARED_RUNS`: fewer than two with a check seed both ran on every one of them)."""
+    from evolvekit.confirm import BASELINE, Comparison, analysed
+
+    cid = comparison.candidates[0]
+    ours_config, side = (cid, cid) if decision == "use" else (BASELINE, STARTING_POINT)
+    instance_of: dict[str, str] = {}
+    for instance in comparison.instances:
+        key = key_of_ours(str(instance))
+        if key is not None:
+            instance_of.setdefault(key, str(instance))
+
+    def by_case(runs: list[dict[str, Any]], config: str, key_of: Callable[[str], str | None]) -> dict:
+        out: dict[str, dict[int, list[dict[str, Any]]]] = {}
+        for run in runs:
+            if not isinstance(run, dict) or run.get("configuration") != config:
+                continue
+            key = key_of(str(run.get("instance")))
+            if key is not None:
+                out.setdefault(key, {}).setdefault(int(run["seed"]), []).append(run)
+        return out
+
+    mine, other = by_case(list(comparison.runs), ours_config, key_of_ours), by_case(theirs, BASELINE, key_of_theirs)
+    shared = [key for key in instance_of if key in other]
+    if len(shared) < 2:
+        return OTHER_CASES
+    both = {key: set(mine.get(key, {})) & set(other[key]) for key in shared}
+    cases = [key for key in shared if both[key]]
+    seeds = sorted(set.intersection(*(both[key] for key in cases))) if cases else []
+    if len(cases) < 2 or not seeds:
+        return NO_SHARED_RUNS
+    runs = [{**run, "configuration": name, "instance": instance_of[key]}
+            for key in cases for seed in seeds
+            for name, kept in ((BASELINE, other), (side, mine)) for run in kept[key][seed]]
+    return analysed(Comparison(
+        label=DEFAULTS_LABEL, objective=comparison.objective, direction=comparison.direction, stage=comparison.stage,
+        seeds=seeds, instances=[instance_of[key] for key in cases], baseline_id=DEFAULTS_ID, candidates=[side],
+        runs=runs, levels=list(comparison.levels or []), prior=comparison.prior))
+
+
+def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, decision: str,
+                      log: Callable[[str], None]) -> None:
+    """A warm-started settings study in a library home (`root.parent.name == "studies"`): its
+    final check set against the harness defaults, written to `confirm/final/against_defaults.json`
+    -- `defaults_comparison` of the latest study that started from them (`memory.defaults_study`)
+    with `measured: true`, `side` ("candidate" or "starting point") and `numbers_from` `{study,
+    run, cases, seeds}`; else `{"measured": false, "why": ...}`. Information beside the answer: it
+    never changes `final`, and a failure to read the other studies is said, never raised."""
+    if study.warm is None or study.code is not None or root.parent.name != "studies":
+        return
+    from types import SimpleNamespace
+
+    from evolvekit.harness import memory
+
+    digests: dict[Path, str | None] = {}
+
+    def key_in(folder: Path) -> Callable[[str], str | None]:
+        def key(instance: str) -> str | None:
+            # The check names a case from the run's folder (`UP/<case>`); the study names it from its own.
+            name = instance[len(UP) + 1:] if instance.startswith(UP + "/") else instance
+            path = folder / name
+            if path not in digests:
+                digests[path] = memory.case_digest(path)
+            return digests[path]
+        return key
+
+    try:
+        found = memory.defaults_study(SimpleNamespace(root=root.parent.parent, studies_dir=root.parent), study,
+                                      [root / case for case in study.test])
+        if found is None:
+            document: dict[str, Any] = {"measured": False, "why": NO_DEFAULTS}
+        else:
+            other, results = found
+            theirs = json.loads(results.read_text(encoding="utf-8"))
+            if not isinstance(theirs, list):
+                raise ValueError(f"{other.slug}'s final check keeps no list of runs")
+            against = defaults_comparison(comparison, decision, theirs, key_of_ours=key_in(root),
+                                          key_of_theirs=key_in(other.root))
+            if isinstance(against, str):
+                document = {"measured": False, "why": against}
+            else:
+                document = {"measured": True, **against.to_json(),
+                            "side": "candidate" if decision == "use" else STARTING_POINT,
+                            "numbers_from": {"study": other.slug, "run": other.run, "cases": len(against.instances),
+                                             "seeds": len(against.seeds)}}
+    except Exception as exc:  # noqa: BLE001 - a line beside the answer: the final check's answer stands
+        document = {"measured": False, "why": f"the other studies could not be read: {exc}"}
+    path = run_dir / "confirm" / "final" / AGAINST_DEFAULTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps(document, indent=1))
+    if document["measured"]:
+        numbers = document["numbers_from"]
+        log(f"final check: {DEFAULTS_LABEL}: {numbers['study']}'s runs on {numbers['cases']} held-back cases, "
+            f"{numbers['seeds']} runs each, read once, for information")
+    else:
+        log(f"final check: {DEFAULTS_LABEL}: not measured ({document['why']})")
 
 
 def _first_seeds(plan: Plan) -> int:

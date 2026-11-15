@@ -431,3 +431,40 @@ def test_the_new_studys_features_are_read_only_when_a_winner_needs_them(tmp_path
                             features=lambda root, s: reads.append(Path(root)))
     assert set(got) == {"neighbours", "restart_after"} and reads == [home.study_root(slug)], \
         "the new study's features once; with none there, the winner's are not read either"
+
+
+# -- the study that started from the harness defaults (A4.3c, S11) ------------
+
+
+def _edit(root, change) -> None:
+    study = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    change(study)
+    (root / "study.yaml").write_text(yaml.safe_dump(study, sort_keys=False), encoding="utf-8")
+
+
+def test_the_defaults_study_is_the_latest_settings_study_that_started_from_the_harness_defaults(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    first = finished(home, docs, "A", decision="use", finished_at="2026-10-01")
+    second = finished(home, docs, "B", decision="keep", finished_at="2026-10-08")
+    warm = finished(home, docs, "C", decision="use", finished_at="2026-10-15")
+    _edit(warm, lambda s: s.update(warm={"from": "a", "run": "r1", "at": "2026-10-01T00:00:00+00:00"}))
+    started = finished(home, docs, "D", decision="keep", finished_at="2026-10-22")
+    _edit(started, lambda s: s["vary"]["settings"].update(neighbours={"tune": True, "start": 10}))
+    fixed = finished(home, docs, "E", decision="keep", finished_at="2026-10-29")
+    _edit(fixed, lambda s: s["vary"]["settings"].update(neighbours={"fixed": 10}))
+    finished(home, docs, "F", decision="use", finished_at="2026-11-01", template="faster")
+    not_run = finished(home, docs, "G", decision="keep", finished_at="2026-11-02")
+    _job(not_run, search={"generations": 0, "aborted": False, "stop_reason": "time limit: …"},
+         final={"skipped": "the search did not run", "not_run": True})
+    per_group = finished(home, docs, "H", decision="keep", finished_at="2026-11-03")
+    _job(per_group, per_group=True)
+    slug, study = _new_study(home)
+    cases = [home.study_root(slug) / case for case in study.test]
+    got = memory.defaults_study(home, study, cases)
+    assert got is not None and got[0].root == second, \
+        "C was warm-started, D set a start by hand, E fixed a setting, F is a code study, G did not search, H per group"
+    assert got[1] == second / "runs" / "r1" / "confirm" / "final" / "results.json"
+    (got[1]).unlink()
+    assert memory.defaults_study(home, study, cases)[0].root == first, "a study without its final check's runs is passed over"
+    (first / "runs" / "r1" / "confirm" / "final" / "results.json").unlink()
+    assert memory.defaults_study(home, study, cases) is None

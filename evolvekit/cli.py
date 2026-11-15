@@ -1355,6 +1355,8 @@ def _say_verdict(document: dict) -> None:
         print(f"  {name}: {own.get('line', '')}")
     if document.get("advice"):
         print(document["advice"])
+    if (document.get("against_defaults") or {}).get("line"):
+        print(document["against_defaults"]["line"])  # a warm-started study: the same runs against the harness defaults
     if document.get("how_it_ran"):
         print(document["how_it_ran"])
     if (document.get("converged") or {}).get("line"):

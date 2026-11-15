@@ -13,11 +13,14 @@ searches ("on the cases they learned from"); only a verdict claims an improvemen
 with the measure); `priors_for` gives a warm-started run a prior around each winner whose
 weight halves with every later study that tuned that setting and shrinks when the new study's
 cases are unlike the winner's (design §6.3: a prior never excludes a value in range).
+`defaults_study` finds the latest study that started from the harness defaults, whose final
+check's runs a warm-started study's verdict is also set against (A4.3c).
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -25,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import threading
 from statistics import fmean, median, median_low
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import BAKEOFF, run_study_of
@@ -420,6 +423,48 @@ def warm_start(home: Any, harness: Harness, study: Study, *,
     if said:
         lines.append(f"the starting point is now {source.name}'s winner: the final check compares the result with it")
     return study, lines + tail
+
+
+def case_digest(path: Path) -> str | None:
+    """The sha256 of a case file's content, None when it cannot be read: two studies hold back
+    the same case when the content is the same, whatever the file is called."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _from_the_defaults(f: Finished) -> bool:
+    """Whether a finished study's starting point was the harness defaults (A4.3c, Q18): a settings
+    study (or settings and data) whose search ran, not warm-started, with no tuned setting started
+    by hand and no setting given by the study itself (fixed, or from an input settings file)."""
+    from evolvekit.harness.compile import _given_settings
+
+    if f.kind not in ("settings", "both") or f.not_run or f.study.warm is not None:
+        return False
+    if any(choice.mode == "tune" and choice.start is not None for choice in f.study.settings.values()):
+        return False
+    try:
+        return not _given_settings(f.study, f.pinned, f.root)
+    except HarnessError:
+        return False
+
+
+def defaults_study(home: Any, study: Study, cases: Sequence[Path]) -> tuple[Finished, Path] | None:
+    """The latest finished study on `study`'s harness whose starting point was the harness
+    defaults (`_from_the_defaults`) and whose final check kept its runs
+    (`confirm/final/results.json`), with that file; of those, the latest that held back a case
+    with the content of one of `cases` (the new study's held-back case files) when there is one.
+    None when there is none."""
+    found = [(f, f.run_dir / "confirm" / "final" / "results.json") for f in finished_studies(home, study.harness_id)
+             if _from_the_defaults(f)]
+    found = [(f, results) for f, results in found if results.is_file()]
+    if not found:
+        return None
+    wanted = {digest for digest in map(case_digest, cases) if digest}
+    sharing = [(f, results) for f, results in found
+               if wanted & {case_digest(f.root / case) for case in f.study.test}]
+    return (sharing or found)[-1]
 
 
 def _study_harness(home: Any, study: Study, finished: list[Finished]) -> Harness | None:

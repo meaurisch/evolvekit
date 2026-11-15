@@ -353,9 +353,18 @@
       <div class="strip-main">${EK.verdictMark(x.mark, phone ? 36 : 44, acc)}<div class="strip-words">
         <span class="type-label${x.kickerTone === "accent" && !acc ? " accent-ink" : x.kickerTone === "critical" ? " tone-critical" : ""}">${x.kicker}</span>
         <p class="${acc ? "type-display" : "strip-head"}">${EK.figures(x.head)}${x.tag ? html` <span class="strip-tag">${x.tag}</span>` : ""}</p>
-        ${x.why ? html`<p class="type-body strip-why">${x.why}</p>` : ""}<p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p>${factLine}${branchLines(acc)}</div></div>
+        ${x.why ? html`<p class="type-body strip-why">${x.why}</p>` : ""}<p class="type-body${acc ? "" : " ink-2"}">${x.sub || ""}</p>${againstDefaults(acc)}${factLine}${branchLines(acc)}</div></div>
       <div class="strip-side">${vis}${x.caption ? html`<span class="type-small${acc ? "" : " ink-2"}">${x.caption}</span>` : ""}
         ${acts.length ? html`<div class="actions">${acts}</div>` : ""}${rule}</div></section>`;
+  }
+
+  /** A warm-started study: the same held-back runs against the harness defaults, the verdict
+      document's own line and note under the answer, verbatim (as `study verdict` prints it):
+      information about the same runs, never a second answer. */
+  function againstDefaults(acc) {
+    var a = (st.results && st.status && st.status.phase === "done" && st.results.against_defaults) || null;
+    if (!a || !a.line) return "";
+    return html`<p class="type-small strip-against${acc ? "" : " ink-2"}">${EK.figures(a.line)}${a.note ? " " + a.note : ""}</p>`;
   }
 
   /** A finished bake-off: each branch's own line under the verdict, verbatim (as `study verdict` prints
