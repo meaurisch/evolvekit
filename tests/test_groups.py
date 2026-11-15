@@ -795,13 +795,13 @@ def test_cases_of_one_kind_split_in_under_10_percent_on_three_features():
 def test_similarity_is_one_for_alike_cases_and_falls_with_the_rms_distance():
     """Decisions 5 and 14 (A4.3, S11): z standardised by the within-study pooled sd (population form),
     each z² capped at 9, d² = max(0, mean z² - (1/n_a + 1/n_b)), the factor exp(-d²/2). Four cases a
-    study: {9, 9, 11, 11} has sd 1 and the correction is 1/4 + 1/4 = 1/2."""
+    study: {9, 9, 11, 11} has sd 1 and the correction is (1/4 + 1/4) * 8 / (8 - 4) = 1."""
     import math
 
     def study(values, shift=0.0, names=("mean_x",), prefix="a"):
         return {f"{prefix}{i}": {n: v + shift for n in names} for i, v in enumerate(values)}
 
-    base, up = [9.0, 9.0, 11.0, 11.0], math.sqrt(1.5)  # z² = 1.5, d² = 1.5 - 0.5 = 1
+    base, up = [9.0, 9.0, 11.0, 11.0], math.sqrt(2.0)  # z² = 2, d² = 2 - 1 = 1
     a = study(base)
     assert groups.similarity(a, a) == 1.0 and groups.similarity(a, None) == 1.0
     assert groups.similarity(None, a) == 1.0 and groups.similarity({}, a) == 1.0
@@ -811,7 +811,7 @@ def test_similarity_is_one_for_alike_cases_and_falls_with_the_rms_distance():
         pytest.approx(math.exp(-0.5), abs=1e-9), "the same distance in each of three features: the mean, not the sum"
     assert groups.similarity(a, study(base, 0.5, prefix="b")) == 1.0, \
         "z² = 0.25 is less than sampling alone gives two studies of the same kind: no shrink"
-    assert groups.similarity(a, study(base, 4.0, prefix="b")) == pytest.approx(math.exp(-(9 - 0.5) / 2), abs=1e-12), \
+    assert groups.similarity(a, study(base, 4.0, prefix="b")) == pytest.approx(math.exp(-(9 - 1) / 2), abs=1e-12), \
         "four sd apart counts as three (z² capped at 9)"
     # counts are read as log1p, as the clustering reads them
     counts = [math.expm1(v) for v in (1.0, 1.0, 3.0, 3.0)]
@@ -831,21 +831,37 @@ def test_similarity_is_one_for_alike_cases_and_falls_with_the_rms_distance():
         (pytest.approx(math.exp(-0.5), abs=1e-9), [])
 
 
+def test_the_sampling_correction_is_exact_and_plain_where_the_exact_one_is_infinite():
+    """Decision 14: c = (1/n_a + 1/n_b) * N / (N - 4); at N <= 4 (E[1/chi²(N-2)] is infinite) the
+    plain 1/n_a + 1/n_b, so two studies of two cases still get a factor."""
+    import math
+
+    assert groups._correction(4, 4) == pytest.approx(1.0)  # noqa: SLF001
+    assert groups._correction(8, 8) == pytest.approx(0.25 * 16 / 12)  # noqa: SLF001
+    assert groups._correction(3, 5) == pytest.approx((1 / 3 + 1 / 5) * 2)  # noqa: SLF001
+    assert groups._correction(2, 2) == pytest.approx(1.0) and groups._correction(1, 3) == pytest.approx(4 / 3)  # noqa: SLF001
+    # two cases a study: {10, 20} has sd 5; 5 apart is z² = 1 = c, so no shrink; 10 apart is d² = 4 - 1 = 3
+    two = {"a0": {"mean_x": 10.0}, "a1": {"mean_x": 20.0}}
+    assert groups.similarity(two, {"b0": {"mean_x": 15.0}, "b1": {"mean_x": 25.0}}) == 1.0
+    assert groups.similarity(two, {"b0": {"mean_x": 20.0}, "b1": {"mean_x": 30.0}}) == \
+        pytest.approx(math.exp(-1.5), abs=1e-12)
+
+
 @pytest.mark.parametrize("cases, shift, low, high, estimate", [
-    (4, 0.0, 0.79, 0.845, 0.818),
-    (8, 0.0, 0.925, 0.95, 0.937),
-    (12, 0.0, 0.957, 0.972, 0.964),
-    (8, 1.0, 0.525, 0.565, 0.546),
-    (8, 3.0, 0.020, 0.0245, 0.0222),
+    (4, 0.0, 0.87, 0.91, 0.895),
+    (8, 0.0, 0.94, 0.965, 0.953),
+    (12, 0.0, 0.963, 0.978, 0.971),
+    (8, 1.0, 0.545, 0.59, 0.568),
+    (8, 3.0, 0.0215, 0.025, 0.0231),
 ])
-def test_alike_studies_keep_about_82_94_and_96_percent_and_unlike_ones_far_less(cases, shift, low, high, estimate):
+def test_alike_studies_keep_about_90_95_and_97_percent_and_unlike_ones_far_less(cases, shift, low, high, estimate):
     """Decision 14's figures, three features, standard normal cases, the second study shifted by
-    `shift` sd in each: the mean factor at 4 / 8 / 12 cases a study, alike, is about 0.818 / 0.937 /
-    0.964; at 8 cases, 1 sd apart about 0.546, 3 sd about 0.022 (20 000 pairs, two seeds each). Not
-    1.0 for alike studies: d² is clipped at 0, so a pair that happens to lie apart shrinks while a
-    close pair cannot grow. Seeded (`Random(15)`), 2000 pairs, measured 0.808 / 0.937 / 0.963 / 0.541 /
-    0.0220; each band is at least 3 SE (SE of the mean 0.0052 / 0.0023 / 0.0014 / 0.0047 / 0.0003)
-    from both the estimate and the measured mean."""
+    `shift` sd in each, with the exact correction: the mean factor at 4 / 8 / 12 cases a study,
+    alike, is about 0.895 / 0.953 / 0.971; at 8 cases, 1 sd apart about 0.568, 3 sd about 0.0231
+    (20 000 pairs, two seeds each). Not 1.0 for alike studies: d² is clipped at 0, so a pair that
+    happens to lie apart shrinks while a close pair cannot grow. Seeded (`Random(15)`), 2000 pairs,
+    measured 0.887 / 0.952 / 0.970 / 0.563 / 0.0230; each band is at least 3 SE (SE of the mean
+    0.0045 / 0.0021 / 0.0013 / 0.0049 / 0.0003) from both the estimate and the measured mean."""
     import random
 
     rng = random.Random(15)

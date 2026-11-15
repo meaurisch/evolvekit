@@ -2913,14 +2913,15 @@ weight also shrinks when the new study's cases are unlike the winner's: it is
 multiplied by exp(−d²/2). For each case feature both studies have, z² is the
 squared distance between the two studies' average cases in units of the spread
 of the cases within each study (counts on a log scale, as for groups), at most
-9 (three standard deviations); d² is the mean z² less 1/n₁ + 1/n₂ (what chance
-alone puts between two studies of n₁ and n₂ cases of the same kind), and never
+9 (three standard deviations); d² is the mean z² less what chance alone puts
+between two studies of n₁ and n₂ cases of the same kind, (1/n₁ + 1/n₂) · N /
+(N − 4) with N = n₁ + n₂ (just 1/n₁ + 1/n₂ when N is 4 or less), and never
 below 0. A feature with no spread inside either study — a fixed fleet size,
 say — cannot be measured this way and is left out (`study-run.json` names it).
-Measured with three features: two studies of the same kind keep about 81 % of
-the weight on average at four cases each, 94 % at eight and 96 % at twelve (not
+Measured with three features: two studies of the same kind keep about 90 % of
+the weight on average at four cases each, 95 % at eight and 97 % at twelve (not
 all of it: a pair that happens to lie apart shrinks, a close one cannot grow);
-at eight cases, one standard deviation apart in every feature keeps about 54 %,
+at eight cases, one standard deviation apart in every feature keeps about 57 %,
 three about 2 %, which drops the prior. The features are those `study groups`
 keeps for each case (its kept tables); a warm start never solves a case for
 them, so when either study has none kept the weight does not shrink. Each run's

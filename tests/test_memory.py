@@ -385,13 +385,13 @@ def test_the_prior_shrinks_for_unlike_cases(tmp_path):
     won = finished(home, docs, "A", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
     slug, study = _new_study(home)
     new = home.study_root(slug)
-    # four cases a study, sd 1, sampling correction 1/2: a shift of sqrt(1.5) is d² = 1, of 3 is d² = 8.5
+    # four cases a study, sd 1, sampling correction 1: a shift of sqrt(2) is d² = 1, of 3 is d² = 8
     base = [9.0, 9.0, 11.0, 11.0]
 
     def cases(shift, fleet=3.0):
         return {f"c{i}": {"mean_x": v + shift, "mean_fleet": fleet} for i, v in enumerate(base)}
 
-    alike, one_sd, far = cases(0.0), cases(math.sqrt(1.5), fleet=5.0), cases(3.0)
+    alike, one_sd, far = cases(0.0), cases(math.sqrt(2.0), fleet=5.0), cases(3.0)
     seen = []
 
     def features(of_new):

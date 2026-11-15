@@ -400,9 +400,9 @@ def test_a_prior_reaches_tpe_as_its_pseudo_count(tmp_path, monkeypatch):
     monkeypatch.setattr(memory, "build_status", docs.get)
     study = warm_study(home, docs)
     root = home.study_root("winter")
-    # four cases a study, sd 1, correction 1/2: sqrt(1.5) apart is d² = 1; the fixed fleet size is left out
+    # four cases a study, sd 1, correction 1: sqrt(2) apart is d² = 1; the fixed fleet size is left out
     cases = {at: {f"c{i}": {"mean_x": v + shift, "mean_fleet": fleet} for i, v in enumerate([9.0, 9.0, 11.0, 11.0])}
-             for at, shift, fleet in ((won, 0.0, 3.0), (root, math.sqrt(1.5), 5.0))}
+             for at, shift, fleet in ((won, 0.0, 3.0), (root, math.sqrt(2.0), 5.0))}
     monkeypatch.setattr(groups, "study_features", lambda at, _study: cases.get(at))
     weight = memory.priors_for(home, study, slug="winter", document_of=docs.get)["neighbours"]["weight"]
     assert weight == pytest.approx(0.5 * math.exp(-0.5))
