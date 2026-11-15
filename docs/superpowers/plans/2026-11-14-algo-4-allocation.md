@@ -585,6 +585,15 @@ design's text are marked **(departs)** and listed in the PR for the owner.
     [23, 30] %; and every other band ≥ 2 SE from its measured rate.
 12. **The PR goes against `master`**, stacked on A2 (#83) and A3, and says so.
 13. The other open questions as proposed (5, 6, 9–13, 18, 20, 21), with the builder check's notes.
+14. **The similarity factor, after A4.3b's review** (refines decision 5) **(departs)**: (a) a feature
+    with no spread inside either study cannot be standardised and is left out of the distance, with
+    a note naming it (a fixed fleet size must not drop every prior); (b) each feature's z² is capped
+    at 9, so one nearly fixed feature cannot zero the factor; (c) the distance is bias-corrected,
+    `d² = max(0, mean z² − (1/n_a + 1/n_b))` — the expected z² of two studies of the same kind from
+    sampling alone — so alike studies keep their weight at any size (the uncorrected factor was
+    0.67 at four cases a study, 0.86 at eight). The docs state the factor's measured mean for alike
+    studies and at 1 and 3 sd. `study-run.json` records each prior's value, weight, studies_since,
+    similarity and left-out features.
 
 ## Open questions for the builder check
 
