@@ -1444,15 +1444,35 @@ def defaults_comparison(comparison: Any, decision: str, theirs: list[dict[str, A
         runs=runs, levels=list(comparison.levels or []), prior=comparison.prior))
 
 
+def chain_words(name: str) -> str:
+    """Why the line is not measured when the defaults study chose this study's starting point
+    (decision 15c): measured, it says use for no true difference in about 92 %."""
+    return f"{name} chose this study's starting point on these same held-back cases, so they cannot tell"
+
+
+def defaults_line(against: Any, decision: str, *, name: str, reuses: bool) -> dict[str, Any]:
+    """`against_defaults.json` of a `defaults_comparison` result: why not when it is a reason;
+    not measured either when the defaults study (`name`) is in this study's own warm-start chain
+    (`reuses`): its final check chose what is compared on these same cases, so the comparison
+    replays that choice (decision 15c; `reuses` is kept for engineers); else the comparison,
+    `measured: true`, with the `side` compared."""
+    if isinstance(against, str):
+        return {"measured": False, "why": against}
+    if reuses:
+        return {"measured": False, "why": chain_words(name), "reuses": True}
+    return {"measured": True, **against.to_json(), "side": "candidate" if decision == "use" else STARTING_POINT,
+            "reuses": False}
+
+
 def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, decision: str,
                       log: Callable[[str], None]) -> None:
     """A warm-started settings study in a library home (`root.parent.name == "studies"`): its
     final check set against the harness defaults, written to `confirm/final/against_defaults.json`
     -- `defaults_comparison` of the latest study that started from them (`memory.defaults_study`)
-    with `measured: true`, `side` ("candidate" or "starting point"), `reuses` (that study is in
-    this one's warm-start chain, so its cases chose what is compared: `memory.in_warm_chain`) and
+    (`defaults_line`) with `measured: true`, `side` ("candidate" or "starting point") and
     `numbers_from` `{study, name, run, cases, seeds}`; else `{"measured": false, "why": ...}` --
-    also when that study ran at another time per case or on another harness version (decision 15).
+    also when that study ran at another time per case or on another harness version, or is in
+    this one's warm-start chain (`memory.in_warm_chain`, `reuses: true`) (decision 15).
     Information beside the answer: it never changes `final`; any failure, the write included, is
     logged and is "not measured" (or no file), never raised."""
     if study.warm is None or study.code is not None or root.parent.name != "studies":
@@ -1490,15 +1510,11 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
                     raise ValueError(f"{results} holds no list of runs")
                 against = defaults_comparison(comparison, decision, theirs, key_of_ours=key_in(root),
                                               key_of_theirs=key_in(other.root))
-                if isinstance(against, str):
-                    document = {"measured": False, "why": against}
-                else:
-                    document = {"measured": True, **against.to_json(),
-                                "side": "candidate" if decision == "use" else STARTING_POINT,
-                                # In the study's own chain: those cases chose what is compared (decision 15c).
-                                "reuses": memory.in_warm_chain(home, study, other.slug),
-                                "numbers_from": {"study": other.slug, "name": other.name, "run": other.run,
-                                                 "cases": len(against.instances), "seeds": len(against.seeds)}}
+                document = defaults_line(against, decision, name=other.name,
+                                         reuses=memory.in_warm_chain(home, study, other.slug))
+                if document["measured"]:
+                    document["numbers_from"] = {"study": other.slug, "name": other.name, "run": other.run,
+                                                "cases": len(against.instances), "seeds": len(against.seeds)}
     except Exception as exc:  # noqa: BLE001 - a line beside the answer: the final check's answer stands
         log(f"final check: {DEFAULTS_LABEL}: the other studies could not be read: {type(exc).__name__}: {exc}")
         document = {"measured": False, "why": UNREADABLE}
@@ -1510,8 +1526,7 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
     if document["measured"]:
         numbers = document["numbers_from"]
         log(f"final check: {DEFAULTS_LABEL}: {numbers['study']}'s runs on {numbers['cases']} held-back cases, "
-            f"{numbers['seeds']} runs each, read once, for information"
-            + ("; that study chose what is compared on these cases" if document["reuses"] else ""))
+            f"{numbers['seeds']} runs each, read once, for information")
     else:
         log(f"final check: {DEFAULTS_LABEL}: not measured ({document['why']})")
 

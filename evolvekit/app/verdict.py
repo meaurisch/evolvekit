@@ -876,8 +876,10 @@ def against_defaults_of(run_dir: Path, study: Any, goal: dict[str, Any], final: 
     held-back runs of the side the verdict names (`side`: the new settings on use, else the
     starting point) set against the runs of the latest study that started from the harness
     defaults, in `_final_words`' words on that comparison and by `decision_of` -- `{"measured":
-    true, "decision", "chance", "range90_pct", "mean_pct", "line", "side", "note", "reuses", "from"}` -- or
-    `{"measured": false, "why", "line"}` when it could not be measured. Information about the
+    true, "decision", "chance", "range90_pct", "mean_pct", "line", "side", "note", "from"}` -- or
+    `{"measured": false, "why", "line"}` when it could not be measured (also when the defaults
+    study chose this study's starting point on the same cases, `execute.defaults_line`: no
+    number is shown there, decision 15c). Information about the
     same runs: it never changes the study's `decision`, `line` or `advice`."""
     from evolvekit.app import jobs
 
@@ -890,7 +892,7 @@ def against_defaults_of(run_dir: Path, study: Any, goal: dict[str, Any], final: 
     def not_measured(why: str) -> dict[str, Any]:
         return {"measured": False, "why": why, "line": f"Against {DEFAULTS_WORDS}: not measured ({why})."}
 
-    if not data.get("measured"):
+    if not data.get("measured") or data.get("reuses") is True:
         return not_measured(str(data.get("why") or "its comparison could not be read"))
     try:
         side = str(data["candidates"][0])
@@ -914,11 +916,7 @@ def against_defaults_of(run_dir: Path, study: Any, goal: dict[str, Any], final: 
             "side": whose,
             "note": (f"{whose[0].upper() + whose[1:]} set against the runs of {name}, a study that "
                      f"started from {DEFAULTS_WORDS}, on the same held-back cases and runs: information about the "
-                     "same runs, read once; it does not change what this study recommends."
-                     + (f" {name} chose this study's starting point on these same held-back cases, so the comparison "
-                        "reuses the cases that chose what is compared, and leans toward “use”."
-                        if data.get("reuses") else "")),
-            "reuses": data.get("reuses") is True,
+                     "same runs, read once; it does not change what this study recommends."),
             "from": numbers}
 
 

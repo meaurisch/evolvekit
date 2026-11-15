@@ -1157,14 +1157,15 @@ def test_a_warm_started_verdict_adds_the_line_against_the_defaults(tmp_path, cap
     assert got["from"] == {"study": summer.name, "name": "Summer", "run": "20260101-000000", "cases": 3, "seeds": 3}
     assert got["side"] == ("the new settings" if decision == "use" else "the starting point")
     assert "does not change what this study recommends" in got["note"] and "Summer" in got["note"]
-    assert got["reuses"] is False and "leans toward" not in got["note"], "Autumn did not start from Summer's winner"
+    assert "reuses" not in got and "chose this study's starting point" not in got["note"], \
+        "Autumn did not start from Summer's winner"
     assert {k: v[k] for k in ("decision", "line", "advice")} == {k: plain[k] for k in ("decision", "line", "advice")}, \
         "information about the same runs: the study's own answer is unchanged"
     if got["decision"] == "use":
         assert "than the harness defaults" in got["line"] and "your starting point" not in got["line"]
     saved = json.loads((run_dir / "confirm" / "final" / "against_defaults.json").read_text(encoding="utf-8"))
     assert saved["label"] == "against the harness defaults" and saved["looks"] == 1 and saved["baseline_id"] == "defaults"
-    assert saved["numbers_from"] == got["from"]
+    assert saved["numbers_from"] == got["from"] and saved["reuses"] is False
     # Wherever the verdict is read, the line is the document's.
     report = render_report(v)
     assert report.index(v["advice"]) < report.index(got["line"]) < report.index("## Held-back cases")
@@ -1248,22 +1249,28 @@ def test_a_study_that_is_not_warm_started_has_no_line_against_the_defaults(tmp_p
     assert "against_defaults" not in v and not (run_dir / "confirm" / "final" / "against_defaults.json").exists()
 
 
-@pytest.mark.parametrize("start", ["summer", "spring"])
-def test_in_the_warm_studys_own_chain_the_line_says_it_reuses_the_cases_that_chose(tmp_path, start):
-    """Decision 15c: Autumn started from Summer's winner -- directly, or through Spring, which did --
-    on the same held-back cases: the line is kept and the note says it leans toward use."""
+@pytest.mark.parametrize("through", [False, True])
+def test_in_the_warm_studys_own_chain_the_line_against_the_defaults_is_not_measured(tmp_path, through):
+    """Decision 15c (revised): Autumn started from the defaults study's winner -- directly, or
+    through a study warm-started from it -- on the same held-back cases, so the line would replay
+    that choice (about 92 % use for no true difference): not measured, by the study's display
+    name, no number; `reuses` is kept in the file for engineers."""
     from evolvekit.app.store import Home
 
     home = Home(tmp_path / "home")
-    summer = _library_study(home, "Summer")
+    summer = _library_study(home, "Depot summer")
     _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0], decision="use")
-    if start == "spring":
-        spring = _library_study(home, "Spring", warm="summer")
+    start = summer.name
+    if through:
+        spring = _library_study(home, "Depot spring", warm=summer.name)
         _checked(spring, "2026-01-01T06:00:00+00:00", base=[49.0, 59.0, 69.0], best=[48.0, 58.0, 68.0],
                  decision="use")
+        start = spring.name
     autumn = _library_study(home, "Autumn", warm=start)
     run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0])
-    got = _against(autumn, run_dir, ours, "keep")["against_defaults"]
-    assert got["measured"] is True and got["reuses"] is True and got["from"]["name"] == "Summer"
-    assert got["note"].endswith("Summer chose this study's starting point on these same held-back cases, so the "
-                                "comparison reuses the cases that chose what is compared, and leans toward “use”.")
+    v = _against(autumn, run_dir, ours, "keep")
+    reason = "Depot summer chose this study's starting point on these same held-back cases, so they cannot tell"
+    assert v["against_defaults"] == {"measured": False, "why": reason,
+                                     "line": f"Against the harness defaults: not measured ({reason})."}
+    saved = json.loads((run_dir / "confirm" / "final" / "against_defaults.json").read_text(encoding="utf-8"))
+    assert saved == {"measured": False, "why": reason, "reuses": True}

@@ -2964,11 +2964,13 @@ held-back cases, runs noisier than cases), it says use in 6.2 % ± 0.24
 overall, 14.9 % ± 1.2 after a main *use* and 5.4 % ± 0.24 otherwise. When
 the defaults study is in the warm study's own chain (its winner, or the winner
 of a study warm-started from it, is the starting point) on the same held-back
-cases -- the usual path -- the comparison reuses the cases that chose what is
-compared: the line is kept and its note says it leans toward *use*. Measured
-on that path (20 000 seeded pairs with no true difference; the 1711 whose
-defaults study said use), it says use in 91.9 % ± 0.66: it replays the earlier
-choice and is no independent evidence. The defaults study must also have run
+cases -- the usual path -- the comparison would reuse the cases that chose
+what is compared, so the line says "not measured (Depot summer chose this
+study's starting point on these same held-back cases, so they cannot tell)"
+and shows no number; `against_defaults.json` keeps `reuses: true`. Measured on
+that path (20 000 seeded pairs with no true difference; the 1711 whose
+defaults study said use), such a line would say use in 91.9 % ± 0.66: it
+would replay the earlier choice. The defaults study must also have run
 at the same time per case and on the same harness version, else the line
 says "not measured"; nothing in it can cost the study's answer (any failure
 is logged and is "not measured"). The

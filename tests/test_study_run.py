@@ -895,18 +895,20 @@ def _chain_line_null_rates(studies: int) -> dict[str, tuple[float, float, int]]:
     takes W) the warm study, on the same cases, checks a new candidate C against W -- W's runs at
     a seed are the very runs the defaults study measured (a run repeats at its seed) -- through
     `_extend_check` again, then the line: `execute.defaults_comparison` of the side that verdict
-    names against the defaults study's own results (its D runs, every seed it ran), read once.
-    Returns {"defaults use", "line", "line after use", "line after no use"} (rate, SE, count); the
-    line's counts are of the pairs whose defaults study said use."""
+    names against the defaults study's own results (its D runs, every seed it ran), read once --
+    what the line would say -- and `execute.defaults_line`, what the product writes there.
+    Returns {"defaults use", "line", "line after use", "line after no use", "measured"} (rate, SE,
+    count); the line's counts are of the pairs whose defaults study said use."""
     from evolvekit.confirm import decision_of
-    from evolvekit.harness.execute import defaults_comparison
+    from evolvekit.harness.execute import defaults_comparison, defaults_line
 
     case_sd, run_sd = 0.005, 0.02
     rng = random.Random(20261115)
     study = SimpleNamespace(test=_NULL_NAMES)
     plan = SimpleNamespace(check_seeds=3, workers=1, run_s=1.0)
     job = SimpleNamespace(update=lambda **fields: None)
-    counts = {"defaults use": [0, 0], "line": [0, 0], "line after use": [0, 0], "line after no use": [0, 0]}
+    counts = {"defaults use": [0, 0], "line": [0, 0], "line after use": [0, 0], "line after no use": [0, 0],
+              "measured": [0, 0]}
 
     def value(effect, noise):
         return lambda i, s: 100 * math.exp(effect[i] + noise[i][s])
@@ -934,6 +936,9 @@ def _chain_line_null_rates(studies: int) -> dict[str, tuple[float, float, int]]:
         for key in ("line", "line after use" if decision == "use" else "line after no use"):
             counts[key][0] += line
             counts[key][1] += 1
+        # What the product writes on this path: not measured, never the replayed number.
+        counts["measured"][0] += defaults_line(against, decision, name="Summer", reuses=True)["measured"]
+        counts["measured"][1] += 1
     return _rates(counts)
 
 
@@ -1022,26 +1027,30 @@ def test_the_line_against_the_defaults_says_use_for_no_difference_in_about_6_per
     assert 0.046 <= rates["line after no use"][0] <= 0.062
 
 
-def test_in_the_warm_studys_own_chain_the_line_says_use_for_no_difference_in_about_92_percent(capsys):
-    """Decision 15c: the defaults study chose the warm study's starting point on the same cases
-    and runs, so the line replays that choice. Measured, 3000 pairs: the defaults study said use in
+def test_in_the_warm_studys_own_chain_the_line_would_say_use_in_about_92_percent_so_it_is_not_measured(capsys):
+    """Decision 15c (revised): the defaults study chose the warm study's starting point on the same
+    cases and runs, so a line would replay that choice; the product writes "not measured" on every
+    such pair (`execute.defaults_line`). What the line would say, measured, 3000 pairs: the defaults study said use in
     8.97 % +- 0.52; then the line says use in 91.45 % +- 1.70 (269), 92.34 % +- 1.65 after the warm
     study's keep (261). 20 000 pairs: 91.88 % +- 0.66 (1711). Asserts the line in [80, 98] % and
     after a keep in [85, 98] % (every bound at least 3.4 SE from the measured rate)."""
     rates = _chain_line_null_rates(3000)
     _say_rates(rates, capsys)
+    assert rates["measured"][0] == 0 and rates["measured"][2] == rates["line"][2] > 0, "never a number there"
     assert 0.80 <= rates["line"][0] <= 0.98
     assert 0.85 <= rates["line after no use"][0] <= 0.98
 
 
 @pytest.mark.slow
-def test_in_the_warm_studys_own_chain_the_line_says_use_for_no_difference_in_about_92_percent_on_20000(capsys):
+def test_in_the_warm_studys_own_chain_the_line_would_say_use_in_about_92_percent_so_it_is_not_measured_on_20000(
+        capsys):
     """The same on 20 000 pairs: measured the defaults study's use 8.55 % +- 0.20; the line 91.88 %
     +- 0.66 (1711 pairs), 93.17 % +- 0.62 after a keep (1654), 54.39 % +- 6.60 after a use (57).
     Asserts the line in [89, 94.5] %, after a keep in [90.5, 95.5] %, after a use in [25, 85] %
     (every bound at least 3.8 SE from the measured rate)."""
     rates = _chain_line_null_rates(20_000)
     _say_rates(rates, capsys)
+    assert rates["measured"][0] == 0 and rates["measured"][2] == rates["line"][2] > 0, "never a number there"
     assert 0.89 <= rates["line"][0] <= 0.945
     assert 0.905 <= rates["line after no use"][0] <= 0.955
     assert 0.25 <= rates["line after use"][0] <= 0.85
