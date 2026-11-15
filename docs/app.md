@@ -230,7 +230,10 @@ study) and beside each application in *Applications*. It lists the finished
 studies on that application, each with its own verdict line, and then a table
 with a row for every setting that was tuned: *Tuned in* (how many studies),
 *How strongly it went with the measure (0 to 1, not proof)* (a bar and a figure such as
-`0.42 · from 2 studies`, or *not enough tries to tell*), *The searches leaned
+`0.42 · from 2 studies`, or *not enough tries to tell*, or, when the studies
+that measured it could not tell it from chance taken together, *the study
+could not tell it from chance* / *together, the 3 studies could not tell it
+from chance*), *The searches leaned
 to* (each setting's median of the studies' search-best values, for a choice
 the value most of them had and none on a tie, as `4 (search, not checked)`),
 *Winning values* (`12 in Depot spring (1 Oct)`, or *none yet*) and *Winners
@@ -239,7 +242,11 @@ setting's values went with the measure in the searches, and a sentence under
 the table says so: *0 means the setting did not go with the measure in the
 searches, 1 that it went with it every time. It comes from the searches, not
 from final checks: it says which settings are worth tuning, not which value
-wins.* It is not proof of anything, and the page claims no gain of its own;
+wins. A strength is shown only when the studies that measured it, taken
+together, could tell it from chance (under 10 %).* (A setting that does nothing
+is shown after three studies in about 8 %; [docs/reference.md](reference.md)
+gives the measured rates.)
+It is not proof of anything, and the page claims no gain of its own;
 where the searches leaned is a search figure, never a winner. A winning value comes only from a study whose
 final check said *use it*. What could not be read across (a setting the
 application no longer has, or one whose meaning changed) is listed under
@@ -721,7 +728,8 @@ the first thing Set up lacks as `{"step", "key", "text"}`, or `null`),
 `/api/harnesses/{id}` (its `learned`: per setting `tuned_in`, `importance`,
 `importance_n`, `importance_of`, `importance_p`, `winners`, `direction` and
 `leaned` — `importance_of` the studies with a strength on at least five
-combinations, `importance_p` their permutation p's (`importance.p`) combined
+combinations, `importance_p` their permutation p's (the status document's
+`importance.p`, from `importance.shuffles`, 999, shuffles within each round) combined
 by Fisher's rule (an item without one counts as 1), and `importance` their
 mean |ρ| over `importance_n` of them only when `importance_p` is under 0.1,
 else `null` with `importance_n` 0 — `leaned` the median of the

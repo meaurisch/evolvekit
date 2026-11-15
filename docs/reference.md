@@ -88,7 +88,7 @@ live run is built from:
   | `type` | When | Carries |
   |---|---|---|
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
-  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned` and `plateau` (whether the generation was planned on a plateau; a resumed run reads it back to space its big steps, and an event from before it was recorded falls back to replaying the stop policy); then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force); and what a study re-plans from: `round_best` (the best's fitness as the generation measured it, before a re-evaluation pooled it; `best_fitness` is after), `breed_s` (the wall seconds of writing the generation's children, 0 for the seed and for children adopted from `pending.json`), `adopted` (`true` when the generation's children were adopted from `pending.json`, written by an earlier session: `replan` leaves it out of the AI's seconds per child), `noise_sd` (the noise sd the stop policy judged it with), `tpe_ratio` (`null` until the TPE reading fills it) and `breadth_at_ceiling` (whether `adaptive_children` ended the generation at its `max`; `null` without it). An event from before these fields reads as a generation with no writing time and no noise, its best `best_fitness` |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned` and `plateau` (whether the generation was planned on a plateau; a resumed run reads it back to space its big steps, and an event from before it was recorded falls back to replaying the stop policy); then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force); and what a study re-plans from: `round_best` (the best's fitness as the generation measured it, before a re-evaluation pooled it; `best_fitness` is after), `breed_s` (the wall seconds of writing the generation's children, 0 for the seed and for children adopted from `pending.json`), `adopted` (`true` when the generation's children were adopted from `pending.json`, written by an earlier session: `replan` leaves it out of the AI's seconds per child), `noise_sd` (the noise sd the stop policy judged it with), `tpe_ratio` (the largest log density ratio among the generation's TPE proposals, `null` without one; recorded, not read), `big_steps` (its children planned as big steps: what a settled search waits for under `stop.min_big_steps`) and `breadth_at_ceiling` (whether `adaptive_children` ended the generation at its `max`; `null` without it). An event from before these fields reads as a generation with no writing time and no noise, its best `best_fitness` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
@@ -2462,7 +2462,7 @@ stops `wait` and `watch`, never the run.
   starts no round the longest of the last two would not let finish, so after
   a slow round it may run one round fewer than `rounds_left`, which counts the
   median round.
-  **A search that has settled ends early** (`plan.converged`, read from the
+  **A search that has settled ends early** (`harness/plan.py`'s `converged`, read from the
   round events after every round, so a resumed run answers as the
   uninterrupted one would): the bar is the starting point's best; a round
   whose best beats it by more than the noise sd (`max(1e-6, 1e-9·|bar|,
@@ -2882,7 +2882,7 @@ page says the studies *could not tell it from chance*, and `--warm` ranks the
 setting after the ones with a strength, in the harness's order. A setting that
 does nothing is shown after three studies in about 8 % of cases (7.8 % ± 0.4
 over two runs of 2000); counting only the studies that beat 0.1 on their own
-(the design's first rule) would show it in about 25 % (24.8 % ± 0.7), at a
+would show it in about 25 % (24.8 % ± 0.7), at a
 strength (0.74) as high as a real one's.
 The strength runs from 0 (the
 setting did not go with the measure in the searches) to 1 (it went with it
@@ -2990,7 +2990,7 @@ tags that name the same folder, `Big` and `big`, are one group, and cases
 without a tag are `untagged`):
 
 ```
-python -m evolvekit study groups depot-a            # 2 or 3 groups, whichever k-means likes best
+python -m evolvekit study groups depot-a            # one group, or 2 or 3 if the cases separate clearly
 python -m evolvekit study groups depot-a --k 3      # or ask for 3 (2 to 5)
 ```
 
@@ -3038,7 +3038,14 @@ lists what joined it; for groups by features the rule is then fitted again
 over the merged groups and the held-back cases are placed by it again.
 `study groups` writes
 `groups.json` (the first time it solves each case once to read its tables;
-it refuses while a run of the study is going). Then `per_group: true` in
+it refuses while a run of the study is going) at `"format": 2`: beside
+`method`, `k`, `silhouette`, `groups` and `features` (a value that is not a
+number is `null`), it records `assigned` (how the held-back cases were placed:
+`stump`, `nearest`, `tags` or `one`), `stump` (the rule), `accuracy` (the
+rule's agreement on the cases to learn from and on the held-back cases) and
+`min_silhouette` (0.5); [docs/app.md](app.md) lists every key. A study's
+format-1 file grouped by features is out of date and is computed again; one
+grouped by tags means the same and is read as it is. Then `per_group: true` in
 `study.yaml` learns settings for each group:
 
 ```yaml
