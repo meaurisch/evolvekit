@@ -11,7 +11,8 @@ searches ("on the cases they learned from"); only a verdict claims an improvemen
 `warm_start` gives a new study the latest `use` study's winning values as its starting point
 (and, after three settings studies, tunes the recommended number of settings that went most
 with the measure); `priors_for` gives a warm-started run a prior around each winner whose
-weight halves with every study since it (design §6.3: a prior never excludes a value in range).
+weight halves with every later study that tuned that setting and shrinks when the new study's
+cases are unlike the winner's (design §6.3: a prior never excludes a value in range).
 """
 
 from __future__ import annotations
@@ -433,30 +434,55 @@ def _study_harness(home: Any, study: Study, finished: list[Finished]) -> Harness
     return current_harness(home, study.harness_id, finished)
 
 
+def _studies_since(finished: list[Finished], winner: Finished, name: str, slug: str | None) -> int:
+    """The finished studies after `winner` that tuned `name`: settings studies (or settings and
+    data) whose search ran and that had it among their tuned settings; never the winner's own, nor
+    the new study's (`slug`), which the `1 +` of the weight counts once. A code study, a bake-off,
+    a per-group study or a search that did not run learned nothing about the setting."""
+    return sum(1 for f in finished
+               if f.finished_at > winner.finished_at and f.slug not in (winner.slug, slug)
+               and f.kind in ("settings", "both") and not f.not_run and name in f.study.tuned_settings())
+
+
 def priors_for(home: Any, study: Study, *, slug: str | None = None,
-               document_of: Callable[[Path], dict] | None = None) -> dict[str, dict]:
-    """`{name: {"value", "weight"}}` for each setting `study` tunes that a `use` study won: the
-    latest winner, at weight `0.5 ** k`, `k` being 1 + the other finished studies on the harness
-    after the winner's (the new study is the first since, counted once: `slug`, the study's own
-    folder name, is never counted again when it is run again). Dropped below `MIN_PRIOR_WEIGHT`,
-    and when the value is outside the study's range."""
+               document_of: Callable[[Path], dict] | None = None,
+               features: Callable[[Path, Study], dict | None] | None = None) -> dict[str, dict]:
+    """`{name: {"value", "weight", "studies_since", "similarity"}}` for each setting `study` tunes
+    that a `use` study won: the latest winner, at weight `0.5 ** (1 + k) * similarity`. `k`
+    (`studies_since`, `_studies_since`) counts the later finished studies that tuned the setting;
+    the new study is the first since, counted once (`slug`, its own folder name, is never counted
+    again when it is run again). `similarity` (`groups.similarity`, rounded to three places in the
+    result) compares the cases of the winner's study with the new study's, from the features its
+    kept tables give (`features`, `groups.study_features` when None: never a solve); 1.0 when
+    either has none, or without a `slug`. Dropped below `MIN_PRIOR_WEIGHT`, and when the value is
+    outside the study's range. `compile_study` reads `value` and `weight`."""
+    from evolvekit.harness import groups
+
+    read = features or groups.study_features
     finished = finished_studies(home, study.harness_id)
     facts = learned(home, study.harness_id, document_of=document_of)["settings"]
     harness = _study_harness(home, study, finished)
     if harness is None:
         return {}
-    at = {f.slug: f.finished_at for f in finished}
+    by_slug = {f.slug: f for f in finished}
+    new = read(Path(home.studies_dir) / slug, study) if slug else None
+    factors: dict[str, float] = {}
     priors: dict[str, dict] = {}
     for name in study.tuned_settings():
         entry, setting = facts.get(name), harness.settings.get(name)
         if not entry or not entry["winners"] or setting is None:
             continue
-        winner = entry["winners"][-1]  # `learned` lists them oldest first
-        won = at.get(winner["study"])
-        if won is None:
+        winner = by_slug.get(entry["winners"][-1]["study"])  # `learned` lists them oldest first
+        if winner is None:
             continue
-        weight = 0.5 ** (1 + sum(1 for f in finished if f.finished_at > won and f.slug not in (winner["study"], slug)))
-        if weight < MIN_PRIOR_WEIGHT or not _fits(setting.parameter, study.settings[name], winner["value"]):
+        value = entry["winners"][-1]["value"]
+        k = _studies_since(finished, winner, name, slug)
+        if winner.slug not in factors:
+            factors[winner.slug] = groups.similarity(read(winner.root, winner.study), new) if new else 1.0
+        factor = factors[winner.slug]
+        weight = 0.5 ** (1 + k) * factor
+        if weight < MIN_PRIOR_WEIGHT or not _fits(setting.parameter, study.settings[name], value):
             continue
-        priors[name] = {"value": setting.parameter.coerce(winner["value"]), "weight": weight}
+        priors[name] = {"value": setting.parameter.coerce(value), "weight": weight, "studies_since": k,
+                        "similarity": round(factor, 3)}
     return priors

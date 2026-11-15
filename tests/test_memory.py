@@ -331,3 +331,76 @@ def test_a_study_whose_search_did_not_run_is_listed_and_adds_up_nothing(tmp_path
     assert idle["line"].startswith("The search did not run") and idle["not_run"] is True
     n = got["settings"]["neighbours"]
     assert n["tuned_in"] == 1 and n["importance"] == pytest.approx(0.6) and n["leaned"] == 4
+
+
+# -- the prior: what it decays for, and how alike the cases are (A4.3, S11) ----
+
+
+def _tunes_only(root, *names) -> None:
+    """The study (and so its runs, which keep no copy here) tunes `names` alone; the rest at their defaults."""
+    study = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    study["vary"]["settings"] = {n: ("tune" if n in names else "default") for n in study["vary"]["settings"]}
+    (root / "study.yaml").write_text(yaml.safe_dump(study, sort_keys=False), encoding="utf-8")
+
+
+def _job(root, **changes) -> None:
+    path = root / "runs" / "r1" / "job.json"
+    job = json.loads(path.read_text(encoding="utf-8"))
+    job.update(changes)
+    path.write_text(json.dumps(job), encoding="utf-8")
+
+
+def _new_study(home, name="Winter"):
+    slug = home.create_study("demo-tour", "tune", name)
+    return slug, load_study(home.study_root(slug))
+
+
+def test_the_prior_decays_only_for_settings_studies_that_tuned_the_setting(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "A", decision="use", best={"neighbours": 12, "restart_after": 13000}, finished_at="2026-10-01")
+    b = finished(home, docs, "B", decision="keep", best={"restart_after": 9000}, finished_at="2026-10-08")
+    _tunes_only(b, "restart_after")
+    finished(home, docs, "C", decision="keep", best={"neighbours": 30}, finished_at="2026-10-15", template="faster")
+    d = finished(home, docs, "D", decision="keep", best={"neighbours": 25}, finished_at="2026-10-22")
+    _job(d, bakeoff=[{"ref": "a"}])
+    e = finished(home, docs, "E", decision="keep", best={"neighbours": 8}, finished_at="2026-10-29")
+    _job(e, search={"generations": 0, "aborted": False, "stop_reason": "time limit: …"},
+         final={"skipped": "the search did not run", "not_run": True})
+    assert [(s["name"], s["kind"], s["not_run"]) for s in memory.learned(home, "demo-tour", document_of=docs.get)["studies"]] \
+        == [("A", "settings", False), ("B", "settings", False), ("C", "code", False), ("D", "bakeoff", False),
+            ("E", "settings", True)]
+    slug, study = _new_study(home)
+    got = memory.priors_for(home, study, slug=slug, document_of=docs.get)
+    assert got == {"neighbours": {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0},
+                   "restart_after": {"value": 13000, "weight": 0.25, "studies_since": 1, "similarity": 1.0}}, \
+        "only B tuned restart_after since A; C is a code study, D a bake-off, E did not search"
+
+
+def test_the_prior_shrinks_for_unlike_cases(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    won = finished(home, docs, "A", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
+    slug, study = _new_study(home)
+    new = home.study_root(slug)
+    alike = {"c1": {"mean_x": 10.0}, "c2": {"mean_x": 20.0}}
+    one_sd = {"c3": {"mean_x": 15.0}, "c4": {"mean_x": 25.0}}
+    far = {"c3": {"mean_x": 25.0}, "c4": {"mean_x": 35.0}}  # three sd: exp(-4.5) * 0.5 is under 0.05
+    seen = []
+
+    def features(of_new):
+        def read(root, s):
+            seen.append(Path(root))
+            return of_new if Path(root) == new else (alike if Path(root) == won else None)
+        return read
+
+    def prior(of_new):
+        return memory.priors_for(home, study, slug=slug, document_of=docs.get, features=features(of_new)).get("neighbours")
+
+    assert prior(alike) == {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0}
+    assert set(seen) == {won, new}, "the winner's cases against the new study's"
+    shrunk = prior(one_sd)
+    assert shrunk["weight"] == pytest.approx(0.5 * math.exp(-0.5)) and shrunk["similarity"] == round(math.exp(-0.5), 3)
+    assert prior(None) == {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0}, \
+        "no cases kept on one side: no shrink"
+    assert prior(far) is None, "a factor that takes the weight under 0.05 drops the prior"
+    assert memory.priors_for(home, study, document_of=docs.get)["neighbours"]["similarity"] == 1.0, \
+        "without the study's folder name there is nothing to compare: no shrink"

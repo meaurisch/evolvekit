@@ -67,7 +67,7 @@ __all__ = [
     "SolveFailed", "COUNT_PREFIX", "FORMAT", "GROUPS", "KS", "MIN_HELD_BACK", "MIN_SILHOUETTE", "MIN_TRAINING",
     "RESTARTS", "TAGS", "TAG_MAX",
     "assign", "case_tables", "compute", "features_of", "kmeans", "read_groups", "read_tag", "rule_lines", "rule_stump",
-    "silhouette", "cache_stump", "stump_of",
+    "silhouette", "similarity", "study_features", "cache_stump", "stump_of",
     "merge_small_groups", "slug_of",
     "standardise", "transformed", "write_tag",
 ]
@@ -173,11 +173,8 @@ def case_tables(root: Path, case: str, *, say: Callable[[str], None] | None = No
     except OSError:
         raise HarnessError(f"{case}: the case file is not there") from None
     stamp = [stat.st_size, stat.st_mtime_ns, study.application_path]
-    try:
-        if target.is_file() and json.loads(stamp_file.read_text(encoding="utf-8")) == stamp:
-            return target
-    except (OSError, ValueError):
-        pass
+    if _cached(root, study, case) is not None:
+        return target
     if say is not None:
         say(f"solving {Path(case).stem} for its features …")
     # The case as it is: no data change, no rule; one folder per solve, so two never meet.
@@ -201,6 +198,22 @@ def case_tables(root: Path, case: str, *, say: Callable[[str], None] | None = No
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return target
+
+
+def _cached(root: Path, study: Study, case: str) -> Path | None:
+    """The case's kept tables while their stamp still matches the case file and the application
+    (as `case_tables` checks it); `None` otherwise. Never solves."""
+    name = Path(case).name
+    folder = Path(root) / FOLDER / "tables"
+    target, stamp_file = folder / f"{name}.sqlite", folder / f"{name}.json"
+    try:
+        stat = (Path(root) / case).stat()
+        if target.is_file() and json.loads(stamp_file.read_text(encoding="utf-8")) == \
+                [stat.st_size, stat.st_mtime_ns, study.application_path]:
+            return target
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def _defaults(harness: Harness) -> dict[str, tuple[str, str]]:
@@ -244,6 +257,56 @@ def features_of(root: Path, case: str, *, tables: Callable[[Path, str], Path] = 
         return out
     finally:
         db.close()
+
+
+def study_features(root: Path, study: Study) -> dict[str, dict[str, float]] | None:
+    """Each case's features (cases to learn from and held-back cases) from the tables `study groups`
+    kept for it (`<study>/groups/tables/`, while their stamp matches); `None` when any case has none
+    kept, or its features cannot be read. Never solves a case (a warm start reads, it does not run)."""
+    root = Path(root)
+    cases = list(study.training) + list(study.test)
+    if not cases:
+        return None
+    kept = {case: _cached(root, study, case) for case in cases}
+    if any(path is None for path in kept.values()):
+        return None
+    try:
+        return {case: features_of(root, case, tables=lambda _root, c: kept[c]) for case in cases}
+    except (HarnessError, OSError, sqlite3.Error, ValueError):
+        return None
+
+
+def similarity(a: dict[str, dict[str, float]] | None, b: dict[str, dict[str, float]] | None) -> float:
+    """How alike two studies' cases are, in (0, 1]: `exp(-d² / 2)`, where `d²` is the mean over the
+    features every case of both has as a finite number (`transformed`, so counts on a log scale) of
+    `((centre_a - centre_b) / sd)²`, `sd` the within-study pooled sd (population form: each case's
+    deviation from its own study's centre, decision 5 -- an sd over both studies would contain the
+    shift itself and cap the distance at 2). The mean, not the sum, so the factor does not fall with
+    the number of features. A feature the same in every case of both is left out; one with no
+    spread inside either study but different centres puts them infinitely apart (0.0). 1.0 when
+    either side is `None` or empty, or no feature is left."""
+    if not a or not b:
+        return 1.0
+    rows_a = [transformed(row) for row in a.values() if isinstance(row, dict)]
+    rows_b = [transformed(row) for row in b.values() if isinstance(row, dict)]
+    if len(rows_a) != len(a) or len(rows_b) != len(b):
+        return 1.0
+    names = [n for n in rows_a[0] if all(_finite(row.get(n)) for row in rows_a + rows_b)]
+    z2: list[float] = []
+    for name in names:
+        xs, ys = [float(row[name]) for row in rows_a], [float(row[name]) for row in rows_b]
+        mean_a, mean_b = sum(xs) / len(xs), sum(ys) / len(ys)
+        within = (sum((x - mean_a) ** 2 for x in xs) + sum((y - mean_b) ** 2 for y in ys)) / (len(xs) + len(ys))
+        sd, gap = math.sqrt(within), abs(mean_a - mean_b)
+        scale = max(1.0, abs(mean_a), abs(mean_b))
+        if sd <= 1e-12 * scale:
+            if gap <= 1e-12 * scale:
+                continue  # the same value in every case of both: it tells nothing
+            return 0.0
+        z2.append((gap / sd) ** 2)
+    if not z2:
+        return 1.0
+    return math.exp(-sum(z2) / len(z2) / 2)
 
 
 # ---------------------------------------------------------------------------

@@ -2384,7 +2384,7 @@ Every command:
 | Command | Does |
 |---|---|
 | `doctor [--app PATH] [--json]` | is this computer ready: Python, evolvekit, the library home, the app, the AI provider, the harnesses |
-| `study new NAME --harness ID [--template T] [--app PATH] [--dir DIR] [--warm] [--json]` | a new study in the library home; prints its short name (`--json`: `{"slug", "root"}`); `--dir` writes a standalone folder instead; `--warm`: start from what finished studies on this harness learned: the latest `use` winner's values as the starting point, and a prior around them for the search that halves with every study since |
+| `study new NAME --harness ID [--template T] [--app PATH] [--dir DIR] [--warm] [--json]` | a new study in the library home; prints its short name (`--json`: `{"slug", "root"}`); `--dir` writes a standalone folder instead; `--warm`: start from what finished studies on this harness learned: the latest `use` winner's values as the starting point, and a prior around them for the search that halves with every later study that tuned the setting and shrinks when the cases differ |
 | `study application SLUG PATH` / `study application SLUG --detect` (`--json`) | where the study's application is, checked by the harness; or the ones found on this computer |
 | `study code SLUG [--repo PATH] [--from REF] [--brief TEXT] [--json]` | a code study: where the source is (default: the harness's own folder, while it is there), the commit it starts from (`working`: the files as they are), what to improve; exit 1 when the folder or the ref is not found |
 | `study list [--json]` | every study in the library home: its name, harness and the state line its card shows (`draft · step 3 of 7`, `running · round 2 of 6`, …) |
@@ -2905,8 +2905,20 @@ the study's range), and with a `recommended` template and three finished
 settings studies the tuned settings are those that went most with the
 measure. Each run then draws a share of its combinations around each tuned
 setting's winner: a prior of weight one half, which halves again with every
-other study finished since that winner and is dropped below 0.05 or once four
-have. It is only a prior — it never stops the search from trying any value in
+later settings study whose search ran and tuned that setting (a code study, a
+bake-off, a study per kind of case, or one that tuned other settings does not
+count), and is dropped below 0.05: once four such studies have finished, or
+sooner when the cases differ. The
+weight also shrinks when the new study's cases are unlike the winner's: it is
+multiplied by exp(−d²/2), where d² is the mean, over the case features both
+studies have, of the squared distance between the two studies' average cases,
+in units of the spread of the cases within each study (counts on a log scale,
+as for groups). Two studies of eight cases of the same kind keep about 86 % of
+the weight on average; one standard deviation apart in every feature, about
+61 %; three, about 1 %, which drops the prior. The features are those `study
+groups` keeps for each case (its kept tables); a warm start never solves a case
+for them, so when either study has none kept the weight does not shrink.
+It is only a prior — it never stops the search from trying any value in
 range, and a bool or a choice is drawn as the winner itself. The prior also
 acts on the rest of the search: `param_tpe` counts it as 4 × its weight
 observations at the winner's value in both its densities, and a `param_local`

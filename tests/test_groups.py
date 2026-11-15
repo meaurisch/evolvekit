@@ -790,3 +790,90 @@ def test_cases_of_one_kind_split_in_under_10_percent_on_three_features():
     rate = split / trials
     print(f"one kind, 8 cases, three features: split in {rate:.1%}")
     assert rate < 0.10
+
+
+def test_similarity_is_one_for_alike_cases_and_falls_with_the_rms_distance():
+    """Decision 5 (A4.3, S11): the distance is standardised by the within-study pooled sd (population
+    form), RMS over the features; the factor is exp(-d²/2)."""
+    import math
+
+    a = {"c1": {"rows_s": 10.0}, "c2": {"rows_s": 20.0}}
+    assert groups.similarity(a, a) == 1.0 and groups.similarity(a, None) == 1.0
+    assert groups.similarity(None, a) == 1.0 and groups.similarity({}, a) == 1.0
+    # mean_* stays raw: {10, 20} against {15, 25} -> within sd sqrt((25 + 25 + 25 + 25) / 4) = 5, one sd apart
+    one = {"c1": {"mean_x": 10.0}, "c2": {"mean_x": 20.0}}
+    shifted = {"c3": {"mean_x": 15.0}, "c4": {"mean_x": 25.0}}
+    assert groups.similarity(one, shifted) == pytest.approx(math.exp(-0.5), abs=1e-9)
+    three = {c: {"mean_x": v, "mean_y": 2 * v, "mean_z": -v} for c, v in (("c1", 10.0), ("c2", 20.0))}
+    three_shifted = {c: {"mean_x": v, "mean_y": 2 * v, "mean_z": -v} for c, v in (("c3", 15.0), ("c4", 25.0))}
+    assert groups.similarity(three, three_shifted) == pytest.approx(math.exp(-0.5), abs=1e-9), \
+        "one sd in each of three features is still d² = 1: the mean, not the sum"
+    far = {"c3": {"mean_x": 25.0}, "c4": {"mean_x": 35.0}}
+    assert groups.similarity(one, far) == pytest.approx(math.exp(-4.5), abs=1e-12) and math.exp(-4.5) < math.exp(-2), \
+        "three sd apart: no cap at 2 sd, as an sd over both studies (which holds the shift) would give"
+    # counts are read as log1p, as the clustering reads them
+    counts_a = {"c1": {"rows_s": math.expm1(1.0)}, "c2": {"rows_s": math.expm1(3.0)}}
+    counts_b = {"c3": {"rows_s": math.expm1(2.0)}, "c4": {"rows_s": math.expm1(4.0)}}
+    assert groups.similarity(counts_a, counts_b) == pytest.approx(math.exp(-0.5), abs=1e-9)
+    # a feature the same everywhere is left out; one some case lacks is left out; none left -> 1.0
+    flat = {"c1": {"mean_x": 10.0, "mean_w": 1.0}, "c2": {"mean_x": 20.0, "mean_w": 1.0}}
+    flat_shifted = {"c3": {"mean_x": 15.0, "mean_w": 1.0}, "c4": {"mean_x": 25.0, "mean_w": float("nan")}}
+    assert groups.similarity(flat, flat_shifted) == pytest.approx(math.exp(-0.5), abs=1e-9)
+    assert groups.similarity({"c1": {"mean_w": 1.0}}, {"c3": {"mean_w": 1.0}}) == 1.0
+    assert groups.similarity({"c1": {"mean_w": 1.0}}, {"c3": {"mean_w": 2.0}}) == 0.0, \
+        "no spread inside either study but different values: infinitely apart"
+
+
+def test_two_studies_of_the_same_kind_of_case_keep_about_86_percent_of_the_prior():
+    """Decision 5's figure: two studies of 8 cases from the same kind (three features, standard
+    normal) are about 1/4 sd² apart per feature, and the within-study sd is itself estimated, so the
+    factor averages about 0.856 (20 000 pairs, three seeds: 0.855-0.857; the builder check's 0.88
+    is exp(-1/8), the estimate's noise left out). Seeded; 2000 pairs, SE of the mean about 0.0025;
+    the band [0.84, 0.87] is over 5 SE from the estimate."""
+    import random
+
+    rng = random.Random(15)
+
+    def study() -> dict[str, dict[str, float]]:
+        return {f"c{i}": {f"mean_{j}": rng.gauss(0, 1) for j in "xyz"} for i in range(8)}
+
+    factors = [groups.similarity(study(), study()) for _ in range(2000)]
+    mean = sum(factors) / len(factors)
+    print(f"same kind, 8 + 8 cases, three features: mean factor {mean:.3f}")
+    assert 0.84 <= mean <= 0.87
+
+
+def _keep_tables(root: Path, case: str, rows: int) -> None:
+    """The kept tables of `case` as `case_tables` leaves them: the SQLite file and its stamp."""
+    folder = root / "groups" / "tables"
+    folder.mkdir(parents=True, exist_ok=True)
+    made = fake_tables({case: rows})(root, case)
+    target = folder / f"{Path(case).name}.sqlite"
+    target.unlink(missing_ok=True)
+    made.replace(target)
+    stat = (root / case).stat()
+    (folder / f"{Path(case).name}.json").write_text(
+        json.dumps([stat.st_size, stat.st_mtime_ns, load_study(root).application_path]) + "\n", encoding="utf-8")
+
+
+def test_study_features_never_solve_and_need_every_case_cached(tmp_path, monkeypatch):
+    from evolvekit.harness import execute
+
+    def no_solve(*_a, **_k):
+        raise AssertionError("a warm start never solves a case")
+
+    monkeypatch.setattr(execute, "_solve_once", no_solve)
+    sizes = [20, 40, 60]
+    root = study_with_cases(tmp_path, sizes, held=1)
+    study = load_study(root)
+    assert groups.study_features(root, study) is None, "nothing kept yet"
+    for case, rows in sizes_of(sizes).items():
+        if case != "cases/c2.json":
+            _keep_tables(root, case, rows)
+    assert groups.study_features(root, study) is None, "the held-back case has none kept"
+    _keep_tables(root, "cases/c2.json", 60)
+    got = groups.study_features(root, study)
+    assert set(got) == {"cases/c0.json", "cases/c1.json", "cases/c2.json"}
+    assert got["cases/c2.json"]["rows_stops"] == 60.0 and got["cases/c0.json"]["mean_stops_stop_id"] == 9.5
+    (root / "cases" / "c1.json").write_bytes((root / "cases" / "c1.json").read_bytes() + b" ")
+    assert groups.study_features(root, study) is None, "a case changed since its tables were kept: stale"
