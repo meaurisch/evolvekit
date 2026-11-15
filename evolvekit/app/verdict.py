@@ -876,7 +876,7 @@ def against_defaults_of(run_dir: Path, study: Any, goal: dict[str, Any], final: 
     held-back runs of the side the verdict names (`side`: the new settings on use, else the
     starting point) set against the runs of the latest study that started from the harness
     defaults, in `_final_words`' words on that comparison and by `decision_of` -- `{"measured":
-    true, "decision", "chance", "range90_pct", "mean_pct", "line", "side", "note", "from"}` -- or
+    true, "decision", "chance", "range90_pct", "mean_pct", "line", "side", "note", "reuses", "from"}` -- or
     `{"measured": false, "why", "line"}` when it could not be measured. Information about the
     same runs: it never changes the study's `decision`, `line` or `advice`."""
     from evolvekit.app import jobs
@@ -901,6 +901,7 @@ def against_defaults_of(run_dir: Path, study: Any, goal: dict[str, Any], final: 
         return not_measured("its comparison could not be read")
     what = jobs._what(study)
     whose = f"the new {what}" if data.get("side") == "candidate" else "the starting point"
+    name = str(numbers.get("name") or numbers.get("study") or "a study")
     if result.get("identical"):
         line = f"No difference in any run: every paired run gave exactly {DEFAULTS_WORDS}' result."
         words: dict[str, Any] = {"mean": None, "range90": None, "chance": None}
@@ -911,9 +912,13 @@ def against_defaults_of(run_dir: Path, study: Any, goal: dict[str, Any], final: 
     return {"measured": True, "decision": decision, "chance": words.get("chance"), "range90_pct": words.get("range90"),
             "mean_pct": words.get("mean"), "line": AGAINST_DEFAULTS_LEAD.format(whose=whose) + line[:1].lower() + line[1:],
             "side": whose,
-            "note": (f"{whose[0].upper() + whose[1:]} set against the runs of {numbers.get('study')}, a study that "
+            "note": (f"{whose[0].upper() + whose[1:]} set against the runs of {name}, a study that "
                      f"started from {DEFAULTS_WORDS}, on the same held-back cases and runs: information about the "
-                     "same runs, read once; it does not change what this study recommends."),
+                     "same runs, read once; it does not change what this study recommends."
+                     + (f" {name} chose this study's starting point on these same held-back cases, so the comparison "
+                        "reuses the cases that chose what is compared, and leans toward “use”."
+                        if data.get("reuses") else "")),
+            "reuses": data.get("reuses") is True,
             "from": numbers}
 
 

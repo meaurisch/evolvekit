@@ -467,6 +467,22 @@ def defaults_study(home: Any, study: Study, cases: Sequence[Path]) -> tuple[Fini
     return (sharing or found)[-1]
 
 
+def in_warm_chain(home: Any, study: Study, slug: str) -> bool:
+    """Whether the study `slug` is among those `study` was warm-started from, directly or through
+    the studies its own starting point came from (each finished study's `warm.from`): then its
+    final check chose what `study` compares (decision 15c)."""
+    by_slug = {f.slug: f for f in finished_studies(home, study.harness_id)}
+    seen: set[str] = set()
+    warm = study.warm
+    while warm is not None and warm.from_slug not in seen:
+        if warm.from_slug == slug:
+            return True
+        seen.add(warm.from_slug)
+        parent = by_slug.get(warm.from_slug)
+        warm = parent.study.warm if parent is not None else None
+    return False
+
+
 def _study_harness(home: Any, study: Study, finished: list[Finished]) -> Harness | None:
     """The harness version the study was made with, from the library; else the newest of its id."""
     for entry in find_harnesses(Path(home.root)):

@@ -1063,7 +1063,7 @@ def test_a_keep_line_gives_the_middle_figure_in_the_use_lines_words(tmp_path):
 DEFAULTS_LINE = "On the same held-back cases, against the harness defaults ({whose}): "
 
 
-def _library_study(home, name: str, *, warm: bool = False, held: int = 3) -> Path:
+def _library_study(home, name: str, *, warm: str | None = None, held: int = 3) -> Path:
     """A demo study in `home` with the sample cases, `held` of them held back; `warm` marks it warm-started."""
     import yaml
 
@@ -1073,7 +1073,7 @@ def _library_study(home, name: str, *, warm: bool = False, held: int = 3) -> Pat
     root = home.study_root(slug)
     if warm:
         data = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
-        data["warm"] = {"from": "summer", "run": RUN, "at": "2026-01-01T00:12:00+00:00"}
+        data["warm"] = {"from": warm, "run": RUN, "at": "2026-01-01T00:12:00+00:00"}
         (root / "study.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return root
 
@@ -1144,7 +1144,7 @@ def test_a_warm_started_verdict_adds_the_line_against_the_defaults(tmp_path, cap
     home = Home(tmp_path / "home")
     summer = _library_study(home, "Summer")
     _, theirs = _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0])
-    autumn = _library_study(home, "Autumn", warm=True)
+    autumn = _library_study(home, "Autumn", warm="spring")
     run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0],
                              decision=decision)
     plain = build_verdict(autumn, run_dir.name)
@@ -1154,9 +1154,10 @@ def test_a_warm_started_verdict_adds_the_line_against_the_defaults(tmp_path, cap
     assert got["measured"] is True and got["line"].startswith(DEFAULTS_LINE.format(whose=got["side"])), got
     assert got["chance"] == pytest.approx(_paired_chance(theirs, ours, side)), "verdict_summary of the paired log gains"
     assert got["decision"] in ("use", "keep", "worse") and got["range90_pct"] and got["mean_pct"] is not None
-    assert got["from"] == {"study": summer.name, "run": "20260101-000000", "cases": 3, "seeds": 3}
+    assert got["from"] == {"study": summer.name, "name": "Summer", "run": "20260101-000000", "cases": 3, "seeds": 3}
     assert got["side"] == ("the new settings" if decision == "use" else "the starting point")
-    assert "does not change what this study recommends" in got["note"]
+    assert "does not change what this study recommends" in got["note"] and "Summer" in got["note"]
+    assert got["reuses"] is False and "leans toward" not in got["note"], "Autumn did not start from Summer's winner"
     assert {k: v[k] for k in ("decision", "line", "advice")} == {k: plain[k] for k in ("decision", "line", "advice")}, \
         "information about the same runs: the study's own answer is unchanged"
     if got["decision"] == "use":
@@ -1176,6 +1177,14 @@ def test_a_warm_started_verdict_adds_the_line_against_the_defaults(tmp_path, cap
     assert out[out.index(v["advice"]) + 1] == got["line"], "information after the answer and what to do about it"
 
 
+def _edit_yaml(path: Path, change) -> None:
+    import yaml
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    change(data)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
 def _not_measured(tmp_path: Path, why: str) -> dict:
     from evolvekit.app.store import Home
 
@@ -1184,7 +1193,11 @@ def _not_measured(tmp_path: Path, why: str) -> dict:
         summer = _library_study(home, "Summer", held=1 if why == "other cases" else 3)
         seeds = (2001, 2002, 2003) if why == "no shared runs" else (1001, 1002, 1003)
         _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0], seeds=seeds)
-    autumn = _library_study(home, "Autumn", warm=True)
+        if why == "other time per case":
+            _edit_yaml(summer / "study.yaml", lambda d: d.setdefault("limits", {}).update(time_per_case_s=7))
+        if why == "other harness version":
+            _edit_yaml(summer / "harness" / "harness.yaml", lambda d: d.update(version="0.9.0"))
+    autumn = _library_study(home, "Autumn", warm="spring")
     if why == "same names other content":
         _edited_cases(autumn)
     run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0],
@@ -1197,6 +1210,8 @@ def _not_measured(tmp_path: Path, why: str) -> dict:
     ("other cases", "it held back other cases"),
     ("same names other content", "it held back other cases"),
     ("no shared runs", "its final check has no runs on the same cases and runs"),
+    ("other time per case", "it ran at another time per case"),
+    ("other harness version", "it ran on another version of the harness"),
 ])
 def test_against_the_defaults_is_not_measured_when_the_cases_differ(tmp_path, why, reason):
     v = _not_measured(tmp_path, why)
@@ -1214,7 +1229,7 @@ def test_the_defaults_study_that_held_back_the_same_cases_is_preferred(tmp_path)
     spring = _library_study(home, "Spring", held=1)
     _edited_cases(spring)
     _checked(spring, "2026-01-01T06:00:00+00:00", base=[50.0], best=[49.0])
-    autumn = _library_study(home, "Autumn", warm=True)
+    autumn = _library_study(home, "Autumn", warm="spring")
     run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0])
     got = _against(autumn, run_dir, ours, "keep")["against_defaults"]
     assert got["measured"] is True and got["from"]["study"] == summer.name, "the later Spring held back other cases"
@@ -1231,3 +1246,24 @@ def test_a_study_that_is_not_warm_started_has_no_line_against_the_defaults(tmp_p
                              decision="use")
     v = _against(plain, run_dir, ours, "use")
     assert "against_defaults" not in v and not (run_dir / "confirm" / "final" / "against_defaults.json").exists()
+
+
+@pytest.mark.parametrize("start", ["summer", "spring"])
+def test_in_the_warm_studys_own_chain_the_line_says_it_reuses_the_cases_that_chose(tmp_path, start):
+    """Decision 15c: Autumn started from Summer's winner -- directly, or through Spring, which did --
+    on the same held-back cases: the line is kept and the note says it leans toward use."""
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Summer")
+    _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0], decision="use")
+    if start == "spring":
+        spring = _library_study(home, "Spring", warm="summer")
+        _checked(spring, "2026-01-01T06:00:00+00:00", base=[49.0, 59.0, 69.0], best=[48.0, 58.0, 68.0],
+                 decision="use")
+    autumn = _library_study(home, "Autumn", warm=start)
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0])
+    got = _against(autumn, run_dir, ours, "keep")["against_defaults"]
+    assert got["measured"] is True and got["reuses"] is True and got["from"]["name"] == "Summer"
+    assert got["note"].endswith("Summer chose this study's starting point on these same held-back cases, so the "
+                                "comparison reuses the cases that chose what is compared, and leans toward “use”.")

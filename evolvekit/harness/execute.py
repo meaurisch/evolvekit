@@ -1373,7 +1373,10 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     final = {"candidate": cid, "confirmed": decision == "use", "decision": decision,
              "seeds": seeds, "comparison": "confirm/final/comparison.json"}
     if up == UP:  # a warm-started study in a library home: the same runs against the harness defaults'
-        _against_defaults(run_dir.parent.parent, run_dir, study, comparison, decision, log)
+        try:
+            _against_defaults(run_dir.parent.parent, run_dir, study, comparison, decision, log)
+        except Exception as exc:  # noqa: BLE001 - a line beside the answer can never cost the answer
+            log(f"final check: {DEFAULTS_LABEL}: not measured: {type(exc).__name__}: {exc}")
     if search.get("converged") and extend:
         final["saved"] = _saved(job, plan, search, result, added=seeds - _first_seeds(plan))
     job.finish("done", final=final)
@@ -1387,6 +1390,9 @@ STARTING_POINT = "starting point"
 NO_DEFAULTS = "no finished study on this application started from the harness defaults"
 OTHER_CASES = "it held back other cases"
 NO_SHARED_RUNS = "its final check has no runs on the same cases and runs"
+OTHER_TIME = "it ran at another time per case"
+OTHER_VERSION = "it ran on another version of the harness"
+UNREADABLE = "the other studies could not be read"
 
 
 def defaults_comparison(comparison: Any, decision: str, theirs: list[dict[str, Any]], *,
@@ -1443,9 +1449,12 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
     """A warm-started settings study in a library home (`root.parent.name == "studies"`): its
     final check set against the harness defaults, written to `confirm/final/against_defaults.json`
     -- `defaults_comparison` of the latest study that started from them (`memory.defaults_study`)
-    with `measured: true`, `side` ("candidate" or "starting point") and `numbers_from` `{study,
-    run, cases, seeds}`; else `{"measured": false, "why": ...}`. Information beside the answer: it
-    never changes `final`, and a failure to read the other studies is said, never raised."""
+    with `measured: true`, `side` ("candidate" or "starting point"), `reuses` (that study is in
+    this one's warm-start chain, so its cases chose what is compared: `memory.in_warm_chain`) and
+    `numbers_from` `{study, name, run, cases, seeds}`; else `{"measured": false, "why": ...}` --
+    also when that study ran at another time per case or on another harness version (decision 15).
+    Information beside the answer: it never changes `final`; any failure, the write included, is
+    logged and is "not measured" (or no file), never raised."""
     if study.warm is None or study.code is not None or root.parent.name != "studies":
         return
     from types import SimpleNamespace
@@ -1465,33 +1474,44 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
         return key
 
     try:
-        found = memory.defaults_study(SimpleNamespace(root=root.parent.parent, studies_dir=root.parent), study,
-                                      [root / case for case in study.test])
+        home = SimpleNamespace(root=root.parent.parent, studies_dir=root.parent)
+        found = memory.defaults_study(home, study, [root / case for case in study.test])
         if found is None:
             document: dict[str, Any] = {"measured": False, "why": NO_DEFAULTS}
         else:
             other, results = found
-            theirs = json.loads(results.read_text(encoding="utf-8"))
-            if not isinstance(theirs, list):
-                raise ValueError(f"{other.slug}'s final check keeps no list of runs")
-            against = defaults_comparison(comparison, decision, theirs, key_of_ours=key_in(root),
-                                          key_of_theirs=key_in(other.root))
-            if isinstance(against, str):
-                document = {"measured": False, "why": against}
+            if other.study.limits.time_per_case_s != study.limits.time_per_case_s:
+                document = {"measured": False, "why": OTHER_TIME}
+            elif other.pinned.version != study.harness_version:
+                document = {"measured": False, "why": OTHER_VERSION}
             else:
-                document = {"measured": True, **against.to_json(),
-                            "side": "candidate" if decision == "use" else STARTING_POINT,
-                            "numbers_from": {"study": other.slug, "run": other.run, "cases": len(against.instances),
-                                             "seeds": len(against.seeds)}}
+                theirs = json.loads(results.read_text(encoding="utf-8"))
+                if not isinstance(theirs, list):
+                    raise ValueError(f"{results} holds no list of runs")
+                against = defaults_comparison(comparison, decision, theirs, key_of_ours=key_in(root),
+                                              key_of_theirs=key_in(other.root))
+                if isinstance(against, str):
+                    document = {"measured": False, "why": against}
+                else:
+                    document = {"measured": True, **against.to_json(),
+                                "side": "candidate" if decision == "use" else STARTING_POINT,
+                                # In the study's own chain: those cases chose what is compared (decision 15c).
+                                "reuses": memory.in_warm_chain(home, study, other.slug),
+                                "numbers_from": {"study": other.slug, "name": other.name, "run": other.run,
+                                                 "cases": len(against.instances), "seeds": len(against.seeds)}}
     except Exception as exc:  # noqa: BLE001 - a line beside the answer: the final check's answer stands
-        document = {"measured": False, "why": f"the other studies could not be read: {exc}"}
-    path = run_dir / "confirm" / "final" / AGAINST_DEFAULTS
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(path, json.dumps(document, indent=1))
+        log(f"final check: {DEFAULTS_LABEL}: the other studies could not be read: {type(exc).__name__}: {exc}")
+        document = {"measured": False, "why": UNREADABLE}
+    try:
+        _atomic_write(run_dir / "confirm" / "final" / AGAINST_DEFAULTS, json.dumps(document, indent=1))
+    except Exception as exc:  # noqa: BLE001 - the same: no line, and the answer stands
+        log(f"final check: {DEFAULTS_LABEL}: not written: {type(exc).__name__}: {exc}")
+        return
     if document["measured"]:
         numbers = document["numbers_from"]
         log(f"final check: {DEFAULTS_LABEL}: {numbers['study']}'s runs on {numbers['cases']} held-back cases, "
-            f"{numbers['seeds']} runs each, read once, for information")
+            f"{numbers['seeds']} runs each, read once, for information"
+            + ("; that study chose what is compared on these cases" if document["reuses"] else ""))
     else:
         log(f"final check: {DEFAULTS_LABEL}: not measured ({document['why']})")
 

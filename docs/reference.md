@@ -2961,7 +2961,17 @@ same runs, not a second answer, and never changes what the study recommends:
 it reuses the runs the main answer was read on, so it is selected on.
 Measured on 10 000 seeded studies with no true difference anywhere (4
 held-back cases, runs noisier than cases), it says use in 6.2 % ± 0.24
-overall, 14.9 % ± 1.2 after a main *use* and 5.4 % ± 0.24 otherwise. The
+overall, 14.9 % ± 1.2 after a main *use* and 5.4 % ± 0.24 otherwise. When
+the defaults study is in the warm study's own chain (its winner, or the winner
+of a study warm-started from it, is the starting point) on the same held-back
+cases -- the usual path -- the comparison reuses the cases that chose what is
+compared: the line is kept and its note says it leans toward *use*. Measured
+on that path (20 000 seeded pairs with no true difference; the 1711 whose
+defaults study said use), it says use in 91.9 % ± 0.66: it replays the earlier
+choice and is no independent evidence. The defaults study must also have run
+at the same time per case and on the same harness version, else the line
+says "not measured"; nothing in it can cost the study's answer (any failure
+is logged and is "not measured"). The
 two sides also ran in different sessions, so for a solver timed by the clock
 a change of machine is in the difference too. With no `use`
 study it is a plain start, and says so; a template that tunes no setting is

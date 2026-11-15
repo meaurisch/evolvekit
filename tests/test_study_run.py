@@ -797,6 +797,146 @@ def test_a_settled_null_study_says_use_in_under_10_percent_through_the_real_exte
 # -- the line against the harness defaults: information about the same runs (A4.3c, decision 6)
 
 
+def _warm_check(tmp_path, monkeypatch, *, up=None):
+    """`_final_check` of a warm-started study in a library home whose check says use (the real
+    `_extend_check` over `_confirm_recording`); returns the job's state and the run's folder."""
+    import yaml
+
+    from evolvekit.app.store import Home
+    from evolvekit.harness import execute
+
+    home = Home(tmp_path / "home")
+    slug = home.create_study("demo-tour", "tune", "Autumn")
+    root = home.study_root(slug)
+    data = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    data["warm"] = {"from": "summer", "run": "r1", "at": "2026-01-01T00:00:00+00:00"}
+    (root / "study.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    study = load_study(root)
+    study.test = ["cases/a.json", "cases/b.json", "cases/c.json"]
+    run_dir = root / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setattr(execute, "_extend_check",
+                        lambda *a, **kw: _extend_check(*a, **kw, confirm=_confirm_recording([], 3)))
+    monkeypatch.setattr(execute, "rank", lambda rows, n: [{"operator": "param_tpe"}])
+    monkeypatch.setattr(execute, "read_rows", lambda run_dir: [])
+    monkeypatch.setattr(execute, "_write_exports", lambda *args: None)
+    job = Job(run_dir, run_id="r1", study=slug, plan={})
+    job.update(search={"stop_reason": "the plan's rounds are done", "generations": 3})
+    lines: list[str] = []
+    kw = {} if up is None else {"up": up}
+    execute._final_check(study, _plan_with(), None, run_dir, job, lines.append, **kw)
+    return job.state, run_dir, lines
+
+
+def test_the_line_against_the_defaults_can_never_cost_the_answer(tmp_path, monkeypatch):
+    """Decision 15a: a failure finding the defaults study, or writing the line, is logged and the
+    final check finishes with its own answer; a run per kind of case gets no line."""
+    from evolvekit.harness import execute, memory
+    from evolvekit.harness.compile import GROUP_UP
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("a damaged study folder")
+
+    monkeypatch.setattr(memory, "defaults_study", broken)
+    state, run_dir, lines = _warm_check(tmp_path / "a", monkeypatch)
+    assert state["phase"] == "done" and state["final"]["decision"] == "use" and state["final"]["confirmed"] is True
+    saved = json.loads((run_dir / "confirm" / "final" / "against_defaults.json").read_text(encoding="utf-8"))
+    assert saved == {"measured": False, "why": "the other studies could not be read"}, "a fixed reason for people"
+    assert any("RuntimeError: a damaged study folder" in line for line in lines), "the exception is in the log"
+    monkeypatch.setattr(memory, "defaults_study", lambda *a, **k: None)
+    real = execute._atomic_write
+
+    def no_line(path, text):
+        if Path(path).name == "against_defaults.json":
+            raise OSError("disk full")
+        real(path, text)
+
+    monkeypatch.setattr(execute, "_atomic_write", no_line)
+    state, run_dir, lines = _warm_check(tmp_path / "b", monkeypatch)
+    assert state["phase"] == "done" and state["final"]["decision"] == "use"
+    assert not (run_dir / "confirm" / "final" / "against_defaults.json").exists()
+    assert any("not written: OSError: disk full" in line for line in lines)
+    monkeypatch.setattr(execute, "_atomic_write", real)
+    state, run_dir, lines = _warm_check(tmp_path / "c", monkeypatch, up=GROUP_UP)
+    assert state["phase"] == "done" and not (run_dir / "confirm" / "final" / "against_defaults.json").exists(), \
+        "one group's folder of a run per kind of case: no line"
+    assert not any("against the harness defaults" in line for line in lines)
+
+
+_NULL_CASES = 4
+_NULL_NAMES = [f"c{i}" for i in range(_NULL_CASES)]
+
+
+def _null_runs(config: str, value, seeds) -> list[dict]:
+    """One run per held-back case and seed of `config`, its cost `value(case, seed)`."""
+    return [{"configuration": config, "instance": name, "seed": s, "ok": True, "kpis": {"cost": value(i, s)}}
+            for i, name in enumerate(_NULL_NAMES) for s in seeds]
+
+
+def _null_analysed(cand, base, seeds) -> Comparison:
+    """`cand` against `base` on the held-back cases and `seeds`, by the real `confirm._analyse`."""
+    comparison = Comparison(label="final", objective="cost", direction="minimize", stage="full", seeds=list(seeds),
+                            instances=list(_NULL_NAMES), baseline_id="b", candidates=["c"],
+                            runs=_null_runs(BASELINE, base, seeds) + _null_runs("c", cand, seeds))
+    _analyse(comparison)
+    return comparison
+
+
+def _rates(counts: dict) -> dict[str, tuple[float, float, int]]:
+    return {key: (hits / max(1, n), math.sqrt((hits / max(1, n)) * (1 - hits / max(1, n)) / max(1, n)), n)
+            for key, (hits, n) in counts.items()}
+
+
+def _chain_line_null_rates(studies: int) -> dict[str, tuple[float, float, int]]:
+    """Decision 15c, the usual path: the defaults study is the warm study's own source. On
+    `studies` seeded null pairs (`random.Random(20261115)`, case sd 0.005, run sd 0.02, 4 held-back
+    cases, every configuration alike on average): a defaults study checks its winner W against
+    the defaults D through the real `execute._extend_check`; only when it says use (the warm start
+    takes W) the warm study, on the same cases, checks a new candidate C against W -- W's runs at
+    a seed are the very runs the defaults study measured (a run repeats at its seed) -- through
+    `_extend_check` again, then the line: `execute.defaults_comparison` of the side that verdict
+    names against the defaults study's own results (its D runs, every seed it ran), read once.
+    Returns {"defaults use", "line", "line after use", "line after no use"} (rate, SE, count); the
+    line's counts are of the pairs whose defaults study said use."""
+    from evolvekit.confirm import decision_of
+    from evolvekit.harness.execute import defaults_comparison
+
+    case_sd, run_sd = 0.005, 0.02
+    rng = random.Random(20261115)
+    study = SimpleNamespace(test=_NULL_NAMES)
+    plan = SimpleNamespace(check_seeds=3, workers=1, run_s=1.0)
+    job = SimpleNamespace(update=lambda **fields: None)
+    counts = {"defaults use": [0, 0], "line": [0, 0], "line after use": [0, 0], "line after no use": [0, 0]}
+
+    def value(effect, noise):
+        return lambda i, s: 100 * math.exp(effect[i] + noise[i][s])
+
+    def check(cand, base):
+        def confirm(config, run_dir, *, seeds, instances, label, log, stop):
+            return _null_analysed(cand, base, range(len(seeds)))
+        comparison, _seeds = _extend_check(study, plan, None, None, job, lambda _m: None, stop=threading.Event(),
+                                           time_left_s=lambda: 1e9, confirm=confirm)
+        return comparison, decision_of(comparison.per_candidate["c"])
+
+    for _ in range(studies):
+        cd, cw, cc = ([rng.gauss(0, case_sd) for _ in range(_NULL_CASES)] for _ in range(3))
+        ed, ew, ec = ([[rng.gauss(0, run_sd) for _ in range(12)] for _ in range(_NULL_CASES)] for _ in range(3))
+        defaults, winner, new = value(cd, ed), value(cw, ew), value(cc, ec)
+        first, said = check(winner, defaults)
+        counts["defaults use"][0] += said == "use"
+        counts["defaults use"][1] += 1
+        if said != "use":
+            continue
+        warm, decision = check(new, winner)
+        against = defaults_comparison(warm, decision, first.runs, key_of_ours=str, key_of_theirs=str)
+        (result,) = against.per_candidate.values()
+        line = decision_of(result) == "use"
+        for key in ("line", "line after use" if decision == "use" else "line after no use"):
+            counts[key][0] += line
+            counts[key][1] += 1
+    return _rates(counts)
+
+
 def _defaults_line_null_rates(studies: int) -> dict[str, tuple[float, float, int]]:
     """The selected path as the product takes it, on `studies` seeded null studies
     (`random.Random(20261114)`, runs noisier than cases: case sd 0.005, run sd 0.02, 4 held-back
@@ -810,19 +950,7 @@ def _defaults_line_null_rates(studies: int) -> dict[str, tuple[float, float, int
     from evolvekit.confirm import decision_of
     from evolvekit.harness.execute import defaults_comparison
 
-    cases, case_sd, run_sd = 4, 0.005, 0.02
-    names = [f"c{i}" for i in range(cases)]
-
-    def runs(config: str, value, seeds) -> list[dict]:
-        return [{"configuration": config, "instance": name, "seed": s, "ok": True, "kpis": {"cost": value(i, s)}}
-                for i, name in enumerate(names) for s in seeds]
-
-    def analysed(cand, base, seeds) -> Comparison:
-        comparison = Comparison(label="final", objective="cost", direction="minimize", stage="full", seeds=list(seeds),
-                                instances=list(names), baseline_id="b", candidates=["c"],
-                                runs=runs(BASELINE, base, seeds) + runs("c", cand, seeds))
-        _analyse(comparison)
-        return comparison
+    cases, case_sd, run_sd, names, runs, analysed = _NULL_CASES, 0.005, 0.02, _NULL_NAMES, _null_runs, _null_analysed
 
     def draw(rng):
         return [rng.gauss(0, case_sd) for _ in range(cases)]
@@ -892,3 +1020,28 @@ def test_the_line_against_the_defaults_says_use_for_no_difference_in_about_6_per
     assert 0.055 <= rates["line"][0] <= 0.07
     assert 0.11 <= rates["line after use"][0] <= 0.19
     assert 0.046 <= rates["line after no use"][0] <= 0.062
+
+
+def test_in_the_warm_studys_own_chain_the_line_says_use_for_no_difference_in_about_92_percent(capsys):
+    """Decision 15c: the defaults study chose the warm study's starting point on the same cases
+    and runs, so the line replays that choice. Measured, 3000 pairs: the defaults study said use in
+    8.97 % +- 0.52; then the line says use in 91.45 % +- 1.70 (269), 92.34 % +- 1.65 after the warm
+    study's keep (261). 20 000 pairs: 91.88 % +- 0.66 (1711). Asserts the line in [80, 98] % and
+    after a keep in [85, 98] % (every bound at least 3.4 SE from the measured rate)."""
+    rates = _chain_line_null_rates(3000)
+    _say_rates(rates, capsys)
+    assert 0.80 <= rates["line"][0] <= 0.98
+    assert 0.85 <= rates["line after no use"][0] <= 0.98
+
+
+@pytest.mark.slow
+def test_in_the_warm_studys_own_chain_the_line_says_use_for_no_difference_in_about_92_percent_on_20000(capsys):
+    """The same on 20 000 pairs: measured the defaults study's use 8.55 % +- 0.20; the line 91.88 %
+    +- 0.66 (1711 pairs), 93.17 % +- 0.62 after a keep (1654), 54.39 % +- 6.60 after a use (57).
+    Asserts the line in [89, 94.5] %, after a keep in [90.5, 95.5] %, after a use in [25, 85] %
+    (every bound at least 3.8 SE from the measured rate)."""
+    rates = _chain_line_null_rates(20_000)
+    _say_rates(rates, capsys)
+    assert 0.89 <= rates["line"][0] <= 0.945
+    assert 0.905 <= rates["line after no use"][0] <= 0.955
+    assert 0.25 <= rates["line after use"][0] <= 0.85
