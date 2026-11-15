@@ -1445,21 +1445,27 @@ def defaults_comparison(comparison: Any, decision: str, theirs: list[dict[str, A
 
 
 def chain_words(name: str) -> str:
-    """Why the line is not measured when the defaults study chose this study's starting point
-    (decision 15c): measured, it says use for no true difference in about 92 %."""
+    """Why the line is not measured when a study that started from the defaults chose this study's
+    starting point on the same held-back cases (decisions 15c and 17): measured against that study,
+    it says use for no true difference in about 92 %; against a later study from the defaults on
+    those cases, about 77 % when the cases vary more than the runs (10 % the other way round)."""
     return f"{name} chose this study's starting point on these same held-back cases, so they cannot tell"
 
 
-def defaults_line(against: Any, decision: str, *, name: str, reuses: bool) -> dict[str, Any]:
+def defaults_line(against: Any, decision: str, *, name: str, reuses: bool,
+                  chose: str | None = None) -> dict[str, Any]:
     """`against_defaults.json` of a `defaults_comparison` result: why not when it is a reason;
     not measured either when the defaults study (`name`) is in this study's own warm-start chain
     (`reuses`): its final check chose what is compared on these same cases, so the comparison
-    replays that choice (decision 15c; `reuses` is kept for engineers); else the comparison,
-    `measured: true`, with the `side` compared."""
+    replays that choice (decision 15c; `reuses` is kept for engineers); nor when `chose` names the
+    chain's root, a study from the defaults that held back any of the same cases
+    (`memory.chain_defaults_study`): every later study from the defaults carries, on those cases,
+    the case effects it chose on (decision 17); else the comparison, `measured: true`, with the
+    `side` compared."""
     if isinstance(against, str):
         return {"measured": False, "why": against}
-    if reuses:
-        return {"measured": False, "why": chain_words(name), "reuses": True}
+    if reuses or chose is not None:
+        return {"measured": False, "why": chain_words(chose if chose is not None else name), "reuses": True}
     return {"measured": True, **against.to_json(), "side": "candidate" if decision == "use" else STARTING_POINT,
             "reuses": False}
 
@@ -1472,7 +1478,9 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
     (`defaults_line`) with `measured: true`, `side` ("candidate" or "starting point") and
     `numbers_from` `{study, name, run, cases, seeds}`; else `{"measured": false, "why": ...}` --
     also when that study ran at another time per case or on another harness version, or is in
-    this one's warm-start chain (`memory.in_warm_chain`, `reuses: true`) (decision 15).
+    this one's warm-start chain (`memory.in_warm_chain`, `reuses: true`) (decision 15), or the
+    chain's root started from the defaults and held back any of the same cases
+    (`memory.chain_defaults_study`, decision 17).
     Information beside the answer: it never changes `final`; any failure, the write included, is
     logged and is "not measured" (or no file), never raised."""
     if study.warm is None or study.code is not None or root.parent.name != "studies":
@@ -1495,7 +1503,9 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
 
     try:
         home = SimpleNamespace(root=root.parent.parent, studies_dir=root.parent)
-        found = memory.defaults_study(home, study, [root / case for case in study.test])
+        cases = [root / case for case in study.test]
+        found = memory.defaults_study(home, study, cases)
+        chose = memory.chain_defaults_study(home, study, cases) if found is not None else None
         if found is None:
             document: dict[str, Any] = {"measured": False, "why": NO_DEFAULTS}
         else:
@@ -1511,7 +1521,8 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
                 against = defaults_comparison(comparison, decision, theirs, key_of_ours=key_in(root),
                                               key_of_theirs=key_in(other.root))
                 document = defaults_line(against, decision, name=other.name,
-                                         reuses=memory.in_warm_chain(home, study, other.slug))
+                                         reuses=memory.in_warm_chain(home, study, other.slug),
+                                         chose=chose.name if chose is not None else None)
                 if document["measured"]:
                     document["numbers_from"] = {"study": other.slug, "name": other.name, "run": other.run,
                                                 "cases": len(against.instances), "seeds": len(against.seeds)}

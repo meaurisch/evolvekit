@@ -1282,3 +1282,30 @@ def test_in_the_warm_studys_own_chain_the_line_against_the_defaults_is_not_measu
                                      "line": f"Against the harness defaults: not measured ({reason})."}
     saved = json.loads((run_dir / "confirm" / "final" / "against_defaults.json").read_text(encoding="utf-8"))
     assert saved == {"measured": False, "why": reason, "reuses": True}
+
+
+@pytest.mark.parametrize("root_cases", ["the same", "other"])
+def test_a_later_defaults_study_is_not_measured_when_the_chains_root_held_back_the_same_cases(tmp_path, root_cases):
+    """Decision 17: Depot summer (from the defaults) chose Autumn's starting point; Depot winter,
+    later and also from the defaults, is the study the line would be read against. A case's effect
+    is the same in every study, so on the cases Depot summer held back too the line would replay
+    its choice (about 77 % use for no true difference when the cases vary more than the runs): not
+    measured, naming Depot summer. When Depot summer held back other cases, Depot winter's line is
+    measured."""
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Depot summer")
+    if root_cases == "other":
+        _edited_cases(summer)
+    _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0], decision="use")
+    winter = _library_study(home, "Depot winter")
+    _checked(winter, "2026-01-01T06:00:00+00:00", base=[50.5, 60.5, 70.5], best=[50.0, 60.0, 70.0])
+    autumn = _library_study(home, "Autumn", warm=summer.name)
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0])
+    got = _against(autumn, run_dir, ours, "keep")["against_defaults"]
+    if root_cases == "other":
+        assert got["measured"] is True and got["from"]["name"] == "Depot winter"
+        return
+    reason = "Depot summer chose this study's starting point on these same held-back cases, so they cannot tell"
+    assert got == {"measured": False, "why": reason, "line": f"Against the harness defaults: not measured ({reason})."}

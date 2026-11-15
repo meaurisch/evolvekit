@@ -487,6 +487,29 @@ def in_warm_chain(home: Any, study: Study, slug: str) -> bool:
     return False
 
 
+def chain_defaults_study(home: Any, study: Study, cases: Sequence[Path]) -> Finished | None:
+    """The study at the root of `study`'s warm-start chain (each finished study's `warm.from`,
+    followed back) when it started from the harness defaults (`_from_the_defaults`) and held back
+    a case with the content of one of `cases`; else None (decision 17). A configuration's effect
+    on a case is the same in every study, so any later study that started from the defaults
+    carries, on those cases, the case effects that root's final check chose on: a line against
+    the defaults would replay that choice. A chain that reaches a study it cannot see is
+    `in_warm_chain`'s to judge."""
+    by_slug = {f.slug: f for f in finished_studies(home, study.harness_id)}
+    seen: set[str] = set()
+    warm, root = study.warm, None
+    while warm is not None and warm.from_slug not in seen:
+        seen.add(warm.from_slug)
+        root = by_slug.get(warm.from_slug)
+        if root is None:
+            return None
+        warm = root.study.warm
+    if root is None or not _from_the_defaults(root):
+        return None
+    wanted = {digest for digest in map(case_digest, cases) if digest}
+    return root if wanted & {case_digest(root.root / case) for case in root.study.test} else None
+
+
 def _study_harness(home: Any, study: Study, finished: list[Finished]) -> Harness | None:
     """The harness version the study was made with, from the library; else the newest of its id."""
     for entry in find_harnesses(Path(home.root)):

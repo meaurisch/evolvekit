@@ -887,7 +887,8 @@ def _rates(counts: dict) -> dict[str, tuple[float, float, int]]:
             for key, (hits, n) in counts.items()}
 
 
-def _chain_line_null_rates(studies: int) -> dict[str, tuple[float, float, int]]:
+def _chain_line_null_rates(studies: int, case_sd: float = 0.005,
+                           run_sd: float = 0.02) -> dict[str, tuple[float, float, int]]:
     """Decision 15c, the usual path: the defaults study is the warm study's own source. On
     `studies` seeded null pairs (`random.Random(20261115)`, case sd 0.005, run sd 0.02, 4 held-back
     cases, every configuration alike on average): a defaults study checks its winner W against
@@ -897,18 +898,23 @@ def _chain_line_null_rates(studies: int) -> dict[str, tuple[float, float, int]]:
     `_extend_check` again, then the line: `execute.defaults_comparison` of the side that verdict
     names against the defaults study's own results (its D runs, every seed it ran), read once --
     what the line would say -- and `execute.defaults_line`, what the product writes there.
-    Returns {"defaults use", "line", "line after use", "line after no use", "measured"} (rate, SE,
-    count); the line's counts are of the pairs whose defaults study said use."""
+    Decision 17, beside it: a LATER study S3 from the defaults on the same cases, its own runs of
+    the defaults with the same case effects and fresh run noise (`random.Random(20261116)`, so the
+    first path's draws are unchanged), read against the same side -- the study the line would be
+    read against, not itself in the chain; the product writes "not measured" there too, as the
+    chain's root held back those cases (`chose`).
+    Returns {"defaults use", "line", "line after use", "line after no use", "measured", "S3 line",
+    "S3 measured"} (rate, SE, count); the line's counts are of the pairs whose defaults study said
+    use."""
     from evolvekit.confirm import decision_of
     from evolvekit.harness.execute import defaults_comparison, defaults_line
 
-    case_sd, run_sd = 0.005, 0.02
-    rng = random.Random(20261115)
+    rng, rng3 = random.Random(20261115), random.Random(20261116)
     study = SimpleNamespace(test=_NULL_NAMES)
     plan = SimpleNamespace(check_seeds=3, workers=1, run_s=1.0)
     job = SimpleNamespace(update=lambda **fields: None)
     counts = {"defaults use": [0, 0], "line": [0, 0], "line after use": [0, 0], "line after no use": [0, 0],
-              "measured": [0, 0]}
+              "measured": [0, 0], "S3 line": [0, 0], "S3 measured": [0, 0]}
 
     def value(effect, noise):
         return lambda i, s: 100 * math.exp(effect[i] + noise[i][s])
@@ -939,6 +945,15 @@ def _chain_line_null_rates(studies: int) -> dict[str, tuple[float, float, int]]:
         # What the product writes on this path: not measured, never the replayed number.
         counts["measured"][0] += defaults_line(against, decision, name="Summer", reuses=True)["measured"]
         counts["measured"][1] += 1
+        later = value(cd, [[rng3.gauss(0, run_sd) for _ in range(12)] for _ in range(_NULL_CASES)])
+        against3 = defaults_comparison(warm, decision, _null_runs(BASELINE, later, range(3)),
+                                       key_of_ours=str, key_of_theirs=str)
+        (result3,) = against3.per_candidate.values()
+        counts["S3 line"][0] += decision_of(result3) == "use"
+        counts["S3 line"][1] += 1
+        counts["S3 measured"][0] += defaults_line(against3, decision, name="Winter", reuses=False,
+                                                  chose="Summer")["measured"]
+        counts["S3 measured"][1] += 1
     return _rates(counts)
 
 
@@ -1041,6 +1056,24 @@ def test_in_the_warm_studys_own_chain_the_line_would_say_use_in_about_92_percent
     assert 0.85 <= rates["line after no use"][0] <= 0.98
 
 
+def test_a_later_defaults_study_on_the_chains_cases_would_replay_the_choice_so_it_is_not_measured(capsys):
+    """Decision 17: S3, a later study from the defaults on the cases the chain's root chose on,
+    carries that root's case effects, so a line against it would replay the choice; the product
+    writes "not measured" on every such pair. What it would say (runs repeat at their seed), 3000
+    pairs: runs noisier than cases 16.36 % +- 2.26 (269); cases noisier than runs (case sd 0.02,
+    run sd 0.005) 86.01 % +- 2.90 (143). (The statistician's check with fresh runs for the warm
+    study's starting point: 9.9 % and 76.5 %.) Asserts [8, 26] % and [74, 97] % (every bound at
+    least 3.7 SE from the measured rate)."""
+    rates = _chain_line_null_rates(3000)
+    cases = _chain_line_null_rates(3000, case_sd=0.02, run_sd=0.005)
+    _say_rates(rates, capsys)
+    _say_rates(cases, capsys)
+    for got in (rates, cases):
+        assert got["S3 measured"][0] == 0 and got["S3 measured"][2] == got["S3 line"][2] > 0, "never a number there"
+    assert 0.08 <= rates["S3 line"][0] <= 0.26
+    assert 0.74 <= cases["S3 line"][0] <= 0.97
+
+
 @pytest.mark.slow
 def test_in_the_warm_studys_own_chain_the_line_would_say_use_in_about_92_percent_so_it_is_not_measured_on_20000(
         capsys):
@@ -1054,3 +1087,18 @@ def test_in_the_warm_studys_own_chain_the_line_would_say_use_in_about_92_percent
     assert 0.89 <= rates["line"][0] <= 0.945
     assert 0.905 <= rates["line after no use"][0] <= 0.955
     assert 0.25 <= rates["line after use"][0] <= 0.85
+
+
+@pytest.mark.slow
+def test_a_later_defaults_study_on_the_chains_cases_would_replay_the_choice_so_it_is_not_measured_on_20000(capsys):
+    """The same on 20 000 pairs: runs noisier than cases 17.24 % +- 0.91 (1711); cases noisier than
+    runs 86.12 % +- 1.10 (994). Asserts [14, 20.5] % and [82, 90] % (every bound at least 3.5 SE from
+    the measured rate), and "not measured" on every pair."""
+    rates = _chain_line_null_rates(20_000)
+    cases = _chain_line_null_rates(20_000, case_sd=0.02, run_sd=0.005)
+    _say_rates(rates, capsys)
+    _say_rates(cases, capsys)
+    for got in (rates, cases):
+        assert got["S3 measured"][0] == 0 and got["S3 measured"][2] == got["S3 line"][2] > 0, "never a number there"
+    assert 0.14 <= rates["S3 line"][0] <= 0.205
+    assert 0.82 <= cases["S3 line"][0] <= 0.90

@@ -2970,7 +2970,15 @@ study's starting point on these same held-back cases, so they cannot tell)"
 and shows no number; `against_defaults.json` keeps `reuses: true`. Measured on
 that path (20 000 seeded pairs with no true difference; the 1711 whose
 defaults study said use), such a line would say use in 91.9 % ± 0.66: it
-would replay the earlier choice. The defaults study must also have run
+would replay the earlier choice. The same holds, and the line is not
+measured either (naming the chain's root), when the root started from the
+defaults and held back any of the same cases while the line would be read
+against a later study from the defaults: a configuration's effect on a case
+is the same in every study, so that study's runs carry the case effects the
+root chose on. Measured with no true difference, such a line would say use
+in 76.5 % when the cases vary more than the runs and 9.9 % the other way
+round (86 % and 17 % when a run repeats exactly at its seed). The defaults
+study must also have run
 at the same time per case and on the same harness version, else the line
 says "not measured"; nothing in it can cost the study's answer (any failure
 is logged and is "not measured"). The
