@@ -597,6 +597,16 @@ design's text are marked **(departs)** and listed in the PR for the owner.
     0.86. The docs state the factor's measured mean for alike
     studies and at 1 and 3 sd. `study-run.json` records each prior's value, weight, studies_since,
     similarity and left-out features.
+15. **The "against the harness defaults" line, after A4.3c's review** (refines decision 6):
+    (a) nothing in it can cost the main answer — any failure, the file write included, is logged
+    and becomes "not measured", and `_final_check` is tested for that and for the per-group skip;
+    (b) the defaults study must have run at the same time per case and harness version, else "not
+    measured (it ran at another time per case / harness version)"; (c) when the defaults study is in
+    the warm study's own chain on the same held-back case content (the usual path: a "use" winner
+    of that very study), the comparison reuses cases that chose what is compared and leans toward
+    "use": the line is kept, the note says so in plain words, and that path's null rate is measured
+    through the product's procedure and stated in the docs beside the independent one; (d) people's
+    text names studies by their display name and never shows a raw exception.
 
 ## Open questions for the builder check
 
