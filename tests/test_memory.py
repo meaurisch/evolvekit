@@ -468,3 +468,30 @@ def test_the_defaults_study_is_the_latest_settings_study_that_started_from_the_h
     assert memory.defaults_study(home, study, cases)[0].root == first, "a study without its final check's runs is passed over"
     (first / "runs" / "r1" / "confirm" / "final" / "results.json").unlink()
     assert memory.defaults_study(home, study, cases) is None
+
+
+def test_the_warm_chain_counts_a_study_it_cannot_see(tmp_path):
+    """Decision 15c: a study on the way that is gone (deleted, in the trash) or not finished might
+    have come from the defaults study: it counts as the chain, so the line is not measured."""
+    from evolvekit.harness.study import Warm
+
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "A", decision="use", finished_at="2026-10-01")
+    other = finished(home, docs, "B", decision="use", finished_at="2026-10-08")
+    _edit(other, lambda s: s["vary"]["settings"].update(neighbours={"tune": True, "start": 10}))
+    slug, study = _new_study(home)
+
+    def warm(from_slug):
+        return Warm(from_slug=from_slug, run="r1", at="2026-10-08T00:00:00+00:00")
+
+    study.warm = warm("a")
+    assert memory.in_warm_chain(home, study, "a")
+    study.warm = warm("b")
+    assert not memory.in_warm_chain(home, study, "a"), "B started from a value set by hand: its chain ends there"
+    _edit(other, lambda s: s.update(warm={"from": "a", "run": "r1", "at": "2026-10-01T00:00:00+00:00"}))
+    assert memory.in_warm_chain(home, study, "a"), "through B, warm-started from A"
+    study.warm = warm("gone")
+    assert memory.in_warm_chain(home, study, "a"), "a study it cannot see counts as the chain"
+    shutil.rmtree(other / "runs")
+    study.warm = warm("b")
+    assert memory.in_warm_chain(home, study, "a"), "an unfinished study too"

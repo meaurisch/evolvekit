@@ -1064,9 +1064,17 @@ DEFAULTS_LINE = "On the same held-back cases, against the harness defaults ({who
 
 
 def _library_study(home, name: str, *, warm: str | None = None, held: int = 3) -> Path:
-    """A demo study in `home` with the sample cases, `held` of them held back; `warm` marks it warm-started."""
+    """A demo study in `home` with the sample cases, `held` of them held back; `warm` marks it
+    warm-started from the study of that short name -- made here when the home has none: a
+    finished study that started from a value set by hand, so not from the harness defaults."""
     import yaml
 
+    if warm and not (home.studies_dir / warm).exists():
+        source = home.study_root(home.create_study("demo-tour", "tune", warm))
+        assert source.name == warm
+        _edit_yaml(source / "study.yaml",
+                   lambda d: d["vary"]["settings"].update(neighbours={"tune": True, "start": 10}))
+        finished_run(source / "runs" / RUN, check=False)
     slug = home.create_study("demo-tour", "tune", name)
     home.use_samples(slug)
     home.split(slug, held)

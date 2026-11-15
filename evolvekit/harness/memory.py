@@ -470,7 +470,9 @@ def defaults_study(home: Any, study: Study, cases: Sequence[Path]) -> tuple[Fini
 def in_warm_chain(home: Any, study: Study, slug: str) -> bool:
     """Whether the study `slug` is among those `study` was warm-started from, directly or through
     the studies its own starting point came from (each finished study's `warm.from`): then its
-    final check chose what `study` compares (decision 15c)."""
+    final check chose what `study` compares (decision 15c). A study on the way that cannot be
+    seen (deleted, in the trash, not finished) counts as the chain: it may have come from `slug`,
+    and a line that cannot rule that out is not measured."""
     by_slug = {f.slug: f for f in finished_studies(home, study.harness_id)}
     seen: set[str] = set()
     warm = study.warm
@@ -479,7 +481,9 @@ def in_warm_chain(home: Any, study: Study, slug: str) -> bool:
             return True
         seen.add(warm.from_slug)
         parent = by_slug.get(warm.from_slug)
-        warm = parent.study.warm if parent is not None else None
+        if parent is None:
+            return True
+        warm = parent.study.warm
     return False
 
 
