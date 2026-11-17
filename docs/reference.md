@@ -520,7 +520,8 @@ finds a duplicate is asked once more and takes the next row. A typed
 (a parent that declares other ranges gets its own). The cubes and the next row
 of each are kept in `work/lhs.json` (`{"cubes": {"typed" | "params:<ranges as
 JSON>": {"K", "built", "next", "rows"}}}`, with `prior` beside `rows` when a
-parameter has one), written as each row is handed out, so a resumed run goes on
+parameter has one, and on the `typed` cube `space`: the declaration its rows
+were drawn over, as JSON), written as each row is handed out, so a resumed run goes on
 from the next row; a run without the file builds a cube at its next `param_lhs`
 child. A run that dies while it breeds a round, before the round's
 `pending.json` is written, skips the rows that round had taken.
