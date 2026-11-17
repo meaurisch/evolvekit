@@ -23,7 +23,7 @@ from evolvekit.candidate import SEED_OPERATOR, Candidate, splice_block
 from evolvekit.config import Config
 from evolvekit.diffs import DiffError, apply_response
 from evolvekit.evaluate.types import EvalResult
-from evolvekit.prompts import Inspiration, build_messages
+from evolvekit.prompts import Inspiration, LedgerEntry, build_messages
 from evolvekit.providers.base import Completion, Provider, ProviderError
 from evolvekit.search.params import apply_params, current_values, declared_ranges
 from evolvekit.search.tuning import Observation, propose_tpe
@@ -112,12 +112,14 @@ def run_operator(
     scratchpad: str | None = None,
     extra_instruction: str | None = None,
     tree: TreeContext | None = None,
+    ledger: Sequence[LedgerEntry] = (),
 ) -> OperatorResult:
-    """One LLM call, one apply attempt. With `tree`, on the parent's tree (`_on_tree`)."""
+    """One LLM call, one apply attempt. With `tree`, on the parent's tree (`_on_tree`).
+    `ledger` is what was tried on the parent (`search/tried.py`), shown in the prompt."""
     if tree is not None:
         return _on_tree(operator, config=config, provider=provider, model_role=model_role, parent=parent,
                         parent_result=parent_result, best_score=best_score, inspirations=inspirations,
-                        scratchpad=scratchpad, extra_instruction=extra_instruction, ctx=tree)
+                        scratchpad=scratchpad, extra_instruction=extra_instruction, ctx=tree, ledger=ledger)
     model_cfg = config.models.by_role(model_role)
     messages = build_messages(
         config,
@@ -130,6 +132,7 @@ def run_operator(
         inspirations=inspirations,
         scratchpad=scratchpad,
         extra_instruction=extra_instruction,
+        ledger=ledger,
     )
     try:
         completion = provider.complete(
@@ -174,6 +177,7 @@ def _on_tree(
     scratchpad: str | None,
     extra_instruction: str | None,
     ctx: TreeContext,
+    ledger: Sequence[LedgerEntry] = (),
 ) -> OperatorResult:
     """The parent's tree checked out as a draft; the open files (or their one
     marked block) shown; the reply applied to the draft; the child is the
@@ -223,7 +227,7 @@ def _on_tree(
             config, parent=parent, result=parent_result, operator=operator, files=files,
             best_score=best_score, inspirations=inspirations, scratchpad=scratchpad,
             extra_instruction=extra_instruction, block=block, refusals=ctx.refusals,
-            prefix=ctx.repo.prefix,
+            prefix=ctx.repo.prefix, ledger=ledger,
         )
         try:
             completion = provider.complete(

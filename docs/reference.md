@@ -88,7 +88,7 @@ live run is built from:
   | `type` | When | Carries |
   |---|---|---|
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
-  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned`; then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force) |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned` and `plateau` (whether the generation was planned on a plateau; a resumed run reads it back to space its big steps, and an event from before it was recorded falls back to replaying the stop policy); then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force) |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
@@ -432,26 +432,68 @@ rescaling, not candidates being lost.
 
 | Operator | Model | What it sees |
 |---|---|---|
-| `diff` | small | the parent block, its score breakdown, delta summaries of 1 to `search.inspirations` (default 2) inspirations |
+| `diff` | small | the parent block, its score breakdown, change summaries of 1 to `search.inspirations` (default 2) inspirations, and what was tried on this parent |
 | `rewrite` | small | the same, and asks for the whole block back |
 | `crossover` | small | the parent **and** one inspiration's block, both with score breakdowns |
-| `big_step` | strong | scheduled every `big_step_every` generations, or on plateau |
+| `big_step` | strong | scheduled every `big_step_every` generations, or on plateau — then no plateau big step for `big_step_every` generations unless the search improved |
 | `param_lhs` | none | the next row of the run's Latin hypercube over the block's own constants |
 | `param_local` | none | a good configuration; moves one to three of its parameters a little |
 | `param_cross` | none | two good configurations; each parameter from one of them |
 | `param_tpe` | none | every configuration evaluated so far, the failed ones included |
 
+**Big steps on a plateau.** A plateau buys one big step, then waits: the next
+plateau big step comes `big_step_every` generations after the last big step
+that applied while the plateau held (a scheduled one included), or sooner if
+the search improved since. A big step whose reply never applied does not start
+the wait. A plateau held open by `stop.min_big_steps` is not made to wait: the
+run cannot stop until enough big steps were tried, so it takes them (this never
+fires at the default `min_big_steps: 0`). Scheduled big steps keep their
+schedule. The big step's prompt names the trigger that fired and, from the
+second big step of the run on, the previous big step as a line in the form of
+"What was tried on this parent" (it may have had another parent): what it
+changed and what came of it. A resumed run
+spaces its big steps as the uninterrupted run would; it reads the plateau each
+generation was planned with from `events.jsonl` (`generation_started`).
+
 Shares come from `search.operators`. Inspirations are drawn from cells other
-than the parent's and are shown as one-line delta summaries — a unified-diff
-stat against their own parent plus the first line of their docstring, both
-computed locally. Crossover is the one operator that also sees an inspiration's
-code, because it cannot combine two candidates otherwise. The model-free
-operators (role `none`) read no inspirations, so none are drawn for them: on a
-typed space, adding parameter axes leaves the run's proposals as they were.
+than the parent's and are shown as one-line change summaries — a unified-diff
+stat against their own parent plus the names of the functions and constants
+they changed, computed locally — never the model's own docstring, which can
+describe the rule it meant rather than the one it wrote. A function whose
+numbers alone changed is marked `(numbers only)`; on a typed space the
+constants named are the parameters whose values changed. On a tree problem,
+the summary names the files the diff touched. Crossover is the one operator
+that also sees an inspiration's code, because it cannot combine two candidates
+otherwise. The model-free operators (role `none`) read no inspirations, so
+none are drawn for them: on a typed space, adding parameter axes leaves the
+run's proposals as they were.
 
 Each inspiration adds a summary and a score line to the prompt, and on a tree
 problem its whole diff, so raising `search.inspirations` raises the cost of
 every prompt. Crossover is always shown exactly one.
+
+**What was tried on this parent.** Every prompt of an operator that calls a
+model also lists the parent's last five children, newest first, one line each:
+the child, its operator, its change summary and what came of it — at most 160
+characters a line, so the prompt does not grow with the run. What came of it is
+one of: a signed score change against the parent as it stands now — the
+score its "How it scored" section shows, not the ranking score
+`evaluate.holdout_penalty` discounts; a change below a billionth of the
+scores reads `+0` (with
+"(now the best)" when the child is the run's best, and ", close to …" for a
+near-duplicate); "score …" when the parent has no score; "failed: `…`" with
+the error's last line (a Python traceback's exception); "same behaviour as …"
+— with ", within the noise" on a noisy stage, where the twin is an earlier
+candidate that scored at least as well; "broke the gate `…`"; "raced out after
+N instances"; "kept out by the hold-out"; "not promoted"; "not ranked (score
+…)"; "not evaluated: the daily cap on final evaluations was reached"; "not
+applied: `…`" when a reply came back and was refused (it did not apply, it
+changed a file outside the open files, or the agent's change was empty or
+unreadable); "no reply: …" when there was no reply to apply (a provider error,
+a checkout that failed, open files too long to show, no time left, nothing for
+`param_lhs` to sweep); and "rejected: …" for a no-op or a duplicate. It replaces
+the parent's failure section (a parent always finished its evaluation, so that
+section was always empty), and it is rebuilt from `runs.jsonl` on resume.
 
 `param_lhs` costs no tokens. It needs a declaration inside the evolve block:
 
@@ -1556,11 +1598,12 @@ TurboEvolve's stagnation window and the same judgement for the same reason.
 ### The meta-scratchpad
 
 Every `search.scratchpad_every` generations (default 5, `0` turns it off) the
-small model is shown the current elites' delta summaries and score lines — never
+small model is shown the current elites' change summaries and score lines — never
 their source — and asked for at most 40 lines of lessons. The result is cached
 in `<run_dir>/scratchpad.md` and pasted into every prompt body until the next
-refresh. It is the only part of the prompt that carries memory across
-generations, which is exactly why it is capped in lines.
+refresh. With the parent's ledger of what was tried on it, it is the only part
+of the prompt that carries memory across generations, which is exactly why it
+is capped in lines.
 
 ### Sharing one config between two runs
 
@@ -3303,9 +3346,10 @@ stochastic, Azure-backed evaluators.
 - **The prompt** (`evolvekit/prompts.py`) — a cacheable system half carrying
   the problem's `description`, `tools`, `constraints` and `what_counts_as_new`
   as named sections, and a bounded user half carrying the parent's block, its
-  score breakdown, its evaluator's own notes, delta summaries of 1 to
+  score breakdown, its evaluator's own notes, change summaries of 1 to
   `search.inspirations` inspirations,
-  the meta-scratchpad, the "Already tried" dead-end list, and the operator
+  the meta-scratchpad, what was tried on this parent (its last five
+  children), the "Already tried" dead-end list, and the operator
   instruction. Nothing in it grows with the number of generations.
 - **Providers** (`evolvekit/providers/`) — `azure`, `openrouter`, `claude-cli`
   and `fake` behind one `complete()` Protocol, plus an optional second
@@ -3337,7 +3381,7 @@ stochastic, Azure-backed evaluators.
   `archive.json` and rebuildable from `runs.jsonl`.
 - **Search** (`evolvekit/search/`) — `diff`, `rewrite`, `crossover`, scheduled
   `big_step` and a real `param_lhs`; inspirations drawn from other cells and
-  passed as LLM-free delta summaries; three novelty filters (exact structural
+  passed as LLM-free change summaries; three novelty filters (exact structural
   hash, a similarity gate that flags rather than rejects, and a behavioural
   signature that stops a monotone re-expression at the first stage that scores
   it and tells the parent why); TurboEvolve-style adaptive breadth; and a
