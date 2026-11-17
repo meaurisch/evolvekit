@@ -509,3 +509,88 @@ Nothing is merged. The PRs are stacked in order (A2 → A3 → A4), each against
 that order with merge commits. The decisions marked "(departs)" in the A2 and A4 plans leave the
 design's text on measured grounds; the owner should read A2's decisions 1, 2, 16, 17, 19 and A4's 2,
 3, 4, 14, 15, 16, 17.
+
+## Pre-merge testing (2026-11-17)
+
+A third session tested PRs #83–#85 end to end before merging them, from
+[the test-and-merge prompt](../design/2026-11-17-algorithms-merge-session-prompt.md), in the worktree
+`.claude/worktrees/awesome-kepler-c454d8` (`PYTHONPATH` set to it, the PyVRP harness tests pointed at
+the main checkout's `.venv-pyvrp`, `benchmarks/pyvrp_hard/instances/` copied in).
+
+### What was run
+
+- **CI** on each PR, Linux and Windows: green on #83 and #84 before testing; #85's ran green during it.
+- **Two read-only reviewers** across the diffs (A2; A3 with A4), told the plans' decisions and
+  logged limits were settled. A2: no Critical or Important, one docs gap. A3 + A4: one Important
+  and three Minor (below).
+- **`python tasks.py run`**: the bin-packing demo, a leaderboard at the end.
+- **The product end to end** in a fresh library home whose path has a space
+  (`…\scratchpad\e2e home`), the demo tour through `evolvekit study`, no AI:
+  - *Depot A*, from the harness defaults: `doctor`, `new --app`, `cases --hold-back 2`, `groups`,
+    `check`, `start`, `status`, `wait`, `verdict`, `report --markdown`. Use (8.7 % lower, a chance of
+    about 96 %); the search settled after 4 of 9 rounds and its saved time went to the final check
+    (`final.saved` `{"s": 160, "spent": true, "why": "extended"}`); `job.json`'s `plan.rounds_left`
+    and `search.converged` as the manual says.
+  - *Depot B*, `--warm` from A: `study-run.json` records `priors` for the four settings (weight 0.5,
+    `studies_since` 0, similarity 1.0: B has no features, the logged limit); the starting point
+    stayed the best, so there is no final check and no line against the defaults.
+  - *Groups G*, the four samples learned from: **one group** (silhouette 0.45 of 1, at least 0.5
+    needed). *Kinds C*, ten generated cases of two kinds: two groups by features (0.90), then
+    tagged `small` / `large`, two groups by tags; `per_group: true` ran a group per kind with a line
+    per group and Holm ("with 2 kinds of case compared").
+  - *Depot D*, `--warm`: the starting point stayed the best. *Depot E*, `--warm` with its start
+    moved off the winner by hand, reached its final check — and found the bug below (the line said
+    "it held back other cases" though Depot A held back the same two).
+  - *Depot F*, as E after the fix: stopped from the command line in round 3, the Study page offered
+    *Run the final check* and *Carry on*; *Carry on* in the app resumed it (rounds 3–6, no round
+    run twice), the search settled, the final check ran, and the line said "Against the harness
+    defaults: not measured (Depot A chose this study's starting point on these same held-back
+    cases, so they cannot tell)" — the warm chain's answer.
+  - **The app** (`app --home` on that home) in the browser: Home, the Study page of a running,
+    stopped and finished study, *What we learned* (six studies; the per-kind study listed but not
+    counted, two settings told from chance and two not, "under 10 %"); no console errors.
+  - **An engine run** of `examples/cli-solver` with `promote.adapt` on its screen and
+    `reevaluate_best_every: 2`: `work/screening.json`, `reevaluations.jsonl`, `work/lhs.json`,
+    `work/perturb.json` and `work/noise.json` as the manual gives them (bar `lhs.json`'s `space`,
+    below).
+  - Every sentence for people used the app's words (study, case, held-back case, starting point,
+    round, final check) and percent.
+- **`python benchmarks/operator_mixes.py --seeds 5`** on 5904a37: mature mix **99.89** (master
+  100.30), far mix 1035.44 — A2's after-figures to the digit.
+- **The gate** (below).
+
+### What was found and fixed
+
+| Found by | Branch | What | Fix | Commit |
+|---|---|---|---|---|
+| reviewer (Important) | A4 | A search that settled and was then resumed (its final check stopped, say: the stopped card offers *Carry on*) bred a round more before the round hook could answer, and could search on if that round gained; the docs say a resumed run answers as the uninterrupted one would | the driver asks `on_round` about the last round on record before it breeds a resumed run; a settled search goes straight to its final check | 5904a37 |
+| the product, end to end (Important) | A4 | The line against the harness defaults could never be measured on a real study: `confirm` names a held-back case by its stem (`town-40`), `_against_defaults` only read `../../cases/town-40.json` — the form its tests wrote and the product never does — so every line said "not measured (it held back other cases)" | the case names are read as the stage's `instance_names()` writes them; the tests now name the cases as `confirm` does (eight of them failed before the fix) | aef85c6 |
+| reviewer (Minor) | A4 | A settled search's line named the window, not the flat rounds, which exceed it when a plateau waits for its big steps | the flat rounds, else the window | 5904a37 |
+| reviewer (Minor) | A4 | `study groups` with one case to learn from said "the cases' features are the same in every case" — about held-back cases it never read | with too few cases to learn from for two groups, the one-group note says that | 5904a37 |
+| reviewer (Minor) | A4 | A warm chain through a study that can no longer be read made the defaults line say the defaults study "chose this study's starting point", which may be false | `memory.warm_chain_unseen`; the line names the study that cannot be read | 5904a37 |
+| reviewer (Minor, docs) | A2 | `work/lhs.json`'s typed cube keeps `space`, which decides whether a resumed run keeps it; the manual did not say | the manual says it | 17f1370 |
+
+Each code fix has a test that failed first. The A2 commit was merged forward into `algo/3-prompt`
+(e8e4adc) and `algo/4-allocation` (8b618ce) with merge commits.
+
+As in every earlier review round, the bug that mattered most was one a test missed because it
+simulated a simpler procedure than the product's: here the case names.
+
+### Not fixed
+
+- The page's *Copy a summary* text leaves out the defaults line and the saved-time line (a gap,
+  not a wrong statement).
+- A third session after two crashes with the noise moved reads the second session's `plateau` for
+  an adopted generation (the reviewer's own "too contrived to matter").
+- No statistical doubt came up, so no statistician subagent was run: the fixes change no rule's
+  numbers.
+
+### Gate and merge
+
+- Gate: `python tasks.py check` on aef85c6 (all three projects and every fix), nothing else running:
+  **3419 passed, 1 failed, 5 skipped** in 48:18. The one failure is the worktree's path (step 0); the
+  five skips are the expected ones (the pyvrp extra in this venv, Windows mode bits).
+- CI on the fixed tips (17f1370, e8e4adc, aef85c6): green on Linux and Windows for #83, #84 and #85.
+
+Ruling: every PR is green and, with the fixes above, correct as far as this testing reaches; they are
+merged in order, #83, #84, #85, with merge commits, each after `master`'s CI on the one before.
