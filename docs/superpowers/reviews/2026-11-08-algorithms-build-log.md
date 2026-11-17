@@ -424,3 +424,88 @@ Two tasks, each built by a fresh implementer and reviewed by a fresh reviewer.
   by the ledger, so the test now looks for the twin's ledger line (8da08a0); its file then passed
   (33 tests). The final gate on the A4 branch runs the whole suite again over A3's code.
 - PR: [meaurisch/evolvekit#84](https://github.com/meaurisch/evolvekit/pull/84), `algo/3-prompt` against `master`, stacked on #83. **PASS.**
+
+## Project A4 — allocation and memory (2026-11-14 to 2026-11-17)
+
+Branch `algo/4-allocation` from `algo/3-prompt` (374a826). Plan:
+[2026-11-14-algo-4-allocation.md](../plans/2026-11-14-algo-4-allocation.md), checked by a fresh builder
+check that simulated the product's procedures (the real `_extend_check`, `_analyse`, the groups
+k-means, `tuning._Density`); seventeen decisions record what was ruled before, during and after the
+build — those marked "(departs)" leave the design's text and are listed in the PR for the owner.
+Six tasks, each built by a fresh implementer and reviewed by a fresh reviewer; a docs sweep; two
+statistician rounds.
+
+| Task | Closes | Review rounds | Commits |
+|---|---|---|---|
+| A4.1a re-plan from the measured rounds, `plan.rounds_left` | P3 | 1 + minors | d3d2b76 e19fdd2 |
+| A4.1b a settled search ends early; its time is the check's allowance | P1, P2 | 2 (the saved time was said nowhere) | 564d9b9 ca6be79 13ef49a |
+| A4.2 grouping that can say one group | S10 | 1 + minors | 7c2573b bbf2bb3 |
+| A4.3a importance against a permutation null, pooled by Fisher | S9 | 2 (seeds and bands) | 71b5757 4bfdeb8 |
+| A4.3b priors that decay for a reason and shrink for unlike cases | S11 | 3 (one fixed feature dropped every prior; alike studies always shrunk) | 282eca0 99e2622 fcc6e95 9033b45 |
+| A4.3c "against the harness defaults", a second comparison | S11 | 3 (a failure could cost the answer; the warm chain replayed its own choice) | 2049fc0 7c2d680 468700e 8857163 |
+| Docs sweep | — | — | 90468e0 |
+| Statistician fixes (decisions 16, 17) | — | rounds 1–2 | 40e2da1 012a8d0 5731060 |
+
+### What measurement changed
+
+- **The final check** (handoff item 3). A settled search's saved time only enlarges the one
+  extension's allowance (12-run cap, two reads). Measured through the real `_extend_check`: 8.5–9.0 %
+  false "use" (slow test, 10 000 null studies, rate + 2 SE ≤ 9.55 %); no study takes a third read.
+- **Convergence** is the design's first leg alone (decision 4, departs): the TPE leg cannot be read in
+  a 6-round study and barely separates settled from improving. Flat search called settled in 95 %,
+  one gaining 1 noise sd a round in 4 %, 0.5 sd in 50 %, **0.25 sd in 81 % — the documented cost**.
+- **Grouping** keeps the design's silhouette ≥ 0.5 (decision 1): the alternative reference test cut
+  false splits but lost real structure. The docs give the measured split rates by cases and features
+  (shapeless cases on one feature split 63–94 %; on three, 0.5–3 %). The demo tour's four samples give
+  one group (0.455); the pyvrp samples, tagged by depots, keep their tags.
+- **Importance** (decisions 2, 3, 16, departs): the design's "pool over studies with p < 0.1" let a
+  setting that does nothing in 25 % of the time; Fisher's combination 8–10 %. A permutation of raw
+  rows within a round read a do-nothing setting as important in 40–63 % of lineage-shaped searches
+  (children of one elite share its value and its quality); the statistic now compares siblings —
+  measured about 10 % (6.9–12.0 % across shapes; up to about 20 % for a switch in a two-or-three-setting
+  space searched almost only by local steps, documented).
+- **Priors** (decisions 5, 14, departs in detail): decay counts only settings studies that tuned the
+  setting; the similarity factor is standardised within studies, leaves out what it cannot
+  standardise, caps each feature, and is bias-corrected exactly, so alike studies keep 90 / 95 / 97 %
+  of the weight at 4 / 8 / 12 cases (uncorrected 67 / 86 %); it reaches TPE as A2.5b's pseudo-count.
+- **The defaults line** (decisions 6, 15, 17) is information, never an action, and never costs the
+  main answer. Independent defaults study: 6.2 % "use" under the null (14.9 % after a main "use").
+  When the defaults study is in the warm study's own chain on the same cases — the usual path — it
+  measured 92 % would-be "use" (77–86 % through a later from-defaults study), so there it says "not
+  measured" with the reason.
+
+### Statistician review
+
+| Round | Findings | What it found |
+|---|---|---|
+| 1 | 2 Important | the within-round permutation was invalid for lineage rows; the defaults line could replay an earlier choice through another from-defaults study |
+| 2 | **clean** | one Minor (the small-space switch edge, documented) |
+
+### Limits logged
+
+- Per-group runs: each group's allowance reads its job's own start time (unchanged from before A4).
+- A new warm study has features only when `study groups` was run on it, so the similarity factor is
+  usually 1.0 on a real warm start (documented).
+- The defaults study's case content is digested from its files now, not as they were when it ran.
+- Importance power is modest (a number worth 10 noise sd over its range found in 39 %).
+
+### Gate and PR
+
+- Gate: `python tasks.py check` on 5731060 (the last branch of the programme, so A2 and A3's code
+  too), the PyVRP harness tests pointed at the main checkout's `.venv-pyvrp`: **3416 passed, 1 failed,
+  5 skipped** in 47:59. The one failure is the worktree's path (step 0). Another project's idle test
+  servers and one of its test runs were on the machine; no timing-sensitive test failed.
+- PR: against `master`, stacked on #83 and #84.
+
+## The A2–A4 session, finished (2026-11-17)
+
+| Project | PR | Result | Gate | Benchmark | Reviews |
+|---|---|---|---|---|---|
+| A2 noise-aware search | [#83](https://github.com/meaurisch/evolvekit/pull/83) | **PASS** | 3243 passed, 1 failed (path), 5 skipped | mature mix 100.30 → 99.89 (must not rise: holds) | 4 statistician rounds (last clean), whole-branch review |
+| A3 what the model is told | [#84](https://github.com/meaurisch/evolvekit/pull/84) | **PASS** | 3305 passed, 2 failed (path; one stale test, fixed and re-run), 5 skipped | — | builder check, task reviews |
+| A4 allocation and memory | see below | **PASS** | 3416 passed, 1 failed (path), 5 skipped | — | 2 statistician rounds (last clean) |
+
+Nothing is merged. The PRs are stacked in order (A2 → A3 → A4), each against `master`; merge them in
+that order with merge commits. The decisions marked "(departs)" in the A2 and A4 plans leave the
+design's text on measured grounds; the owner should read A2's decisions 1, 2, 16, 17, 19 and A4's 2,
+3, 4, 14, 15, 16, 17.
