@@ -27,8 +27,11 @@ from evolvekit.leaderboard import (
     novelty_counts,
     rank,
     render_html,
+    read_reevaluations,
+    read_rows,
     render_markdown,
-    replay_veto,
+    run_holdout_penalty,
+    view_rows,
     unfinished_count,
     vetoed_count,
 )
@@ -116,11 +119,10 @@ evaluate:
   holdout_veto: true
   # Behavioural duplicates: after every command stage the candidate's KPIs are
   # rounded and hashed, and a candidate whose fingerprint matches one already
-  # seen at that stage is stopped there. Defaults shown.
+  # seen at that stage is stopped there. On a noisy evaluator the run's own
+  # noise decides instead (docs/reference.md, "The novelty filters").
+  # Defaults shown.
   signature_digits: 9
-  # Used instead on a `seeds: N > 1` stage: a stochastic evaluator moves the
-  # eighth digit for free, so at nine digits nothing ever looks like a twin.
-  signature_digits_stochastic: 3
   signature_ignore: [runtime_s, complexity, static_problems]
 
 models:
@@ -146,7 +148,7 @@ budget:
 
 stop:
   patience: 4
-  epsilon: 0.001
+  epsilon: null            # null: automatic -- max(1e-6, 1e-9 x the best, half the noise)
   target: null
   # Economics stops, both off by default. Either one only fires after at least
   # one big step has been applied since the last improvement. In a run that
@@ -642,6 +644,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             limit=10,
             usage=driver.ledger.usage(),
             window=config.stop.economics_window,
+            reevaluations=read_reevaluations(driver.ledger.run_dir),
+            holdout_penalty=config.evaluate.holdout_penalty,
         )
     )
     print()
@@ -899,9 +903,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1 if state == "missing" else 0
 
     ledger = Ledger(args.run_dir)
-    rows = replay_veto(ledger.runs())
+    rows = read_rows(ledger.run_dir)
     if not rows:
         return 0
+    reevaluations = read_reevaluations(ledger.run_dir)
+    penalty = run_holdout_penalty(ledger.run_dir) if reevaluations else 0.0
     print()
     totals = ledger.totals()
     ranked = rank(rows, 1)
@@ -943,7 +949,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"tokens       : {int(totals['input_tokens'])} in / {int(totals['output_tokens'])} out")
     print(f"spend        : ${totals['usd']:.4f}")
     window = archive.get("economics_window", DEFAULT_WINDOW)
-    points = series(rows, ledger.usage(), window=window)
+    points = series(view_rows(ledger.runs(), []), ledger.usage(), window=window,
+                    reevaluations=reevaluations, holdout_penalty=penalty)
     if points:
         print()
         print(format_series(points))
@@ -953,16 +960,20 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_leaderboard(args: argparse.Namespace) -> int:
     ledger = Ledger(args.run_dir)
     rows = ledger.runs()
+    reevaluations = read_reevaluations(ledger.run_dir)
+    penalty = run_holdout_penalty(ledger.run_dir) if reevaluations else 0.0
     usage = ledger.usage()
     archive = ledger.read_archive()
-    print(render_markdown(rows, limit=args.limit, usage=usage))
+    print(render_markdown(rows, limit=args.limit, usage=usage, reevaluations=reevaluations,
+                          holdout_penalty=penalty))
     if archive.get("occupancy"):
         print(f"\narchive: {archive['occupancy']}")
     if args.html:
         path = Path(args.html)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            render_html(rows, archive=archive), encoding="utf-8", newline="\n"
+            render_html(rows, archive=archive, reevaluations=reevaluations, holdout_penalty=penalty),
+            encoding="utf-8", newline="\n"
         )
         print(f"\nwrote {path.resolve()}")
     return 0
@@ -992,12 +1003,9 @@ def cmd_confirm(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    from evolvekit.leaderboard import rank
-    from evolvekit.ledger import read_jsonl
-
     if not Path(args.run_dir).is_dir():
         raise ValueError(f"there is no run directory at {args.run_dir}")
-    rows = list(read_jsonl(Path(args.run_dir) / "runs.jsonl"))
+    rows = read_rows(Path(args.run_dir))
     if args.candidate == "best":
         ranked = rank(rows, 1)
         if not ranked:

@@ -30,12 +30,13 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from evolvekit.candidate import extract_block, splice_block
 from evolvekit.config import Config, ModelConfig, StageConfig
 from evolvekit.evaluate.cascade import race_warnings
 from evolvekit.evaluate.fanout import Job, run_instance_stage
+from evolvekit.evaluate.noise import Noise, about_pct, check_seeds, check_stage, measurable, record_check
 from evolvekit.evaluate.process import can_pin
 from evolvekit.evaluate.stages import (
     Configuration,
@@ -308,7 +309,62 @@ def _command_stage(
             return False
         if _seed_breaks_a_gate(config, report, f"stage {stage.id} hold-out", private):
             return False
+    if stage.id == config.final_stage.id:
+        _check_noise(config, report, stage, outcome, candidate_path, configuration, work_dir, app=app)
     return True
+
+
+def _check_noise(
+    config: Config,
+    report: PreflightReport,
+    stage: StageConfig,
+    outcome: StageOutcome,
+    candidate_path: Path,
+    configuration: Configuration | None,
+    work_dir: Path,
+    *,
+    app: str | None = None,
+) -> None:
+    """The seed run again at the final stage, as a run does it once
+    (`evaluate/noise.py`): one report line on the evaluator's noise."""
+    if stage.kind != "command":
+        return
+    if not measurable(stage):
+        if stage.seeds <= 1:
+            report.notes.append(
+                f"stage {stage.id}: the command has no {{seed}}, so the noise cannot be measured; "
+                "every comparison is made as if the evaluator were exact"
+            )
+        return
+    noise = Noise()
+    noise.observe(stage.id, "seed", outcome, is_seed=True)
+    extra = _run_command(
+        config, check_stage(stage, outcome), candidate_path, configuration, work_dir / "noise-check",
+        private=False, app=app, seeds=check_seeds(stage),
+    )
+    objective = config.evaluate.score.objective
+    check = (
+        record_check(noise, stage.id, stage, outcome, extra, objective=objective,
+                     digits=config.evaluate.signature_digits, ignore=config.evaluate.signature_ignore)
+        if extra.ok else None
+    )
+    if check is None:
+        why = extra.failure or "its measures could not be compared"
+        report.warnings.append(f"stage {stage.id}: the seed could not be run again to measure the noise ({why})")
+        return
+    if check.repeatable:
+        report.notes.append(
+            f"stage {stage.id}: the evaluator gives the same numbers for the same seed; comparisons are paired by seed"
+        )
+        return
+    if check.calibrated:
+        basis = f"{check.runs} runs of the seed" + (f" on {check.instance}" if check.instance else "")
+    else:
+        basis = f"seeds: {stage.seeds}"
+    report.notes.append(
+        f"run-to-run noise at stage {stage.id}: one run varies by about "
+        f"{about_pct(noise.cv(stage.id, objective))} % ({basis})"
+    )
 
 
 def _run_tree_stages(config: Config, report: PreflightReport, work_dir: Path) -> None:
@@ -375,13 +431,15 @@ def _run_command(
     *,
     private: bool,
     app: str | None = None,
+    seeds: Sequence[int] | None = None,
 ) -> StageOutcome:
-    """The seed through one command stage, the way a run would put it through."""
+    """The seed through one command stage, the way a run would put it through
+    (`seeds` in place of the stage's own: the noise check's extra runs)."""
     if stage.fans_out:
         job = Job("seed", candidate_path, configuration=configuration, app=app)
         return run_instance_stage(
             [job], stage, out_dir=work_dir, cwd=config.base_dir, private=private,
-            required_kpis=config.evaluate.required_kpis,
+            required_kpis=config.evaluate.required_kpis, seeds=seeds,
         )["seed"]
     return run_command_stage(
         candidate_path,
@@ -393,6 +451,7 @@ def _run_command(
         required_kpis=config.evaluate.required_kpis,
         configuration=configuration,
         app=app,
+        seeds=seeds,
     )
 
 
@@ -547,9 +606,8 @@ def _check_budget(config: Config, report: PreflightReport) -> None:
         report.notes.append(
             f"stage {stage.label} ran {seeds} seed(s)"
             + (" per instance" if stage.instances else "")
-            + f"; {varied}. The behaviour "
-            f"signature uses {config.evaluate.signature_digits_stochastic} significant "
-            "digits on this stage."
+            + f"; {varied}. Behaviour twins on this stage are compared within how far "
+            "its runs vary (exactly, on an evaluator that repeats itself on a seed)."
         )
     for stage_config in config.evaluate.stages:
         if stage_config.fans_out and stage_config.normalize == "baseline":

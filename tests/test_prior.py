@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import random
 import shutil
+from dataclasses import replace
+from statistics import fmean
 
 import pytest
 import yaml
@@ -19,7 +22,8 @@ from evolvekit.harness.library import BUILT_IN
 from evolvekit.harness.manifest import Setting, load_harness
 from evolvekit.harness.plan import Plan
 from evolvekit.harness.study import SettingChoice, Study, load_study, save_study
-from evolvekit.search.operators import param_lhs_typed
+from evolvekit.search.operators import latin_rows, param_lhs_typed, param_local
+from evolvekit.search.tuning import Observation, _Density, propose_tpe
 from evolvekit.space import ParameterSpace, SpaceError
 
 
@@ -170,9 +174,16 @@ def test_prior_outside_the_study_range_is_dropped(tmp_path):
     assert memory.priors_for(home, study, document_of=docs.get) == {}
 
 
+def lhs_children(space, count: int, per_cube: int = 10):
+    """`count` `param_lhs` children over `space`, as the driver hands them out:
+    the rows of hypercubes of `per_cube` rows, each cube from its own seed."""
+    rows = [row for s in range(count // per_cube) for row in latin_rows(space, per_cube, random.Random(s))]
+    return [param_lhs_typed(space, seed_candidate(space), row=values, prior=names) for values, names in rows]
+
+
 def test_prior_share_of_draws():
     space = ParameterSpace.parse({"n": {"type": "int", "low": 2, "high": 30, "default": 8, "prior": {"value": 12, "weight": 0.3}}})
-    drawn = [param_lhs_typed(space, seed_candidate(space), seed=s) for s in range(1000)]
+    drawn = lhs_children(space, 1000)
     share = sum("n" in r.meta.get("prior", []) for r in drawn) / 1000
     assert abs(share - 0.3) <= 0.05
     assert all(abs(space.parameters[0].to_unit(r.meta["params"]["n"]) - space.parameters[0].to_unit(12)) <= 0.1 + 1e-9
@@ -182,7 +193,7 @@ def test_prior_share_of_draws():
 def test_prior_never_excludes_range_ends():
     space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5,
                                         "prior": {"value": 0.5, "weight": 0.5}}})
-    values = [param_lhs_typed(space, seed_candidate(space), seed=s).meta["params"]["x"] for s in range(1000)]
+    values = [r.meta["params"]["x"] for r in lhs_children(space, 1000)]
     assert any(v < 0.05 for v in values) and any(v > 0.95 for v in values)
 
 
@@ -193,10 +204,11 @@ def test_prior_draws_are_seeded():
         "init": {"type": "choice", "choices": ["random", "nearest"], "default": "random", "prior": {"value": "nearest", "weight": 0.5}},
     })
     for seed in range(30):
-        first, second = (param_lhs_typed(space, seed_candidate(space), seed=seed) for _ in range(2))
-        assert first.meta == second.meta and first.block == second.block
-        if "init" in first.meta.get("prior", []):
-            assert first.meta["params"]["init"] == "nearest", "a choice is drawn as the value itself"
+        first, second = (latin_rows(space, 6, random.Random(seed)) for _ in range(2))
+        assert first == second
+        for values, names in first:
+            if "init" in names:
+                assert values["init"] == "nearest", "a choice is drawn as the value itself"
 
 
 NO_PRIOR = ParameterSpace.parse({
@@ -206,25 +218,24 @@ NO_PRIOR = ParameterSpace.parse({
     "init": {"type": "choice", "choices": ["random", "nearest"], "default": "random"},
     "or_opt": {"type": "bool", "default": False},
 })
-BEFORE_PRIORS = {  # what `param_lhs_typed` drew at 430a6e4, before priors existed
-    0: {"n": 10, "r": 1736, "a": 0.00608193, "init": "random", "or_opt": True},
-    1: {"n": 23, "r": 4925, "a": 0.0167434, "init": "random", "or_opt": True},
-    7: {"n": 14, "r": 20176, "a": 0.0461724, "init": "random", "or_opt": False},
-    42: {"n": 7, "r": 110, "a": 0.0429623, "init": "nearest", "or_opt": True},
-}
 
 
 def test_no_prior_draws_as_before():
-    for seed, values in BEFORE_PRIORS.items():
-        result = param_lhs_typed(NO_PRIOR, seed_candidate(NO_PRIOR), seed=seed)
-        assert result.meta == {"params": values}, seed
+    """Without a prior a cube is the space's own hypercube: nothing more is drawn."""
+    for seed in (0, 1, 7, 42):
+        ours, plain = random.Random(seed), random.Random(seed)
+        rows = latin_rows(NO_PRIOR, 6, ours)
+        assert [values for values, _ in rows] == NO_PRIOR.latin_hypercube(6, plain)
+        assert ours.getstate() == plain.getstate(), "not one number more drawn"
+        assert all(names == [] for _, names in rows)
+        child = param_lhs_typed(NO_PRIOR, seed_candidate(NO_PRIOR), row=rows[0][0], prior=rows[0][1])
+        assert child.meta == {"params": rows[0][0]}
 
 
 def test_a_prior_at_a_range_end_is_reflected_not_piled_on_the_end():
     space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5,
                                         "prior": {"value": 0.0, "weight": 0.5}}})
-    near = [r.meta["params"]["x"] for r in (param_lhs_typed(space, seed_candidate(space), seed=s) for s in range(400))
-            if "x" in r.meta.get("prior", [])]
+    near = [r.meta["params"]["x"] for r in lhs_children(space, 400) if "x" in r.meta.get("prior", [])]
     assert len(near) > 100 and all(0.0 <= v <= 0.1 + 1e-9 for v in near)
     assert sum(v == 0.0 for v in near) <= 2, "clamping would put about half of them on 0.0"
 
@@ -234,6 +245,112 @@ def test_prior_is_not_part_of_the_cache_key():
     with_prior = ParameterSpace.parse({"n": {"type": "int", "low": 2, "high": 30, "default": 8, "prior": {"value": 12, "weight": 0.5}}})
     assert plain.render_block({"n": 9}) == with_prior.render_block({"n": 9})
     assert plain.describe() == with_prior.describe()
+
+
+# -- priors beyond the sweep: the estimator and the first local steps (Q18) ----
+
+UNIT = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.2}})
+
+
+def _with_prior(space: ParameterSpace, value, weight: float) -> ParameterSpace:
+    """`space` with a prior on its one parameter. Built rather than parsed, so a
+    weight of one can be tried: a declaration refuses it, the density does not."""
+    return ParameterSpace((replace(space.parameters[0], prior=(value, weight)),))
+
+
+def test_a_numeric_prior_adds_four_weights_of_a_narrow_gaussian_to_the_uniform():
+    """No observations: the density is the prior part alone, (U + 4w G) / (1 + 4w).
+    At w 0.5 and the prior's own value 0.8: G(0.8) = phi(0) / (0.1 Z),
+    Z = Phi(2) - Phi(-8) = 0.97725, so G = 4.0822 and the pdf (1 + 2 G) / 3 = 3.0548.
+    It integrates to one, the narrow Gaussian renormalised inside [0, 1]."""
+    density = _Density(_with_prior(UNIT, 0.8, 0.5).parameters[0], [])
+    assert density.pdf(0.8) == pytest.approx(3.0548, abs=1e-3)
+    assert density.pdf(0.0) == pytest.approx(1 / 3, abs=1e-6), "eight bandwidths from the prior: the uniform's share alone"
+    edge = _Density(_with_prior(UNIT, 1.0, 0.5).parameters[0], [Observation({"x": 0.9}, 1.0)])
+    assert sum(edge.pdf((i + 0.5) / 4000) for i in range(4000)) / 4000 == pytest.approx(1.0, abs=0.005)
+
+
+def test_a_choice_prior_is_four_weights_of_pseudo_counts_on_its_value():
+    """A bool with a prior on True at w 0.5 and no observations: 1/2 on each value from
+    the uniform part, 4 x 0.5 = 2 more on True; total W = 3, so True has 5/6."""
+    flag = ParameterSpace.parse({"on": {"type": "bool", "default": False, "prior": {"value": True, "weight": 0.5}}})
+    density = _Density(flag.parameters[0], [])
+    assert (density.pdf(False), density.pdf(True)) == pytest.approx((1 / 6, 5 / 6))
+    plain = _Density(ParameterSpace.parse({"on": {"type": "bool", "default": False}}).parameters[0],
+                     [Observation({"on": True}, 1.0)])
+    assert (plain.pdf(False), plain.pdf(True)) == pytest.approx((1 / 4, 3 / 4)), "without a prior, as before"
+
+
+@pytest.mark.parametrize("raw, value", [
+    ({"type": "float", "low": 1.0, "high": 10_000.0, "default": 10.0, "log": True}, 1000.0),
+    ({"type": "int", "low": 2, "high": 30, "default": 8}, 12),
+])
+def test_a_log_or_int_prior_peaks_at_its_value_on_the_unit_scale(raw, value):
+    """The bump sits at `to_unit(value)` (0.75 for 1000 on a log 1..10 000; 10/28 for
+    12 on 2..30), not at the raw value's place in the range."""
+    parameter = ParameterSpace.parse({"p": {**raw, "prior": {"value": value, "weight": 0.5}}}).parameters[0]
+    density = _Density(parameter, [])
+    values = [parameter.from_unit(i / 1000) for i in range(1001)]
+    peak = max(values, key=density.pdf)
+    assert abs(parameter.to_unit(peak) - parameter.to_unit(value)) <= 0.001
+    assert density.pdf(value) == pytest.approx(density.pdf(peak), rel=1e-4)
+    assert density.pdf(value) > 2.5, "about (1 + 2 x 4) / 3 at its centre"
+    raw_place = (value - raw["low"]) / (raw["high"] - raw["low"])
+    if raw.get("log"):
+        assert density.pdf(parameter.from_unit(raw_place)) < 0.5, "the raw value's place in the range is far off"
+
+
+def test_a_prior_pulls_tpe_towards_its_value_by_at_least_a_tenth():
+    """Same observations, flat around the box; a prior at 0.8 with weight 1: over
+    200 seeds the mean proposal moves towards 0.8 by at least 0.1 on the unit scale.
+    Flat: each seed has its own history, 30 stratified points with scores drawn at
+    random, so no side of the box is better on average. Measured: 0.481 without the
+    prior, 0.698 with it, a paired shift of 0.217 (SE 0.021); at weight 0.5, 0.114."""
+    pulled = _with_prior(UNIT, 0.8, 1.0)
+    plain, near = [], []
+    for s in range(200):
+        rng = random.Random(s)
+        history = [Observation({"x": (i + rng.random()) / 30}, rng.random()) for i in range(30)]
+        plain.append(propose_tpe(UNIT, history, random.Random(10_000 + s))["x"])
+        near.append(propose_tpe(pulled, history, random.Random(10_000 + s))["x"])
+    print(f"mean proposal: {fmean(plain):.3f} without the prior, {fmean(near):.3f} with it at 0.8")
+    assert fmean(near) >= fmean(plain) + 0.1
+
+
+def test_a_local_step_from_the_seed_starts_at_the_prior_value_at_its_weight():
+    """Decision 11: one parameter, default 0.2, prior value 0.8, weight w = 0.5, 4000 seeds;
+    "near" = within one step (0.15) of the prior value. Expected share
+    w * 0.73 + (1 - w) * plain: 0.73 is a step from the prior value landing near it,
+    P(|N(0, 0.15)| <= 0.15) = 0.683 plus, since a step past 1 is reflected back inside
+    (A2.6c), P(0.25 <= N(0, 0.15) <= 0.55) = 0.048 (0.8 + s comes back to 1.2 - s); and
+    plain = P(0.45 <= N(0, 0.15) <= 0.75) = 0.0013, the share of plain steps from 0.2
+    that land near 0.8 (reflected ones from 0.2 reach it only past 0.85: negligible).
+    So about 36.6 %; measured 37.8 % (SE 0.77 points; before reflection 35.0 % against
+    34.2 %, the same seeds' prior starts), plain 0.18 %; assert 0.30 <= share <= 0.42
+    (37.8 % is 5.5 SE below the top)."""
+    def near(space) -> float:
+        start = seed_candidate(space)
+        return sum(abs(param_local(space, start, seed=s).meta["params"]["x"] - 0.8) <= 0.15 for s in range(4000)) / 4000
+
+    share, plain = near(_with_prior(UNIT, 0.8, 0.5)), near(UNIT)
+    print(f"near the prior: {share:.1%} from the seed with the prior, {plain:.2%} plain")
+    assert 0.30 <= share <= 0.42
+
+
+def test_a_local_step_from_another_parent_ignores_the_prior():
+    space = _with_prior(UNIT, 0.8, 0.5)
+    parent = Candidate(id="g001-c0001", generation=1, block=space.render_block({"x": 0.2}), source="",
+                       operator="param_lhs", params={"x": 0.2})
+    for s in range(50):
+        assert param_local(space, parent, seed=s).meta == {"params": space.perturb({"x": 0.2}, random.Random(s))}
+        unpriored = param_local(UNIT, seed_candidate(UNIT), seed=s)
+        assert unpriored.meta == {"params": UNIT.perturb({"x": 0.2}, random.Random(s))}, "no prior: nothing more drawn"
+
+
+def test_a_local_step_that_starts_at_the_prior_says_so():
+    space = _with_prior(UNIT, 0.8, 0.5)
+    started = [param_local(space, seed_candidate(space), seed=s).meta for s in range(200)]
+    assert 70 <= sum(m.get("prior") == ["x"] for m in started) <= 130, "about half, at w 0.5"
 
 
 @pytest.mark.parametrize("prior, words", [

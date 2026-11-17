@@ -145,10 +145,10 @@ evaluate:
   signature_digits: 9
   # A PyVRP solve is wall-clock bounded, so two runs of the *same* config on
   # the same machine differ in iteration count and therefore in objective. The
-  # behavioural-duplicate filter is consequently close to inert on this
-  # example, and that is expected rather than broken; everything timing-shaped
-  # is dropped from the signature anyway so that what remains is at least the
-  # shape of the routing.
+  # nine-digit fingerprint is consequently close to inert on this example; once
+  # the run has a noise estimate, twins are judged by that noise instead
+  # (docs/reference.md, "The novelty filters"). Everything timing-shaped is
+  # dropped from what is compared, so that what remains is the routing.
   signature_ignore:
     [runtime_s, complexity, static_problems, time_used_s, configure_s, budget_s, iterations]
 

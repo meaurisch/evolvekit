@@ -326,7 +326,7 @@ def compile_study(
             "command": command(plan.screen_time_limit_s),
             "instances": [f"{up}/{case}" for case in screened],
             "timeout": timeout(plan.screen_time_limit_s),
-            "promote": {"top_k_per_generation": 2},
+            "promote": {"top_k_per_generation": 2, "adapt": True},  # the run adapts k (search/screening.py)
         })
     stages.append({"id": "full", **shared, "command": command(time_limit), "instances": cases,
                    "timeout": timeout(time_limit)})
@@ -383,9 +383,21 @@ def compile_study(
         },
         "stop": {"patience": plan.generations},
     }
+    if parameters:
+        config["search"]["archive"] = {"descriptors": archive_axes(list(parameters), harness)}
     if ai:
         config["models"] = models
     return config, runner_input(study, harness, runner_settings(study, harness, root), up=up)
+
+
+def archive_axes(names: list[str], harness: Harness) -> list[dict[str, Any]]:
+    """`search.archive.descriptors` of a study that tunes: two of the tuned
+    values, 4 fixed bins each over their range -- the harness's recommended
+    settings first, in its order (the one that matters most first), then the
+    rest as the study declares them."""
+    ranked = {name: index for index, name in enumerate(harness.recommended)}
+    order = sorted(names, key=lambda n: (ranked.get(n, len(ranked)), names.index(n)))
+    return [{"param": name, "bins": 4} for name in order[:2]]
 
 
 def _tree(study: Study, harness: Harness) -> dict[str, Any]:

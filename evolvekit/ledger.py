@@ -98,6 +98,10 @@ class Ledger:
     def record_run(self, record: dict[str, Any]) -> None:
         self._append(self.runs_path, record)
 
+    def record_reevaluation(self, record: dict[str, Any]) -> None:
+        """One re-evaluation of the best (`leaderboard.REEVALUATIONS`)."""
+        self._append(self.run_dir / "reevaluations.jsonl", record)
+
     def record_usage(
         self,
         completion: Completion,

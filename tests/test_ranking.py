@@ -26,9 +26,11 @@ import pytest
 import yaml
 
 from evolvekit.candidate import Candidate
-from evolvekit.config import ConfigError, build_config, load_config
+from evolvekit.config import ConfigError, LevelConfig, build_config, load_config
 from evolvekit.evaluate.cascade import Cascade, finished_final_stage
 from evolvekit.evaluate.scoring import ranking_score
+from evolvekit.evaluate.types import StageOutcome
+from evolvekit.stats import t_scale
 from evolvekit.leaderboard import (
     competes,
     fitness_of,
@@ -319,6 +321,103 @@ def test_a_candidate_below_the_seeds_hold_out_does_not_compete(mirror_project, t
     assert results["lo"].competes is True and results["lo"].veto is None
 
 
+def test_with_no_noise_the_veto_is_the_literal_rule(mirror_project, tmp_path):
+    """No `seeds: N`, no `{seed}`: sigma-hat is 0, the margin is 0, and A0's rule
+    (the test above) holds unchanged; every finished result says so."""
+    config = load_config(mirror_project)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    seed = cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])["g000-c0001"]
+    assert seed.holdout_margin == 0.0 and cascade.holdout_margin() == 0.0
+    results = cascade.evaluate_generation([_value_candidate("hi", 1.001), _value_candidate("lo", 0.5)])
+    assert results["hi"].competes is False and results["hi"].veto == "holdout below the seed's -1"
+    assert results["hi"].holdout_margin == 0.0 and results["lo"].holdout_margin == 0.0
+
+
+T1 = t_scale(2**0.5, 1)
+"""The margin's widening to Student's t when its sd rests on two runs (1 df):
+2.80 (Decision 17b). The fixtures below observe `runs=2`."""
+
+
+def test_a_hold_out_below_the_seed_within_the_noise_margin_competes(mirror_project, tmp_path):
+    config = load_config(mirror_project)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])
+    cascade.noise.observe("full/private", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": -1.0},
+                                                            kpi_var={"value": 0.25}, runs=2))
+    # margin = 2 * 0.5 / sqrt(1) * T1 = 2.8 (seeds: 1): -3.5 is above -1 - 2.8
+    result = cascade.evaluate_generation([_value_candidate("hi", 3.5)])["hi"]
+    assert result.competes is True and result.holdout_margin == pytest.approx(1.0 * T1)
+    worse = cascade.evaluate_generation([_value_candidate("far", 4.0)])["far"]
+    assert worse.competes is False
+    assert worse.veto == "holdout below the seed's -1 by more than its noise margin 2.8"
+
+
+def test_the_public_noise_is_not_rescaled_across_a_change_of_sign(mirror_project, tmp_path):
+    """mirror_project: the seed's public score is 1, its private -1. With only the public
+    stage's noise known, |-1/1| would rescale it; the signs differ, so the margin is 0."""
+    config = load_config(mirror_project)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])
+    cascade.noise.observe("full", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": 1.0},
+                                                    kpi_var={"value": 0.25}, runs=2))
+    assert cascade.holdout_margin() == 0.0
+
+
+def test_without_a_hold_out_estimate_the_public_noise_is_rescaled_to_the_hold_outs_size(mirror_project, tmp_path):
+    """A hold-out at `seeds: 1` replicates nothing; the public run's noise, scaled by
+    |seed_private / seed_public| = 0.5 when both have one sign, stands in for it."""
+    config = load_config(mirror_project)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])
+    cascade.noise.observe("full", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": 1.0},
+                                                    kpi_var={"value": 0.25}, runs=2))
+    cascade.seed_public, cascade.seed_private = 2.0, 1.0
+    assert cascade.holdout_margin() == pytest.approx(2 * 0.5 * 0.5 * T1)
+    cascade.seed_public = 0.0
+    assert cascade.holdout_margin() == 0.0, "a public score of 0: no rescale"
+    cascade.noise.observe("full/private", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": 1.0},
+                                                            kpi_var={"value": 0.04}, runs=2))
+    assert cascade.holdout_margin() == pytest.approx(0.4 * T1), "the hold-out's own estimate comes first"
+
+
+def test_a_repeatable_hold_out_uses_its_own_noise_only_when_it_is_paired(mirror_project, tmp_path):
+    """On a repeatable hold-out the accessors read the paired pool; an across-only
+    estimate there says nothing they would read, so the public noise stands in."""
+    config = load_config(mirror_project)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_value_candidate("g000-c0001", 1, "human-seed")])
+    cascade.seed_public, cascade.seed_private = 2.0, 1.0
+    cascade.noise.observe("full", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": 1.0},
+                                                    kpi_var={"value": 0.25}, runs=2))
+    cascade.noise.set_repeatable("full/private", True)
+    cascade.noise.observe("full/private", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": 1.0},
+                                                            kpi_var={"value": 0.04}, runs=2))
+    assert cascade.holdout_margin() == pytest.approx(2 * 0.5 * 0.5 * T1), "across only: the rescaled public noise"
+
+    def paired(values):
+        return StageOutcome(stage_id="full", ok=True, kpis={"value": sum(values) / 2},
+                            kpi_var={"value": 0.0}, runs=2, seed_runs={"value": values}, seed_list=(0, 1))
+
+    cascade.noise.observe("full/private", "s", paired([1.0, 3.0]), is_seed=True)
+    cascade.noise.observe("full/private", "y", paired([1.2, 2.8]))
+    # Two candidates on two seeds: the two-way residual is var_d / 2 with 1 df.
+    # d = (0.2, -0.2): var_d = 0.08, one side 0.04, sd 0.2, margin 0.4 * T1
+    assert cascade.holdout_margin() == pytest.approx(0.4 * T1), "paired data: the hold-out's own estimate"
+
+
+def test_with_a_score_by_levels_the_margin_is_zero(mirror_project, tmp_path):
+    config = load_config(mirror_project)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.noise.observe("full/private", "x", StageOutcome(stage_id="full", ok=True, kpis={"value": -1.0},
+                                                            kpi_var={"value": 0.25}, runs=2))
+    assert cascade.holdout_margin() == pytest.approx(1.0 * T1)
+    levels = (LevelConfig(kpi="value", direction="maximize", tolerance=0.1),
+              LevelConfig(kpi="value", direction="maximize"))
+    score = replace(config.evaluate.score, levels=levels)
+    cascade.config = replace(config, evaluate=replace(config.evaluate, score=score))
+    assert cascade.holdout_margin() == 0.0
+
+
 def test_the_veto_can_be_switched_off(mirror_project, tmp_path):
     config = load_config(mirror_project)
     config = replace(config, evaluate=replace(config.evaluate, holdout_veto=False))
@@ -364,6 +463,47 @@ def test_a_resumed_run_rebuilds_the_seeds_hold_out_from_runs_jsonl(mirror_projec
     assert driver.by_id["g001-c0003"].veto == "holdout below the seed's -1"
     assert driver.by_id["g000-c0001"].competes is True
     assert [c.id for c in driver.top_k(3)] == ["g000-c0001"]
+
+
+def test_a_row_without_a_margin_is_judged_by_the_literal_rule(mirror_project, tmp_path):
+    """Rows written before A2 carry no `holdout_margin`: the resumed run judges
+    them as A0 did. A row judged live with a margin keeps that margin."""
+    from evolvekit.search.driver import Driver
+
+    config = load_config(mirror_project)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    seed = {"id": "g000-c0001", "generation": 0, "operator": "human-seed", "block": "def value():\n    return 1\n",
+            "score": 1.0, "public_score": 1.0, "private_score": -1.0, "rejected": False, "competes": True,
+            "stages_reached": ["static", "full"]}
+    rows = [
+        seed,
+        # Before A2, before `competes`: settled and vetoed by the literal rule.
+        {"id": "g001-c0002", "generation": 1, "operator": "rewrite", "parent_id": "g000-c0001",
+         "block": "def value():\n    return 1.5\n", "score": 1.5, "public_score": 1.5, "private_score": -1.5,
+         "rejected": False, "stages_reached": ["static", "full"]},
+        # Before A2, `competes: true`, no `veto`: the replay applies the literal rule.
+        {"id": "g001-c0003", "generation": 1, "operator": "rewrite", "parent_id": "g000-c0001",
+         "block": "def value():\n    return 1.2\n", "score": 1.2, "public_score": 1.2, "private_score": -1.2,
+         "rejected": False, "competes": True, "stages_reached": ["static", "full"]},
+        # Judged live within its margin of 1: it competes on resume too.
+        {"id": "g001-c0004", "generation": 1, "operator": "rewrite", "parent_id": "g000-c0001",
+         "block": "def value():\n    return 1.4\n", "score": 1.4, "public_score": 1.4, "private_score": -1.4,
+         "rejected": False, "competes": True, "veto": None, "holdout_margin": 1.0,
+         "stages_reached": ["static", "full"]},
+    ]
+    (run_dir / "runs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    driver = Driver(config, run_dir=run_dir)
+    driver.resume()
+    assert driver.cascade.seed_public == pytest.approx(1.0) and driver.cascade.seed_private == pytest.approx(-1.0)
+    assert driver.by_id["g001-c0002"].competes is False
+    assert driver.by_id["g001-c0002"].veto == "holdout below the seed's -1"
+    assert driver.by_id["g001-c0003"].competes is False
+    assert driver.by_id["g001-c0003"].veto == "holdout below the seed's -1"
+    assert driver.by_id["g001-c0002"].holdout_margin is None
+    assert driver.by_id["g001-c0004"].competes is True and driver.by_id["g001-c0004"].holdout_margin == 1.0
+    assert [c.id for c in driver.top_k(3)] == ["g001-c0004", "g000-c0001"]
+    assert [r["id"] for r in rank(rows)] == ["g001-c0004", "g000-c0001"], "the views agree"
 
 
 def test_a_resumed_run_ranks_old_rows_with_the_current_penalty(mirror_project, tmp_path):

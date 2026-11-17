@@ -6,6 +6,7 @@ that breaks one."""
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -191,7 +192,7 @@ def test_with_constraints_is_a_space_error_for_the_space_itself():
 
 # -- the model-free operators draw again rather than propose a breaking configuration
 
-from evolvekit.search.operators import param_cross, param_lhs_typed, param_local, param_tpe  # noqa: E402
+from evolvekit.search.operators import param_cross, param_local, param_tpe  # noqa: E402
 from evolvekit.search.tuning import Observation  # noqa: E402
 
 ORDERED = ParameterSpace.parse(
@@ -218,7 +219,6 @@ def test_every_model_free_operator_respects_the_constraints(seed):
         a = rng.random() * 0.9
         observations.append(Observation({"a": a, "b": a + rng.random() * (1 - a)}, rng.random()))
     for result in (
-        param_lhs_typed(ORDERED, parent, seed=seed),
         param_local(ORDERED, parent, seed=seed),
         param_cross(ORDERED, parent, mate, seed=seed),
         param_tpe(ORDERED, parent, observations, seed=seed),
@@ -226,6 +226,18 @@ def test_every_model_free_operator_respects_the_constraints(seed):
         assert result.ok, result.error
         values = result.meta["params"]
         assert values["a"] <= values["b"], (result.operator, values)
+
+
+def test_param_lhs_passes_over_the_rows_of_its_cube_that_break_a_constraint(tmp_path):
+    """`param_lhs` renders the run's hypercube row by row (`Driver._next_lhs_row`);
+    a row on the wrong side of `van <= truck` is passed over, not proposed."""
+    config = _config(tmp_path, ["van <= truck"])
+    driver = Driver(replace(config, search=replace(config.search, operators={"param_lhs": 1.0})),
+                    run_dir=tmp_path / "run")
+    parent = driver._seed_candidate()
+    for _ in range(20):
+        result = driver._invoke("param_lhs", parent, [], "none", None, "g001-c0002")
+        assert result.ok and config.problem.parameters.satisfies(result.meta["params"]), result.meta["params"]
 
 
 def test_a_constraint_nothing_can_meet_leaves_the_last_draw_to_the_static_stage():

@@ -153,7 +153,8 @@ gets the full budget.
 - `evaluate.score`: a weighted sum over KPIs; **every score is a finite
   float** — gate violations are penalty terms, not `None`s.
 - `search.archive.descriptors`: one or two axes describing *what a candidate
-  does*, not how well it scores (`complexity` comes free). A quality-monotone
+  does*, not how well it scores (`complexity` comes free; a declared
+  parameter is an axis with `param:`). A quality-monotone
   axis makes the grid a second copy of the leaderboard
   ([README: the archive](reference.md#the-archive)).
 - Fill in `problem.description`, `problem.tools`, `problem.constraints`,

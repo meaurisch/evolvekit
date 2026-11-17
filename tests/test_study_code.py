@@ -185,7 +185,9 @@ def test_faster_template_compiles_once_repo_is_set():
     study = study_from_template(harness, "faster", "F")
     assert study.code.repo == "" and study.code.from_ref == "HEAD" and study.goal[0].kpi == "tour_length"
     study.code.repo, study.training = str(SOURCE), ["cases/a.json"]
-    assert compile_study(study, harness, Plan.fixed(), bakeoff=True)[0]["problem"]["tree"]["repo"] == str(SOURCE)
+    compiled = compile_study(study, harness, Plan.fixed(), bakeoff=True)[0]
+    assert compiled["problem"]["tree"]["repo"] == str(SOURCE)
+    assert "archive" not in compiled["search"], "a code study keeps the engine's default axes"
 
 
 def test_study_document_proposes_the_code_repo(tmp_path):

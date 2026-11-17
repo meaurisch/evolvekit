@@ -953,8 +953,9 @@ def best_so_far(run_dir: Path, goal: dict[str, Any], rows: list[dict[str, Any]] 
     here. While the run is live the best is the search's ranking's first (the
     one the final check will check), else the one the run checked. The figure
     comes from the best's own row in `runs.jsonl`, written once its
-    evaluation finished on every case, so it never moves while the best stays
-    the same. `pct` is None before there is a starting point and a best to
+    evaluation finished on every case, pooled with its re-evaluations
+    (`search.reevaluate_best_every`, `jobs._rows`): it moves while the best
+    stays the same only when the best is run again. `pct` is None before there is a starting point and a best to
     compare; 0.0 while the starting point is the best. `goal` is `jobs._goal`'s;
     `rows` and `job` are the run's when the caller read them already."""
     from evolvekit.app import jobs

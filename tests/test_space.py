@@ -197,6 +197,28 @@ def test_a_perturbation_at_the_edge_of_a_range_stays_inside_it(space):
         assert space.validate(space.perturb(edge, rng, scale=0.5))[1] == []
 
 
+def test_a_step_past_the_bound_is_reflected_not_clamped():
+    """Q6: from 0.98 with steps of sd 0.15, clamping put about 45 % of the moves on
+    1.0 exactly; reflection puts none there (beyond rounding)."""
+    space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.98}})
+    rng = random.Random(71)
+    values = [space.perturb({"x": 0.98}, rng)["x"] for _ in range(2000)]
+    assert sum(v == 1.0 for v in values) / 2000 < 0.01
+    assert all(0.0 <= v <= 1.0 for v in values)
+
+
+def test_a_step_longer_than_the_range_is_reflected_until_it_lands_inside():
+    """A step of more than one whole range (possible at the largest scale, 0.4) is
+    folded back as often as it takes: 0.9 + 1.5 = 2.4 -> 2 - 2.4 = -0.4 -> 0.4."""
+    space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.9}})
+
+    class Fixed(random.Random):
+        def gauss(self, mu=0.0, sigma=1.0):
+            return 1.5
+
+    assert space.perturb({"x": 0.9}, Fixed(0), scale=0.4)["x"] == pytest.approx(0.4)
+
+
 def test_crossover_takes_every_parameter_from_one_parent_or_the_other(space):
     a = {"num_neighbours": 10, "max_penalty": 1e3, "exhaustive": False, "init": "random"}
     b = {"num_neighbours": 120, "max_penalty": 1e7, "exhaustive": True, "init": "savings"}

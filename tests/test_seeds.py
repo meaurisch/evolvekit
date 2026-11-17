@@ -10,6 +10,7 @@ what this file is about.
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -18,7 +19,6 @@ import pytest
 from evolvekit.candidate import Candidate
 from evolvekit.config import (
     ConfigError,
-    DEFAULT_SIGNATURE_DIGITS_STOCHASTIC,
     StageConfig,
     build_config,
 )
@@ -80,21 +80,6 @@ def test_zero_seeds_is_refused(minimal_raw, tmp_path):
             minimal_raw,
             tmp_path,
         )
-
-
-def test_the_stochastic_digit_count_has_a_default_and_is_configurable(
-    minimal_raw, tmp_path
-):
-    evaluate = build_config(minimal_raw, base_dir=tmp_path).evaluate
-    assert evaluate.signature_digits_stochastic == DEFAULT_SIGNATURE_DIGITS_STOCHASTIC
-    assert evaluate.signature_digits_stochastic < evaluate.signature_digits
-
-    plain = StageConfig(id="a", kind="command", command="x {candidate} {out}")
-    noisy = StageConfig(
-        id="b", kind="command", command="x {candidate} {out} {seed}", seeds=3
-    )
-    assert evaluate.digits_for(plain) == evaluate.signature_digits
-    assert evaluate.digits_for(noisy) == evaluate.signature_digits_stochastic
 
 
 # -- argv ------------------------------------------------------------------
@@ -198,6 +183,24 @@ def test_vector_kpis_are_averaged_element_by_element(tmp_path):
     assert outcome.vector_kpis["per"] == pytest.approx([1.0, 2.0])
 
 
+def test_a_seeded_stage_reports_the_variance_of_one_run(tmp_path):
+    """`value` is 10 + seed: 10, 11, 12 over three seeds (`NOISY`)."""
+    outcome = _run(tmp_path, NOISY, seeds=3)
+    assert outcome.kpi_var["value"] == pytest.approx(statistics.variance([10.0, 11.0, 12.0]))
+    assert outcome.kpi_var["steady"] == 0.0
+    assert outcome.seed_runs["value"] == pytest.approx([10.0, 11.0, 12.0]) and outcome.seed_list == (0, 1, 2)
+    one = _run(tmp_path, NOISY, seeds=1)
+    assert one.kpi_var == {} and one.vector_var == {}
+    assert one.seed_runs["value"] == pytest.approx([10.0]) and one.seed_list == (0,), "the reference of a later pair"
+
+
+def test_a_seeded_stage_reports_its_vectors_variance_per_element(tmp_path):
+    body = "payload = {'kpis': {'v': 1.0, 'bins_per_instance': [float(seed), 2.0 * seed]}}"
+    outcome = _run(tmp_path, body, seeds=3)
+    assert outcome.vector_var["bins_per_instance"] == pytest.approx([1.0, 4.0])
+    assert outcome.seed_vectors["bins_per_instance"] == [[0.0, 0.0], [1.0, 2.0], [2.0, 4.0]]
+
+
 def test_ragged_vectors_fail_the_stage_and_say_which_seed(tmp_path):
     """A mean over vectors of different lengths would be a fabrication, and so is the first run's alone."""
     body = "payload = {'kpis': {'v': 1.0, 'per': [1.0] * (20 if seed == 1 else 19)}}"
@@ -269,19 +272,17 @@ def _cascade_config(minimal_raw, tmp_path, command, seeds):
     return build_config(minimal_raw, base_dir=tmp_path)
 
 
-def _candidate(cid: str, tail: str) -> Candidate:
+def _candidate(cid: str, tail: str, generation: int = 1) -> Candidate:
     block = f"def f():\n    return 1  # {tail}\n"
-    return Candidate(id=cid, generation=1, block=block, source=block, operator="diff")
+    return Candidate(id=cid, generation=generation, block=block, source=block, operator="diff")
 
 
 def test_a_noisy_evaluator_still_catches_a_behavioural_twin(minimal_raw, tmp_path):
-    """The whole point of `signature_digits_stochastic`.
-
-    The evaluator reports a value that wobbles in the sixth digit between
-    runs -- a solver that stopped a microsecond later. Two structurally
-    different candidates that do the same thing must still be recognised as
-    twins, and at nine digits they never would be.
-    """
+    """The evaluator reports a value that wobbles in the sixth digit between
+    seeds. Two structurally different candidates that do the same thing must
+    still be recognised as twins: the wobble is the run's noise, and the twin
+    rule allows for it (A2.2). Nothing ran the seed again here, so the stage's
+    repeatability is unknown and the across-seed noise is read."""
     script = tmp_path / "wobbly.py"
     script.write_text(
         "import json, sys, pathlib, hashlib\n"
@@ -297,7 +298,7 @@ def test_a_noisy_evaluator_still_catches_a_behavioural_twin(minimal_raw, tmp_pat
 
     cascade = Cascade(config, work_dir=tmp_path / "work")
     first = cascade.evaluate_generation([_candidate("a", "one way")])
-    second = cascade.evaluate_generation([_candidate("b", "another way")])
+    second = cascade.evaluate_generation([_candidate("b", "another way", generation=2)])  # a later round
 
     assert not first["a"].rejected
     assert second["b"].rejected
@@ -305,16 +306,16 @@ def test_a_noisy_evaluator_still_catches_a_behavioural_twin(minimal_raw, tmp_pat
     assert "behavioural duplicate" in (second["b"].reject_reason or "")
 
 
-def test_the_same_wobble_at_nine_digits_would_look_novel(minimal_raw, tmp_path):
-    """The failure mode the coarser rounding exists to prevent, made explicit."""
-    from evolvekit.evaluate.signature import behaviour_signature
+def test_the_same_wobble_at_nine_digits_would_look_novel_but_is_within_the_noise():
+    """The failure mode the noise margin exists to prevent, made explicit."""
+    from evolvekit.evaluate.signature import Behaviour, behaviour_signature, twin_margins, within
 
     run_a = {"value": 7.000001}
     run_b = {"value": 7.000002}
     fine = dict(ignore=(), digits=9)
-    coarse = dict(ignore=(), digits=DEFAULT_SIGNATURE_DIGITS_STOCHASTIC)
     assert behaviour_signature(run_a, {}, **fine) != behaviour_signature(run_b, {}, **fine)
-    assert behaviour_signature(run_a, {}, **coarse) == behaviour_signature(run_b, {}, **coarse)
+    margins = twin_margins(Behaviour(run_a, {}), {"value": 1e-6}, {}, seeds=3)
+    assert within(Behaviour(run_a, {}), Behaviour(run_b, {}), margins, 9)
 
 
 def test_the_spread_reaches_the_candidate_record(minimal_raw, tmp_path):

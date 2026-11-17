@@ -19,11 +19,21 @@ from __future__ import annotations
 
 import html
 import json
+import math
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from evolvekit.economics import DEFAULT_WINDOW, GenerationPoint, series
+from evolvekit.ledger import read_jsonl
 
 __all__ = [
+    "REEVALUATIONS",
+    "REEVALUATION_SEED_BASE",
+    "pool_rows",
+    "read_reevaluations",
+    "read_rows",
+    "run_holdout_penalty",
+    "view_rows",
     "rank",
     "render_markdown",
     "render_html",
@@ -33,6 +43,7 @@ __all__ = [
     "unfinished_count",
     "competes",
     "seed_private",
+    "seed_public",
     "replay_veto",
     "veto_reason",
     "vetoed_count",
@@ -41,6 +52,153 @@ __all__ = [
 ]
 
 HOLDOUT_FLAG = "!"
+
+REEVALUATIONS = "reevaluations.jsonl"
+"""One row per re-evaluation of the best (`search.reevaluate_best_every`),
+beside `runs.jsonl`: `{"id", "generation", "seed", "stage", "prior_runs",
+"kpis", "score", "at"}`. Every view reads `runs.jsonl` pooled with it
+(`read_rows`)."""
+REEVALUATION_SEED_BASE = 2000
+"""The k-th re-evaluation of a run (from 0) runs on seed `2000 + k`: above the
+final check's `CHECK_SEEDS` (1001 ... 1012), so the search never selects on
+the seeds the final check judges on."""
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _pooled(row: dict[str, Any], extra: Sequence[Mapping[str, Any]], holdout_penalty: float) -> dict[str, Any]:
+    from evolvekit.evaluate.scoring import ranking_score  # here: `evaluate` imports this module
+
+    kpis = dict(row.get("kpis") or {})
+    score = float(row["score"])
+    replicates = None
+    for entry in extra:
+        n = entry.get("prior_runs")
+        new_score = _finite(entry.get("score"))
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1 or new_score is None:
+            continue  # a malformed row pools nothing
+        for name, value in (entry.get("kpis") or {}).items():
+            new, old = _finite(value), _finite(kpis.get(name))
+            if new is not None and old is not None:
+                kpis[name] = (n * old + new) / (n + 1)
+        score = (n * score + new_score) / (n + 1)
+        replicates = n + 1
+    if replicates is None:
+        return row
+    pooled = {**row, "kpis": kpis, "score": score, "replicates": replicates}
+    if row.get("public_score") is not None:
+        pooled["public_score"] = score
+    public, private = pooled.get("public_score"), row.get("private_score")
+    pooled["ranking_score"] = ranking_score(
+        score, None if public is None else float(public), None if private is None else float(private),
+        holdout_penalty,
+    )
+    if public is not None and private is not None:
+        pooled["generalization_gap"] = float(public) - float(private)
+    return pooled
+
+
+def pool_rows(
+    rows: Sequence[dict[str, Any]],
+    reevaluations: Sequence[Mapping[str, Any]],
+    *,
+    holdout_penalty: float = 0.0,
+) -> list[dict[str, Any]]:
+    """`rows` with each re-evaluated row's runs pooled, in file order: with
+    `n = prior_runs`, every KPI both carry and the score become
+    `(n·old + new) / (n + 1)`, the public score follows the score,
+    `replicates` is `n + 1`, and the ranking score is recomputed from the
+    pooled score with `holdout_penalty` (`scoring.ranking_score`; the private
+    score is never re-run). The pooled score is the mean of the runs' scores,
+    not the score of the pooled KPIs. The veto is the caller's, after this
+    (`read_rows`). Every other row with a score has its ranking score
+    recomputed with the same `holdout_penalty` (as the driver's `_rerank`
+    does), so that a row written at another λ is not ranked on another scale
+    beside the pooled ones. Without re-evaluations the rows are returned as
+    they are."""
+    from evolvekit.evaluate.scoring import ranking_score  # here: `evaluate` imports this module
+
+    if not reevaluations:
+        return list(rows)
+    by_id: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in reevaluations:
+        if entry.get("id") is not None:
+            by_id.setdefault(str(entry["id"]), []).append(entry)
+    result = []
+    for row in rows:
+        extra = by_id.get(str(row.get("id")))
+        score = _finite(row.get("score"))
+        if score is None:
+            result.append(row)
+            continue
+        if not extra:
+            private = _finite(row.get("private_score"))
+            result.append({**row, "ranking_score": ranking_score(score, score, private, holdout_penalty)})
+            continue
+        result.append(_pooled(row, extra, holdout_penalty))
+    return result
+
+
+def read_reevaluations(run_dir: str | Path) -> list[dict[str, Any]]:
+    """`reevaluations.jsonl`, oldest first; none for a run without the file."""
+    return [row for row in read_jsonl(Path(run_dir) / REEVALUATIONS) if isinstance(row, dict)]
+
+
+def run_holdout_penalty(run_dir: str | Path) -> float:
+    """The run's `evaluate.holdout_penalty`: from the compiled `evolvekit.yaml`
+    in the run directory (a study's run), else the config the last session
+    started from (`run_started`'s `config_path`), else 0."""
+    from evolvekit.config import load_config
+
+    directory = Path(run_dir)
+    paths = [directory / "evolvekit.yaml"]
+    started = [e for e in read_jsonl(directory / "events.jsonl") if e.get("type") == "run_started"]
+    if started and started[-1].get("config_path"):
+        paths.append(Path(str(started[-1]["config_path"])))
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            return float(load_config(path).evaluate.holdout_penalty)
+        except Exception:  # noqa: BLE001 - a config that no longer loads: try the next
+            continue
+    return 0.0
+
+
+def read_rows(
+    run_dir: str | Path, *, holdout_penalty: float | None = None, veto: bool = True
+) -> list[dict[str, Any]]:
+    """The run's rows as every view ranks them: `runs.jsonl`, pooled with its
+    re-evaluations (`pool_rows`, the ranking score recomputed with
+    `holdout_penalty`, the run's own when not given), then the hold-out veto
+    replayed (`replay_veto`; `veto=False` leaves it out, for readers that
+    count rows). Without `reevaluations.jsonl` this is `replay_veto` of
+    `runs.jsonl`, as every view read it before."""
+    directory = Path(run_dir)
+    raw = list(read_jsonl(directory / "runs.jsonl"))
+    extra = read_reevaluations(directory)
+    penalty = 0.0
+    if extra:
+        penalty = run_holdout_penalty(directory) if holdout_penalty is None else holdout_penalty
+    return view_rows(raw, extra, holdout_penalty=penalty, veto=veto)
+
+
+def view_rows(
+    raw: Sequence[dict[str, Any]],
+    reevaluations: Sequence[Mapping[str, Any]],
+    *,
+    holdout_penalty: float = 0.0,
+    veto: bool = True,
+) -> list[dict[str, Any]]:
+    """`read_rows` over rows already read: pooled, then the veto replayed
+    against the seed's private score **as written** (`raw`): a starting point
+    re-evaluated as the best never moves the reference."""
+    rows = pool_rows(raw, reevaluations, holdout_penalty=holdout_penalty)
+    return replay_veto(rows, reference=seed_private(raw)) if veto else rows
 
 
 def fitness_of(row: Mapping[str, Any]) -> float | None:
@@ -59,9 +217,18 @@ def competes(row: Mapping[str, Any]) -> bool:
     return not row.get("rejected") and bool(row.get("competes", True))
 
 
-def veto_reason(reference: float) -> str:
-    """The sentence a vetoed row carries: `evaluate.holdout_veto`'s reason."""
-    return f"holdout below the seed's {reference:.6g}"
+def veto_reason(reference: float, margin: float = 0.0) -> str:
+    """The sentence a vetoed row carries: `evaluate.holdout_veto`'s reason,
+    naming the noise margin when the veto allowed one."""
+    if margin == 0:
+        return f"holdout below the seed's {reference:.6g}"
+    return f"holdout below the seed's {reference:.6g} by more than its noise margin {margin:.3g}"
+
+
+def _margin(row: Mapping[str, Any]) -> float:
+    """The noise margin a row was judged with; a row from before the margin
+    existed has none and is judged by the literal rule."""
+    return float(row.get("holdout_margin") or 0.0)
 
 
 def _replayed_veto(row: Mapping[str, Any], reference: float | None) -> str | None:
@@ -74,18 +241,24 @@ def _replayed_veto(row: Mapping[str, Any], reference: float | None) -> str | Non
         return None
     if row.get("rejected") or not row.get("competes", True):
         return None
-    private = row.get("private_score")
-    if private is None or float(private) >= reference:
+    private, margin = row.get("private_score"), _margin(row)
+    if private is None or float(private) >= reference - margin:
         return None
-    return veto_reason(reference)
+    return veto_reason(reference, margin)
 
 
-def replay_veto(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+_FROM_ROWS = object()
+
+
+def replay_veto(rows: Sequence[dict[str, Any]], *, reference: Any = _FROM_ROWS) -> list[dict[str, Any]]:
     """`rows` with the hold-out veto applied as a resumed run applies it: a row
     written before the veto existed whose private score is below the seed's
     gets `competes: false` and its `veto`. Every view that ranks or counts goes
-    through this, so no view names a candidate the search keeps out."""
-    reference = seed_private(rows)
+    through this, so no view names a candidate the search keeps out.
+    `reference`: the seed's private score to judge by (`view_rows` passes the
+    unpooled seed row's); by default `seed_private(rows)`."""
+    if reference is _FROM_ROWS:
+        reference = seed_private(rows)
     result = []
     for row in rows:
         veto = _replayed_veto(row, reference)
@@ -159,10 +332,20 @@ def seed_private(rows: Sequence[dict[str, Any]]) -> float | None:
     compare every hold-out with. It is the **last** seed row's (an aborted seed
     is evaluated again, and the attempt that worked is the reference); `None`
     when that row has no private score, or there is no seed row."""
+    return _last_seed_score(rows, "private_score")
+
+
+def seed_public(rows: Sequence[dict[str, Any]]) -> float | None:
+    """The same seed row's public score: what the veto's noise margin rescales
+    the public run's noise by (`Cascade.holdout_margin`)."""
+    return _last_seed_score(rows, "public_score")
+
+
+def _last_seed_score(rows: Sequence[dict[str, Any]], key: str) -> float | None:
     for row in reversed(rows):
         if row.get("operator") == "human-seed":
-            private = row.get("private_score")
-            return None if private is None else float(private)
+            value = row.get(key)
+            return None if value is None else float(value)
     return None
 
 
@@ -186,9 +369,10 @@ def _kept_out_lines(rows: Sequence[dict[str, Any]]) -> list[str]:
 
 
 def _flagged(row: Mapping[str, Any], reference: float | None) -> bool:
+    """The `!` flag: the veto's condition, with the row's own noise margin."""
     private = row.get("private_score")
     return (
-        reference is not None and private is not None and float(private) < reference
+        reference is not None and private is not None and float(private) < reference - _margin(row)
     )
 
 
@@ -249,13 +433,19 @@ def render_markdown(
     limit: int = 20,
     usage: Sequence[dict[str, Any]] | None = None,
     window: int = DEFAULT_WINDOW,
+    *,
+    reevaluations: Sequence[Mapping[str, Any]] = (),
+    holdout_penalty: float = 0.0,
 ) -> str:
     """A leaderboard that fits in a terminal.
 
     `usage` is optional: pass `ledger.usage()` to get the economics table as
-    well. Without it the board is exactly the Phase B one.
+    well. Without it the board is exactly the Phase B one. With
+    `reevaluations`, `rows` are the rows as written: the board ranks them
+    pooled (`view_rows`) and the economics table is the search's own series.
     """
-    rows = replay_veto(rows)
+    written = replay_veto(rows)
+    rows = view_rows(rows, reevaluations, holdout_penalty=holdout_penalty) if reevaluations else written
     top = rank(rows, limit)
     kept_out = _kept_out_lines(rows)
     if not top:
@@ -310,7 +500,8 @@ def render_markdown(
             "may not generalise."
         )
     if usage is not None:
-        economics = render_economics(series(rows, usage, window=window))
+        economics = render_economics(series(written, usage, window=window, reevaluations=reevaluations,
+                                            holdout_penalty=holdout_penalty))
         if economics:
             lines.append(economics)
     return "\n".join(lines)
@@ -582,9 +773,14 @@ def render_html(
     archive: Mapping[str, Any] | None = None,
     usage: Sequence[dict[str, Any]] | None = None,
     window: int = DEFAULT_WINDOW,
+    *,
+    reevaluations: Sequence[Mapping[str, Any]] = (),
+    holdout_penalty: float = 0.0,
 ) -> str:
-    """Self-contained dashboard: no CDN, no fetch, works from file://."""
-    rows = replay_veto(rows)
+    """Self-contained dashboard: no CDN, no fetch, works from file://.
+    `reevaluations`: as `render_markdown`."""
+    written = replay_veto(rows)
+    rows = view_rows(rows, reevaluations, holdout_penalty=holdout_penalty) if reevaluations else written
     top = rank(rows, limit)
     scores = [fitness_of(r) or 0.0 for r in top]
     best = max(scores) if scores else None
@@ -646,7 +842,8 @@ def render_html(
         or '<tr><td colspan="14">No scored candidates yet.</td></tr>',
         grid=_grid_html(archive),
         economics=(
-            economics_svg(series(rows, usage, window=window))
+            economics_svg(series(written, usage, window=window, reevaluations=reevaluations,
+                                 holdout_penalty=holdout_penalty))
             if usage is not None
             else ""
         ),

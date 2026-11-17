@@ -167,7 +167,7 @@ def test_the_search_learns_a_gated_configuration_is_a_bad_one(tmp_path):
                       score=-50.0, competes=False, gated="missed = 1 > 0")
     driver.archive = [fine, gated]
     observations = {o.values["x"]: o.fitness for o in driver._observations()}
-    assert observations == {0.3: -100.0, 0.8: -101.0}, "below the worst finished one, like a failure"
+    assert observations == {0.3: -1.0, 0.8: -2.0}, "ranked below the worst finished one, like a failure"
 
 
 @pytest.mark.slow

@@ -12,7 +12,7 @@ mature   a solver somebody has already tuned: 25 parameters, the defaults close
 
 Reported is the TRUE cost (noise-free) of the configuration each run called its
 best -- what a held-out test would see, not what the search saw. The numbers in
-the README's operator section come from this script.
+docs/reference.md's "Operators" section come from this script.
 """
 
 from __future__ import annotations

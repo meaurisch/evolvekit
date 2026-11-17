@@ -845,7 +845,12 @@ def _baseline(study: Study, harness: Harness, seed: dict[str, Any] | None) -> st
 
 
 def _rows(run_dir: Path) -> list[dict[str, Any]]:
-    return list(read_jsonl(run_dir / "runs.jsonl"))
+    """`runs.jsonl`, pooled with the best's re-evaluations (`leaderboard.read_rows`):
+    the best and its figure are the pooled ones. The veto is left to the readers
+    that rank (`rank` applies it), as before."""
+    from evolvekit.leaderboard import read_rows
+
+    return read_rows(run_dir, veto=False)
 
 
 def _plan(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:

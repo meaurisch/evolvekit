@@ -24,14 +24,11 @@ import ast
 import re
 from typing import Any, Mapping
 
-from evolvekit.search.lhs import sweep_params
-
 __all__ = [
     "PARAMS_MARKER",
     "declared_ranges",
     "current_values",
     "apply_params",
-    "param_variant",
     "has_params",
 ]
 
@@ -108,23 +105,3 @@ def apply_params(block: str, values: Mapping[str, Any]) -> str:
             lines[i] = f"{match.group(1)}{rendered}{ending}"
             break
     return "".join(lines)
-
-
-def param_variant(block: str, *, seed: int, n_variants: int = 6) -> tuple[str, dict[str, Any]] | None:
-    """One swept variant of `block`, or None when there is nothing to sweep.
-
-    Variant 0 of the sweep is always the base point, so it is skipped: a child
-    identical to its parent is exactly what the novelty filter exists to stop.
-    """
-    ranges = declared_ranges(block)
-    if not ranges:
-        return None
-    base = current_values(block, set(ranges))
-    if not base:
-        return None
-    variants = sweep_params(base, ranges, max(2, n_variants), seed=seed)
-    candidates = [v for v in variants[1:] if v != base]
-    if not candidates:
-        return None
-    chosen = candidates[seed % len(candidates)]
-    return apply_params(block, chosen), chosen

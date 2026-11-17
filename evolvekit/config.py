@@ -23,7 +23,6 @@ from evolvekit.space import ParameterSpace, SpaceError
 __all__ = [
     "ConfigError",
     "DEFAULT_SIGNATURE_DIGITS",
-    "DEFAULT_SIGNATURE_DIGITS_STOCHASTIC",
     "DEFAULT_SIGNATURE_IGNORE",
     "Config",
     "ProblemConfig",
@@ -160,19 +159,17 @@ DEFAULT_FORBIDDEN_IMPORTS = (
 DEFAULT_SIGNATURE_DIGITS = 9
 """Significant digits every KPI is rounded to before it is fingerprinted.
 Enough that two genuinely different behaviours never collide, few enough that
-the last bits of a float sum cannot separate two identical ones."""
+the last bits of a float sum cannot separate two identical ones. On a noisy
+stage twins are judged by the run's noise instead (`evaluate/signature.py`)."""
 
-DEFAULT_SIGNATURE_DIGITS_STOCHASTIC = 3
-"""Significant digits used instead, on a stage with `seeds: N > 1`.
-
-A stochastic evaluator never fingerprints identically. Two runs of the same
-program on the same instances differ in the eighth digit for free -- a
-different random restart, a different tie broken by hash order, a solver that
-stopped a microsecond later -- so at nine digits every candidate is novel and
-the behavioural filter, the one thing standing between an hour-long evaluator
-and a re-expression of its own seed, silently stops working. Three digits says
-"the same to a tenth of a percent", which on a mean over N runs is a claim
-about the program rather than about the dice."""
+REMOVED_SIGNATURE_DIGITS_STOCHASTIC = (
+    "evaluate.signature_digits_stochastic: behaviour twins are now judged by the run's noise; "
+    "remove signature_digits_stochastic (a child is a twin when every measure is within the "
+    "noise of an earlier candidate that scored at least as well; see 'The novelty filters' "
+    "in docs/reference.md)"
+)
+"""Why the key is refused: three digits called 0.3 % apart a twin under a
+0.1 % noise and 1.5 % apart novel under a 2 % one (A2.2)."""
 
 DEFAULT_SIGNATURE_IGNORE: tuple[str, ...] = (
     "runtime_s",
@@ -413,13 +410,17 @@ class PromoteRule:
 
     top_k_per_generation: int | None = None
     archive_percentile: float | None = None
+    adapt: bool = False
+    """Let the run move `top_k_per_generation` (`search/screening.py`): one more
+    a round while this stage agrees only weakly with the next, and the stage
+    passed over once it disagrees. A study's screen sets it."""
 
     @staticmethod
     def parse(raw: Any, path: str) -> "PromoteRule":
         data = _as_mapping(raw, path)
         if not data:
             return PromoteRule()
-        _reject_unknown(data, {"top_k_per_generation", "archive_percentile"}, path)
+        _reject_unknown(data, {"top_k_per_generation", "archive_percentile", "adapt"}, path)
         top_k = data.get("top_k_per_generation")
         percentile = data.get("archive_percentile")
         if top_k is None and percentile is None:
@@ -438,7 +439,12 @@ class PromoteRule:
                 if percentile is None
                 else _as_float(percentile, f"{path}.archive_percentile")
             ),
+            adapt=_as_flag(data.get("adapt", False), f"{path}.adapt"),
         )
+        if rule.adapt and rule.top_k_per_generation is None:
+            raise ConfigError(
+                f"{path}.adapt: adapts `top_k_per_generation`, which this rule does not set"
+            )
         if rule.archive_percentile is not None and not (
             0.0 <= rule.archive_percentile <= 100.0
         ):
@@ -1089,11 +1095,9 @@ class EvaluateConfig:
     holdout_veto: bool = True
     """Whether a candidate whose private score is below the seed's private
     score is kept from competing (`cascade.holdout_veto`). The comparison is
-    the literal `private < seed's private`, with no allowance for noise."""
+    `private < seed's private - margin`, the margin the hold-out's noise
+    (`Cascade.holdout_margin`); with no noise estimate it is 0, the literal rule."""
     signature_digits: int = DEFAULT_SIGNATURE_DIGITS
-    signature_digits_stochastic: int = DEFAULT_SIGNATURE_DIGITS_STOCHASTIC
-    """Used in place of `signature_digits` on a stage with `seeds: N > 1`.
-    See `DEFAULT_SIGNATURE_DIGITS_STOCHASTIC` for why it has to be coarser."""
     signature_ignore: tuple[str, ...] = DEFAULT_SIGNATURE_IGNORE
     """The behaviour signature: which KPIs it is built from and how precisely.
     See `evolvekit/evaluate/signature.py`."""
@@ -1101,14 +1105,6 @@ class EvaluateConfig:
     """Keep every successful evaluator run under `work/cache/` and look an
     identical one up instead of running it again (`evaluate/cache.py`). Off for
     an evaluator whose answer to the same question is meant to change."""
-
-    def digits_for(self, stage: StageConfig) -> int:
-        """How precisely to fingerprint one stage's KPIs."""
-        return (
-            self.signature_digits_stochastic
-            if stage.stochastic
-            else self.signature_digits
-        )
 
     @property
     def required_kpis(self) -> tuple[str, ...]:
@@ -1129,6 +1125,8 @@ class EvaluateConfig:
     @staticmethod
     def parse(raw: Any) -> "EvaluateConfig":
         data = _as_mapping(raw, "evaluate")
+        if "signature_digits_stochastic" in data:
+            raise ConfigError(REMOVED_SIGNATURE_DIGITS_STOCHASTIC)
         _reject_unknown(
             data,
             {
@@ -1139,7 +1137,6 @@ class EvaluateConfig:
                 "holdout_penalty",
                 "holdout_veto",
                 "signature_digits",
-                "signature_digits_stochastic",
                 "signature_ignore",
                 "cache",
                 "gates",
@@ -1204,6 +1201,21 @@ class EvaluateConfig:
                     f"evaluate.stages[{i}].private_inputs: only the final stage "
                     "may declare a private hold-out"
                 )
+        for i, stage in enumerate(stages):
+            if not stage.promote.adapt:
+                continue
+            # The screening controller compares this stage's ranking with the
+            # next command stage's (`search/screening.py`): it needs one.
+            if i == len(stages) - 1:
+                raise ConfigError(
+                    f"evaluate.stages[{i}].promote.adapt: the final stage promotes to no later stage, so "
+                    "there is no ranking to check its screen against; set it on a screening stage before it"
+                )
+            if stages[i + 1].kind != "command":
+                raise ConfigError(
+                    f"evaluate.stages[{i}].promote.adapt: the next stage ({stages[i + 1].id}) is not a "
+                    "command stage, so it gives no score to check this stage's ranking against"
+                )
         return EvaluateConfig(
             stages=stages,
             score=score,
@@ -1226,14 +1238,6 @@ class EvaluateConfig:
             signature_digits=_as_int(
                 data.get("signature_digits", DEFAULT_SIGNATURE_DIGITS),
                 "evaluate.signature_digits",
-                minimum=1,
-            ),
-            signature_digits_stochastic=_as_int(
-                data.get(
-                    "signature_digits_stochastic",
-                    DEFAULT_SIGNATURE_DIGITS_STOCHASTIC,
-                ),
-                "evaluate.signature_digits_stochastic",
                 minimum=1,
             ),
             signature_ignore=signature_ignore,
@@ -1432,7 +1436,11 @@ class GainPerUsdRule:
 @dataclass(frozen=True)
 class StopConfig:
     patience: int = 5
-    epsilon: float = 1e-6
+    epsilon: float | None = None
+    """How far a generation's best must beat the run's best to count as an
+    improvement. `None` (`null` or absent, the default) is automatic:
+    `StopPolicy.epsilon_now`, half the noise of one finished candidate's score,
+    with floors `1e-6` and `1e-9 * |best|`."""
     target: float | None = None
     min_big_steps: int = 0
     max_usd_since_improvement: float | None = None
@@ -1461,8 +1469,10 @@ class StopConfig:
             },
             "stop",
         )
-        epsilon = _as_float(data.get("epsilon", 1e-6), "stop.epsilon")
-        if epsilon < 0:
+        epsilon = data.get("epsilon")
+        if epsilon is not None:
+            epsilon = _as_float(epsilon, "stop.epsilon")
+        if epsilon is not None and epsilon < 0:
             raise ConfigError(f"stop.epsilon: must be >= 0, got {epsilon}")
         target = data.get("target")
         max_usd = data.get("max_usd_since_improvement")
@@ -1574,14 +1584,14 @@ class NoveltyConfig:
     near: NearDuplicateConfig = field(default_factory=NearDuplicateConfig)
     behavioural: str = "on"
     """`on` (default): every command stage is fingerprinted and checked against
-    every prior signature at that stage, as it always was. `off`: skip the
-    fingerprinting and the check entirely. `auto`: skip it per-stage when the
-    stage is stochastic (`seeds > 1`) -- on a wall-clock-bounded solver a
-    stochastic stage's KPIs vary enough that, even at the coarser
-    `signature_digits_stochastic` rounding, two runs of the same candidate
-    almost never hash equal (0 hits in the first PyVRP run), so the filter
-    pays for a hash on every candidate at every such stage and catches
-    nothing. A deterministic stage keeps fingerprinting either way."""
+    every prior signature at that stage (by the run's noise on a stage that
+    is not repeatable and has an estimate, `evaluate/signature.py`). `off`:
+    skip the fingerprinting and the check entirely. `auto`: do not check a
+    stochastic stage (`seeds > 1`) while it says nothing a twin could be
+    judged by -- its noise is still 0 and it is not known to be repeatable
+    (the seed run again says so). What such a stage did is still kept, so
+    the seed is a twin target once the check starts. A deterministic stage
+    is checked either way."""
 
     @staticmethod
     def parse(raw: Any) -> "NoveltyConfig":
@@ -1614,28 +1624,50 @@ provider, no key and no `models` section -- and must never reach for one."""
 
 @dataclass(frozen=True)
 class DescriptorConfig:
-    """One axis of the MAP-Elites grid: a KPI, a bin count and a range.
+    """One axis of the MAP-Elites grid: a KPI or a parameter, a bin count and a range.
 
-    `range: auto` (or an omitted range) lets the archive widen the axis as it
-    sees values, re-binning what it already holds. Any KPI the evaluator emits
-    works; `complexity` is emitted by the static stage for free.
+    `range: auto` (or an omitted range) lets the archive bin a KPI axis by the
+    quantiles of the values it has seen, re-binning what it already holds when
+    its members double. Any KPI the evaluator emits works; `complexity` is
+    emitted by the static stage for free. A `param` axis (`{param: name}`)
+    names a declared `problem.parameters` entry instead: its range is known, so
+    it is fixed equal-width bins over the parameter's unit scale `[0, 1]`.
     """
 
-    kpi: str
+    kpi: str = ""
     bins: int = 4
     lo: float | None = None
     hi: float | None = None
+    param: str | None = None
 
     @property
     def auto(self) -> bool:
         return self.lo is None or self.hi is None
 
+    @property
+    def name(self) -> str:
+        """What the axis is called: the parameter's name, else the KPI's."""
+        return self.param if self.param is not None else self.kpi
+
     @staticmethod
     def parse(raw: Any, index: int) -> "DescriptorConfig":
         path = f"search.archive.descriptors[{index}]"
         data = _as_mapping(raw, path)
-        _reject_unknown(data, {"kpi", "bins", "range"}, path)
+        _reject_unknown(data, {"kpi", "param", "bins", "range"}, path)
         bins = _as_int(data.get("bins", 4), f"{path}.bins", minimum=1)
+        if ("kpi" in data) == ("param" in data):
+            raise ConfigError(
+                f"{path}: give one of `kpi` or `param` -- a KPI the evaluator emits, "
+                "or the name of one of problem.parameters"
+            )
+        if "param" in data:
+            if data.get("range", "auto") not in (None, "auto"):
+                raise ConfigError(
+                    f"{path}.range: a parameter axis spans the parameter's range; leave `range` out"
+                )
+            return DescriptorConfig(
+                bins=bins, lo=0.0, hi=1.0, param=_as_str(data["param"], f"{path}.param")
+            )
         raw_range = data.get("range", "auto")
         lo = hi = None
         if raw_range not in (None, "auto"):
@@ -1665,6 +1697,10 @@ class ArchiveConfig:
 
     descriptors: tuple[DescriptorConfig, ...] = DEFAULT_DESCRIPTORS
     top_k: int = 20
+    descriptors_given: bool = False
+    """`search.archive.descriptors` was written in the config. When it was not
+    and the config declares `problem.parameters`, the root parse replaces the
+    default with the first two parameters (`_default_parameter_axes`)."""
 
     @staticmethod
     def parse(raw: Any) -> "ArchiveConfig":
@@ -1673,19 +1709,57 @@ class ArchiveConfig:
         raw_descriptors = _as_list(
             data.get("descriptors"), "search.archive.descriptors"
         )
-        descriptors = tuple(
-            DescriptorConfig.parse(d, i) for i, d in enumerate(raw_descriptors)
-        ) or DEFAULT_DESCRIPTORS
-        names = [d.kpi for d in descriptors]
+        given = tuple(DescriptorConfig.parse(d, i) for i, d in enumerate(raw_descriptors))
+        descriptors = given or DEFAULT_DESCRIPTORS
+        names = [d.name for d in descriptors]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             raise ConfigError(
-                f"search.archive.descriptors: duplicate kpi(s) {duplicates}"
+                f"search.archive.descriptors: duplicate kpi(s) or parameter(s) {duplicates}: "
+                "every axis needs a name of its own"
             )
         return ArchiveConfig(
             descriptors=descriptors,
             top_k=_as_int(data.get("top_k", 20), "search.archive.top_k", minimum=1),
+            descriptors_given=bool(given),
         )
+
+
+PARAMETER_AXES = 2
+"""A tuning run's default grid: its first two declared parameters, 4 bins each."""
+
+
+def _default_parameter_axes(config: "Config") -> "Config":
+    """`search.archive.descriptors` against `problem.parameters`.
+
+    Given: every `param` axis must name a declared parameter. Not given, with a
+    declared space: the first two parameters (one when there is one), 4 fixed
+    bins each over the unit scale. A tuning candidate's `complexity` is the
+    size of a generated block whose shape never changes, so the default axis
+    would put every candidate in one cell.
+    """
+    archive = config.search.archive
+    space = config.problem.parameters
+    if archive.descriptors_given:
+        for index, axis in enumerate(archive.descriptors):
+            if axis.param is None:
+                continue
+            path = f"search.archive.descriptors[{index}].param"
+            if space is None:
+                raise ConfigError(
+                    f"{path}: names a parameter, and this config declares no problem.parameters"
+                )
+            if axis.param not in space.names:
+                raise ConfigError(
+                    f"{path}: {axis.param!r} is not a parameter; the parameters are {space.names}"
+                )
+        return config
+    if space is None:
+        return config
+    axes = tuple(
+        DescriptorConfig(bins=4, lo=0.0, hi=1.0, param=name) for name in space.names[:PARAMETER_AXES]
+    )
+    return replace(config, search=replace(config.search, archive=replace(archive, descriptors=axes)))
 
 
 @dataclass(frozen=True)
@@ -1705,6 +1779,12 @@ class SearchConfig:
     novelty_retry: bool = True
     novelty: NoveltyConfig = field(default_factory=NoveltyConfig)
     adaptive_children: AdaptiveChildrenConfig | None = None
+    reevaluate_best_every: int = 0
+    """Every N rounds the archive's best runs once more at the final stage on a
+    fresh seed, and its runs are pooled (`leaderboard.read_rows`); 0 is off."""
+    selection_temperature: float = 1.0
+    """tau in the archive's parent weight `sigmoid(z(fitness) / tau) / (1 + c)`:
+    below 1 the fitter elites are drawn harder, above 1 softer; > 0."""
 
     @property
     def llm_operators(self) -> list[str]:
@@ -1748,6 +1828,8 @@ class SearchConfig:
             "novelty_retry",
             "novelty",
             "adaptive_children",
+            "reevaluate_best_every",
+            "selection_temperature",
         }
         if "parent_top_k" in data:
             raise ConfigError(
@@ -1774,6 +1856,9 @@ class SearchConfig:
             raise ConfigError(
                 "search.operators: at least one operator must have a share > 0"
             )
+        temperature = _as_float(data.get("selection_temperature", 1.0), "search.selection_temperature")
+        if not 0.0 < temperature < float("inf"):
+            raise ConfigError(f"search.selection_temperature: must be a finite number > 0, got {temperature:g}")
         return SearchConfig(
             children_per_generation=_as_int(
                 data.get("children_per_generation", 4),
@@ -1805,6 +1890,10 @@ class SearchConfig:
             adaptive_children=AdaptiveChildrenConfig.parse(
                 data.get("adaptive_children")
             ),
+            reevaluate_best_every=_as_int(
+                data.get("reevaluate_best_every", 0), "search.reevaluate_best_every", minimum=0
+            ),
+            selection_temperature=temperature,
         )
 
 
@@ -1853,9 +1942,11 @@ def build_config(raw: Any, *, base_dir: Path, source: Path | None = None) -> Con
         source=source,
     )
     config = _tree_rules(config)
+    config = _default_parameter_axes(config)
     _check_embedding_route(config)
     _check_parameter_placeholders(config)
     _check_typed_operators(config)
+    _check_reevaluation(config)
     if config.evaluate.score.levels and config.stop.target is not None:
         raise ConfigError(
             "stop.target: cannot be combined with evaluate.score.levels -- the combined score "
@@ -1917,6 +2008,12 @@ def _tree_rules(config: Config) -> Config:
                        for stage in config.evaluate.stages)
         config = replace(config, evaluate=replace(config.evaluate, stages=stages))
         for index, stage in enumerate(config.evaluate.stages):
+            if stage.promote.adapt:
+                raise ConfigError(
+                    f"evaluate.stages[{index}].promote.adapt: cannot be used with `problem.tree.build`: "
+                    "candidates are built one at a time, so a round's top k is of one and there is no "
+                    "screen to adapt; remove `adapt`"
+                )
             if stage.promote.top_k_per_generation is not None:
                 raise ConfigError(
                     f"evaluate.stages[{index}]: `promote.top_k_per_generation` cannot be used with "
@@ -1986,6 +2083,25 @@ def _check_typed_operators(config: Config) -> None:
                 "config declares none. Add `problem.parameters` (name, type, range, default "
                 "of what may be tuned), or use `param_lhs` with a `# PARAMS:` line"
             )
+
+
+def _check_reevaluation(config: Config) -> None:
+    """`search.reevaluate_best_every` runs the best again on a fresh seed: the
+    final stage has to be a command that takes one. Not on a source tree: the
+    best's tree is gone by then, and a build would have to run again."""
+    if config.search.reevaluate_best_every <= 0:
+        return
+    final = config.final_stage
+    if final.kind != "command" or "{seed}" not in final.command:
+        raise ConfigError(
+            "search.reevaluate_best_every: runs the best again at the final stage on a fresh seed, so the "
+            f"final stage ({final.id!r}) has to be a command with a {{seed}} placeholder; add {{seed}} to "
+            "its command or set reevaluate_best_every: 0"
+        )
+    if config.problem.tree is not None:
+        raise ConfigError(
+            "search.reevaluate_best_every: does not work on a source tree (problem.tree) yet; set it to 0"
+        )
 
 
 def _check_parameter_placeholders(config: Config) -> None:

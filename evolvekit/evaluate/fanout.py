@@ -29,13 +29,14 @@ readable.
 
 from __future__ import annotations
 
+import math
 import queue
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from statistics import fmean
+from statistics import fmean, stdev, variance
 from typing import Mapping, Sequence
 
 from evolvekit.config import ConfigError, StageConfig
@@ -49,9 +50,10 @@ from evolvekit.evaluate.stages import (
     _run_once,
 )
 from evolvekit.evaluate.types import StageOutcome
+from evolvekit.stats import t_quantile
 from evolvekit.stopping import AnyEvent
 
-__all__ = ["Job", "Race", "run_instance_stage", "per_instance_key"]
+__all__ = ["Job", "Race", "race_looks", "run_instance_stage", "per_instance_key"]
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,15 @@ class Job:
     """For a tree problem: the tree's commit, which keys the cache."""
 
 
+RACE_TAIL = 0.9975
+"""The race's noise term at each look: the 99.75 % quantile of the mean
+ratio's noise, so an equal candidate crosses it in 0.25 % per look at any df.
+Decision 18a named 0.995; at a known cv that raced out 1.0 % of equal
+candidates against a fresh incumbent and 4.5 % against the best of eight
+(the targets: under 1 % and under 3 %), so the tail is halved: 0.6 % and
+2.6 %, and on a calibration's 2 df 0.3 % and 0.8 %."""
+
+
 @dataclass(frozen=True)
 class Race:
     """A stage's `race` rule, with what it is raced against."""
@@ -80,19 +91,121 @@ class Race:
     margin_pct: float
     exempt: frozenset[str] = frozenset()
     """Candidates that always finish: the baseline is a yardstick, not a contestant."""
+    cv: float = 0.0
+    """The objective's relative noise of one run on one instance, one side of
+    the comparison (`Noise.vector_cv`); 0 when unknown."""
+    instances: int = 0
+    """How many instances the stage has, for the reason sentence; 0 (not
+    given) falls back to the incumbent's count."""
+    df: float = math.inf
+    """The degrees of freedom `cv` is estimated on (`Noise.vector_cv_df`):
+    the noise term's normal quantile widens to Student's t at them
+    (Decision 17b). Infinite: a known cv, the normal rule."""
+    by_seed: Mapping[int, Mapping[str, float]] = field(default_factory=dict)
+    """The incumbent's own values per seed and instance (Decision 17a). A
+    challenger's prefix is compared with the incumbent's values **on the
+    seeds the prefix ran** (`against`), so on a repeatable stage the seed's
+    effect cancels and the paired `cv` is the right noise. Empty (a file
+    from before it): the challenger is compared with `incumbent`, the means
+    over all the incumbent's seeds, and `cv` must allow for that."""
 
-    def behind_pct(self, mine: Mapping[str, float]) -> tuple[int, float]:
+    def against(self, seeds: Mapping[str, Sequence[int]]) -> dict[str, float]:
+        """What a prefix that ran `seeds[name]` on each instance is compared
+        with: the incumbent's mean over those same seeds where `by_seed` has
+        them all, else its mean over all its seeds (`incumbent`)."""
+        out: dict[str, float] = {}
+        for name, ran in seeds.items():
+            values = [self.by_seed.get(seed, {}).get(name) for seed in ran]
+            if self.by_seed and ran and all(v is not None for v in values):
+                out[name] = fmean(v for v in values if v is not None)
+            elif name in self.incumbent:
+                out[name] = self.incumbent[name]
+        return out
+
+    @property
+    def population(self) -> int:
+        """The n the race reads over: the instances it can compare on, those
+        where the incumbent is above 0 (no ratio at 0), never more than the
+        stage has. So `compared` can reach n, and the finite-population factor 0."""
+        positive = sum(1 for value in self.incumbent.values() if value > 0)
+        return min(self.instances, positive) if self.instances > 0 else positive
+
+    @property
+    def looks(self) -> tuple[int, ...]:
+        """After `after` compared instances, then every quarter of them, never at
+        the last: a candidate with nothing left to run cannot be raced out."""
+        return race_looks(self.after, self.population)
+
+    def _diffs(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> list[float]:
+        """Per instance both have (the incumbent's above 0): how far `mine` is
+        behind, as a fraction -- positive is worse, whatever the direction.
+        `against` is what the incumbent reached on the prefix's own seeds
+        (`against()`); `None`, its means (`incumbent`)."""
+        sign = 1.0 if self.minimize else -1.0
+        reference = self.incumbent if against is None else against
+        return [
+            sign * (mine[name] / reference[name] - 1.0)
+            for name in mine
+            if name in self.incumbent and self.incumbent[name] > 0 and name in reference and reference[name] > 0
+        ]
+
+    def behind_pct(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> tuple[int, float]:
         """On the instances both have a value for: how many, and how many
         percent worse `mine` is than the incumbent, averaged over them."""
-        ratios = [
-            mine[name] / self.incumbent[name]
-            for name in mine
-            if name in self.incumbent and self.incumbent[name] > 0
-        ]
-        if not ratios:
+        diffs = self._diffs(mine, against)
+        if not diffs:
             return 0, 0.0
-        relative = fmean(ratios) - 1.0
-        return len(ratios), 100.0 * (relative if self.minimize else -relative)
+        return len(diffs), 100.0 * fmean(diffs)
+
+    def margin_at(self, diffs: Sequence[float]) -> float:
+        """How far behind, in percent, a candidate may be at a look over
+        `diffs` (`_diffs`, fractions): the largest of `margin_pct`; the
+        run-to-run noise term `100 · t_ν(0.9975) · √2·cv/√m` -- one side at
+        `cv`, the other at `cv`, so the mean ratio over m instances has sd
+        `√2·cv/√m`, and the term is its one-sided `1 - RACE_TAIL` tail at each
+        look, with Student's t at the cv's `df` (Decision 18a; 2.81 at infinite
+        df, 1.98·cv at m = 4, 14.1 on a calibration's 2 df); and twice the standard error
+        of the cases' own spread, with the finite-population factor that makes
+        it 0 once every instance is in."""
+        m, n = len(diffs), self.population
+        spread = 0.0
+        if m >= 2 and n > 0:
+            spread = 200.0 * stdev(diffs) / math.sqrt(m) * math.sqrt(max(0.0, 1.0 - m / n))
+        noise = 0.0
+        if self.cv > 0 and m >= 1:
+            noise = 100.0 * t_quantile(RACE_TAIL, self.df) * math.sqrt(2.0) * self.cv / math.sqrt(m)
+        return max(self.margin_pct, noise, spread)
+
+    def judge(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> tuple[str, float] | None:
+        """`decide`, with the margin it used (percent, to two places)."""
+        diffs = self._diffs(mine, against)
+        compared = len(diffs)
+        if compared not in self.looks:
+            return None
+        behind, margin = 100.0 * fmean(diffs), self.margin_at(diffs)
+        if behind <= margin:
+            return None
+        shown = round(margin, 2)
+        reason = (
+            f"raced out after {compared} of {self.instances or self.population} instances: "
+            f"{behind:.2f} % behind the best "
+            f"candidate so far on the same instances (margin {shown:g} %)"
+        )
+        return reason, shown
+
+    def decide(self, mine: Mapping[str, float], against: Mapping[str, float] | None = None) -> str | None:
+        """The reason `mine` is raced out at this look; `None` when it is not
+        a look or `mine` is within the margin."""
+        verdict = self.judge(mine, against)
+        return None if verdict is None else verdict[0]
+
+
+def race_looks(after: int, instances: int) -> tuple[int, ...]:
+    """Where a race reads: after `after` instances, then every ceil(n / 4),
+    never at `n` itself."""
+    if after >= instances:
+        return ()
+    return tuple(range(after, instances, math.ceil(instances / 4)))
 
 
 def per_instance_key(kpi: str) -> str:
@@ -176,7 +289,13 @@ def run_instance_stage(
                     break
             verdict = board.settle(job.candidate_id, index, seed, names[index], outcome)
             if verdict is not None and job.observer is not None:
-                job.observer("raced_out", reason=verdict, runs_done=board.runs_done(job.candidate_id))
+                job.observer(
+                    "raced_out",
+                    reason=verdict,
+                    runs_done=board.runs_done(job.candidate_id),
+                    looks=list(race.looks) if race is not None else [],
+                    margin_pct=board.margin(job.candidate_id),
+                )
         finally:
             if cpus is not None and cpu is not None:
                 cpus.put(cpu)
@@ -262,6 +381,14 @@ class _Board:
         self._failure: dict[str, StageOutcome] = {}
         self._runs: dict[str, int] = {job.candidate_id: 0 for job in jobs}
         self._spent: dict[str, float] = {job.candidate_id: 0.0 for job in jobs}
+        self._looked: dict[str, int] = {}
+        """Per candidate, the last look the race read."""
+        self._margins: dict[str, float] = {}
+        """Per raced-out candidate, the margin it was raced out by (percent)."""
+
+    def margin(self, candidate_id: str) -> float | None:
+        with self._lock:
+            return self._margins.get(candidate_id)
 
     def failed(self, candidate_id: str) -> bool:
         with self._lock:
@@ -295,16 +422,27 @@ class _Board:
         if race is None or candidate_id in race.exempt or candidate_id in self._failure:
             return None
         by_instance: dict[str, list[float]] = {}
-        for (index, _seed), done in self._done[candidate_id].items():
+        seeds_of: dict[str, list[int]] = {}
+        for (index, seed), done in self._done[candidate_id].items():
             if race.objective in done.kpis:
                 by_instance.setdefault(self._names[index], []).append(done.kpis[race.objective])
-        compared, behind = race.behind_pct({name: fmean(values) for name, values in by_instance.items()})
-        if compared < race.after or compared >= self._instances or behind <= race.margin_pct:
+                seeds_of.setdefault(self._names[index], []).append(seed)
+        prefix = {name: fmean(values) for name, values in by_instance.items()}
+        # The incumbent on the prefix's own seeds (Decision 17a): units run seed
+        # by seed, so every look reads seed 0, and on a repeatable stage the
+        # seed's effect is then the same on both sides.
+        against = race.against(seeds_of)
+        compared, _ = race.behind_pct(prefix, against)
+        # One read per look: a later seed's run, or a parallel worker's, can
+        # land while `compared` still stands at a look already read -- a second
+        # read there is a second test of the same evidence.
+        if compared not in race.looks or compared >= self._instances or compared <= self._looked.get(candidate_id, 0):
             return None
-        reason = (
-            f"raced out after {compared} of {self._instances} instances: {behind:.2f} % behind the best "
-            f"candidate so far on the same instances (margin {race.margin_pct:g} %)"
-        )
+        self._looked[candidate_id] = compared
+        verdict = race.judge(prefix, against)
+        if verdict is None:
+            return None
+        reason, self._margins[candidate_id] = verdict
         # Kept where a failure is kept, so that its remaining runs are never
         # started -- but marked as what it is: nothing went wrong.
         self._failure[candidate_id] = StageOutcome(
@@ -351,15 +489,30 @@ def _combine(
     kpis: dict[str, float] = {}
     kpi_cv: dict[str, float | None] = {}
     vectors: dict[str, list[float]] = {}
+    kpi_var: dict[str, float] = {}
+    vector_var: dict[str, list[float]] = {}
+    seed_runs: dict[str, list[float]] = {}
+    seed_vectors: dict[str, list[list[float]]] = {}
     for key in sorted(keys):
         by_instance = [
             [done[(index, seed)].kpis[key] for seed in seeds] for index in range(len(names))
         ]
         vectors[per_instance_key(key)] = [fmean(values) for values in by_instance]
         kpis[key] = fmean(vectors[per_instance_key(key)])
+        # Per seed, what that seed's runs reached on every instance, and the
+        # stage-level value of that one run: the seed's are the reference of a
+        # later candidate's paired difference on the same seed.
+        rows = [[done[(index, seed)].kpis[key] for index in range(len(names))] for seed in seeds]
+        seed_vectors[per_instance_key(key)] = rows
+        seed_runs[key] = [fmean(row) for row in rows]
         if len(seeds) > 1:
             cvs = [cv for cv in (_cv(values) for values in by_instance) if cv is not None]
             kpi_cv[key] = fmean(cvs) if cvs else None
+            # Each instance's variance over its seeds; one run of the stage is
+            # the mean of M independent instance runs, so its variance is
+            # the mean of theirs over M.
+            vector_var[per_instance_key(key)] = [variance(values) for values in by_instance]
+            kpi_var[key] = fmean(vector_var[per_instance_key(key)]) / len(names)
     notes = []
     for index in range(len(names)):  # one note per instance: its seeds say the same thing
         said = next((done[(index, s)].text_feedback for s in seeds if done[(index, s)].text_feedback), "")
@@ -372,6 +525,14 @@ def _combine(
         kpis=kpis,
         vector_kpis=vectors,
         kpi_cv=kpi_cv,
+        kpi_var=kpi_var,
+        vector_var=vector_var,
+        seed_runs=seed_runs,
+        seed_vectors=seed_vectors,
+        seed_list=tuple(seeds),
+        instance_durations=[
+            fmean(done[(index, seed)].duration_s for seed in seeds) for index in range(len(names))
+        ],
         # Three instances' worth: a prompt is not a log.
         text_feedback="\n".join(notes[:3])[:FEEDBACK_LIMIT],
         stderr=first.stderr,

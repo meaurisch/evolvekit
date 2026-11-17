@@ -1,6 +1,7 @@
 """Staged evaluation: the product, per the redesign proposal's first principle."""
 
 from evolvekit.evaluate.cascade import Cascade, archive_threshold, select_promoted
+from evolvekit.evaluate.noise import Noise
 from evolvekit.evaluate.scoring import compute_score, penalty_terms, scale_value
 from evolvekit.evaluate.stages import (
     build_argv,
@@ -13,6 +14,7 @@ from evolvekit.evaluate.types import EvalResult, StageOutcome
 __all__ = [
     "Cascade",
     "EvalResult",
+    "Noise",
     "StageOutcome",
     "archive_threshold",
     "build_argv",

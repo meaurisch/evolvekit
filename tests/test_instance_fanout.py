@@ -9,7 +9,9 @@ seed and flags, writes one JSON object, and knows nothing about evolvekit.
 from __future__ import annotations
 
 import json
+import math
 import os
+import statistics
 import sys
 import threading
 import time
@@ -202,7 +204,8 @@ def test_every_instance_and_seed_is_a_run_of_its_own_and_instances_weigh_the_sam
         [_candidate(config, "g000-c0001", seed=True)]
     )["g000-c0001"]
 
-    assert sorted(_calls(tmp_path))[0][:2] == ("b1", 0) and len(_calls(tmp_path)) == 4
+    # 2 instances x 2 seeds, and the seed once more on seed 0 on the median-time instance (the noise check)
+    assert sorted(_calls(tmp_path))[0][:2] == ("b1", 0) and len(_calls(tmp_path)) == 5
     final = result.outcomes[-1]
     assert final.instance_names == ("s1", "b1")
     assert final.vector_kpis["cost_per_instance"] == [100.25, 1000.25], "seeds average within an instance"
@@ -211,6 +214,63 @@ def test_every_instance_and_seed_is_a_run_of_its_own_and_instances_weigh_the_sam
     assert final.kpi_cv["cost"] < 0.01
     assert final.text_feedback == "b1: slow to converge"
     assert result.competes is True
+
+
+def test_a_per_instance_stage_reports_each_instances_variance_and_the_stage_mean_s(tmp_path):
+    """The toy solver's cost is `scale + 0.5·seed`: seeds 0 and 1 differ by 0.5 on every instance."""
+    instances = _instances(tmp_path, s1={"scale": 100}, s2={"scale": 300}, b1={"scale": 1000})
+    config = build_config(_raw(instances, seeds=2, normalize="none"), base_dir=tmp_path)
+    outcome = Cascade(config, work_dir=tmp_path / "work").evaluate_generation(
+        [_candidate(config, "g000-c0001", seed=True)]
+    )["g000-c0001"].outcomes[-1]
+    per_instance_runs = [[100.0, 100.5], [300.0, 300.5], [1000.0, 1000.5]]
+    var = outcome.vector_var["cost_per_instance"]
+    assert var == pytest.approx([statistics.variance(v) for v in per_instance_runs])
+    assert outcome.kpi_var["cost"] == pytest.approx(statistics.fmean(var) / 3)
+    assert outcome.seed_list == (0, 1)
+    assert outcome.seed_vectors["cost_per_instance"] == [[100.0, 300.0, 1000.0], [100.5, 300.5, 1000.5]]
+    assert outcome.seed_runs["cost"] == pytest.approx([1400.0 / 3, 1401.5 / 3])
+    assert len(outcome.instance_durations) == 3 and all(d >= 0.0 for d in outcome.instance_durations)
+
+
+def test_with_normalize_baseline_the_variance_is_in_percent_of_the_seed(tmp_path):
+    instances = _instances(tmp_path, s1={"scale": 100}, b1={"scale": 10_000})
+    config = build_config(_raw(instances, seeds=2), base_dir=tmp_path)
+    cascade = Cascade(config, work_dir=tmp_path / "work")
+    cascade.evaluate_generation([_candidate(config, "g000-c0001", seed=True)])
+    ref = cascade.reference["full"]
+    names = ["s1", "b1"]
+    raw_var = statistics.variance([100.0, 100.5])   # the seed's two runs on s1
+    # The toy (`scale + 0.5·seed`) gives the same numbers for the same seed: the
+    # rules read the paired noise, 0 with only the seed. The units are those of
+    # the across estimate, read here as on a stage that is not repeatable.
+    assert cascade.noise.repeatable("full") is True
+    assert cascade.noise.vector_sd("full", "cost_pct_of_baseline", 0) == 0.0
+    cascade.noise.set_repeatable("full", False)
+    pct = cascade.noise.vector_sd("full", "cost_pct_of_baseline", 0)
+    assert pct == pytest.approx(math.sqrt(raw_var) * 100 / ref[names[0]]), "Decision 4: percent on the percent vector"
+    assert cascade.noise.vector_sd("full", "cost_per_instance", 0) == pytest.approx(math.sqrt(raw_var)), "raw stays raw"
+    pct_var = [raw_var * (100 / ref[n]) ** 2 for n in names]
+    assert cascade.noise.sd("full", "cost") == pytest.approx(math.sqrt(statistics.fmean(pct_var) / 2)), "the score's unit"
+    assert cascade.noise.sd("full", "cost_raw") == pytest.approx(math.sqrt(raw_var / 2))
+    assert (tmp_path / "work" / "noise.json").is_file(), "saved at the end of the generation"
+
+
+def test_a_run_written_before_the_noise_file_resumes_with_no_noise(tmp_path):
+    from evolvekit.search.driver import Driver
+
+    instances = _instances(tmp_path, s1={"scale": 100}, b1={"scale": 1000})
+    raw = _raw(instances, seeds=2)
+    raw["search"].update({"children_per_generation": 2, "generations": 1, "seed": 1})
+    config = build_config(raw, base_dir=tmp_path)
+    Driver(config, run_dir=tmp_path / "run").run()
+    (tmp_path / "run" / "work" / "noise.json").unlink()   # as a run from before the noise file left it
+
+    driver = Driver(config, run_dir=tmp_path / "run")
+    assert driver.resume() == 1
+    assert driver.cascade.noise.known("full") is False
+    driver.run(generations=1)
+    assert driver.cascade.noise.known("full") is True, "the next stochastic candidate starts the estimate"
 
 
 def test_every_run_is_reported_under_its_instances_name(tmp_path):
@@ -385,18 +445,25 @@ def test_workers_run_side_by_side_but_never_more_than_asked_for(tmp_path):
     elapsed = time.perf_counter() - started
     assert all(r.competes for r in results.values())
 
-    calls = _calls(tmp_path)
-    assert len(calls) == 12
+    calls = sorted(_calls(tmp_path), key=lambda call: call[2])
+    # Twelve runs for the two candidates, then the seed's noise check (A2,
+    # decision 17d): the seed run again on seed 0 and, at `seeds: 1`, on seed 1,
+    # on one instance, after the generation. The check's runs count towards
+    # the peak below too: they must not exceed `workers` either.
+    assert len(calls) == 14
+    generation, check = calls[:12], calls[12:]
+    assert sorted(seed for _name, seed, *_ in check) == [0, 1] and len({name for name, *_ in check}) == 1
+    assert min(a for *_, a, _b in check) >= max(b for *_, _a, b in generation), "the check runs after the generation"
     moments = sorted([(a, 1) for *_, a, _b in calls] + [(b, -1) for *_, _a, b in calls])
     in_flight = peak = 0
     for _moment, change in moments:
         in_flight += change
         peak = max(peak, in_flight)
     assert peak == 3, "three at a time: not two, and never four"
-    assert elapsed < 12 * 0.8, "twelve runs of 0.8 s took less than they would in a row"
+    assert elapsed < 12 * 0.8, "fourteen runs of 0.8 s took less than twelve would in a row"
     # Instance by instance across candidates: the first three runs to start are
     # both candidates' s0 and one s1 -- not one candidate's s0, s1 and s2.
-    order = [name for name, *_ in sorted(calls, key=lambda call: call[2])]
+    order = [name for name, *_ in generation]
     assert sorted(order[:3]) == ["s0", "s0", "s1"] and sorted(order[-3:]) == ["s4", "s5", "s5"]
 
 
@@ -437,7 +504,8 @@ def test_the_daily_cap_is_applied_on_admission(tmp_path):
     )
     assert [r.competes for r in results.values()] == [True, True, False]
     assert "daily full-evaluation cap reached" in results["g001-c0003"].last_failure
-    assert len(_calls(tmp_path)) == 2
+    # Two candidates, and the seed's noise check (seed 0 again, seed 1), which the cap does not count.
+    assert len(_calls(tmp_path)) == 4
 
 
 # -- what the status document makes of it ----------------------------------

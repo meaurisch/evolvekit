@@ -16,11 +16,13 @@ Two independent objects:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
 from evolvekit.config import BudgetConfig, StopConfig
 from evolvekit.economics import GenerationPoint
+from evolvekit.stats import t_scale
 
 __all__ = ["AI_USED_UP", "FIRST_CALL_USD", "BudgetGuard", "BudgetState", "StopPolicy", "StopDecision"]
 
@@ -144,6 +146,11 @@ class StopDecision:
     driver's cue to spend a big step before the run is allowed to die."""
 
 
+EPSILON_Z = 0.5 / math.sqrt(2.0)
+"""The automatic epsilon's margin in sd of the difference of two equal
+candidates: half a one-side sd, crossed in about 36 %."""
+
+
 class StopPolicy:
     """Patience / epsilon / target over the archive-best score."""
 
@@ -151,6 +158,14 @@ class StopPolicy:
         self.config = config
         self.takes_big_steps = takes_big_steps
         self.best: float | None = None
+        """The run's best as of its last improvement: it moves only when a
+        generation beats it by more than `epsilon_now()` (no ratchet)."""
+        self.noise_sd: float = 0.0
+        """The sd of one finished candidate's fitness (`Noise.score_sd` at the
+        final stage): what the automatic epsilon reads. 0: no noise, today."""
+        self.noise_df: float = math.inf
+        """The degrees of freedom behind `noise_sd` (`Noise.score_df`): the
+        epsilon's normal quantile widens to Student's t at them (Decision 17b)."""
         self.stagnant = 0
         self.big_steps_in_window = 0
         """Big steps tried since the last improvement: what `min_big_steps` counts."""
@@ -165,6 +180,38 @@ class StopPolicy:
     def note_big_step_applied(self) -> None:
         """A big step's response parsed and applied: a candidate exists."""
         self.big_steps_applied_in_window += 1
+
+    def epsilon_now(self) -> float:
+        """An explicit `stop.epsilon` as configured; else automatic:
+        `max(1e-6, 1e-9 * |best|, 0.5 * noise_sd)` -- with no noise, today's 1e-6.
+
+        Half a noise sd is a normal quantile: the difference of two equal
+        candidates has sd `√2 · noise_sd`, and it exceeds `0.5 · noise_sd` with
+        P(Z > 0.5/√2), about 36 %. With `noise_sd` estimated on `noise_df`
+        degrees of freedom the half is widened by `stats.t_scale(0.5/√2, df)`,
+        so the 36 % holds at any df (exactly 0.5 at infinite df)."""
+        return self.epsilon_at(self.best)
+
+    def epsilon_at(self, best: float | None) -> float:
+        """`epsilon_now` with `best` as the run's best: the epsilon a round
+        whose bar is `best` is judged with (`economics.series` replays each
+        round with its own bar, as the live round was)."""
+        if self.config.epsilon is not None:
+            return self.config.epsilon
+        scale = abs(best) if best is not None else 0.0
+        half = 0.5 * self.noise_sd
+        if half > 0:
+            half *= t_scale(EPSILON_Z, self.noise_df)
+        return max(1e-6, 1e-9 * scale, half)
+
+    def rebase(self, best: float | None) -> None:
+        """The best was measured again and pooled (`search.reevaluate_best_every`):
+        the bar a real improvement has to clear is the pooled best, down (a
+        lucky best regressed) or up (an unlucky one). A re-evaluation is never
+        search progress: the flat count and the big-step counts are left as
+        they are."""
+        if best is not None and self.best is not None:
+            self.best = float(best)
 
     @property
     def plateau(self) -> bool:
@@ -187,19 +234,23 @@ class StopPolicy:
             self.stagnant += 1
             return self._verdict(economics)
 
-        if self.best is None or best_score > self.best + self.config.epsilon:
-            self.best = max(best_score, self.best if self.best is not None else best_score)
+        if self.best is None or best_score > self.best + self.epsilon_now():
+            self.best = best_score
             self.stagnant = 0
             self.big_steps_in_window = 0
             self.big_steps_applied_in_window = 0
         else:
-            self.best = max(self.best, best_score)
+            # No ratchet: a step inside epsilon leaves the bar where it was, so
+            # slow steady progress adds up to an improvement.
             self.stagnant += 1
 
-        if self.config.target is not None and self.best >= self.config.target:
+        # The target is read from the generation's best, not the epsilon-gated
+        # one: a target reached by a step inside epsilon is reached.
+        reached = max(best_score, self.best)
+        if self.config.target is not None and reached >= self.config.target:
             return StopDecision(
                 True,
-                f"stop.target reached: {self.best:.6g} >= {self.config.target:.6g}",
+                f"stop.target reached: {reached:.6g} >= {self.config.target:.6g}",
                 self.stagnant,
                 self.plateau,
             )
@@ -245,7 +296,7 @@ class StopPolicy:
             if self.big_steps_in_window >= self.config.min_big_steps:
                 return StopDecision(
                     True,
-                    f"stop.patience reached: no improvement > {self.config.epsilon:g} "
+                    f"stop.patience reached: no improvement > {self.epsilon_now():.3g} "
                     f"for {self.stagnant} generation(s)",
                     self.stagnant,
                     self.plateau,

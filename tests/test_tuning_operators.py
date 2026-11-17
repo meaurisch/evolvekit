@@ -7,6 +7,7 @@ so far -- all plain arithmetic on a declared `problem.parameters` space.
 
 from __future__ import annotations
 
+import json
 import random
 import sys
 from statistics import fmean
@@ -16,8 +17,10 @@ import pytest
 from evolvekit.candidate import Candidate
 from evolvekit.config import ConfigError, build_config
 from evolvekit.search.operators import param_cross, param_local, param_tpe
-from evolvekit.search.tuning import MIN_OBSERVATIONS, Observation, propose_tpe
-from evolvekit.space import ParameterSpace
+from evolvekit.search import tuning
+from evolvekit.search.tuning import MIN_OBSERVATIONS, Observation, _bandwidths, _Density, n_good, propose_tpe
+from evolvekit.space import Parameter, ParameterSpace
+from tests.test_params import sweepable_project  # noqa: F401  (a fixture)
 
 
 def _raw_space(extra: int = 24) -> dict:
@@ -127,6 +130,64 @@ def _history(space: ParameterSpace, count: int, seed: int) -> list[Observation]:
     return [Observation(v, _fitness(v)) for v in space.latin_hypercube(count, rng)]
 
 
+def _float(name: str) -> Parameter:
+    return ParameterSpace.parse({name: {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}}).parameters[0]
+
+
+def test_the_good_share_is_a_tenth_up_to_twenty_five():
+    assert [n_good(n) for n in (8, 20, 21, 100, 400)] == [2, 2, 3, 10, 25]
+
+
+def test_each_point_has_the_larger_of_its_two_gaps_as_its_bandwidth():
+    # sorted with the sentinels: 0, 0.1, 0.4, 0.5, 1
+    assert _bandwidths([0.5, 0.1, 0.4]) == pytest.approx([0.5, 0.3, 0.3]), "0.5: gaps 0.1 and 0.5; 0.1: 0.1 and 0.3; 0.4: 0.3 and 0.1"
+    assert _bandwidths([0.30, 0.31]) == pytest.approx([0.3, 0.5]), "0.31's gap to 1 is 0.69, clipped to 0.5"
+    assert _bandwidths([0.5, 0.5]) == pytest.approx([0.5, 0.5]), "a duplicate's zero gap loses to its other side"
+    assert _bandwidths([0.0, 0.01, 0.02]) == pytest.approx([0.02, 0.02, 0.5]), "gaps of 0.01 are clipped up to 0.02"
+
+
+def test_a_truncated_density_integrates_to_one():
+    """The pdf and the sampler describe one distribution: a point at the edge
+    keeps all its mass inside [0, 1]."""
+    density = _Density(_float("x"), [Observation({"x": 0.0}, 1.0), Observation({"x": 0.02}, 1.0)])
+    grid = [(i + 0.5) / 2000 for i in range(2000)]
+    assert sum(density.pdf(u) for u in grid) / 2000 == pytest.approx(1.0, abs=0.01)
+
+
+def test_the_sampler_draws_the_density_the_pdf_describes():
+    """A histogram of 20 000 draws matches the pdf's mass, bin by bin (ten bins
+    of 0.1), with points at the edge where the truncation matters most. A
+    bin's share has SE at most 0.0035; each must lie within 0.015 (4 SE)."""
+    density = _Density(_float("x"), [Observation({"x": u}, 1.0) for u in (0.0, 0.05, 0.9)])
+    rng = random.Random(4)
+    draws = [density.sample(rng) for _ in range(20_000)]
+    for b in range(10):
+        share = sum(b / 10 <= d < (b + 1) / 10 or (b == 9 and d == 1.0) for d in draws) / len(draws)
+        mass = sum(density.pdf(b / 10 + (i + 0.5) / 1000) for i in range(100)) / 1000
+        assert abs(share - mass) < 0.015, (b, share, mass)
+
+
+def test_half_the_candidates_come_from_the_box(monkeypatch):
+    calls = {"good": 0, "box": 0}
+
+    def sample(self, rng):
+        calls["good"] += 1
+        return rng.random()
+
+    plain = Parameter.from_unit
+
+    def from_unit(self, unit):
+        calls["box"] += 1
+        return plain(self, unit)
+
+    space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}})
+    history = [Observation({"x": (i + 0.5) / 30}, float(i % 7)) for i in range(30)]
+    monkeypatch.setattr(_Density, "sample", sample)
+    monkeypatch.setattr(Parameter, "from_unit", from_unit)
+    assert propose_tpe(space, history, random.Random(3)) is not None
+    assert calls == {"good": tuning.FROM_GOOD, "box": tuning.FROM_PRIOR} == {"good": 24, "box": 24}
+
+
 def test_too_few_observations_is_nothing_to_estimate_from():
     space = _wide_space()
     assert propose_tpe(space, _history(space, MIN_OBSERVATIONS - 1, 1), random.Random(1)) is None
@@ -134,15 +195,22 @@ def test_too_few_observations_is_nothing_to_estimate_from():
 
 
 def test_the_estimator_finds_the_four_parameters_that_matter_among_twenty_eight():
+    """Over five histories of 40, 40 proposals each. With a tenth of 40 as the
+    good set (four configurations), one history can hold two greedy starts
+    among its best four (seed 7 does), and the estimator then rightly stops
+    avoiding greedy there; pooled, measured 194 of 200 proposals with the
+    boolean off and 178 of 200 not greedy."""
     space = _wide_space()
-    history = _history(space, 40, seed=7)
-    rng = random.Random(11)
-    proposals = [propose_tpe(space, history, rng) for _ in range(40)]
-    sampled = space.latin_hypercube(40, random.Random(12))
+    proposals = []
+    for history_seed in (1, 2, 3, 4, 7):
+        history = _history(space, 40, seed=history_seed)
+        rng = random.Random(11)
+        proposals += [propose_tpe(space, history, rng) for _ in range(40)]
+    sampled = space.latin_hypercube(200, random.Random(12))
     assert all(space.validate(p)[1] == [] for p in proposals)
     assert fmean(map(_fitness, proposals)) > fmean(map(_fitness, sampled)) + 1.0
-    assert sum(1 for p in proposals if not p["exhaustive"]) >= 30, "it has learnt what the boolean costs"
-    assert sum(1 for p in proposals if p["init"] != "greedy") >= 30
+    assert sum(1 for p in proposals if not p["exhaustive"]) >= 160, "it has learnt what the boolean costs"
+    assert sum(1 for p in proposals if p["init"] != "greedy") >= 160
 
 
 def test_it_never_proposes_what_has_already_been_evaluated():
@@ -173,8 +241,9 @@ def test_param_tpe_is_a_local_step_until_there_is_something_to_learn_from():
     assert later.mode == "param_tpe" and later.meta["observations"] == 30
 
 
-def _screening_driver(tmp_path, *, normalized: bool):
-    """A proxy stage on one input, then the full stage on three instances."""
+def _screening_driver(tmp_path, *, normalized: bool, middle: bool = False):
+    """A proxy stage on one input, then the full stage on three instances
+    (with `middle`, a second screen on two instances between them)."""
     from evolvekit.search.driver import Driver
 
     stage = {"kind": "command", "kpis_from": "stdout", "command": "{python} solver.py --instance {instance} {params}",
@@ -186,6 +255,7 @@ def _screening_driver(tmp_path, *, normalized: bool):
                 "stages": [
                     {"id": "static", "kind": "builtin-static"},
                     {"id": "proxy", **stage, "instances": ["small"]},
+                    *([{"id": "middle", **stage, "instances": ["small", "medium"]}] if middle else []),
                     {"id": "full", **stage, "instances": ["small", "medium", "large"]},
                 ],
                 "score": {"objective": "cost", "direction": "minimize"},
@@ -198,27 +268,298 @@ def _screening_driver(tmp_path, *, normalized: bool):
 
 
 @pytest.mark.parametrize("normalized", [True, False])
-def test_a_screening_score_is_an_observation_only_where_it_is_on_the_same_scale(tmp_path, normalized):
-    """A candidate screened out by the proxy stage is judged by the proxy's
-    score. With `normalize: baseline` on every stage both are percentages of
-    the baseline and can be ranked together; with plain means they are costs on
-    different instances -- the proxy's one small instance makes every screened
-    candidate look better than any finished one."""
+def test_observations_are_ranks_in_four_tiers(tmp_path, normalized):
+    """Q4: what the estimator reads is a rank, best first: (1) finished, by
+    fitness; (2) screened out, by the deepest stage reached and that stage's
+    score -- on any scale, since only the order counts; (3) raced out or kept
+    out by the hold-out veto, one shared rank; (4) failed or gated, one shared
+    rank, the worst. A proxy's score of 9 on its one small instance beats both
+    finished scores as a number and still ranks below them."""
     driver = _screening_driver(tmp_path, normalized=normalized)
     space = driver.config.problem.parameters
-    near, far, crashed = ({**space.defaults(), "neighbours": n} for n in (30, 110, 70))
+    full = ["static", "proxy", "full"]
+
+    def at(n: int) -> dict:
+        return {**space.defaults(), "neighbours": n}
+
     driver.archive = [
-        _candidate(space, "g001-c0002", near, score=-1000.0, competes=True, stages_reached=["static", "proxy", "full"]),
-        _candidate(space, "g001-c0003", far, score=-120.0, competes=False, stages_reached=["static", "proxy"]),
-        _candidate(space, "g001-c0004", crashed, score=-1e9, competes=False, stages_reached=["static"],
+        _candidate(space, "g001-c0002", at(20), score=3.0, competes=True, stages_reached=full,
+                   stage_scores={"proxy": 3.0, "full": 3.0}),
+        _candidate(space, "g001-c0003", at(30), score=5.0, competes=True, stages_reached=full,
+                   stage_scores={"proxy": 5.0, "full": 5.0}),
+        _candidate(space, "g001-c0004", at(40), score=9.0, competes=False, stages_reached=["static", "proxy"],
+                   stage_scores={"proxy": 9.0}),
+        _candidate(space, "g001-c0005", at(50), score=20.0, competes=False, stages_reached=full,
+                   stage_scores={"proxy": 20.0, "full": 20.0}, raced_out="raced out after 2 of 3 instances"),
+        _candidate(space, "g001-c0006", at(60), score=50.0, competes=False, stages_reached=full,
+                   stage_scores={"proxy": 50.0, "full": 50.0}, veto="holdout below the seed's 1.0"),
+        _candidate(space, "g001-c0007", at(70), score=-1e9, competes=False, stages_reached=["static"],
                    last_failure="stage proxy: exit 1"),
+        _candidate(space, "g001-c0008", at(80), score=60.0, competes=False, stages_reached=full,
+                   gated="missed = 2 > 0"),
     ]
     seen = {o.values["neighbours"]: o.fitness for o in driver._observations()}
-    assert seen[30] == -1000.0 and seen[70] == -1001.0, "a crash is the worst observation either way"
-    if normalized:
-        assert seen[110] == -120.0
-    else:
-        assert 110 not in seen, "a cost on another input set is not a judgement of this configuration"
+    assert set(seen) == {20, 30, 40, 50, 60, 70, 80}, "the screened one is an observation on any scale"
+    assert seen[30] > seen[20] > seen[40] > seen[50], "finished by fitness, then screened, then raced out"
+    assert seen[50] == seen[60], "raced out and vetoed share one rank"
+    assert seen[60] > seen[70] == seen[80], "failed and gated share the worst rank"
+    assert seen[30] == -1.0 and seen[20] == -2.0 and seen[40] == -3.0, "a rank is minus the position"
+
+
+def test_a_deeper_screen_ranks_above_a_shallower_one_whatever_the_score(tmp_path):
+    driver = _screening_driver(tmp_path, normalized=False, middle=True)
+    space = driver.config.problem.parameters
+    driver.archive = [
+        _candidate(space, "g001-c0002", {**space.defaults(), "neighbours": 20}, score=99.0, competes=False,
+                   stages_reached=["static", "proxy"], stage_scores={"proxy": 99.0}),
+        _candidate(space, "g001-c0003", {**space.defaults(), "neighbours": 30}, score=-50.0, competes=False,
+                   stages_reached=["static", "proxy", "middle"], stage_scores={"proxy": 1.0, "middle": -50.0}),
+    ]
+    seen = {o.values["neighbours"]: o.fitness for o in driver._observations()}
+    assert seen[30] > seen[20], "reaching the second screen says more than a high score on the first"
+
+
+def test_an_abandoned_final_stage_is_no_observation(tmp_path):
+    """Reached the final stage, did not finish it, and nothing failed (a stop
+    request, the time limit, the daily cap): that says nothing about the
+    configuration, so the estimator is not told anything about it."""
+    driver = _screening_driver(tmp_path, normalized=False)
+    space = driver.config.problem.parameters
+    driver.archive = [
+        _candidate(space, "g001-c0002", {**space.defaults(), "neighbours": 20}, score=3.0, competes=True,
+                   stages_reached=["static", "proxy", "full"], stage_scores={"full": 3.0}),
+        _candidate(space, "g001-c0003", {**space.defaults(), "neighbours": 30}, score=8.0, competes=False,
+                   stages_reached=["static", "proxy", "full"], stage_scores={"proxy": 8.0}),
+    ]
+    assert {o.values["neighbours"] for o in driver._observations()} == {20}
+
+
+def test_tied_observations_share_the_mean_position(tmp_path):
+    driver = _screening_driver(tmp_path, normalized=False)
+    space = driver.config.problem.parameters
+    full = ["static", "proxy", "full"]
+    driver.archive = [
+        _candidate(space, f"g001-c000{i}", {**space.defaults(), "neighbours": n}, score=s, competes=True,
+                   stages_reached=full, stage_scores={"full": s})
+        for i, (n, s) in enumerate([(20, 4.0), (30, 2.0), (40, 2.0), (50, 1.0)], start=2)
+    ]
+    seen = {o.values["neighbours"]: o.fitness for o in driver._observations()}
+    assert seen == {20: -1.0, 30: -2.5, 40: -2.5, 50: -4.0}
+
+
+def test_siblings_proposed_this_generation_push_tpe_away():
+    """The constant liar (Q19): a configuration already proposed this
+    generation joins the bad set, so the estimator rates its neighbourhood
+    lower and the next proposal lands further from it. Same observations, same
+    rng seed, with and without the sibling taken: over 200 seeds the mean
+    distance from the sibling grows. (Before, `taken` only excluded the exact
+    point, and the two proposals were the same.) Half the candidates come
+    from the box (A2.5b), so proposals already spread more without the liar:
+    measured 0.212 without, 0.259 with it taken, a paired difference of 0.046
+    (SE 0.009); asserted above 0.02."""
+    space = _wide_space(0)
+    history = _history(space, 30, seed=7)
+    plain, liar = [], []
+    for s in range(200):
+        sibling = propose_tpe(space, history, random.Random(s))
+        plain.append(space.distance(propose_tpe(space, history, random.Random(10_000 + s)), sibling))
+        pushed = propose_tpe(space, history, random.Random(10_000 + s), taken=[sibling])
+        liar.append(space.distance(pushed, sibling))
+    print(f"mean distance from the sibling: {fmean(plain):.4f} without, {fmean(liar):.4f} with it taken")
+    assert fmean(liar) > fmean(plain) + 0.02, "measured: 0.212 without, 0.259 with it taken"
+
+
+def test_a_taken_configuration_does_not_count_towards_the_good_set():
+    """`taken` is added after the split: it never changes `n_good`."""
+    space = _wide_space(0)
+    history = _history(space, MIN_OBSERVATIONS - 1, 1)
+    taken = [o.values for o in _history(space, 5, 2)]
+    assert propose_tpe(space, history, random.Random(1), taken=taken) is None, "taken points are not observations"
+
+
+# -- one run-wide hypercube (Q3, Decision 8) -------------------------------
+
+
+def _driver(tmp_path, *, operators, children, generations, space, constraints=None):
+    from evolvekit.search.driver import Driver
+
+    problem: dict = {"parameters": {name: {"type": "float", "low": lo, "high": hi, "default": (lo + hi) / 2}
+                                    for name, (lo, hi) in space.items()}}
+    if constraints:
+        problem["parameter_constraints"] = constraints
+    config = build_config(
+        {
+            "problem": problem,
+            "evaluate": {
+                "stages": [
+                    {"id": "static", "kind": "builtin-static"},
+                    {"id": "full", "kind": "command", "kpis_from": "stdout", "command": "{python} solver.py {params}"},
+                ],
+                "score": {"objective": "cost", "direction": "minimize"},
+            },
+            "search": {"operators": operators, "children_per_generation": children, "generations": generations},
+        },
+        base_dir=tmp_path,
+    )
+    return Driver(config, run_dir=tmp_path / "run", log=lambda m: None)
+
+
+def _lhs_state(tmp_path) -> dict:
+    return json.loads((tmp_path / "run" / "work" / "lhs.json").read_text(encoding="utf-8"))
+
+
+def test_the_lhs_children_of_a_run_share_one_hypercube(tmp_path):
+    """Q3, Decision 8: with the default shares a generation has 0-2 param_lhs children;
+    over the run they take the rows of one cube, so the first K cover K strata of every
+    parameter. generations 2 x children 4 x share 0.5 -> 4 expected -> K = 4."""
+    driver = _driver(tmp_path, operators={"param_lhs": 0.5, "param_local": 0.5}, children=4, generations=2,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    rows = [driver._next_lhs_row(driver._seed_candidate()) for _ in range(4)]
+    for name in ("x", "y"):
+        assert sorted(int(row[name] * 4) for row in rows) == [0, 1, 2, 3]
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["K"] == 4
+
+
+def test_the_cube_size_is_clamped_to_4_and_64(tmp_path):
+    small = _driver(tmp_path / "a", operators={"param_lhs": 0.1, "param_local": 0.9}, children=2, generations=2,
+                    space={"x": (0.0, 1.0)})
+    big = _driver(tmp_path / "b", operators={"param_lhs": 1.0}, children=20, generations=50, space={"x": (0.0, 1.0)})
+    small._next_lhs_row(small._seed_candidate())
+    big._next_lhs_row(big._seed_candidate())
+    assert _lhs_state(tmp_path / "a")["cubes"]["typed"]["K"] == 4
+    assert _lhs_state(tmp_path / "b")["cubes"]["typed"]["K"] == 64
+
+
+def test_the_cube_is_kept_and_the_next_row_survives_a_resume(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 1.0)})
+    first = [driver._next_lhs_row(driver._seed_candidate()) for _ in range(3)]
+    state = _lhs_state(tmp_path)
+    assert state["cubes"]["typed"]["next"] == 3 and state["cubes"]["typed"]["K"] == 8
+    again = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 1.0)})
+    assert again._next_lhs_row(again._seed_candidate()) == state["cubes"]["typed"]["rows"][3]
+    assert first == state["cubes"]["typed"]["rows"][:3]
+
+
+def test_a_new_cube_is_built_when_the_rows_run_out(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 0.5, "param_local": 0.5}, children=4, generations=2,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    first = [driver._next_lhs_row(driver._seed_candidate()) for _ in range(4)]
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["built"] == 1
+    fifth = driver._next_lhs_row(driver._seed_candidate())
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert cube["built"] == 2 and cube["next"] == 1 and cube["rows"][0] == fifth
+    assert fifth not in first
+
+
+def test_a_param_lhs_child_draws_one_number_from_the_run_per_cube(tmp_path):
+    """The run's generator gives one draw per cube and nothing per child."""
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 1.0)})
+    driver._next_lhs_row(driver._seed_candidate())
+    after_build = driver.rng.getstate()
+    for _ in range(5):
+        driver._invoke("param_lhs", driver._seed_candidate(), [], "none", None, "g001-c0009")
+    assert driver.rng.getstate() == after_build
+
+
+def test_a_reprompted_lhs_child_takes_the_next_row(tmp_path):
+    """A child whose row is a configuration the run already holds is a
+    duplicate; its one re-prompt takes the next row of the cube."""
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=4, generations=4,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    space = driver.config.problem.parameters
+    seed = driver._seed_candidate()
+    driver._next_lhs_row(seed)  # row 0, handed out earlier
+    rows = _lhs_state(tmp_path)["cubes"]["typed"]["rows"]
+    driver.novelty.add("g001-c0050", space.render_block(rows[1]), parent_block=seed.block)
+    child = driver._breed_one(2, "param_lhs", seed)
+    assert not child.rejected and child.block == space.render_block(rows[2])
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["next"] == 3
+    assert driver._taken == [rows[2]]
+
+
+def test_a_row_that_breaks_a_constraint_is_passed_over(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=4, generations=4,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)}, constraints=["x <= y"])
+    space = driver.config.problem.parameters
+    handed = [driver._next_lhs_row(driver._seed_candidate()) for _ in range(6)]
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert all(space.satisfies(row) for row in handed)
+    assert cube["next"] > 6, "some rows broke the constraint and were passed over"
+    assert handed == [row for row in cube["rows"][: cube["next"]] if space.satisfies(row)]
+
+
+def test_a_row_equal_to_the_parent_is_passed_over(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=4, generations=4,
+                     space={"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    space = driver.config.problem.parameters
+    driver._next_lhs_row(driver._seed_candidate())
+    rows = _lhs_state(tmp_path)["cubes"]["typed"]["rows"]
+    parent = _candidate(space, "g001-c0002", dict(rows[1]))
+    assert driver._next_lhs_row(parent) == rows[2]
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["next"] == 3
+
+
+def test_a_space_of_one_point_says_so_and_builds_no_extra_cube(tmp_path, monkeypatch):
+    """Every row equal to the parent (a space the parser cannot declare, so the
+    cube is made so): the child fails as it did before, and no second cube is built."""
+    import evolvekit.search.driver as driver_module
+
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=2, space={"x": (0.0, 1.0)})
+    defaults = driver.config.problem.parameters.defaults()
+    monkeypatch.setattr(driver_module, "latin_rows", lambda space, count, rng: [(dict(defaults), [])] * count)
+    result = driver._invoke("param_lhs", driver._seed_candidate(), [], "none", None, "g001-c0002")
+    assert not result.ok and "every sample equals the parent" in result.error
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert cube["built"] == 1 and cube["next"] == cube["K"] == 4
+
+
+def test_a_cube_is_built_anew_when_the_space_changes_and_kept_when_only_the_size_does(tmp_path):
+    """A resumed run whose space is declared differently (here a wider range)
+    does not take the old cube's rows; one whose run is only longer does."""
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 1.0)})
+    driver._next_lhs_row(driver._seed_candidate())
+    old = _lhs_state(tmp_path)["cubes"]["typed"]
+    longer = _driver(tmp_path, operators={"param_lhs": 1.0}, children=4, generations=9, space={"x": (0.0, 1.0)})
+    assert longer._next_lhs_row(longer._seed_candidate()) == old["rows"][1]
+    assert _lhs_state(tmp_path)["cubes"]["typed"]["K"] == 8, "kept until it is used up"
+    wider = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=4, space={"x": (0.0, 10.0)})
+    row = wider._next_lhs_row(wider._seed_candidate())
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert cube["rows"] != old["rows"] and cube["next"] == 1 and row == cube["rows"][0]
+    assert any(r["x"] > 1.0 for r in cube["rows"])
+
+
+def test_a_cube_of_rows_that_all_break_a_constraint_leaves_the_last_to_the_static_stage(tmp_path):
+    driver = _driver(tmp_path, operators={"param_lhs": 1.0}, children=2, generations=2,
+                     space={"x": (0.0, 1.0)}, constraints=["x == 0.5"])
+    row = driver._next_lhs_row(driver._seed_candidate())
+    cube = _lhs_state(tmp_path)["cubes"]["typed"]
+    assert cube["next"] == cube["K"] == 4 and row == cube["rows"][3]
+
+
+def test_an_untyped_params_block_gets_a_cube_of_its_own(sweepable_project, tmp_path):  # noqa: F811
+    """`# PARAMS` ranges as the key; integers stay integers. A parent whose
+    declaration differs gets its own cube."""
+    from evolvekit.candidate import Candidate as _Candidate
+    from evolvekit.config import load_config
+    from evolvekit.search.driver import Driver
+
+    driver = Driver(load_config(sweepable_project), run_dir=tmp_path / "run", log=lambda m: None)
+    seed = driver._seed_candidate()
+    rows = [driver._next_lhs_row(seed) for _ in range(9)]
+    key = 'params:{"ALPHA": [0.0, 10.0], "STEPS": [1.0, 9.0]}'
+    cube = _lhs_state(tmp_path)["cubes"][key]
+    assert cube["K"] == 9 and cube["rows"] == rows  # generations 3 x children 3 x share 1
+    assert all(isinstance(r["STEPS"], int) and isinstance(r["ALPHA"], float) for r in rows)
+    assert sorted(int(r["ALPHA"] / 10.0 * 9) for r in rows) == list(range(9))
+    outcome = driver._invoke("param_lhs", seed, [], "none", None, "g001-c0002")
+    second = _lhs_state(tmp_path)["cubes"][key]
+    assert outcome.ok and second["built"] == 2 and outcome.meta["params"] == second["rows"][0]
+    assert f"STEPS = {outcome.meta['params']['STEPS']}\n" in outcome.block
+    other = _Candidate(id="o", generation=1, block=seed.block.replace('"ALPHA": [0.0, 10.0]', '"ALPHA": [0.0, 20.0]'),
+                       source="", operator="rewrite")
+    driver._next_lhs_row(other)
+    assert set(_lhs_state(tmp_path)["cubes"]) == {key, 'params:{"ALPHA": [0.0, 20.0], "STEPS": [1.0, 9.0]}'}
 
 
 # -- configuration and the whole loop --------------------------------------
@@ -281,3 +622,219 @@ def test_a_model_free_run_uses_all_four_operators_and_none_of_them_needs_a_model
     by_id = {r["id"]: r for r in rows}
     steps = [sum(1 for k, v in r["params"].items() if by_id[r["parent_id"]]["params"][k] != v) for r in local]
     assert steps and max(steps) <= 3, "a local step stays local"
+
+
+# -- the local step's size: the 1/5 rule (Q6, A2.6c) ------------------------
+
+
+def _step_driver(tmp_path):
+    driver = _driver(tmp_path, operators={"param_local": 1.0}, children=3, generations=40, space={"x": (0.0, 1.0)})
+    parent = driver._seed_candidate()
+    parent.score = 10.0
+    driver.by_id[parent.id] = parent
+    return driver, parent
+
+
+def _local_children(driver, parent, generation: int, scores: list[float], operator: str = "param_local"):
+    return [
+        Candidate(id=f"g{generation:03d}-c{i}", generation=generation, block="", source="", operator=operator,
+                  parent_id=parent.id, score=score, params={"x": 0.5})
+        for i, score in enumerate(scores)
+    ]
+
+
+def _perturb_state(tmp_path) -> dict:
+    return json.loads((tmp_path / "run" / "work" / "perturb.json").read_text(encoding="utf-8"))
+
+
+def test_the_step_grows_after_a_round_of_successes_and_shrinks_after_failures(tmp_path):
+    """The 1/5 rule per trial (Decision 16): scale x 1.2 ** (improved - 0.2 tried).
+    1 of 3 improved -> 0.15 x 1.2**0.4; then 0 of 3 -> x 1.2**-0.6, 0.15 x 1.2**-0.2 in
+    all. `work/perturb.json` holds both rounds; a new Driver starts from the last size."""
+    driver, parent = _step_driver(tmp_path)
+    assert driver.step_scale == 0.15, "no perturb.json yet: the default"
+    driver._adapt_step(1, _local_children(driver, parent, 1, [11.0, 9.0, 10.0]))
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** 0.4)
+    driver._adapt_step(2, _local_children(driver, parent, 2, [9.0, 9.5, 10.0]))
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** -0.2)
+    state = _perturb_state(tmp_path)
+    assert state["scale"] == driver.step_scale
+    assert [(h["generation"], h["improved"], h["tried"]) for h in state["history"]] == [(1, 1, 3), (2, 0, 3)]
+    assert [h["scale"] for h in state["history"]] == pytest.approx([0.15 * 1.2 ** 0.4, 0.15 * 1.2 ** -0.2])
+    again, _ = _step_driver(tmp_path)
+    assert again.step_scale == driver.step_scale, "a resumed run takes the size up exactly"
+
+
+def test_one_success_in_five_leaves_the_step_where_it_is(tmp_path):
+    driver, parent = _step_driver(tmp_path)
+    driver._adapt_step(1, _local_children(driver, parent, 1, [11.0, 9.0, 9.0, 9.0, 9.0]))
+    assert driver.step_scale == pytest.approx(0.15)
+
+
+def test_a_round_without_local_steps_leaves_the_size_and_a_recorded_round_is_not_counted_twice(tmp_path):
+    driver, parent = _step_driver(tmp_path)
+    driver._adapt_step(1, _local_children(driver, parent, 1, [11.0, 11.0], operator="param_tpe"))
+    assert driver.step_scale == 0.15 and not (tmp_path / "run" / "work" / "perturb.json").exists()
+    fallbacks = _local_children(driver, parent, 2, [11.0])  # param_cross / param_tpe fallbacks record param_local
+    driver._adapt_step(2, fallbacks)
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** 0.8)
+    driver._adapt_step(2, fallbacks)  # the same round again (a resumed run finishing it): once only
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** 0.8)
+    rejected = _local_children(driver, parent, 3, [None])
+    rejected[0].rejected = True  # refused before evaluation: neither a success nor a failure of the step
+    driver._adapt_step(3, rejected)
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** 0.8)
+
+
+def test_a_child_whose_parent_has_no_fitness_is_not_tried(tmp_path):
+    driver, parent = _step_driver(tmp_path)
+    orphan = Candidate(id="g000-c9", generation=0, block="", source="", operator="param_local", score=None)
+    driver.by_id[orphan.id] = orphan
+    children = _local_children(driver, orphan, 1, [11.0, 9.0])
+    children[1].parent_id = "nowhere"
+    driver._adapt_step(1, children)
+    assert driver.step_scale == 0.15 and driver._step_history == []
+
+
+def test_the_step_stays_within_its_limits(tmp_path):
+    driver, parent = _step_driver(tmp_path)
+    for generation in range(1, 21):
+        driver._adapt_step(generation, _local_children(driver, parent, generation, [9.0, 9.0, 9.0]))
+    assert driver.step_scale == 0.03
+    for generation in range(21, 41):
+        driver._adapt_step(generation, _local_children(driver, parent, generation, [11.0, 11.0, 11.0]))
+    assert driver.step_scale == 0.4
+
+
+def test_a_gain_inside_the_noise_is_not_a_success(tmp_path):
+    """Decision 11, Q22: improved = fitness > parent.fitness + noise_sd, the elite
+    rule's margin. With noise_sd = 1.0 three children at parent + 0.5 are 0 of 3:
+    0.15 x 1.2**-0.6. With no noise (today) the same children are 3 of 3: x 1.2**2.4."""
+    driver, parent = _step_driver(tmp_path)
+    driver.grid.noise_sd = 1.0
+    driver._adapt_step(1, _local_children(driver, parent, 1, [10.5, 10.5, 10.5]))
+    assert driver.step_scale == pytest.approx(0.15 * 1.2 ** -0.6)
+    quiet, quiet_parent = _step_driver(tmp_path / "quiet")
+    quiet._adapt_step(1, _local_children(quiet, quiet_parent, 1, [10.5, 10.5, 10.5]))
+    assert quiet.step_scale == pytest.approx(0.15 * 1.2 ** 2.4)
+
+
+def test_the_success_margin_widens_with_an_estimated_noise(tmp_path):
+    """Decision 17b: the margin is the elite rule's, `Archive.margin`: on a noise
+    estimated with 2 df it is 1.22 noise sd (Student's t at the 24 % tail), so a
+    gain of 1.1 sd is no success; with the noise known (infinite df) it is."""
+    estimated, parent = _step_driver(tmp_path)
+    estimated.grid.noise_sd, estimated.grid.noise_df = 1.0, 2.0
+    assert estimated.grid.margin == pytest.approx(1.219, abs=1e-3)
+    estimated._adapt_step(1, _local_children(estimated, parent, 1, [11.1, 11.1, 11.1]))
+    assert estimated.step_scale == pytest.approx(0.15 * 1.2 ** -0.6)
+    known, known_parent = _step_driver(tmp_path / "known")
+    known.grid.noise_sd = 1.0
+    known._adapt_step(1, _local_children(known, known_parent, 1, [11.1, 11.1, 11.1]))
+    assert known.step_scale == pytest.approx(0.15 * 1.2 ** 2.4)
+
+
+def test_the_step_balances_at_one_success_in_five_however_many_children_a_round_has(tmp_path, monkeypatch):
+    """Decision 16, seeded simulation of `_adapt_step` itself: each local child improves
+    with chance p, 1-3 local children a round, 3000 rounds each from 0.15 (no limit is
+    reached in one round). The mean change of ln(scale) per round is
+    (p - 0.2) x tried x ln 1.2: it rises above 20 % and falls below it for every tried,
+    and is about 0 at 20 %. (The per-round threshold it replaces drifted down at
+    p = 0.25 with one child: it balanced at 50 %.)
+    Measured (ln units per round; expected in brackets), tried 1: -0.0185 (-0.018),
+    -0.0095 (-0.009), +0.0014 (0), +0.0105 (+0.009), +0.0150 (+0.018) at p = 0.1, 0.15,
+    0.2, 0.25, 0.3; tried 3: -0.058, -0.028, -0.003, +0.030, +0.056 (+-0.055, +-0.027, 0).
+    SE 0.001-0.003, so every sign holds by at least 7 SE; at 20 % the drift is within
+    1.5 SE of 0 (asserted within 4)."""
+    import math
+
+    import evolvekit.search.driver as driver_module
+
+    monkeypatch.setattr(driver_module, "_atomic_write", lambda *a, **k: None)
+    driver, parent = _step_driver(tmp_path)
+    rng = random.Random(16)
+    rounds = 3000
+    for tried in (1, 2, 3):
+        for p in (0.1, 0.15, 0.2, 0.25, 0.3):
+            changes = []
+            for r in range(rounds):
+                driver.step_scale, driver._step_history = 0.15, []
+                scores = [11.0 if rng.random() < p else 9.0 for _ in range(tried)]
+                driver._adapt_step(1, _local_children(driver, parent, 1, scores))
+                changes.append(math.log(driver.step_scale / 0.15))
+            drift = fmean(changes)
+            se = (sum((c - drift) ** 2 for c in changes) / (rounds - 1)) ** 0.5 / rounds ** 0.5
+            expected = (p - 0.2) * tried * math.log(1.2)
+            print(f"tried {tried}  p {p:.2f}  drift {drift:+.4f} (SE {se:.4f}, expected {expected:+.4f})")
+            if p > 0.2:
+                assert drift > 0
+            elif p < 0.2:
+                assert drift < 0
+            else:
+                assert abs(drift) < 4 * se
+
+
+def _recorded_round(driver, parent, generation: int, scores: list[float]) -> list[Candidate]:
+    children = _local_children(driver, parent, generation, scores)
+    for child in children:
+        driver._record(child)
+    return children
+
+
+def test_a_round_recorded_but_missing_from_the_step_file_is_counted_on_resume(tmp_path):
+    """Decision 16: a crash between a round's rows and `perturb.json` would lose that
+    round's update; the resumed run counts it, once, with the noise as it stands."""
+    driver, parent = _step_driver(tmp_path)
+    driver._record(parent)
+    driver._adapt_step(1, _recorded_round(driver, parent, 1, [11.0, 9.0, 10.0]))
+    _recorded_round(driver, parent, 2, [11.0, 11.0])  # the run dies before the step file is written
+    resumed, _ = _step_driver(tmp_path)
+    resumed.resume()
+    assert [h["generation"] for h in resumed._step_history] == [1, 2]
+    assert resumed.step_scale == pytest.approx(0.15 * 1.2 ** 0.4 * 1.2 ** 1.6)
+    again, _ = _step_driver(tmp_path)
+    again.resume()
+    assert again.step_scale == resumed.step_scale and len(again._step_history) == 2, "counted once"
+
+
+def test_a_run_written_before_the_step_file_keeps_the_default_size_on_resume(tmp_path):
+    """Several rounds of local steps and no `perturb.json`: a run from before A2.6c,
+    not a lost update. Missing file -> 0.15. A lone first round without the file is
+    the crash case, and is counted."""
+    driver, parent = _step_driver(tmp_path)
+    driver._record(parent)
+    _recorded_round(driver, parent, 1, [11.0])
+    _recorded_round(driver, parent, 2, [11.0])
+    legacy, _ = _step_driver(tmp_path)
+    legacy.resume()
+    assert legacy.step_scale == 0.15 and legacy._step_history == []
+    first, first_parent = _step_driver(tmp_path / "first")
+    first._record(first_parent)
+    _recorded_round(first, first_parent, 1, [11.0])
+    crashed, _ = _step_driver(tmp_path / "first")
+    crashed.resume()
+    assert crashed.step_scale == pytest.approx(0.15 * 1.2 ** 0.8)
+
+
+def test_a_malformed_perturb_file_is_the_default(tmp_path):
+    (tmp_path / "run" / "work").mkdir(parents=True)
+    (tmp_path / "run" / "work" / "perturb.json").write_text('{"scale": "big"}', encoding="utf-8")
+    driver, _ = _step_driver(tmp_path)
+    assert driver.step_scale == 0.15
+
+
+def test_the_local_steps_take_the_drivers_size(tmp_path):
+    """`param_local`, and the local-step fallbacks of `param_cross` and `param_tpe`,
+    step with `scale`; the driver hands them `step_scale`."""
+    space = ParameterSpace.parse({"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.5}})
+    parent = Candidate(id="p", generation=1, block="", source="", operator="param_local", params={"x": 0.5})
+    for seed in range(20):
+        expected = space.perturb({"x": 0.5}, random.Random(seed), scale=0.03)
+        assert param_local(space, parent, seed=seed, scale=0.03).meta["params"] == expected
+        assert param_cross(space, parent, None, seed=seed, scale=0.03).meta["params"] == expected
+        assert param_tpe(space, parent, [], seed=seed, scale=0.03).meta["params"] == expected
+    driver, seed_candidate = _step_driver(tmp_path)
+    driver.step_scale = 0.03
+    moves = [abs(driver._invoke("param_local", seed_candidate, [], "none", None, f"g001-c{i}").meta["params"]["x"] - 0.5)
+             for i in range(200)]
+    assert max(moves) < 0.15, "steps of sd 0.03 stay within five sd"

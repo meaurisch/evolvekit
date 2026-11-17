@@ -18,12 +18,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from functools import lru_cache
-from statistics import fmean, stdev
+from statistics import NormalDist, fmean, stdev
 from typing import Any, Hashable, Mapping, Sequence
 
 __all__ = [
     "t_cdf", "wilcoxon_signed_rank", "paired_summary", "per_instance_means",
     "log_gain", "pct_from_log", "margin_log", "Posterior", "posterior_mean_t", "holm",
+    "ranks", "spearman", "t_quantile", "t_scale",
 ]
 
 # Two-sided 95 % critical values of Student's t, by degrees of freedom.
@@ -108,11 +109,58 @@ def t_cdf(x: float, df: int) -> float:
     `x`: through I_z(df/2, 1/2) with z = df / (df + x²), no table and no
     SciPy. It is what turns a mean and its spread into the chance that the
     true mean gain is above zero."""
-    if df < 1:
-        raise ValueError(f"degrees of freedom must be >= 1, got {df}")
+    if df <= 0:
+        raise ValueError(f"degrees of freedom must be > 0, got {df}")
     z = df / (df + x * x)
     tail = 0.5 * _betainc(df / 2.0, 0.5, z)
     return 1.0 - tail if x >= 0 else tail
+
+
+_NORMAL_DF = 1e7
+"""Degrees of freedom past which Student's t is the normal to well under 1e-6."""
+
+
+@lru_cache(maxsize=4096)
+def t_quantile(p: float, df: float) -> float:
+    """The `p` quantile of Student's t with `df` degrees of freedom (any
+    real `df > 0`; `math.inf`, the normal's), by bisection on `t_cdf` to
+    1e-12. Standard library only: no SciPy."""
+    if not 0.0 < p < 1.0:
+        raise ValueError(f"a quantile needs 0 < p < 1, got {p}")
+    if math.isinf(df) or df >= _NORMAL_DF:
+        return NormalDist().inv_cdf(p)
+    if df <= 0:
+        raise ValueError(f"degrees of freedom must be > 0, got {df}")
+    if p == 0.5:
+        return 0.0
+    if p < 0.5:
+        return -t_quantile(1.0 - p, df)
+    low, high = 0.0, max(1.0, 2.0 * NormalDist().inv_cdf(p))
+    while t_cdf(high, df) < p:
+        low, high = high, 2.0 * high
+    for _ in range(200):
+        mid = (low + high) / 2.0
+        if t_cdf(mid, df) < p:
+            low = mid
+        else:
+            high = mid
+        if high - low <= 1e-12 * max(1.0, high):
+            break
+    return (low + high) / 2.0
+
+
+def t_scale(z: float, df: float) -> float:
+    """How much wider a margin of `z` sd must be when the sd is estimated
+    with `df` degrees of freedom, so that it is crossed with the same chance:
+    `t_df(Φ(z)) / z`, the Student-t quantile at the normal tail probability of
+    `z`, over `z`. Exactly 1.0 at `df = math.inf` (a known sd: the normal
+    rule, unchanged), and > 1 below it -- at 2 df, 1.57 for `z = √2` and
+    5.15 for `z = √8`. `z` > 0."""
+    if z <= 0:
+        raise ValueError(f"a margin's z must be > 0, got {z}")
+    if math.isinf(df) or df >= _NORMAL_DF:
+        return 1.0
+    return t_quantile(NormalDist().cdf(z), df) / z
 
 
 def wilcoxon_signed_rank(differences: Sequence[float]) -> dict[str, Any]:
@@ -319,3 +367,32 @@ def holm(pvalues: Mapping[str, float], alpha: float) -> dict[str, bool]:
             break
         passed[key] = True
     return passed
+
+
+def ranks(values: Sequence[float]) -> list[float]:
+    """1-based ranks, ties sharing their average rank."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    out = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        shared = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            out[order[k]] = shared
+        i = j + 1
+    return out
+
+
+def spearman(xs: Sequence[float], ys: Sequence[float]) -> float | None:
+    """Rank correlation. `None` when either side does not vary (or with fewer
+    than three points). What `status` reports as the screen's agreement and
+    the screening controller (`search/screening.py`) acts on."""
+    if len(xs) < 3 or len(set(xs)) < 2 or len(set(ys)) < 2:
+        return None
+    rx, ry = ranks(xs), ranks(ys)
+    mx, my = fmean(rx), fmean(ry)
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    den = math.sqrt(sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry))
+    return num / den if den else None

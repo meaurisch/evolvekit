@@ -118,6 +118,19 @@ def test_an_improvement_below_epsilon_does_not_reset_the_clock():
     assert points[-1].usd_since_improvement == pytest.approx(0.10)
 
 
+def test_slow_steady_progress_is_an_improvement_as_the_stop_policy_reads_it():
+    """1.0 -> 1.3 -> 1.6 at epsilon 0.5: 1.3 is flat, 1.6 beats 1.0 by more than 0.5."""
+    points = series(
+        [run_row("a", 0, 1.0), run_row("b", 1, 1.3), run_row("c", 2, 1.6)],
+        [usage_row(1, 0.10), usage_row(2, 0.20)],
+        epsilon=0.5,
+    )
+    assert [p.improved for p in points] == [True, False, True]
+    assert [round(p.usd_since_improvement, 4) for p in points] == [0.0, 0.10, 0.0]
+    policy = StopPolicy(StopConfig(patience=9, epsilon=0.5))
+    assert [policy.update(p.best).stagnant_generations == 0 for p in points] == [p.improved for p in points]
+
+
 def test_the_window_measures_gain_against_the_generation_w_back():
     points = series(
         [run_row(str(g), g, -10.0 + g) for g in range(5)],
