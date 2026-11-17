@@ -495,7 +495,7 @@ statistician rounds.
   too), the PyVRP harness tests pointed at the main checkout's `.venv-pyvrp`: **3416 passed, 1 failed,
   5 skipped** in 47:59. The one failure is the worktree's path (step 0). Another project's idle test
   servers and one of its test runs were on the machine; no timing-sensitive test failed.
-- PR: against `master`, stacked on #83 and #84.
+- PR: [meaurisch/evolvekit#85](https://github.com/meaurisch/evolvekit/pull/85), `algo/4-allocation` against `master`, stacked on #83 and #84. **PASS.**
 
 ## The A2–A4 session, finished (2026-11-17)
 
@@ -503,7 +503,7 @@ statistician rounds.
 |---|---|---|---|---|---|
 | A2 noise-aware search | [#83](https://github.com/meaurisch/evolvekit/pull/83) | **PASS** | 3243 passed, 1 failed (path), 5 skipped | mature mix 100.30 → 99.89 (must not rise: holds) | 4 statistician rounds (last clean), whole-branch review |
 | A3 what the model is told | [#84](https://github.com/meaurisch/evolvekit/pull/84) | **PASS** | 3305 passed, 2 failed (path; one stale test, fixed and re-run), 5 skipped | — | builder check, task reviews |
-| A4 allocation and memory | see below | **PASS** | 3416 passed, 1 failed (path), 5 skipped | — | 2 statistician rounds (last clean) |
+| A4 allocation and memory | [#85](https://github.com/meaurisch/evolvekit/pull/85) | **PASS** | 3416 passed, 1 failed (path), 5 skipped | — | 2 statistician rounds (last clean) |
 
 Nothing is merged. The PRs are stacked in order (A2 → A3 → A4), each against `master`; merge them in
 that order with merge commits. The decisions marked "(departs)" in the A2 and A4 plans leave the
