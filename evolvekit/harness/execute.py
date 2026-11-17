@@ -1452,8 +1452,16 @@ def chain_words(name: str) -> str:
     return f"{name} chose this study's starting point on these same held-back cases, so they cannot tell"
 
 
+def unseen_words(slug: str) -> str:
+    """Why the line is not measured when a study this one's starting point came from cannot be
+    seen (deleted, in the trash, not finished: `memory.warm_chain_unseen`): it may have come from
+    the defaults study, and a line that cannot rule that out is not measured (decision 15c)."""
+    return (f"the study this one's starting point came from ({slug}) can no longer be read, so these held-back "
+            "cases may have chosen it")
+
+
 def defaults_line(against: Any, decision: str, *, name: str, reuses: bool,
-                  chose: str | None = None) -> dict[str, Any]:
+                  chose: str | None = None, unseen: str | None = None) -> dict[str, Any]:
     """`against_defaults.json` of a `defaults_comparison` result: why not when it is a reason;
     not measured either when the defaults study (`name`) is in this study's own warm-start chain
     (`reuses`): its final check chose what is compared on these same cases, so the comparison
@@ -1461,9 +1469,12 @@ def defaults_line(against: Any, decision: str, *, name: str, reuses: bool,
     chain's root, a study from the defaults that held back any of the same cases
     (`memory.chain_defaults_study`): every later study from the defaults carries, on those cases,
     the case effects it chose on (decision 17); else the comparison, `measured: true`, with the
-    `side` compared."""
+    `side` compared. `unseen`: the study on the chain that cannot be seen, when that alone makes
+    `reuses` (`memory.warm_chain_unseen`): the reason names it instead."""
     if isinstance(against, str):
         return {"measured": False, "why": against}
+    if reuses and chose is None and unseen is not None:
+        return {"measured": False, "why": unseen_words(unseen), "reuses": True}
     if reuses or chose is not None:
         return {"measured": False, "why": chain_words(chose if chose is not None else name), "reuses": True}
     return {"measured": True, **against.to_json(), "side": "candidate" if decision == "use" else STARTING_POINT,
@@ -1522,7 +1533,8 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
                                               key_of_theirs=key_in(other.root))
                 document = defaults_line(against, decision, name=other.name,
                                          reuses=memory.in_warm_chain(home, study, other.slug),
-                                         chose=chose.name if chose is not None else None)
+                                         chose=chose.name if chose is not None else None,
+                                         unseen=memory.warm_chain_unseen(home, study, other.slug))
                 if document["measured"]:
                     document["numbers_from"] = {"study": other.slug, "name": other.name, "run": other.run,
                                                 "cases": len(against.instances), "seeds": len(against.seeds)}

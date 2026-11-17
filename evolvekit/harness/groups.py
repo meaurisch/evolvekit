@@ -746,8 +746,9 @@ def compute(root: Path, *, k: int | None = None, tables: Callable[[Path, str], P
         kept = {j for j, _, _ in spread}
         same = [n for j, n in enumerate(used) if j not in kept]
         points = standardise(raw)
-        if not spread:
-            notes.append("the cases' features are the same in every case; all cases are one group")
+        if not spread:  # with too few cases to make two groups, no spread says nothing about the cases
+            notes.append(ONE_GROUP if len(training) < 2 * MIN_TRAINING
+                         else "the cases' features are the same in every case; all cases are one group")
         else:
             if same:
                 notes.append(f"{', '.join(same)}: the same in every case, so not used to tell them apart")

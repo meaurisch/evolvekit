@@ -513,3 +513,29 @@ def test_the_warm_chain_counts_a_study_it_cannot_see(tmp_path):
     shutil.rmtree(other / "runs")
     study.warm = warm("b")
     assert memory.in_warm_chain(home, study, "a"), "an unfinished study too"
+
+
+def test_the_warm_chain_names_the_study_it_cannot_see_so_the_line_says_why(tmp_path):
+    """Pre-merge testing: a chain that may run through `slug` only because a study on the way cannot
+    be seen says so: the defaults line then names that, never "<slug> chose this study's starting
+    point", which would assert a chain that may not exist."""
+    from evolvekit.harness.execute import chain_words, defaults_line, unseen_words
+    from evolvekit.harness.study import Warm
+
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "A", decision="use", finished_at="2026-10-01")
+    other = finished(home, docs, "B", decision="use", finished_at="2026-10-08")
+    _edit(other, lambda s: s.update(warm={"from": "a", "run": "r1", "at": "2026-10-01T00:00:00+00:00"}))
+    slug, study = _new_study(home)
+    study.warm = Warm(from_slug="b", run="r1", at="2026-10-08T00:00:00+00:00")
+    assert memory.warm_chain_unseen(home, study, "a") is None, "A is reached through B: seen all the way"
+    study.warm = Warm(from_slug="a", run="r1", at="2026-10-08T00:00:00+00:00")
+    assert memory.warm_chain_unseen(home, study, "a") is None
+    study.warm = Warm(from_slug="gone", run="r1", at="2026-10-08T00:00:00+00:00")
+    assert memory.warm_chain_unseen(home, study, "a") == "gone"
+
+    seen = defaults_line(object(), "use", name="Depot summer", reuses=True)
+    assert seen == {"measured": False, "why": chain_words("Depot summer"), "reuses": True}
+    gap = defaults_line(object(), "use", name="Depot summer", reuses=True, unseen="gone")
+    assert gap == {"measured": False, "why": unseen_words("gone"), "reuses": True}
+    assert "Depot summer" not in gap["why"] and "(gone)" in gap["why"]

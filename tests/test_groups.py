@@ -350,6 +350,16 @@ def test_features_that_never_vary_make_one_group(tmp_path):
     assert doc["notes"] == ["the cases' features are the same in every case; all cases are one group"]
 
 
+def test_one_case_to_learn_from_is_one_group_without_saying_the_cases_are_alike(tmp_path):
+    """Pre-merge testing: the groups are made from the cases to learn from alone, so one such case
+    has no spread -- which says nothing about the held-back cases, which differ here."""
+    sizes = [40, 90, 150]
+    root = study_with_cases(tmp_path, sizes=sizes, held=2)
+    doc = groups.compute(root, tables=fake_tables(sizes_of(sizes)))
+    assert doc["method"] == "one" and list(doc["groups"]) == ["all"]
+    assert doc["notes"] == [groups.ONE_GROUP]
+
+
 def test_a_forced_k_that_the_cases_cannot_make_says_so(tmp_path):
     sizes = [20, 20, 20, 20, 80, 80, 80, 80]
     root = study_with_cases(tmp_path, sizes=sizes, held=2)

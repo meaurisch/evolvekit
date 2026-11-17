@@ -487,6 +487,25 @@ def in_warm_chain(home: Any, study: Study, slug: str) -> bool:
     return False
 
 
+def warm_chain_unseen(home: Any, study: Study, slug: str) -> str | None:
+    """The study on `study`'s warm-start chain that cannot be seen (its `warm.from`), when the
+    chain reaches it before `slug`: `in_warm_chain` then counts the chain without knowing it, and
+    the line says that, not that `slug` chose the starting point. None when the chain reaches
+    `slug`, ends, or is seen all the way."""
+    by_slug = {f.slug: f for f in finished_studies(home, study.harness_id)}
+    seen: set[str] = set()
+    warm = study.warm
+    while warm is not None and warm.from_slug not in seen:
+        if warm.from_slug == slug:
+            return None
+        seen.add(warm.from_slug)
+        parent = by_slug.get(warm.from_slug)
+        if parent is None:
+            return warm.from_slug
+        warm = parent.study.warm
+    return None
+
+
 def chain_defaults_study(home: Any, study: Study, cases: Sequence[Path]) -> Finished | None:
     """The study at the root of `study`'s warm-start chain (each finished study's `warm.from`,
     followed back) when it started from the harness defaults (`_from_the_defaults`) and held back

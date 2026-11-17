@@ -200,6 +200,45 @@ def test_the_driver_calls_on_round_after_each_recorded_round_and_stops_on_a_reas
     assert finished[0]["breed_s"] == 0.0, "the starting point is not bred"
 
 
+def test_a_resumed_search_asks_on_round_before_it_breeds_so_a_settled_one_runs_no_round(tmp_path):
+    """Pre-merge testing: a search that settled in round 3 and was resumed (its final check
+    stopped, say) must not breed round 4 before the hook can say it settled: the resumed
+    run answers as the uninterrupted one would. A hook that says go on lets it breed."""
+    from evolvekit.config import build_config
+    from evolvekit.events import read_events
+    from evolvekit.search.driver import Driver
+
+    (tmp_path / "toy.py").write_text(_ROUND_TOY, encoding="utf-8")
+    config = build_config({
+        "problem": {"parameters": {"x": {"type": "float", "low": 0.0, "high": 1.0, "default": 0.0}}},
+        "evaluate": {
+            "stages": [{"id": "static", "kind": "builtin-static"},
+                       {"id": "full", "kind": "command", "kpis_from": "stdout",
+                        "command": "{python} toy.py --seed {seed} {params}"}],
+            "score": {"objective": "value", "direction": "maximize"},
+        },
+        "search": {"operators": {"param_lhs": 1.0}, "generations": 6},
+    }, base_dir=tmp_path)
+    run_dir = tmp_path / "run"
+    first = Driver(config, run_dir=run_dir, on_round=lambda g: "converged: test" if g == 3 else None).run()
+    assert first.generations == 3 and first.converged
+
+    calls: list[int] = []
+
+    def settled(generation: int) -> str | None:
+        calls.append(generation)
+        return "converged: test"
+
+    resumed = Driver(config, run_dir=run_dir, on_round=settled).run()
+    assert calls == [3], "asked once, for the last round on record, before anything is bred"
+    assert resumed.generations == 0 and resumed.converged and resumed.stop_reason == "converged: test"
+    rounds = [e["generation"] for e in read_events(run_dir) if e["type"] == "generation_finished"]
+    assert rounds == [0, 1, 2, 3], "no round 4"
+
+    goes_on = Driver(config, run_dir=run_dir, on_round=lambda g: None).run()
+    assert goes_on.generations >= 1 and not goes_on.converged, "a hook that says go on: it breeds on"
+
+
 def test_the_round_event_says_whether_adaptive_breadth_ended_at_its_ceiling(tmp_path):
     """`breadth_at_ceiling`: after the round's own breadth update. A flat toy never
     improves, so with `grow_after: 1` the breadth grows 2 -> 3 (its max) in round 1."""

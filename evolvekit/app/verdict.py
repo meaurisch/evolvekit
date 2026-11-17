@@ -818,8 +818,10 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
                     "not measured again.")
         return ""
     if reason.startswith("converged"):
-        window = search.get("window")
-        span = f" for {window} rounds in a row" if isinstance(window, int) else ""
+        # The flat rounds, not the window: a plateau waiting for its big steps runs past the window.
+        flat = search.get("flat_rounds")
+        flat = flat if isinstance(flat, int) and not isinstance(flat, bool) else search.get("window")
+        span = f" for {flat} rounds in a row" if isinstance(flat, int) and not isinstance(flat, bool) else ""
         return f"{rounds}{counts}: the search settled (no round gained beyond the noise{span}), so it ended early."
     if reason.startswith("time limit reached"):
         return f"{rounds}{counts}: the search time was used."

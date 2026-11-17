@@ -2971,7 +2971,10 @@ of a study warm-started from it, is the starting point) on the same held-back
 cases -- the usual path -- the comparison would reuse the cases that chose
 what is compared, so the line says "not measured (Depot summer chose this
 study's starting point on these same held-back cases, so they cannot tell)"
-and shows no number; `against_defaults.json` keeps `reuses: true`. Measured on
+and shows no number; `against_defaults.json` keeps `reuses: true`. A study on
+the chain that can no longer be read (deleted, in the trash, not finished) may
+have come from the defaults study, so the line is not measured then either, and
+says that study can no longer be read instead. Measured on
 that path (20 000 seeded pairs with no true difference; the 1711 whose
 defaults study said use), such a line would say use in 91.9 % ± 0.66: it
 would replay the earlier choice. The same holds, and the line is not

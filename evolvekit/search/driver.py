@@ -897,6 +897,17 @@ class Driver:
         # The replay reads the noise as it is now (open question 12).
         self._refresh_noise()
         decision = self._restore_stop_policy()
+        # A resumed run asks the round hook about the last round on record before it
+        # breeds: a search that settled there (and stopped in its final check, or died
+        # before the hook's answer was acted on) ends as the uninterrupted one did,
+        # instead of running a round more.
+        if (seed is None and started_at >= 1 and total > 0 and not decision.stop
+                and self.on_round is not None):
+            reason = self.on_round(started_at)
+            if reason:
+                summary.stop_reason, summary.converged = reason, True
+                self.log(f"gen {started_at:<2} resumed: the search had settled ({reason})")
+                return self._finalise(summary)
 
         for offset in range(1, total + 1):
             generation = started_at + offset

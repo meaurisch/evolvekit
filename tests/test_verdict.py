@@ -476,11 +476,11 @@ def test_combinations_that_repeated_one_already_tried_are_said(tmp_path):
 def test_a_settled_search_says_so_and_where_its_time_went(tmp_path, why, line):
     """A4.1: the search ended early because it settled -- a fact about the search, never about
     the result -- and the verdict says where the time it saved went (`final.saved.why`)."""
-    root, run = _short_run(tmp_path, ai=False, stop="converged: no round gained beyond the noise for 3 rounds",
+    root, run = _short_run(tmp_path, ai=False, stop="converged: no round gained beyond the noise for 4 rounds",
                            generations=5)
     job_path = root / "runs" / run / "job.json"
     job = json.loads(job_path.read_text(encoding="utf-8"))
-    job["search"].update(converged=True, flat_rounds=3, window=4, used_s=2400.0)
+    job["search"].update(converged=True, flat_rounds=4, window=3, used_s=2400.0)
     job["final"]["saved"] = {"s": 1200, "spent": why == "extended", "why": why}
     job_path.write_text(json.dumps(job), encoding="utf-8")
     v = build_verdict(root, run)
