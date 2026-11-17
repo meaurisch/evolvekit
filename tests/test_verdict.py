@@ -464,6 +464,95 @@ def test_combinations_that_repeated_one_already_tried_are_said(tmp_path):
         "one already tried and were not measured again."), "what it knows, not the whole shortfall (m6)"
 
 
+@pytest.mark.parametrize("why,line", [
+    ("extended", "The time the search saved went to the final check: more runs per held-back case, read once more."),
+    ("cases", "The time the search saved (about 20 min) was not spent: only more held-back cases could firm up "
+              "this answer, not more runs."),
+    ("answered", "The time the search saved (about 20 min) was not spent: the final check's first read already "
+                 "gave the answer."),
+    ("at_cap", "The time the search saved (about 20 min) was not spent: no more runs could be added to the final "
+               "check."),
+])
+def test_a_settled_search_says_so_and_where_its_time_went(tmp_path, why, line):
+    """A4.1: the search ended early because it settled -- a fact about the search, never about
+    the result -- and the verdict says where the time it saved went (`final.saved.why`)."""
+    root, run = _short_run(tmp_path, ai=False, stop="converged: no round gained beyond the noise for 4 rounds",
+                           generations=5)
+    job_path = root / "runs" / run / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["search"].update(converged=True, flat_rounds=4, window=3, used_s=2400.0)
+    job["final"]["saved"] = {"s": 1200, "spent": why == "extended", "why": why}
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    v = build_verdict(root, run)
+    assert v["how_it_ran"] == ("Ran 5 of the 11 planned rounds (25 combinations, about 132 planned): the search "
+                               "settled (no round gained beyond the noise for 4 rounds in a row), so it ended early.")
+    assert v["converged"] == {"rounds": 5, "planned": 11, "saved_s": 1200, "spent": why == "extended", "line": line}
+    assert "better" not in v["converged"]["line"] and "better" not in v["how_it_ran"]
+
+
+def test_a_search_that_did_not_settle_has_no_converged_key(tmp_path):
+    v = build_verdict(*_short_run(tmp_path, ai=False, stop=TIME_LIMIT))
+    assert "converged" not in v
+    root, run = _short_run(tmp_path / "b", ai=False, stop="converged: no round gained beyond the noise for 3 rounds")
+    job_path = root / "runs" / run / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["search"].update(converged=True, window=3)
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    v = build_verdict(root, run)
+    assert v["converged"] == {"rounds": 2, "planned": 11, "saved_s": None, "spent": False, "line": ""}, \
+        "settled, but the final check said nothing of the time (stopped, or skipped)"
+
+
+def _settled_run(tmp_path: Path, saved: dict) -> tuple[Path, str]:
+    root, run = _short_run(tmp_path, ai=False, stop="converged: no round gained beyond the noise for 3 rounds",
+                           generations=5)
+    job_path = root / "runs" / run / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["search"].update(converged=True, flat_rounds=3, window=3, used_s=600.0)
+    job["final"]["saved"] = saved
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+    return root, run
+
+
+def test_where_the_saved_time_went_is_said_wherever_the_verdict_is_read(tmp_path, capsys):
+    """Right after `how_it_ran`: the page's results (and its HTML report), the report's How it ran,
+    and `study verdict`."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import _say_verdict
+
+    root, run = _settled_run(tmp_path, {"s": 1200, "spent": False, "why": "cases"})
+    v = build_verdict(root, run)
+    line = v["converged"]["line"]
+    assert line.startswith("The time the search saved (about 20 min) was not spent")
+    page = jobs.results(root, run, document_of)
+    assert page["saved_line"] == line
+    html = jobs.report_html(page)
+    assert html.index(v["how_it_ran"].split(":")[0]) < html.index("The time the search saved")
+    how = render_report(v).split("## How it ran", 1)[1]
+    assert how.index(v["how_it_ran"].rstrip(".")) < how.index(line.rstrip("."))
+    capsys.readouterr()
+    _say_verdict(v)
+    out = capsys.readouterr().out.splitlines()
+    assert out[out.index(v["how_it_ran"]) + 1] == line
+
+
+def test_nothing_saved_is_nothing_to_say(tmp_path, capsys):
+    """M2: with 0 s saved the line is empty: never "about 0 min", never time that went to the check."""
+    from evolvekit.app.report import render_report
+    from evolvekit.cli import _say_verdict
+
+    for why in ("extended", "cases", "answered", "at_cap"):
+        root, run = _settled_run(tmp_path / why, {"s": 0, "spent": why == "extended", "why": why})
+        v = build_verdict(root, run)
+        assert v["converged"]["saved_s"] == 0 and v["converged"]["line"] == "", why
+        page = jobs.results(root, run, document_of)
+        assert "saved_line" not in page
+        assert "The time the search saved" not in render_report(v) + jobs.report_html(page)
+        capsys.readouterr()
+        _say_verdict(v)
+        assert "The time the search saved" not in capsys.readouterr().out
+
+
 def _two_held_back(tmp_path: Path, changes: tuple[float, ...] = (3.1, 8.2), ci: tuple[float, float] = (-26.7, 37.9),
                    decision: str = "keep", direction: str | None = None) -> tuple[Path, str]:
     """Persona p4's Monday answer: a keep on held-back cases that each came out better, with a range
@@ -967,3 +1056,266 @@ def test_a_keep_line_gives_the_middle_figure_in_the_use_lines_words(tmp_path):
     assert middle.endswith(("lower cost", "lower", "higher", "worse")) or " % " in middle, line
     assert f"{abs(summary['mean']):.1f} %" in middle, line
     assert "a chance of" in line and "its 90 % range is" in line and line.endswith(".")
+
+
+# -- against the harness defaults (A4.3c, S11) ---------------------------------
+
+DEFAULTS_LINE = "On the same held-back cases, against the harness defaults ({whose}): "
+
+
+def _library_study(home, name: str, *, warm: str | None = None, held: int = 3) -> Path:
+    """A demo study in `home` with the sample cases, `held` of them held back; `warm` marks it
+    warm-started from the study of that short name -- made here when the home has none: a
+    finished study that started from a value set by hand, so not from the harness defaults."""
+    import yaml
+
+    if warm and not (home.studies_dir / warm).exists():
+        source = home.study_root(home.create_study("demo-tour", "tune", warm))
+        assert source.name == warm
+        _edit_yaml(source / "study.yaml",
+                   lambda d: d["vary"]["settings"].update(neighbours={"tune": True, "start": 10}))
+        finished_run(source / "runs" / RUN, check=False)
+    slug = home.create_study("demo-tour", "tune", name)
+    home.use_samples(slug)
+    home.split(slug, held)
+    root = home.study_root(slug)
+    if warm:
+        data = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+        data["warm"] = {"from": warm, "run": RUN, "at": "2026-01-01T00:12:00+00:00"}
+        (root / "study.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return root
+
+
+def _edited_cases(root: Path) -> None:
+    """The study's case files keep their names but not their content."""
+    for case in (root / "cases").glob("*.json"):
+        case.write_text(case.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+
+def _confirm_names(cases: list[str]) -> list[str]:
+    """The held-back cases named as the final check names them: `confirm` reads the stage's
+    `instance_names()` over `../../<case>` -- each file's stem when the stems tell them apart
+    (pre-merge testing: the tests named them `../../<case>`, which the product never writes)."""
+    from evolvekit.config import StageConfig
+
+    stage = StageConfig(id="full", kind="command", instances=tuple(f"../../{case}" for case in cases))
+    return list(stage.instance_names())
+
+
+def _checked(root: Path, started: str, *, base: list[float], best: list[float], decision: str = "keep",
+             seeds: tuple[int, ...] = (1001, 1002, 1003)) -> tuple[Path, list[dict]]:
+    """A finished run whose final check ran the starting point at `base[i]` and the best (`c1`) at
+    `best[i]` on held-back case i (plus a little per run), naming the cases as `confirm` does."""
+    from evolvekit.harness.study import load_study
+
+    run_dir = root / "runs" / (started[:10].replace("-", "") + "-" + started[11:19].replace(":", ""))
+    finished_run(run_dir, decision=decision, started=started)
+    rows = []
+    for i, name in enumerate(_confirm_names(load_study(root).test)):
+        for j, seed in enumerate(seeds):
+            rows += [{"configuration": "baseline", "instance": name, "seed": seed, "ok": True,
+                      "kpis": {"tour_length": base[i] + 0.3 * j}},
+                     {"configuration": "c1", "instance": name, "seed": seed, "ok": True,
+                      "kpis": {"tour_length": best[i] + 0.2 * j}}]
+    (run_dir / "confirm" / "final" / "results.json").write_text(json.dumps(rows), encoding="utf-8")
+    return run_dir, rows
+
+
+def _against(root: Path, run_dir: Path, rows: list[dict], decision: str) -> dict:
+    """`execute._against_defaults` after the warm study's final check, then its verdict."""
+    from evolvekit.confirm import Comparison
+    from evolvekit.harness import execute
+    from evolvekit.harness.study import load_study
+
+    study = load_study(root)
+    comparison = Comparison(label="final", objective="tour_length", direction="minimize", stage="full",
+                            seeds=sorted({r["seed"] for r in rows}), instances=_confirm_names(study.test),
+                            baseline_id="seed", candidates=["c1"], runs=rows)
+    said: list[str] = []
+    execute._against_defaults(root, run_dir, study, comparison, decision, said.append)
+    assert bool(said) is (study.warm is not None), "the log says what it compared, or why not"
+    return build_verdict(root, run_dir.name)
+
+
+def _paired_chance(theirs: list[dict], ours: list[dict], side: str) -> float:
+    import math
+
+    from evolvekit.confirm import verdict_summary
+
+    gains = []
+    for case in sorted({r["instance"] for r in ours}):
+        d = {r["seed"]: r["kpis"]["tour_length"] for r in theirs
+             if r["instance"] == case and r["configuration"] == "baseline"}
+        mine = {r["seed"]: r["kpis"]["tour_length"] for r in ours if r["instance"] == case and r["configuration"] == side}
+        gains.append(sum(math.log(d[s] / mine[s]) for s in d) / len(d))
+    return verdict_summary(gains, direction="minimize")["chance"]
+
+
+@pytest.mark.parametrize("decision, side", [("use", "c1"), ("keep", "baseline")])
+def test_a_warm_started_verdict_adds_the_line_against_the_defaults(tmp_path, capsys, decision, side):
+    """The side compared is what the verdict tells a person to run: the new settings on use, else the
+    starting point (the warm study's own baseline runs: the previous winner)."""
+    from evolvekit.app.report import render_report
+    from evolvekit.app.store import Home
+    from evolvekit.cli import _say_verdict
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Summer")
+    _, theirs = _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0])
+    autumn = _library_study(home, "Autumn", warm="spring")
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0],
+                             decision=decision)
+    plain = build_verdict(autumn, run_dir.name)
+    assert "against_defaults" not in plain, "no line before the final check wrote it"
+    v = _against(autumn, run_dir, ours, decision)
+    got = v["against_defaults"]
+    assert got["measured"] is True and got["line"].startswith(DEFAULTS_LINE.format(whose=got["side"])), got
+    assert got["chance"] == pytest.approx(_paired_chance(theirs, ours, side)), "verdict_summary of the paired log gains"
+    assert got["decision"] in ("use", "keep", "worse") and got["range90_pct"] and got["mean_pct"] is not None
+    assert got["from"] == {"study": summer.name, "name": "Summer", "run": "20260101-000000", "cases": 3, "seeds": 3}
+    assert got["side"] == ("the new settings" if decision == "use" else "the starting point")
+    assert "does not change what this study recommends" in got["note"] and "Summer" in got["note"]
+    assert "reuses" not in got and "chose this study's starting point" not in got["note"], \
+        "Autumn did not start from Summer's winner"
+    assert {k: v[k] for k in ("decision", "line", "advice")} == {k: plain[k] for k in ("decision", "line", "advice")}, \
+        "information about the same runs: the study's own answer is unchanged"
+    if got["decision"] == "use":
+        assert "than the harness defaults" in got["line"] and "your starting point" not in got["line"]
+    saved = json.loads((run_dir / "confirm" / "final" / "against_defaults.json").read_text(encoding="utf-8"))
+    assert saved["label"] == "against the harness defaults" and saved["looks"] == 1 and saved["baseline_id"] == "defaults"
+    assert saved["numbers_from"] == got["from"] and saved["reuses"] is False
+    # Wherever the verdict is read, the line is the document's.
+    report = render_report(v)
+    assert report.index(v["advice"]) < report.index(got["line"]) < report.index("## Held-back cases")
+    page = jobs.results(autumn, run_dir.name, document_of)
+    assert page["against_defaults"] == got
+    assert "On the same held-back cases, against the harness defaults" in jobs.report_html(page)
+    capsys.readouterr()
+    _say_verdict(v)
+    out = capsys.readouterr().out.splitlines()
+    assert out[out.index(v["advice"]) + 1] == got["line"], "information after the answer and what to do about it"
+
+
+def _edit_yaml(path: Path, change) -> None:
+    import yaml
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    change(data)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def _not_measured(tmp_path: Path, why: str) -> dict:
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    if why != "no defaults study":
+        summer = _library_study(home, "Summer", held=1 if why == "other cases" else 3)
+        seeds = (2001, 2002, 2003) if why == "no shared runs" else (1001, 1002, 1003)
+        _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0], seeds=seeds)
+        if why == "other time per case":
+            _edit_yaml(summer / "study.yaml", lambda d: d.setdefault("limits", {}).update(time_per_case_s=7))
+        if why == "other harness version":
+            _edit_yaml(summer / "harness" / "harness.yaml", lambda d: d.update(version="0.9.0"))
+    autumn = _library_study(home, "Autumn", warm="spring")
+    if why == "same names other content":
+        _edited_cases(autumn)
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0],
+                             decision="use")
+    return _against(autumn, run_dir, ours, "use")
+
+
+@pytest.mark.parametrize("why, reason", [
+    ("no defaults study", "no finished study on this application started from the harness defaults"),
+    ("other cases", "it held back other cases"),
+    ("same names other content", "it held back other cases"),
+    ("no shared runs", "its final check has no runs on the same cases and runs"),
+    ("other time per case", "it ran at another time per case"),
+    ("other harness version", "it ran on another version of the harness"),
+])
+def test_against_the_defaults_is_not_measured_when_the_cases_differ(tmp_path, why, reason):
+    v = _not_measured(tmp_path, why)
+    got = v["against_defaults"]
+    assert got == {"measured": False, "why": reason, "line": f"Against the harness defaults: not measured ({reason})."}
+    assert v["decision"] == "use", "the study's own answer stands"
+
+
+def test_the_defaults_study_that_held_back_the_same_cases_is_preferred(tmp_path):
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Summer")
+    _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0])
+    spring = _library_study(home, "Spring", held=1)
+    _edited_cases(spring)
+    _checked(spring, "2026-01-01T06:00:00+00:00", base=[50.0], best=[49.0])
+    autumn = _library_study(home, "Autumn", warm="spring")
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0])
+    got = _against(autumn, run_dir, ours, "keep")["against_defaults"]
+    assert got["measured"] is True and got["from"]["study"] == summer.name, "the later Spring held back other cases"
+
+
+def test_a_study_that_is_not_warm_started_has_no_line_against_the_defaults(tmp_path):
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Summer")
+    _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0])
+    plain = _library_study(home, "Autumn")
+    run_dir, ours = _checked(plain, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0],
+                             decision="use")
+    v = _against(plain, run_dir, ours, "use")
+    assert "against_defaults" not in v and not (run_dir / "confirm" / "final" / "against_defaults.json").exists()
+
+
+@pytest.mark.parametrize("through", [False, True])
+def test_in_the_warm_studys_own_chain_the_line_against_the_defaults_is_not_measured(tmp_path, through):
+    """Decision 15c (revised): Autumn started from the defaults study's winner -- directly, or
+    through a study warm-started from it -- on the same held-back cases, so the line would replay
+    that choice (about 92 % use for no true difference): not measured, by the study's display
+    name, no number; `reuses` is kept in the file for engineers."""
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Depot summer")
+    _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0], decision="use")
+    start = summer.name
+    if through:
+        spring = _library_study(home, "Depot spring", warm=summer.name)
+        _checked(spring, "2026-01-01T06:00:00+00:00", base=[49.0, 59.0, 69.0], best=[48.0, 58.0, 68.0],
+                 decision="use")
+        start = spring.name
+    autumn = _library_study(home, "Autumn", warm=start)
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0])
+    v = _against(autumn, run_dir, ours, "keep")
+    reason = "Depot summer chose this study's starting point on these same held-back cases, so they cannot tell"
+    assert v["against_defaults"] == {"measured": False, "why": reason,
+                                     "line": f"Against the harness defaults: not measured ({reason})."}
+    saved = json.loads((run_dir / "confirm" / "final" / "against_defaults.json").read_text(encoding="utf-8"))
+    assert saved == {"measured": False, "why": reason, "reuses": True}
+
+
+@pytest.mark.parametrize("root_cases", ["the same", "other"])
+def test_a_later_defaults_study_is_not_measured_when_the_chains_root_held_back_the_same_cases(tmp_path, root_cases):
+    """Decision 17: Depot summer (from the defaults) chose Autumn's starting point; Depot winter,
+    later and also from the defaults, is the study the line would be read against. A case's effect
+    is the same in every study, so on the cases Depot summer held back too the line would replay
+    its choice (about 77 % use for no true difference when the cases vary more than the runs): not
+    measured, naming Depot summer. When Depot summer held back other cases, Depot winter's line is
+    measured."""
+    from evolvekit.app.store import Home
+
+    home = Home(tmp_path / "home")
+    summer = _library_study(home, "Depot summer")
+    if root_cases == "other":
+        _edited_cases(summer)
+    _checked(summer, "2026-01-01T00:00:00+00:00", base=[50.0, 60.0, 70.0], best=[49.0, 59.0, 69.0], decision="use")
+    winter = _library_study(home, "Depot winter")
+    _checked(winter, "2026-01-01T06:00:00+00:00", base=[50.5, 60.5, 70.5], best=[50.0, 60.0, 70.0])
+    autumn = _library_study(home, "Autumn", warm=summer.name)
+    run_dir, ours = _checked(autumn, "2026-01-02T00:00:00+00:00", base=[49.0, 58.0, 69.5], best=[47.0, 56.0, 67.0])
+    got = _against(autumn, run_dir, ours, "keep")["against_defaults"]
+    if root_cases == "other":
+        assert got["measured"] is True and got["from"]["name"] == "Depot winter"
+        return
+    reason = "Depot summer chose this study's starting point on these same held-back cases, so they cannot tell"
+    assert got == {"measured": False, "why": reason, "line": f"Against the harness defaults: not measured ({reason})."}

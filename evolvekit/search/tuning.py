@@ -101,12 +101,26 @@ def propose_tpe(
     *,
     taken: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
-    """The configuration, among `FROM_GOOD` candidates drawn from the good
+    """`propose_tpe_scored`'s configuration alone: the same draws, the same stream."""
+    scored = propose_tpe_scored(space, observations, rng, taken=taken)
+    return scored[0] if scored is not None else None
+
+
+def propose_tpe_scored(
+    space: ParameterSpace,
+    observations: Sequence[Observation],
+    rng: random.Random,
+    *,
+    taken: Sequence[Mapping[str, Any]] = (),
+) -> tuple[dict[str, Any], float] | None:
+    """The configuration and its score, the log density ratio
+    `sum_p log l(x_p) - log g(x_p)` it was chosen for: the configuration, among `FROM_GOOD` candidates drawn from the good
     density and `FROM_PRIOR` drawn uniformly from the box, where good
     configurations are most over-represented. `None` when there are too few
     observations to say. Every configuration in `taken` (the siblings proposed
     so far this generation) counts as a bad observation and is never proposed
-    itself."""
+    itself. The score is recorded for engineers (`generation_finished`'s
+    `tpe_ratio`); nothing decides on it."""
     usable = [o for o in observations if all(p.name in o.values for p in space)]
     if len(usable) < MIN_OBSERVATIONS:
         return None
@@ -144,7 +158,7 @@ def propose_tpe(
             rated += 1
             if rated >= count:
                 break
-    return best[1] if best else None
+    return (best[1], best[0]) if best else None
 
 
 class _Density:

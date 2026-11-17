@@ -230,7 +230,10 @@ study) and beside each application in *Applications*. It lists the finished
 studies on that application, each with its own verdict line, and then a table
 with a row for every setting that was tuned: *Tuned in* (how many studies),
 *How strongly it went with the measure (0 to 1, not proof)* (a bar and a figure such as
-`0.42 · from 2 studies`, or *not enough tries to tell*), *The searches leaned
+`0.42 · from 2 studies`, or *not enough tries to tell*, or, when the studies
+that measured it could not tell it from chance taken together, *the study
+could not tell it from chance* / *together, the 3 studies could not tell it
+from chance*), *The searches leaned
 to* (each setting's median of the studies' search-best values, for a choice
 the value most of them had and none on a tie, as `4 (search, not checked)`),
 *Winning values* (`12 in Depot spring (1 Oct)`, or *none yet*) and *Winners
@@ -239,7 +242,11 @@ setting's values went with the measure in the searches, and a sentence under
 the table says so: *0 means the setting did not go with the measure in the
 searches, 1 that it went with it every time. It comes from the searches, not
 from final checks: it says which settings are worth tuning, not which value
-wins.* It is not proof of anything, and the page claims no gain of its own;
+wins. A strength is shown only when the studies that measured it, taken
+together, could tell it from chance (under 10 %).* (A setting that does nothing
+is shown after three studies in about 8 %; [docs/reference.md](reference.md)
+gives the measured rates.)
+It is not proof of anything, and the page claims no gain of its own;
 where the searches leaned is a search figure, never a winner. A winning value comes only from a study whose
 final check said *use it*. What could not be read across (a setting the
 application no longer has, or one whose meaning changed) is listed under
@@ -392,7 +399,27 @@ run's sentence the strip gives two facts as the status document says them:
 what the AI has spent of its cap (*AI: $0.42 of $1.00*, or *AI: 4 requests*
 for a provider that counts requests), and after the first round, when the
 pace so far buys fewer rounds than planned, *At this pace about 2 of the 11
-planned rounds will run.* Neither is a claim about the result. Details shows
+planned rounds will run.* Neither is a claim about the result. The number is
+the run's own: after every round the search re-plans from what its rounds
+measured and writes it into `job.json`'s `plan`, beside the planned numbers
+(which stay): `rounds_done` (the rounds finished), `rounds_left` (the rounds
+the search time left buys at the measured pace; `null` until the first round)
+and `measured` (`{"round_s", "ai_child_s"}`: one round as measured, the median
+round's runs plus the children's AI writing time, and the AI's seconds per
+child, from the rounds whose changes this session wrote; `null` until the
+first round). The pace is `rounds_done + rounds_left`; a run from before
+these keys keeps reading the pace from its rounds' times. A search that has
+settled -- no round gained beyond the noise for a third of its planned
+rounds in a row, at least 3 -- ends early, unless its rounds were set by hand:
+`job.json`'s `search` then has `converged: true`, `flat_rounds`, `window` and
+`used_s` (the search's active seconds when it ended), and the final check's
+`final.saved` says what became of the time it left: `{"s", "spent", "why"}`,
+the seconds saved, whether the check's one extension spent them on more runs
+per held-back case, and `why` -- `extended` (it did), `cases` (only more
+held-back cases could firm up the answer), `answered` (the first read already
+gave it) or `at_cap` (no run could be added: every case already had 12, the
+time left paid for no run, or a stop was asked for). "Settled" is a fact about the search, never about the
+result. Details shows
 the spend too, and once the run is finished the verdict's own figure among
 its facts.
 
@@ -496,8 +523,35 @@ own page*.
 The Cases view shows each case's group as a small badge before its name:
 for a run per kind of case, the group the run gave it; for any other run,
 the case's group in `groups.json` (from `study groups` or the tags), when
-there is one. On a phone, where the plot has no width to spare, the badges
-show only when the rows are of more than one group.
+there is one. A held-back case's group is the one the rule gives it, not the
+one its features are nearest: the groups are made from the cases to learn
+from alone, and the final check then checks the rule a planner will use.
+On a phone, where the plot has no width to spare, the badges show only when
+the rows are of more than one group.
+
+`groups.json` (`"format": 2`) holds what the grouping found: `method`
+(`features`, `tags` or `one`); `assigned`, how the held-back cases were put
+in groups (`stump` by the rule, `tags`, `one` for a single group, `nearest`
+to the nearest group's centre when no single split tells the groups apart:
+an asked-for 4 or 5 groups, or 2 or 3 left by a merge whose cases to learn
+from no one split separates); `k`;
+`silhouette`, the best one tried (kept on a single group too, when groups
+were tried and did not separate clearly); `min_silhouette` (0.5, not on a
+grouping by tags); `groups`, `{name: {training, test, merged_from}}`;
+`stump`, the rule over the cases to learn from (`{feature, thresholds,
+sides, misplaced}`); `accuracy`, `{training: {right, of}, held_back: {right,
+of}}` (the cases to learn from the rule puts in the group they were found
+in; of the held-back cases the rule could read, those it puts in the group
+whose centre is nearest — the notes name the others); `features` (a value
+that is not a number is `null`; a case to learn from with one is left out
+of making the groups and joins one afterwards, and a note says so), `describe`, `notes`, `cases`, `tags` and `stamps`. A study's
+file of format 1 grouped by features counts as out of date (the Cases view
+shows no group from it, and the next `study groups` or start of a run per
+kind of case computes the groups again), since it placed the held-back cases
+by k-means; one grouped by tags
+means the same and is read as it is; a finished run's own copy is read
+whatever its format, and its `rule.md` keeps the sentence it was written
+with.
 
 Every figure for a combination is written as the report writes it: one
 decimal and the measure's own direction, never *better* — the chosen
@@ -672,7 +726,14 @@ is 403, sent before the body is read. The routes: `/api/home` (with
 `clock: {line}` while a rehearsal clock is on; a draft's card has `missing`,
 the first thing Set up lacks as `{"step", "key", "text"}`, or `null`),
 `/api/harnesses/{id}` (its `learned`: per setting `tuned_in`, `importance`,
-`importance_n`, `winners`, `direction` and `leaned`, the median of the
+`importance_n`, `importance_of`, `importance_p`, `winners`, `direction` and
+`leaned` — `importance_of` the studies with a strength on at least five
+combinations, `importance_p` their permutation p's (the status document's
+`importance.p`, from `importance.shuffles`, 999, shuffles of child-minus-parent
+changes among siblings, children of one parent in one round) combined
+by Fisher's rule (an item without one counts as 1), and `importance` their
+mean |ρ| over `importance_n` of them only when `importance_p` is under 0.1,
+else `null` with `importance_n` 0 — `leaned` the median of the
 settings studies' search-best values — the lower middle for a whole number,
 the most common value of a choice, `null` on a tie or with none; a study
 whose search did not run is listed in `studies` with `not_run: true` and
@@ -824,6 +885,8 @@ names:
 | `planned` | `{"rounds", "combinations"}` the plan promised; not on a bake-off |
 | `time_note` | only when the study's time per case is below the harness's own: "Tuned at 5 s a case; PyVRP's own time is 1 min: settings found here may not hold at a longer time limit." — Set up says it too (the Time row and the plan's notes), and the report's *How it ran* |
 | `how_it_ran` | whenever fewer rounds ran than planned: one sentence, such as "Ran 2 of the 11 planned rounds (25 combinations, about 132 planned): the time ran out; …", with the reason from the stop (*the time ran out*, *the search time was used*, *stopped*, *the search stopped early (…)*, *the AI budget was used up*); when every round ran but some combinations repeated one already tried, "Ran all 17 planned rounds (176 combinations, about 204 planned): 29 of the combinations tried repeated one already tried and were not measured again." (what it knows, not a claim that it is the whole shortfall) — the Study page shows it under Details |
+| `converged` | only when the search ended early because it settled (`search.converged` in `job.json`): `{"rounds", "planned", "saved_s", "spent", "line"}` -- the rounds it ran of the planned, the seconds of search it left (`final.saved.s`; `null` while the final check has not said), whether the final check spent them, and the line: "The time the search saved went to the final check: more runs per held-back case, read once more." when it did, else "The time the search saved (about 20 min) was not spent: …" with the reason (only more held-back cases could firm up this answer, not more runs; the final check's first read already gave the answer; no more runs could be added to the final check). `how_it_ran` then says "…: the search settled (no round gained beyond the noise for 4 rounds in a row), so it ended early." The line is empty when nothing was saved. `results` carries it as `saved_line`, and the Study page's Details, the report's *How it ran* and `study verdict` say it after `how_it_ran`. A fact about the search, never about the result |
+| `against_defaults` | only on a warm-started study (`study new --warm`) whose final check answered: the same held-back runs of the side the verdict names (the new settings on `use`, else the starting point, which is the previous winner) set against the runs of the latest finished study on the harness that started from the harness defaults (a settings study, not warm-started, with no start set by hand and no setting given by the study), paired run by run on the same case content (the case file's sha256) and the same run of the final check (its seed), read once by the same rule (no extension, no Holm). `{"measured": true, "decision", "chance", "range90_pct", "mean_pct", "line", "side", "note", "from": {"study", "name", "run", "cases", "seeds"}}` with the line "On the same held-back cases, against the harness defaults (the new settings): probably better: 5.8 % lower tour length, …" in the final check's own words; or `{"measured": false, "why", "line"}`, "Against the harness defaults: not measured (it held back other cases)." (the reasons: *no finished study on this application started from the harness defaults*, *it held back other cases*, *its final check has no runs on the same cases and runs*, *it ran at another time per case*, *it ran on another version of the harness*, *<that study's name> chose this study's starting point on these same held-back cases, so they cannot tell*, *the other studies could not be read*; nothing in it can cost the answer: any failure is logged and is "not measured"). The comparison is kept in `confirm/final/against_defaults.json`. Information about the same runs, never another answer: it never changes `decision`, `line` or `advice`. Because it reuses the runs the main answer was read on, it is selected on: measured on 10 000 seeded studies with no true difference anywhere, it says use in 6.2 % ± 0.24 overall, 14.9 % ± 1.2 after a main *use* and 5.4 % ± 0.24 otherwise. `against_defaults.json` has `reuses: true` (for engineers) when that study is in the warm study's own chain (it, or a study warm-started from it, chose the starting point on these same held-back cases: the usual path); the line is then not measured, "Against the harness defaults: not measured (Depot summer chose this study's starting point on these same held-back cases, so they cannot tell)." with no number, because on that path, measured on 20 000 seeded pairs with no true difference (the defaults study said use in 8.6 % ± 0.20 of them; the 1711 that did), the comparison would say use in 91.9 % ± 0.66: it would replay the choice. The same holds when the chain's root started from the defaults and held back any of the same cases while the line would be read against a later study from the defaults: a configuration's effect on a case is the same in every study, so that study's runs carry the case effects the root chose on (decision 17). Measured with no true difference, such a line would say use in 76.5 % when the cases vary more than the runs and 9.9 % the other way round (86 % and 17 % when a run repeats exactly at its seed), so it is not measured either, naming the root. `results` carries it, and the Study page (under the advice), the report and `study verdict` say its line |
 | `why_keep` | only on a `keep` whose held-back cases all moved the goal's way while its range still allows a loss: one sentence after `line` that says why it is still keep, "Every held-back case was lower (3.1 % and 8.2 %), but with only 2 cases the range is too wide to rule out a loss: hold back more cases for a firmer answer." (up to three cases' figures, else "Every one of the N held-back cases was lower"); never on `use`, `worse`, a keep with no difference or a goal with levels (the range there is the level the answer is read on, while the held-back rows are the first measure's), and never a gain; on a check limited by its cases (`limited_by`) a keep says that instead. `results` carries it (and its `final`, and the text to paste after its *Final check* line), a finished card's `verdict`, the report and `study verdict` say it after the line |
 | `spent` | only on a run with AI help: what its AI spent, from the run's `usage.jsonl`: `{"usd", "cap_usd", "line"}` with the line "AI: $0.87 of $1.00", or `{"requests", "line"}` ("AI: 14 requests") for a provider that counts requests; a fact, not a claim |
 

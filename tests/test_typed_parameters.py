@@ -243,7 +243,8 @@ def _typed_run(tmp_path, configurations):
     run.started(100, parameters=space.describe())
     run.row("g000-c0001", 0, 1200.0, params=space.defaults())
     for index, (values, cost) in enumerate(configurations, start=2):
-        run.row(f"g001-c{index:04d}", 1, cost, params={**space.defaults(), **values}, block="rendered\n")
+        run.row(f"g001-c{index:04d}", 1, cost, params={**space.defaults(), **values}, block="rendered\n",
+                parent_id="g000-c0001")
     return run
 
 

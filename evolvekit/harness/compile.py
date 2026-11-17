@@ -83,6 +83,8 @@ config still loads without models (decision D13). The operator is never invoked.
 UP = "../.."
 GROUP_UP = "../../../.."
 """From a group's folder of a per-group run (`runs/<id>/groups/<slug>/`) to its study's."""
+PRIOR_KEYS = ("value", "weight", "studies_since", "similarity", "left_out")
+"""What `study-run.json`'s `priors` keeps of each prior a warm-started run applied (`memory.priors_for`)."""
 GROUPS = "groups"
 """`runs/<id>/groups/`: the group folders of a per-group run."""
 
@@ -486,9 +488,10 @@ def write_run(
     commit (a ref as it is now; `working` as a snapshot of the working tree),
     so the run means the same tree whenever its config is loaded again. A
     warm-started study in a library home gets its priors (`memory.priors_for`)
-    here too, so the weights count the studies finished before this run; when
-    the other studies cannot be read, `study-run.json` says `"priors": "not
-    applied: <why>"` and `log` (stderr when None) says it in a line.
+    here too, so the weights count the studies finished before this run, and
+    `study-run.json`'s `priors` records each one applied (`PRIOR_KEYS`); when
+    the other studies cannot be read, it says `"priors": "not applied: <why>"`
+    and `log` (stderr when None) says it in a line.
 
     With `group` (a per-group run, design §6.4), the folder is
     `<root>/runs/<run_id>/groups/<slug_of(group)>/`, every path is compiled
@@ -502,8 +505,9 @@ def write_run(
             raise HarnessError(f"vary.code.repo: give the full path to the source; {repo!r} is relative")
     priors, not_applied = None, ""
     if study.warm is not None and study.code is None and root.parent.name == "studies":
-        # A warm-started study in a library home: a prior around each winner, weighed by the
-        # studies finished since (computed now, so a run started later counts them too).
+        # A warm-started study in a library home: a prior around each winner, halved for each later
+        # study that tuned the setting and shrunk for unlike cases (computed now, so a run started
+        # later counts the studies finished before it).
         from types import SimpleNamespace
 
         from evolvekit.harness import memory
@@ -516,6 +520,10 @@ def write_run(
     up = UP if group is None else GROUP_UP
     config, study_run = compile_study(study, harness, plan, root=root, models=models, bakeoff=bakeoff, priors=priors,
                                       up=up)
+    if priors is not None:  # the priors the run applied, as `priors_for` gave them, for engineers
+        compiled = config["problem"].get("parameters") or {}
+        study_run["priors"] = {name: {key: prior.get(key) for key in PRIOR_KEYS}
+                               for name, prior in priors.items() if "prior" in (compiled.get(name) or {})}
     if not_applied:
         study_run["priors"] = not_applied
         (log or (lambda line: print(line, file=sys.stderr, flush=True)))(

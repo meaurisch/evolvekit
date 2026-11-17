@@ -1631,9 +1631,12 @@ def _results_at(root: Path, run: str, run_dir: Path, job: dict[str, Any], docume
         "cases": {"training": list(study.training), "test": list(study.test)},
         "can_continue": can_continue(run_dir, job),
     }
-    for key in ("how_it_ran", "time_note", "planned", "spent", "why_keep"):  # how much of the plan ran, what the AI spent, why keep
+    # how much of the plan ran, what the AI spent, why keep; a warm-started study's line against the harness defaults
+    for key in ("how_it_ran", "time_note", "planned", "spent", "why_keep", "against_defaults"):
         if verdict.get(key):
             data[key] = verdict[key]
+    if (verdict.get("converged") or {}).get("line"):
+        data["saved_line"] = verdict["converged"]["line"]  # a settled search: where the time it saved went
     if "candidates" in verdict:  # a bake-off: every branch with its own decision and line
         data["candidates"], data["bakeoff"] = verdict["candidates"], job.get("bakeoff")
     data["summary_text"] = _summary_text(data)
@@ -1789,6 +1792,8 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
                       and context["tried"] >= 1 else str(context["tried"])))
     if data.get("time_note") and not data.get("how_it_ran"):
         facts.append(("How it ran", str(data["time_note"])))  # a time below the harness's own (persona p5, K2)
+    if data.get("saved_line"):
+        facts.append(("Time saved", str(data["saved_line"])))  # a settled search: where the time it saved went
     if context.get("took"):
         facts.append(("It took", context["took"]))
     if context.get("started_at"):
@@ -1796,6 +1801,10 @@ def report_html(data: dict[str, Any], attached: tuple[str, str] | None = None) -
     facts_html = "".join(f"<div><div class='k'>{esc(k)}</div><div class='v'>{esc(v)}</div></div>" for k, v in facts)
     seeds = final.get("seeds")
     rule_note = f"<div class='help' style='margin-top:6px'>{esc(str(final['rule']))}</div>" if final.get("rule") else ""
+    against = data.get("against_defaults") or {}
+    if against.get("line"):  # a warm-started study: the same runs against the harness defaults, beside the answer
+        rule_note = (f"<div style='margin-top:10px'>{esc(str(against['line']))}</div>"
+                     + (f"<div class='help'>{esc(str(against['note']))}</div>" if against.get("note") else "") + rule_note)
     check_note = (f"<p class='help'>The best and the starting point, each run {'once' if seeds == 1 else f'{seeds} times'} on every "
                   "held-back case: cases the search never saw.</p>") if seeds else ""
     rules_html = ("<h2>Rules every combination kept</h2><div class='card'><ul>"
@@ -2031,7 +2040,17 @@ def pace(series: list[dict[str, Any]], plan: dict[str, Any], job: dict[str, Any]
     does: no round is started that the longest of the last two would not let
     finish within `plan.max_hours`. None for a run whose rounds were set by hand
     (they, not the hours, stop it), continued or resumed (its plan is not this
-    session's), or not searching. It claims nothing about any result."""
+    session's), or not searching. It claims nothing about any result.
+
+    A run that re-plans after every round (`plan.replan`, A4) writes
+    `plan.rounds_done` and `plan.rounds_left` into `job.json`: then those give
+    the rounds (one source for the number); a run from before it keeps the
+    reading of the series. The two count differently: `rounds_left` divides
+    the search time left by the median round (its evaluation plus the AI's
+    measured seconds per child), while the series reading -- like the
+    search's own stop, `RunStop.before_generation` -- uses the longest of the
+    last two rounds. So `rounds_left` is "about": after a slow round the
+    search may start one round fewer than it says."""
     if job.get("phase") != "search" or _continued(job) or job.get("resumed_at") or job.get("bakeoff"):
         return None
     if {"rounds", "generations"} & set(plan.get("adjusted") or ()):
@@ -2041,6 +2060,10 @@ def pace(series: list[dict[str, Any]], plan: dict[str, Any], job: dict[str, Any]
     limit_s = float(limit) * 3600.0 if isinstance(limit, (int, float)) else float(plan.get("search_s") or 0.0)
     if not isinstance(planned, int) or planned <= 0 or limit_s <= 0:
         return None
+    left, done_so_far = plan.get("rounds_left"), plan.get("rounds_done")
+    if isinstance(left, int) and not isinstance(left, bool):
+        rounds = (done_so_far if isinstance(done_so_far, int) else 0) + left
+        return _pace_of(rounds, planned)
     ends = {int(s["generation"]): float(s["elapsed_s"]) for s in series
             if isinstance(s.get("generation"), int) and isinstance(s.get("elapsed_s"), (int, float))}
     done = sorted(g for g in ends if g >= 1 and g - 1 in ends)
@@ -2050,7 +2073,11 @@ def pace(series: list[dict[str, Any]], plan: dict[str, Any], job: dict[str, Any]
     longest = max(ends[g] - ends[g - 1] for g in done[-2:])
     if longest <= 0:
         return None
-    rounds = last + max(0, math.floor((limit_s - ends[last]) / longest))
+    return _pace_of(last + max(0, math.floor((limit_s - ends[last]) / longest)), planned)
+
+
+def _pace_of(rounds: int, planned: int) -> dict[str, Any] | None:
+    """`pace`'s answer for `rounds` of the `planned`: None when they buy the plan."""
     if rounds >= planned:
         return None
     return {"rounds": rounds, "planned": planned,

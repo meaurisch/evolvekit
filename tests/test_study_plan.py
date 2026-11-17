@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
+import random
 from datetime import datetime
 
 import pytest
 
-from evolvekit.harness.plan import make_plan
+from evolvekit.harness.plan import Plan, make_plan
 
 
 def _plan(**kwargs):
@@ -228,3 +229,295 @@ def test_too_few_held_back_cases_for_a_firm_answer_is_a_note_with_the_plan():
     assert plan.notes == [THIN] and plan.to_json()["notes"] == [THIN]
     assert plan.summary(datetime(2026, 11, 8, 5, 38)).endswith("; done around 05:48. " + THIN)
     assert THIN not in _plan().summary(), "three held back: no note"
+
+
+# -- the plan re-estimated from the rounds measured (A4.1, P3) ----------------
+
+def _record(generation, duration_s, breed_s=10.0, children=4, *, legacy=False, adopted=False):
+    from evolvekit.harness.plan import RoundRecord
+
+    return RoundRecord(generation, duration_s, breed_s, children, -9.0, None, 0.0, None, None, legacy, adopted)
+
+
+def test_replan_reads_the_median_round_and_the_measured_ai_seconds():
+    from dataclasses import replace
+
+    from evolvekit.harness.plan import Measured, Plan, RoundRecord, replan
+
+    plan = replace(Plan.fixed(children=4), search_s=3600.0)
+    records = [RoundRecord(0, 50.0, 0.0, 0, -10.0, None, 0.0, None, None, False)] + [
+        RoundRecord(g, d, 10.0, 4, -9.0, None, 0.0, None, None, False) for g, d in ((1, 100.0), (2, 120.0), (3, 300.0))]
+    got = replan(plan, Measured(tuple(records), used_s=600.0))
+    # eval median(90, 110, 290) = 110; AI 30 s over 12 children = 2.5 s; a round 110 + 4 * 2.5 = 120 s
+    assert got.measured_round_s == 120.0 and got.measured_ai_child_s == 2.5
+    assert got.rounds_done == 3 and got.rounds_left == 25 and got.rounds == plan.rounds
+    assert got.to_json()["rounds_left"] == 25 and got.to_json()["measured"] == {"round_s": 120.0, "ai_child_s": 2.5}
+    assert (got.round_s, got.ai_child_s, got.children, got.search_s) == (
+        plan.round_s, plan.ai_child_s, plan.children, plan.search_s), "the planned numbers stay as planned"
+
+
+def test_replan_before_the_first_round_changes_nothing():
+    from evolvekit.harness.plan import Measured, Plan, replan
+
+    plan = Plan.fixed()
+    assert replan(plan, Measured((), used_s=0.0)) == plan and plan.to_json()["rounds_left"] is None
+    assert plan.to_json()["rounds_done"] == 0 and plan.to_json()["measured"] is None
+    assert replan(plan, Measured((_record(0, 50.0, 0.0, 0),), used_s=50.0)) == plan, "the starting point is no round"
+
+
+def test_replan_leaves_adopted_and_legacy_rounds_out_of_the_ai_seconds():
+    """Decision 9: an adopted round (its children were written by the session
+    before: `adopted`) and a round from before A4 (no `breed_s`) paid no
+    measured AI time; counting their children would understate it. A written
+    round whose writing took under a millisecond still counts."""
+    from dataclasses import replace
+
+    from evolvekit.harness.plan import Measured, Plan, replan
+
+    plan = replace(Plan.fixed(children=4), search_s=3600.0)
+    records = (_record(1, 110.0, 10.0), _record(2, 90.0, 0.0, adopted=True), _record(3, 120.0, 0.0, legacy=True))
+    got = replan(plan, Measured(records, used_s=1000.0))
+    # AI 10 s over round 1's 4 children = 2.5 s; eval median(100, 90, 120) = 100; a round 100 + 4 * 2.5 = 110 s
+    assert got.measured_ai_child_s == 2.5 and got.measured_round_s == 110.0
+    assert got.rounds_done == 3 and got.rounds_left == 23  # floor(2600 / 110)
+    only_adopted = replan(plan, Measured((_record(1, 90.0, 0.0, adopted=True),), used_s=100.0))
+    assert only_adopted.measured_ai_child_s == 0.0 and only_adopted.measured_round_s == 90.0
+    quick = replan(plan, Measured((_record(1, 100.0, 0.0), _record(2, 100.0, 8.0)), used_s=0.0))
+    assert quick.measured_ai_child_s == 1.0, "a written round of 0.000 s counts its children: 8 s over 8"
+    spent = replan(plan, Measured((_record(1, 90.0, 0.0),), used_s=4000.0))
+    assert spent.rounds_left == 0, "never fewer than none"
+
+
+def test_round_records_read_legacy_events_without_inventing_progress():
+    from evolvekit.harness.plan import round_records
+
+    events = [{"type": "generation_finished", "generation": 1, "duration_s": 5.0, "children": 4, "best_fitness": -3.0}]
+    (r,) = round_records(events)
+    assert r.legacy and r.best == -3.0 and r.breed_s == 0.0 and r.noise_sd == 0.0 and r.tpe_ratio is None
+    assert r.rebased is None and r.breadth_at_ceiling is None and not r.adopted
+
+
+def test_round_records_count_a_resumed_round_once_from_its_last_event():
+    from evolvekit.harness.plan import round_records
+
+    events = [
+        {"type": "generation_finished", "generation": 2, "duration_s": 7.0, "children": 4, "best_fitness": -1.0,
+         "round_best": -2.0, "breed_s": 1.5, "noise_sd": 0.3, "tpe_ratio": None, "breadth_at_ceiling": None},
+        {"type": "generation_started", "generation": 1},
+        {"type": "generation_finished", "generation": 1, "duration_s": 5.0, "children": 4, "best_fitness": -3.0,
+         "round_best": -3.0, "breed_s": 1.0, "noise_sd": 0.2, "tpe_ratio": 0.5, "breadth_at_ceiling": False},
+        {"type": "generation_finished", "generation": 1, "duration_s": 6.0, "children": 4, "best_fitness": -3.0,
+         "round_best": -3.0, "breed_s": 0.0, "adopted": True, "noise_sd": 0.2, "tpe_ratio": None,
+         "breadth_at_ceiling": False},
+        {"type": "generation_finished", "generation": "x"},
+    ]
+    first, second = round_records(events)
+    assert (first.generation, first.duration_s, first.breed_s, first.legacy, first.adopted) == (1, 6.0, 0.0, False, True)
+    assert not second.adopted
+    assert (second.best, second.rebased, second.noise_sd) == (-2.0, -1.0, 0.3), "a re-evaluation pooled the best"
+    assert first.rebased is None and first.breadth_at_ceiling is False
+
+
+def _events(path, rows):
+    import json
+
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def _finished(generation, ts, **fields):
+    return {"type": "generation_finished", "session": "s", "ts": f"2026-11-14T10:{ts}+00:00", "generation": generation,
+            "duration_s": 100.0, "breed_s": 10.0, "adopted": False, "children": 4, "round_best": 1.0,
+            "best_fitness": 1.0, **fields}
+
+
+def test_the_round_hook_writes_the_replan_beside_the_planned_numbers(tmp_path):
+    from dataclasses import replace
+
+    from evolvekit.harness.execute import Job, _round_hook, read_job
+
+    _events(tmp_path / "events.jsonl", [_finished(0, "00:00", breed_s=0.0, children=1), _finished(1, "01:40")])
+    job = Job(tmp_path, run_id="r", study="s", plan={"rounds": 7, "children": 4, "search_s": 3600.0})
+    plan = replace(Plan.fixed(children=4), search_s=3600.0)
+    assert _round_hook(tmp_path, job, plan, log=lambda _m: None)(1) is None
+    # 100 s used; a round 90 + 4 * 2.5 = 100 s -> floor(3500 / 100) = 35
+    written = read_job(tmp_path)["plan"]
+    assert written == {"rounds": 7, "children": 4, "search_s": 3600.0, "rounds_done": 1, "rounds_left": 35,
+                       "measured": {"round_s": 100.0, "ai_child_s": 2.5}}
+
+
+def test_the_round_hook_logs_a_file_it_cannot_read_or_write_and_still_answers(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from evolvekit import events as events_module
+    from evolvekit.harness.execute import Job, _round_hook
+
+    _events(tmp_path / "events.jsonl", [_finished(1, "01:40")])
+    job = Job(tmp_path, run_id="r", study="s", plan={"rounds": 7})
+    plan = replace(Plan.fixed(children=4), search_s=3600.0)
+    said: list[str] = []
+
+    def refuse(**_fields):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(job, "update", refuse)
+    assert _round_hook(tmp_path, job, plan, log=said.append)(1) is None
+    assert len(said) == 1 and "job.json could not be rewritten" in said[0] and "disk full" in said[0]
+
+    def unreadable(_run_dir):
+        raise OSError("locked")
+
+    monkeypatch.setattr(events_module, "read_events", unreadable)
+    assert _round_hook(tmp_path, job, plan, log=said.append)(2) is None
+    assert "events.jsonl could not be read" in said[1] and "locked" in said[1]
+
+
+def test_a_resumed_run_replans_from_its_stored_plan_else_from_the_compiled_run():
+    from types import SimpleNamespace
+
+    from evolvekit.harness.execute import _stored_plan
+
+    config = SimpleNamespace(budget=SimpleNamespace(max_hours=0.5), search=SimpleNamespace(children_per_generation=5))
+    stored = _stored_plan({"children": 6, "search_s": 1200.0, "rounds": 3}, config)
+    assert (stored.children, stored.search_s) == (6, 1200.0)
+    fallback = _stored_plan({}, config)
+    assert (fallback.children, fallback.search_s) == (5, 1800.0)
+    odd = _stored_plan({"children": 0, "search_s": "x"}, SimpleNamespace(budget=SimpleNamespace(max_hours=None),
+                                                                        search=SimpleNamespace(children_per_generation=4)))
+    assert (odd.children, odd.search_s) == (4, 0.0)
+
+
+# -- a settled search ends early (A4.1, P1) ------------------------------------
+
+def _rec(g, best, *, sd=1.0, tpe=None, ceiling=None, rebased=None, legacy=False, big_steps=0):
+    from evolvekit.harness.plan import RoundRecord
+
+    return RoundRecord(g, 10.0, 1.0, 8, best, rebased, sd, tpe, ceiling, legacy, big_steps=big_steps)
+
+
+def test_convergence_needs_window_flat_rounds():
+    from evolvekit.harness.plan import CONVERGE_MIN_ROUNDS, converged
+
+    assert CONVERGE_MIN_ROUNDS == 3
+    flat = [_rec(0, 0.0)] + [_rec(g, 0.5) for g in range(1, 4)]          # 0.5 < bar + 1 sd: flat
+    got = converged(flat, planned_rounds=6)
+    assert got.converged and (got.flat_rounds, got.window) == (3, 3)      # window max(3, ceil(6 / 3)) = 3
+    assert got.reason == "converged: no round gained beyond the noise for 3 rounds"
+    assert not converged(flat[:3], planned_rounds=6).converged
+    assert converged(flat, planned_rounds=12).window == 4
+    assert not converged(flat, planned_rounds=12).converged
+    gained = flat[:2] + [_rec(2, 1.6)] + flat[3:]
+    assert converged(gained, planned_rounds=6).flat_rounds == 1
+    assert not converged([], planned_rounds=6).converged and not converged(flat[:1], planned_rounds=6).converged
+
+
+def test_a_sub_noise_step_never_moves_the_bar():
+    from evolvekit.harness.plan import converged
+
+    steps = [_rec(0, 0.0)] + [_rec(g, 0.4 * g) for g in range(1, 5)]   # 0.4, 0.8 flat; 1.2 > 0 + 1: counted
+    assert converged(steps, planned_rounds=6).flat_rounds == 1
+
+
+def test_a_re_evaluation_moves_the_bar_never_the_count():
+    from evolvekit.harness.plan import converged
+
+    # Round 1 gains (2.0 > 0 + 1); its re-evaluation pools the best down to 0.5, so 1.6 in round 2 counts.
+    rounds = [_rec(0, 0.0), _rec(1, 2.0, rebased=0.5), _rec(2, 1.6)]
+    assert converged(rounds, planned_rounds=6).flat_rounds == 0
+    # A re-evaluation in a flat round leaves the count as it was.
+    flat = [_rec(0, 0.0), _rec(1, 0.5, rebased=0.2), _rec(2, 0.5)]
+    assert converged(flat, planned_rounds=6).flat_rounds == 2
+
+
+def test_convergence_is_the_first_leg_alone():
+    """Decision 4: neither TPE's proposal scores nor the breadth's ceiling is read."""
+    from evolvekit.harness.plan import converged
+
+    rising_tpe = [_rec(0, 0.0)] + [_rec(g, 0.0, tpe=float(g), ceiling=False) for g in range(1, 4)]
+    assert converged(rising_tpe, planned_rounds=6).converged
+
+
+def test_convergence_waits_until_the_big_steps_have_been_tried():
+    """As `StopPolicy` holds a plateau open (`stop.min_big_steps`): the big steps
+    tried in the flat rounds count; one before the bar last moved does not."""
+    from evolvekit.harness.plan import converged
+
+    flat = [_rec(0, 0.0)] + [_rec(g, 0.0) for g in range(1, 4)]
+    assert converged(flat, planned_rounds=6, min_big_steps=0).converged
+    assert not converged(flat, planned_rounds=6, min_big_steps=1).converged
+    one = flat[:2] + [_rec(2, 0.0, big_steps=1)] + flat[3:]
+    assert converged(one, planned_rounds=6, min_big_steps=1).converged
+    before = [_rec(0, 0.0), _rec(1, 2.0, big_steps=1)] + [_rec(g, 2.0) for g in range(2, 5)]
+    assert not converged(before, planned_rounds=6, min_big_steps=1).converged, "it came before the bar moved"
+
+
+def test_a_legacy_round_in_the_window_never_converges():
+    from evolvekit.harness.plan import converged
+
+    flat = [_rec(0, 0.0)] + [_rec(g, 0.0) for g in range(1, 5)]
+    assert converged(flat, planned_rounds=6).converged
+    assert not converged(flat[:3] + [_rec(3, 0.0, legacy=True)] + flat[4:], planned_rounds=6).converged
+    assert converged([_rec(0, 0.0, legacy=True), _rec(1, 0.0, legacy=True)] + flat[2:],
+                     planned_rounds=6).converged, "only the last `window` rounds are read"
+
+
+def _settles_within(rng, *, step: float, children: int = 8, rounds: int = 6) -> bool:
+    """One simulated search (sd 1 per measured child): the best child's true
+    value rises `step` a round, the others sit |N(0, 1)| below it (`step` 0:
+    every child exactly as good); `round_best` is the running maximum of the
+    measured values, as the driver's archive best is. Whether `converged`
+    holds after some round within `rounds`, as the round hook asks it."""
+    from evolvekit.harness.plan import converged
+
+    best = rng.gauss(0.0, 1.0)
+    records = [_rec(0, best)]
+    for g in range(1, rounds + 1):
+        top = g * step
+        truths = [top] + [top - (abs(rng.gauss(0.0, 1.0)) if step else 0.0) for _ in range(children - 1)]
+        best = max(best, max(t + rng.gauss(0.0, 1.0) for t in truths))
+        records.append(_rec(g, best))
+        if converged(records, planned_rounds=rounds).converged:
+            return True
+    return False
+
+
+def _settled_rate(step: float, trials: int = 4000, **kwargs) -> tuple[float, float]:
+    rng = random.Random(20261114)
+    rate = sum(_settles_within(rng, step=step, **kwargs) for _ in range(trials)) / trials
+    return rate, math.sqrt(rate * (1 - rate) / trials)
+
+
+def test_a_flat_search_is_called_converged_within_its_rounds_in_over_90_percent():
+    """Every child exactly as good as the best (true values 0, one run's measured sd 1), 8 children
+    a round, 6 planned rounds. Estimate 95.4 % +- 0.33 (builder check, 4000 trials); measured here
+    95.45 % +- 0.33 on 4000 trials (random.Random(20261114)); asserts > 90 %, prints the rate."""
+    rate, se = _settled_rate(0.0)
+    print(f"flat search called settled: {rate:.2%} +- {se:.2%}")
+    assert rate > 0.90
+
+
+def test_a_search_gaining_one_noise_sd_a_round_is_called_converged_in_under_10_percent():
+    """The best child's true value rises 1 sd a round, the other seven sit |N(0, 1)| below it;
+    measured with sd 1; 6 planned rounds. Estimate 4.5 % +- 0.33 (0.2-1.2 % at 12 planned
+    rounds); measured here 3.60 % +- 0.29 on 4000 trials; asserts < 10 %, prints the rate."""
+    rate, se = _settled_rate(1.0)
+    print(f"1 sd a round called settled: {rate:.2%} +- {se:.2%}")
+    assert rate < 0.10
+
+
+def test_a_search_gaining_half_a_noise_sd_a_round_is_called_converged_in_about_half():
+    """The same at 0.5 sd a round, 8 children (decision 4: pinned at 8; 4 children measures
+    57 %, too near 60): estimate 50.5 % +- 0.79 (46-57 % over 4-12 children, 6 or 12 planned
+    rounds); measured here 50.38 % +- 0.79 on 4000 trials. Asserts the band [40, 60] % and prints
+    it: the documented cost of a one-sd bar."""
+    rate, se = _settled_rate(0.5)
+    print(f"0.5 sd a round called settled: {rate:.2%} +- {se:.2%}")
+    assert 0.40 <= rate <= 0.60
+
+
+def test_a_search_gaining_a_quarter_noise_sd_a_round_is_called_converged_in_over_70_percent():
+    """Decision 4's documented cost: at 0.25 sd a round (1.5 sd over 6 rounds) the search is
+    called settled in most studies. Estimate 81-84 % at 6 planned rounds (builder check); measured
+    here 81.38 % +- 0.62 on 4000 trials; asserts > 70 %, prints the rate."""
+    rate, se = _settled_rate(0.25)
+    print(f"0.25 sd a round called settled: {rate:.2%} +- {se:.2%}")
+    assert rate > 0.70

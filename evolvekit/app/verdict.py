@@ -31,7 +31,11 @@ was used up, says so in a sentence (`how_it_ran`). `why_keep`, only on a
 `keep` whose held-back cases all moved the goal's way while its range still
 allows a loss, says in one sentence why it is still keep (`why_keep`; when the check found
 that only more held-back cases could firm the answer, `limited_by: "cases"` and that sentence is
-its fallback). `spent`, on a run
+its fallback). `converged`, only on a run whose search ended early
+because it settled, says where the time it saved went (`converged_of`). `against_defaults`,
+only on a warm-started study whose final check answered, sets the same held-back runs against
+those of the latest study that started from the harness defaults (`against_defaults_of`):
+information about the same runs, by the same rule, never another answer. `spent`, on a run
 with AI, is what its AI spent (`ai_spent`): `{usd, cap_usd, line}`, or
 `{requests, line}` for a provider that counts requests. The page
 (`jobs.results`), the command line and the report all render from it, so they
@@ -72,7 +76,7 @@ from evolvekit.confirm import (BASELINE, LEGACY_RULE_WORDS, LIMITED_BY_CASES, RU
                                read_on_row, t_cdf)
 from evolvekit.stats import Posterior, pct_from_log
 
-__all__ = ["DECISIONS", "RANGE_NAME", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "how_it_ran", "time_note", "no_difference_line",
+__all__ = ["DECISIONS", "RANGE_NAME", "SCHEMA", "ai_spent", "best_so_far", "build_verdict", "converged_of", "how_it_ran", "time_note", "no_difference_line",
            "number_text", "range90_of", "why_keep"]
 
 SCHEMA = 2
@@ -244,9 +248,11 @@ def _decision_of(final: dict[str, Any], summary: dict[str, Any]) -> str:
 
 
 def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: dict[str, Any], what: str,
-                 baseline: str = "") -> dict[str, Any]:
+                 baseline: str = "", *, against: str = "") -> dict[str, Any]:
     """The final check in a sentence, what to do about it in another, and the
-    rule that decided in a third: the app says "use it" only by `decide`."""
+    rule that decided in a third: the app says "use it" only by `decide`.
+    `against` names what the comparison's baseline is when it is not the
+    starting point (the harness defaults, `against_defaults_of`)."""
     final = job.get("final") or {}
     new = f"the new {what}"
     they = "it is" if what.startswith(("combination", "code")) else "they are"
@@ -356,7 +362,7 @@ def _final_words(job: dict[str, Any], comparison: dict[str, Any] | None, goal: d
     sure = words == "almost certain"
     of_gain = "" if not words else "a gain almost certain" if sure else f"a chance of {words} of a gain"
     if decision == "use":
-        start = "your starting point" + (f" ({baseline})" if baseline and what != "data changes" else "")
+        start = against or "your starting point" + (f" ({baseline})" if baseline and what != "data changes" else "")
         edge = (f"at least {_pct(worst)} better than {start}" if worst is not None and worst >= 0.05
                 else f"at worst about the same as {start}" if worst is not None and worst > -0.05
                 else f"at worst {_pct(worst)} worse than {start}")
@@ -677,6 +683,12 @@ def _document(root: Path, run_dir: Path, study: Any, harness: Any, job: dict[str
                      what=jobs._what(study))
     if ran:
         document["how_it_ran"] = ran
+    settled = converged_of(job, plan)
+    if settled is not None:
+        document["converged"] = settled
+    against = against_defaults_of(run_dir, study, goal, final)
+    if against is not None:
+        document["against_defaults"] = against
     if time_note(study.limits.time_per_case_s, harness):
         document["time_note"] = time_note(study.limits.time_per_case_s, harness)
     spent = ai_spent(run_dir, study, job)
@@ -805,6 +817,12 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
                     f"combinations tried repeated one already tried and {'were' if repeated != 1 else 'was'} "
                     "not measured again.")
         return ""
+    if reason.startswith("converged"):
+        # The flat rounds, not the window: a plateau waiting for its big steps runs past the window.
+        flat = search.get("flat_rounds")
+        flat = flat if isinstance(flat, int) and not isinstance(flat, bool) else search.get("window")
+        span = f" for {flat} rounds in a row" if isinstance(flat, int) and not isinstance(flat, bool) else ""
+        return f"{rounds}{counts}: the search settled (no round gained beyond the noise{span}), so it ended early."
     if reason.startswith("time limit reached"):
         return f"{rounds}{counts}: the search time was used."
     if reason.startswith("time limit"):
@@ -813,6 +831,95 @@ def how_it_ran(job: dict[str, Any], plan: dict[str, Any], tried: int | None, ai:
     if not reason or reason.startswith("stopped"):
         return f"{rounds}{counts}: stopped."
     return f"{rounds}{counts}: the search stopped early ({reason.rstrip('.')})."
+
+
+SAVED_LINES = {
+    "extended": "The time the search saved went to the final check: more runs per held-back case, read once more.",
+    "cases": "The time the search saved (about {m}) was not spent: only more held-back cases could firm up this "
+             "answer, not more runs.",
+    "answered": "The time the search saved (about {m}) was not spent: the final check's first read already gave "
+                "the answer.",
+    "at_cap": "The time the search saved (about {m}) was not spent: no more runs could be added to the final check.",
+}
+"""`converged.line` by `final.saved.why` (`execute._saved`); `{m}` is the time saved (`plan._minutes`)."""
+
+
+def converged_of(job: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | None:
+    """The verdict's `converged`, only for a search that ended early because it
+    settled (`search.converged`, A4.1): `{"rounds", "planned", "saved_s",
+    "spent", "line"}` -- the rounds it ran of the planned, the seconds of
+    search it left unspent and whether the final check's one extension spent
+    them (`final.saved`), and the sentence that says where that time went
+    (`SAVED_LINES`). "Settled" is a fact about the search, never about the
+    result. While the final check has said nothing of the time (it was
+    stopped, or skipped) `saved_s` is None and the line empty; with nothing
+    saved (`saved_s` 0) the line is empty too."""
+    from evolvekit.harness.plan import _minutes
+
+    search = job.get("search") or {}
+    if search.get("converged") is not True:
+        return None
+    saved = (job.get("final") or {}).get("saved") or {}
+    seconds = saved.get("s") if isinstance(saved.get("s"), (int, float)) else None
+    # Nothing saved is nothing to say: never "about 0 min", never time that "went to the final check".
+    line = SAVED_LINES.get(saved.get("why"), "") if seconds is not None and seconds > 0 else ""
+    return {"rounds": search.get("generations"), "planned": plan.get("rounds"), "saved_s": seconds,
+            "spent": saved.get("spent") is True, "line": line.replace("{m}", _minutes(float(seconds or 0)))}
+
+
+DEFAULTS_WORDS = "the harness defaults"
+AGAINST_DEFAULTS_LEAD = "On the same held-back cases, against the harness defaults ({whose}): "
+"""The line of `against_defaults` (decision 6): information about the same runs, never a second answer."""
+
+
+def against_defaults_of(run_dir: Path, study: Any, goal: dict[str, Any], final: dict[str, Any]) -> dict[str, Any] | None:
+    """The verdict's `against_defaults`, only for a warm-started study whose final check answered
+    and wrote `confirm/final/against_defaults.json` (`execute._against_defaults`): the same
+    held-back runs of the side the verdict names (`side`: the new settings on use, else the
+    starting point) set against the runs of the latest study that started from the harness
+    defaults, in `_final_words`' words on that comparison and by `decision_of` -- `{"measured":
+    true, "decision", "chance", "range90_pct", "mean_pct", "line", "side", "note", "from"}` -- or
+    `{"measured": false, "why", "line"}` when it could not be measured (also when the defaults
+    study chose this study's starting point on the same cases, `execute.defaults_line`: no
+    number is shown there, decision 15c). Information about the
+    same runs: it never changes the study's `decision`, `line` or `advice`."""
+    from evolvekit.app import jobs
+
+    if getattr(study, "warm", None) is None or not final.get("decision"):
+        return None
+    data = jobs._read(run_dir / "confirm" / "final" / "against_defaults.json")
+    if not isinstance(data, dict):
+        return None
+
+    def not_measured(why: str) -> dict[str, Any]:
+        return {"measured": False, "why": why, "line": f"Against {DEFAULTS_WORDS}: not measured ({why})."}
+
+    if not data.get("measured") or data.get("reuses") is True:
+        return not_measured(str(data.get("why") or "its comparison could not be read"))
+    try:
+        side = str(data["candidates"][0])
+        result = data["per_candidate"][side]
+        numbers = dict(data["numbers_from"])
+        decision = decision_of(result)
+    except (LookupError, TypeError, ValueError):
+        return not_measured("its comparison could not be read")
+    what = jobs._what(study)
+    whose = f"the new {what}" if data.get("side") == "candidate" else "the starting point"
+    name = str(numbers.get("name") or numbers.get("study") or "a study")
+    if result.get("identical"):
+        line = f"No difference in any run: every paired run gave exactly {DEFAULTS_WORDS}' result."
+        words: dict[str, Any] = {"mean": None, "range90": None, "chance": None}
+    else:
+        words = _final_words({"final": {"candidate": side, "decision": decision}}, data, goal, what,
+                             against=DEFAULTS_WORDS)
+        line = str(words.get("line") or "")
+    return {"measured": True, "decision": decision, "chance": words.get("chance"), "range90_pct": words.get("range90"),
+            "mean_pct": words.get("mean"), "line": AGAINST_DEFAULTS_LEAD.format(whose=whose) + line[:1].lower() + line[1:],
+            "side": whose,
+            "note": (f"{whose[0].upper() + whose[1:]} set against the runs of {name}, a study that "
+                     f"started from {DEFAULTS_WORDS}, on the same held-back cases and runs: information about the "
+                     "same runs, read once; it does not change what this study recommends."),
+            "from": numbers}
 
 
 COUNTS_REQUESTS = ("copilot-cli",)

@@ -11,12 +11,16 @@ searches ("on the cases they learned from"); only a verdict claims an improvemen
 `warm_start` gives a new study the latest `use` study's winning values as its starting point
 (and, after three settings studies, tunes the recommended number of settings that went most
 with the measure); `priors_for` gives a warm-started run a prior around each winner whose
-weight halves with every study since it (design §6.3: a prior never excludes a value in range).
+weight halves with every later study that tuned that setting and shrinks when the new study's
+cases are unlike the winner's (design §6.3: a prior never excludes a value in range).
+`defaults_study` finds the latest study that started from the harness defaults, whose final
+check's runs a warm-started study's verdict is also set against (A4.3c).
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -24,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import threading
 from statistics import fmean, median, median_low
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from evolvekit.harness import HarnessError
 from evolvekit.harness.execute import BAKEOFF, run_study_of
@@ -35,6 +39,9 @@ from evolvekit.status import build_status
 
 IMPORTANCE_MIN_N = 5
 """A study's importance counts when its correlation rests on at least this many fully evaluated combinations."""
+IMPORTANCE_P = 0.1
+"""A setting's strength is shown when its studies' permutation p's, combined by Fisher's rule, are under this
+(A4.3, S9; decision 2)."""
 MIN_PRIOR_WEIGHT = 0.05
 """A prior weaker than this (five studies since its winner) is dropped: it would steer nothing."""
 RERANK_AFTER = 3
@@ -205,7 +212,8 @@ def _items(run_dir: Path, document_of: Callable[[Path], dict] | None) -> list[di
             continue
         importance = item.get("importance") or {}
         items.append({"name": str(item["name"]), "default": item.get("default"), "best": item.get("best"),
-                      "importance": importance.get("value"), "n": int(importance.get("n") or 0)})
+                      "importance": importance.get("value"), "n": int(importance.get("n") or 0),
+                      "p": importance.get("p")})
     if key is not None:
         with _LOCK:
             if len(_CACHE) >= _CACHE_MAX:
@@ -239,16 +247,16 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
                 gone.append(f"{name} (in {f.name}) is not a setting of {current.title} {current.version} any more: left out")
                 continue
             entry = seen.setdefault(name, {"label": setting.label, "tuned_in": 0, "importance": None, "importance_n": 0,
-                                           "winners": [], "direction": None, "leaned": None, "_values": [], "_starts": [],
-                                           "_bests": [], "_type": setting.parameter.type})
+                                           "importance_of": 0, "importance_p": None, "winners": [], "direction": None,
+                                           "leaned": None, "_values": [], "_starts": [], "_bests": [],
+                                           "_type": setting.parameter.type})
             then = f.pinned.settings.get(name)
             difference = _difference(then.parameter, setting.parameter) if then is not None else None
             if difference:
                 changed.append(f"{name}: {difference.format(study=f.name)}: that study's figures are left out")
                 continue
             entry["tuned_in"] += 1
-            if item["importance"] is not None and item["n"] >= IMPORTANCE_MIN_N:
-                entry["_values"].append(float(item["importance"]))
+            entry["_values"].append((item["importance"], item["n"], item["p"]))
             if item["best"] is not None:
                 entry["_bests"].append(item["best"])
             if f.decision == "use" and item["best"] is not None:
@@ -258,8 +266,7 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
     for name, entry in seen.items():
         values, starts = entry.pop("_values"), entry.pop("_starts")
         entry["leaned"] = _leaned(entry.pop("_bests"), entry.pop("_type"))
-        entry["importance_n"] = len(values)
-        entry["importance"] = fmean(values) if values else None
+        entry.update(_pooled(values))
         moves = set()
         for winner, start in zip(entry["winners"], starts):
             a, b = _number(winner["value"]), _number(start)
@@ -268,6 +275,37 @@ def learned(home: Any, harness_id: str, *, document_of: Callable[[Path], dict] |
         entry["direction"] = "mixed" if len(moves) == 2 else next(iter(moves), None)
         out["settings"][name] = entry
     return out
+
+
+def _combined_p(ps: list[Any]) -> float | None:
+    """Fisher's combined p of independent studies: -2 * sum(ln p) against chi-squared with 2k degrees
+    of freedom, whose survival is exp(-x/2) * sum_{j<k} (x/2)^j / j!. A p that is not a number in
+    (0, 1] counts as 1: it was not shown to beat chance. None without a study."""
+    if not ps:
+        return None
+    numbers = [_number(p) for p in ps]
+    clean = [p if p is not None and 0.0 < p <= 1.0 else 1.0 for p in numbers]
+    half = -sum(math.log(p) for p in clean)
+    term, total = 1.0, 1.0
+    for j in range(1, len(clean)):
+        term *= half / j
+        total += term
+    return min(1.0, math.exp(-half) * total)
+
+
+def _pooled(studies: list[tuple[Any, int, Any]]) -> dict[str, Any]:
+    """A setting's strength over its studies, each `(|rho|, n, p)` (decision 2, departing from the design's
+    "pool over the studies with p < 0.1", which shows a setting that does nothing in about 26 % of cases
+    after three studies, at a strength as high as a real one's). A study counts when it has a strength on
+    at least `IMPORTANCE_MIN_N` combinations (`importance_of`); their p's are combined by Fisher's rule
+    (`importance_p`); when that is under `IMPORTANCE_P` the strength is the mean |rho| over all of them
+    (`importance`, over `importance_n` studies), else None and `importance_n` 0."""
+    counted = [(float(value), p) for value, n, p in studies if _number(value) is not None and n >= IMPORTANCE_MIN_N]
+    combined = _combined_p([p for _, p in counted])
+    shown = combined is not None and combined < IMPORTANCE_P
+    return {"importance": fmean(v for v, _ in counted) if shown else None,
+            "importance_n": len(counted) if shown else 0,
+            "importance_of": len(counted), "importance_p": combined}
 
 
 def _leaned(bests: list[Any], kind: str) -> Any:
@@ -387,6 +425,110 @@ def warm_start(home: Any, harness: Harness, study: Study, *,
     return study, lines + tail
 
 
+def case_digest(path: Path) -> str | None:
+    """The sha256 of a case file's content, None when it cannot be read: two studies hold back
+    the same case when the content is the same, whatever the file is called."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _from_the_defaults(f: Finished) -> bool:
+    """Whether a finished study's starting point was the harness defaults (A4.3c, Q18): a settings
+    study (or settings and data) whose search ran, not warm-started, with no tuned setting started
+    by hand and no setting given by the study itself (fixed, or from an input settings file)."""
+    from evolvekit.harness.compile import _given_settings
+
+    if f.kind not in ("settings", "both") or f.not_run or f.study.warm is not None:
+        return False
+    if any(choice.mode == "tune" and choice.start is not None for choice in f.study.settings.values()):
+        return False
+    try:
+        return not _given_settings(f.study, f.pinned, f.root)
+    except HarnessError:
+        return False
+
+
+def defaults_study(home: Any, study: Study, cases: Sequence[Path]) -> tuple[Finished, Path] | None:
+    """The latest finished study on `study`'s harness whose starting point was the harness
+    defaults (`_from_the_defaults`) and whose final check kept its runs
+    (`confirm/final/results.json`), with that file; of those, the latest that held back a case
+    with the content of one of `cases` (the new study's held-back case files) when there is one.
+    None when there is none."""
+    found = [(f, f.run_dir / "confirm" / "final" / "results.json") for f in finished_studies(home, study.harness_id)
+             if _from_the_defaults(f)]
+    found = [(f, results) for f, results in found if results.is_file()]
+    if not found:
+        return None
+    wanted = {digest for digest in map(case_digest, cases) if digest}
+    sharing = [(f, results) for f, results in found
+               if wanted & {case_digest(f.root / case) for case in f.study.test}]
+    return (sharing or found)[-1]
+
+
+def in_warm_chain(home: Any, study: Study, slug: str) -> bool:
+    """Whether the study `slug` is among those `study` was warm-started from, directly or through
+    the studies its own starting point came from (each finished study's `warm.from`): then its
+    final check chose what `study` compares (decision 15c). A study on the way that cannot be
+    seen (deleted, in the trash, not finished) counts as the chain: it may have come from `slug`,
+    and a line that cannot rule that out is not measured."""
+    by_slug = {f.slug: f for f in finished_studies(home, study.harness_id)}
+    seen: set[str] = set()
+    warm = study.warm
+    while warm is not None and warm.from_slug not in seen:
+        if warm.from_slug == slug:
+            return True
+        seen.add(warm.from_slug)
+        parent = by_slug.get(warm.from_slug)
+        if parent is None:
+            return True
+        warm = parent.study.warm
+    return False
+
+
+def warm_chain_unseen(home: Any, study: Study, slug: str) -> str | None:
+    """The study on `study`'s warm-start chain that cannot be seen (its `warm.from`), when the
+    chain reaches it before `slug`: `in_warm_chain` then counts the chain without knowing it, and
+    the line says that, not that `slug` chose the starting point. None when the chain reaches
+    `slug`, ends, or is seen all the way."""
+    by_slug = {f.slug: f for f in finished_studies(home, study.harness_id)}
+    seen: set[str] = set()
+    warm = study.warm
+    while warm is not None and warm.from_slug not in seen:
+        if warm.from_slug == slug:
+            return None
+        seen.add(warm.from_slug)
+        parent = by_slug.get(warm.from_slug)
+        if parent is None:
+            return warm.from_slug
+        warm = parent.study.warm
+    return None
+
+
+def chain_defaults_study(home: Any, study: Study, cases: Sequence[Path]) -> Finished | None:
+    """The study at the root of `study`'s warm-start chain (each finished study's `warm.from`,
+    followed back) when it started from the harness defaults (`_from_the_defaults`) and held back
+    a case with the content of one of `cases`; else None (decision 17). A configuration's effect
+    on a case is the same in every study, so any later study that started from the defaults
+    carries, on those cases, the case effects that root's final check chose on: a line against
+    the defaults would replay that choice. A chain that reaches a study it cannot see is
+    `in_warm_chain`'s to judge."""
+    by_slug = {f.slug: f for f in finished_studies(home, study.harness_id)}
+    seen: set[str] = set()
+    warm, root = study.warm, None
+    while warm is not None and warm.from_slug not in seen:
+        seen.add(warm.from_slug)
+        root = by_slug.get(warm.from_slug)
+        if root is None:
+            return None
+        warm = root.study.warm
+    if root is None or not _from_the_defaults(root):
+        return None
+    wanted = {digest for digest in map(case_digest, cases) if digest}
+    return root if wanted & {case_digest(root.root / case) for case in root.study.test} else None
+
+
 def _study_harness(home: Any, study: Study, finished: list[Finished]) -> Harness | None:
     """The harness version the study was made with, from the library; else the newest of its id."""
     for entry in find_harnesses(Path(home.root)):
@@ -399,30 +541,59 @@ def _study_harness(home: Any, study: Study, finished: list[Finished]) -> Harness
     return current_harness(home, study.harness_id, finished)
 
 
+def _studies_since(finished: list[Finished], winner: Finished, name: str, slug: str | None) -> int:
+    """The finished studies after `winner` that tuned `name`: settings studies (or settings and
+    data) whose search ran and that had it among their tuned settings; never the winner's own, nor
+    the new study's (`slug`), which the `1 +` of the weight counts once. A code study, a bake-off,
+    a per-group study or a search that did not run learned nothing about the setting."""
+    return sum(1 for f in finished
+               if f.finished_at > winner.finished_at and f.slug not in (winner.slug, slug)
+               and f.kind in ("settings", "both") and not f.not_run and name in f.study.tuned_settings())
+
+
 def priors_for(home: Any, study: Study, *, slug: str | None = None,
-               document_of: Callable[[Path], dict] | None = None) -> dict[str, dict]:
-    """`{name: {"value", "weight"}}` for each setting `study` tunes that a `use` study won: the
-    latest winner, at weight `0.5 ** k`, `k` being 1 + the other finished studies on the harness
-    after the winner's (the new study is the first since, counted once: `slug`, the study's own
-    folder name, is never counted again when it is run again). Dropped below `MIN_PRIOR_WEIGHT`,
-    and when the value is outside the study's range."""
+               document_of: Callable[[Path], dict] | None = None,
+               features: Callable[[Path, Study], dict | None] | None = None) -> dict[str, dict]:
+    """`{name: {"value", "weight", "studies_since", "similarity", "left_out"}}` for each setting
+    `study` tunes that a `use` study won: the latest winner, at weight `0.5 ** (1 + k) * similarity`.
+    `k` (`studies_since`, `_studies_since`) counts the later finished studies that tuned the setting;
+    the new study is the first since, counted once (`slug`, its own folder name, is never counted
+    again when it is run again). `similarity` (`groups.compare`, rounded to three places in the
+    result) compares the cases of the winner's study with the new study's, from the features their
+    kept tables give (`features`, `groups.study_features` when None: never a solve; the new study's
+    read once, at the first winner); 1.0 when either has none, or without a `slug`. `left_out`
+    names the features that could not be standardised (no spread inside either study). Dropped
+    below `MIN_PRIOR_WEIGHT`, and when the value is outside the study's range. `compile_study`
+    reads `value` and `weight`; `write_run` records the applied ones in `study-run.json`."""
+    from evolvekit.harness import groups
+
+    read = features or groups.study_features
     finished = finished_studies(home, study.harness_id)
     facts = learned(home, study.harness_id, document_of=document_of)["settings"]
     harness = _study_harness(home, study, finished)
     if harness is None:
         return {}
-    at = {f.slug: f.finished_at for f in finished}
+    by_slug = {f.slug: f for f in finished}
+    new: list[Any] = []  # the new study's features, read once, at the first winner (none without a winner)
+    factors: dict[str, tuple[float, list[str]]] = {}
     priors: dict[str, dict] = {}
     for name in study.tuned_settings():
         entry, setting = facts.get(name), harness.settings.get(name)
         if not entry or not entry["winners"] or setting is None:
             continue
-        winner = entry["winners"][-1]  # `learned` lists them oldest first
-        won = at.get(winner["study"])
-        if won is None:
+        winner = by_slug.get(entry["winners"][-1]["study"])  # `learned` lists them oldest first
+        if winner is None:
             continue
-        weight = 0.5 ** (1 + sum(1 for f in finished if f.finished_at > won and f.slug not in (winner["study"], slug)))
-        if weight < MIN_PRIOR_WEIGHT or not _fits(setting.parameter, study.settings[name], winner["value"]):
+        value = entry["winners"][-1]["value"]
+        k = _studies_since(finished, winner, name, slug)
+        if not new:
+            new.append(read(Path(home.studies_dir) / slug, study) if slug else None)
+        if winner.slug not in factors:
+            factors[winner.slug] = groups.compare(read(winner.root, winner.study), new[0]) if new[0] else (1.0, [])
+        factor, left_out = factors[winner.slug]
+        weight = 0.5 ** (1 + k) * factor
+        if weight < MIN_PRIOR_WEIGHT or not _fits(setting.parameter, study.settings[name], value):
             continue
-        priors[name] = {"value": setting.parameter.coerce(winner["value"]), "weight": weight}
+        priors[name] = {"value": setting.parameter.coerce(value), "weight": weight, "studies_since": k,
+                        "similarity": round(factor, 3), "left_out": list(left_out)}
     return priors

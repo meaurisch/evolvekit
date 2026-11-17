@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import math
+import random
 import shutil
 from pathlib import Path
+from statistics import fmean
 
 import pytest
 import yaml
@@ -12,6 +16,8 @@ from test_app_results import finished_run
 
 from evolvekit.app.store import Home
 from evolvekit.harness import memory
+from evolvekit.harness.manifest import load_harness
+from evolvekit.harness.study import load_study
 
 STARTS = {"neighbours": 8, "restart_after": 2000, "accept_worse": 0.0, "init": "random"}
 
@@ -29,7 +35,9 @@ def finished(home, docs, name, *, decision, best=None, importance=None, finished
     (run_dir / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     items = [{"name": n, "default": start.get(n), "best": best.get(n),
               "importance": {"value": importance[n][0] if n in importance else None,
-                             "n": importance[n][1] if n in importance else 0}}
+                             "n": importance[n][1] if n in importance else 0,
+                             # (value, n, p); a pair is a status item from before A4.3, without `p`
+                             **({"p": importance[n][2]} if len(importance.get(n, ())) > 2 else {})}}
              for n in [*importance, *[b for b in best if b not in importance]]]
     docs[run_dir] = {"parameters": {"available": True, "items": items}}
     return root
@@ -40,15 +48,117 @@ def again(root, **kw):
     finished_run(root / "runs" / "r1", started="2026-10-01T00:00:00+00:00", **kw)
 
 
-def test_learned_counts_and_importance_mean(tmp_path):
+def test_importance_pools_only_studies_whose_correlation_beat_chance(tmp_path):
+    """Decision 2 (A4.3, S9): a setting's strength is shown when its studies' permutation p's,
+    combined by Fisher's rule, are under 0.1; it is then the mean |rho| over every study with at
+    least five fully evaluated combinations, not only over those that beat chance on their own."""
     home, docs = Home(tmp_path / "my home"), {}
-    finished(home, docs, "One", decision="keep", importance={"neighbours": (0.6, 20)}, finished_at="2026-10-01")
-    finished(home, docs, "Two", decision="keep", importance={"neighbours": (0.2, 20)}, finished_at="2026-10-08")
-    finished(home, docs, "Three", decision="keep", importance={"neighbours": (0.9, 3)}, finished_at="2026-10-15")
+    finished(home, docs, "One", decision="keep", importance={"neighbours": (0.6, 20, 0.01), "init": (0.3, 20, 0.5)},
+             finished_at="2026-10-01")
+    finished(home, docs, "Two", decision="keep", importance={"neighbours": (0.2, 20, 0.4), "init": (0.4, 20, 0.3)},
+             finished_at="2026-10-08")
+    finished(home, docs, "Three", decision="keep", importance={"neighbours": (0.9, 3, 0.001)}, finished_at="2026-10-15")
     got = memory.learned(home, "demo-tour", document_of=docs.get)
     n = got["settings"]["neighbours"]
     assert n["tuned_in"] == 3 and n["importance"] == pytest.approx(0.4) and n["importance_n"] == 2
+    assert n["importance_of"] == 2, "the study of three combinations is too small to count"
+    assert n["importance_p"] == pytest.approx(0.004 * (1 - math.log(0.004)))  # Fisher's rule, two studies
+    init = got["settings"]["init"]
+    assert init["importance"] is None and init["importance_n"] == 0 and init["importance_of"] == 2
+    assert init["importance_p"] >= memory.IMPORTANCE_P == 0.1
     assert [s["name"] for s in got["studies"]] == ["One", "Two", "Three"]
+
+
+def test_a_status_item_from_before_the_permutation_p_counts_as_not_shown(tmp_path):
+    """Legacy split: an item without `importance.p` joins Fisher's rule as p = 1 -- it is counted, and
+    it tells nothing from chance."""
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "One", decision="keep", importance={"neighbours": (0.6, 20)}, finished_at="2026-10-01")
+    n = memory.learned(home, "demo-tour", document_of=docs.get)["settings"]["neighbours"]
+    assert n["importance"] is None and n["importance_of"] == 1 and n["importance_p"] == pytest.approx(1.0)
+    assert memory._combined_p([0.01, None]) == pytest.approx(memory._combined_p([0.01, 1.0]))
+    assert memory._combined_p([]) is None
+
+
+def test_a_setting_no_study_could_tell_from_chance_is_not_reranked(tmp_path):
+    """Three studies, the template tunes `recommended`: restart_after went with the measure most
+    strongly (0.9) but never beat chance, so it keeps the harness's rank order behind the settings
+    with a strength."""
+    home, docs = Home(tmp_path / "my home"), {}
+    shown = {"accept_worse": (0.7, 20, 0.01), "init": (0.6, 20, 0.02), "neighbours": (0.5, 20, 0.03),
+             "restart_after": (0.9, 20, 0.6)}
+    finished(home, docs, "Spring", decision="use", best={"neighbours": 12}, importance=shown, finished_at="2026-10-01")
+    finished(home, docs, "Summer", decision="keep", importance=shown, finished_at="2026-10-08")
+    finished(home, docs, "Autumn", decision="keep", importance=shown, finished_at="2026-10-15")
+    facts = memory.learned(home, "demo-tour", document_of=docs.get)["settings"]
+    assert facts["restart_after"]["importance"] is None and facts["restart_after"]["importance_of"] == 3
+    slug = home.create_study("demo-tour", "tune", "Winter")
+    winter = home.study_root(slug)
+    warmed, _ = memory.warm_start(home, load_harness(winter / "harness"), load_study(winter), document_of=docs.get)
+    assert warmed.warm.ranked == ["accept_worse", "init", "neighbours", "restart_after"]
+
+
+@functools.cache
+def _null_studies(trials: int = 2000, studies: int = 3, rows: int = 8) -> tuple:
+    """`trials` sets of `studies` null studies of `rows` ranked rows (independent value and score),
+    each as (|rho|, p) through `status._permutation_p`; random.Random(99003), a seed of its
+    own (the builder check drew 20261114: Fisher 8.50 % +- 0.62, the design's rule 25.65 % +- 0.98)."""
+    from evolvekit import stats, status
+
+    rng = random.Random(99003)
+    out = []
+    for _ in range(trials):
+        one = []
+        for _ in range(studies):
+            xs = [rng.random() for _ in range(rows)]
+            ys = [rng.gauss(0.0, 1.0) for _ in range(rows)]
+            one.append((abs(stats.spearman(xs, ys)), status._permutation_p(xs, ys)))
+        out.append(tuple(one))
+    return tuple(out)
+
+
+def test_a_setting_that_does_nothing_is_shown_in_about_8_percent_after_three_studies():
+    """The product's rule (decision 2): three null studies of 8 rows each through status._permutation_p
+    and `memory._pooled` (Fisher's combined p < 0.1); 2000 seeded trials. Measured 7.10 % +- 0.57;
+    asserts [5.0, 11.0] %."""
+    trials = _null_studies()
+    shown = sum(memory._pooled([(r, 20, p) for r, p in one])["importance"] is not None for one in trials)
+    rate = shown / len(trials)
+    print(f"null setting shown after three studies (Fisher): {rate:.2%} +- {math.sqrt(rate * (1 - rate) / len(trials)):.2%}")
+    assert 0.05 <= rate <= 0.11
+
+
+def test_under_the_designs_rule_a_setting_that_does_nothing_would_be_shown_in_about_26_percent_after_three_studies():
+    """The design's rule, kept as a measured comparison (decision 2 departs from it): pool |rho| over
+    the studies whose own p < 0.1. Same 2000 seeded trials as the Fisher test. Measured
+    23.95 % +- 0.95, the pooled |rho| when shown 0.74 (a real rho = 0.5 setting's is 0.77, builder
+    check); asserts [22, 30] %."""
+    trials = _null_studies()
+    pooled = [[r for r, p in one if p < memory.IMPORTANCE_P] for one in trials]
+    shown = [fmean(rs) for rs in pooled if rs]
+    rate = len(shown) / len(trials)
+    print(f"null setting shown after three studies (design's rule): {rate:.2%} +- "
+          f"{math.sqrt(rate * (1 - rate) / len(trials)):.2%}; pooled |rho| when shown {fmean(shown):.2f}")
+    assert 0.22 <= rate <= 0.30
+    assert fmean(shown) > 0.6, "what it would rank: noise as strong as a real effect"
+
+
+@pytest.mark.slow
+def test_a_setting_that_does_nothing_in_lineage_shaped_searches_is_shown_in_about_10_percent_after_three_studies():
+    """Decision 16 on the product's path: three lineage-shaped null studies (`test_status.lineage_rows`,
+    10 rounds of 8) read through `status._importance` and pooled by `memory._pooled`; 1000 seeded trials
+    (random.Random(20261118)). Measured 10.0 % +- 0.95 (under the earlier moved-only reading 7.9 % +- 0.85);
+    asserts [7, 13.5] %."""
+    from test_status import lineage_importance, lineage_rows
+
+    rng = random.Random(20261118)
+    shown = 0
+    for _ in range(1000):
+        studies = [lineage_importance(lineage_rows(rng)) for _ in range(3)]
+        shown += memory._pooled([(s["value"], s["n"], s["p"]) for s in studies])["importance"] is not None
+    rate = shown / 1000
+    print(f"null setting shown after three lineage studies (Fisher): {rate:.2%} +- {math.sqrt(rate * (1 - rate) / 1000):.2%}")
+    assert 0.07 <= rate <= 0.135
 
 
 def test_winners_only_from_use_studies(tmp_path):
@@ -224,7 +334,7 @@ def test_a_study_whose_search_did_not_run_is_listed_and_adds_up_nothing(tmp_path
     """Persona p5 fix round 1, I2: a run that stopped before its first round "found" the starting point; it
     stays in the studies with its line, and is no study that tuned, ranked or leaned anywhere."""
     home, docs = Home(tmp_path / "my home"), {}
-    finished(home, docs, "One", decision="keep", best={"neighbours": 4}, importance={"neighbours": (0.6, 20)},
+    finished(home, docs, "One", decision="keep", best={"neighbours": 4}, importance={"neighbours": (0.6, 20, 0.01)},
              finished_at="2026-10-01")
     root = finished(home, docs, "Idle", decision="keep", best={"neighbours": 8}, importance={"neighbours": (0.1, 20)},
                     finished_at="2026-10-08")
@@ -239,3 +349,193 @@ def test_a_study_whose_search_did_not_run_is_listed_and_adds_up_nothing(tmp_path
     assert idle["line"].startswith("The search did not run") and idle["not_run"] is True
     n = got["settings"]["neighbours"]
     assert n["tuned_in"] == 1 and n["importance"] == pytest.approx(0.6) and n["leaned"] == 4
+
+
+# -- the prior: what it decays for, and how alike the cases are (A4.3, S11) ----
+
+
+def _tunes_only(root, *names) -> None:
+    """The study (and so its runs, which keep no copy here) tunes `names` alone; the rest at their defaults."""
+    study = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    study["vary"]["settings"] = {n: ("tune" if n in names else "default") for n in study["vary"]["settings"]}
+    (root / "study.yaml").write_text(yaml.safe_dump(study, sort_keys=False), encoding="utf-8")
+
+
+def _job(root, **changes) -> None:
+    path = root / "runs" / "r1" / "job.json"
+    job = json.loads(path.read_text(encoding="utf-8"))
+    job.update(changes)
+    path.write_text(json.dumps(job), encoding="utf-8")
+
+
+def _new_study(home, name="Winter"):
+    slug = home.create_study("demo-tour", "tune", name)
+    return slug, load_study(home.study_root(slug))
+
+
+def test_the_prior_decays_only_for_settings_studies_that_tuned_the_setting(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "A", decision="use", best={"neighbours": 12, "restart_after": 13000}, finished_at="2026-10-01")
+    b = finished(home, docs, "B", decision="keep", best={"restart_after": 9000}, finished_at="2026-10-08")
+    _tunes_only(b, "restart_after")
+    finished(home, docs, "C", decision="keep", best={"neighbours": 30}, finished_at="2026-10-15", template="faster")
+    d = finished(home, docs, "D", decision="keep", best={"neighbours": 25}, finished_at="2026-10-22")
+    _job(d, bakeoff=[{"ref": "a"}])
+    e = finished(home, docs, "E", decision="keep", best={"neighbours": 8}, finished_at="2026-10-29")
+    _job(e, search={"generations": 0, "aborted": False, "stop_reason": "time limit: …"},
+         final={"skipped": "the search did not run", "not_run": True})
+    f = finished(home, docs, "F", decision="keep", best={"neighbours": 20, "restart_after": 5000},
+                 finished_at="2026-11-05")
+    _job(f, per_group=True)
+    assert [(s["name"], s["kind"], s["not_run"]) for s in memory.learned(home, "demo-tour", document_of=docs.get)["studies"]] \
+        == [("A", "settings", False), ("B", "settings", False), ("C", "code", False), ("D", "bakeoff", False),
+            ("E", "settings", True), ("F", "per_group", False)]
+    slug, study = _new_study(home)
+    got = memory.priors_for(home, study, slug=slug, document_of=docs.get)
+    assert got == {"neighbours": {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0, "left_out": []},
+                   "restart_after": {"value": 13000, "weight": 0.25, "studies_since": 1, "similarity": 1.0,
+                                     "left_out": []}}, \
+        "only B tuned restart_after since A; C is a code study, D a bake-off, E did not search, F per group"
+
+
+def test_the_prior_shrinks_for_unlike_cases(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    won = finished(home, docs, "A", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
+    slug, study = _new_study(home)
+    new = home.study_root(slug)
+    # four cases a study, sd 1, sampling correction 1: a shift of sqrt(2) is d² = 1, of 3 is d² = 8
+    base = [9.0, 9.0, 11.0, 11.0]
+
+    def cases(shift, fleet=3.0):
+        return {f"c{i}": {"mean_x": v + shift, "mean_fleet": fleet} for i, v in enumerate(base)}
+
+    alike, one_sd, far = cases(0.0), cases(math.sqrt(2.0), fleet=5.0), cases(3.0)
+    seen = []
+
+    def features(of_new):
+        def read(root, s):
+            seen.append(Path(root))
+            return of_new if Path(root) == new else (alike if Path(root) == won else None)
+        return read
+
+    def prior(of_new):
+        return memory.priors_for(home, study, slug=slug, document_of=docs.get, features=features(of_new)).get("neighbours")
+
+    assert prior(alike) == {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0,
+                            "left_out": ["mean_fleet"]}
+    assert sorted(seen) == sorted([won, new]), "the winner's cases against the new study's, each read once"
+    shrunk = prior(one_sd)
+    assert shrunk["weight"] == pytest.approx(0.5 * math.exp(-0.5)) and shrunk["similarity"] == round(math.exp(-0.5), 3)
+    assert shrunk["left_out"] == ["mean_fleet"], "a fixed fleet size that differs is named, and drops nothing"
+    assert prior(None) == {"value": 12, "weight": 0.5, "studies_since": 0, "similarity": 1.0, "left_out": []}, \
+        "no cases kept on one side: no shrink"
+    assert prior(far) is None, "a factor that takes the weight under 0.05 drops the prior"
+    assert memory.priors_for(home, study, document_of=docs.get)["neighbours"]["similarity"] == 1.0, \
+        "without the study's folder name there is nothing to compare: no shrink"
+
+
+def test_the_new_studys_features_are_read_only_when_a_winner_needs_them(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "A", decision="keep", best={"neighbours": 12}, finished_at="2026-10-01")
+    slug, study = _new_study(home)
+
+    def never(root, s):
+        raise AssertionError("no use study: nothing to compare the cases with")
+
+    assert memory.priors_for(home, study, slug=slug, document_of=docs.get, features=never) == {}
+    finished(home, docs, "B", decision="use", best={"neighbours": 12, "restart_after": 13000}, finished_at="2026-10-08")
+    reads = []
+    got = memory.priors_for(home, study, slug=slug, document_of=docs.get,
+                            features=lambda root, s: reads.append(Path(root)))
+    assert set(got) == {"neighbours", "restart_after"} and reads == [home.study_root(slug)], \
+        "the new study's features once; with none there, the winner's are not read either"
+
+
+# -- the study that started from the harness defaults (A4.3c, S11) ------------
+
+
+def _edit(root, change) -> None:
+    study = yaml.safe_load((root / "study.yaml").read_text(encoding="utf-8"))
+    change(study)
+    (root / "study.yaml").write_text(yaml.safe_dump(study, sort_keys=False), encoding="utf-8")
+
+
+def test_the_defaults_study_is_the_latest_settings_study_that_started_from_the_harness_defaults(tmp_path):
+    home, docs = Home(tmp_path / "my home"), {}
+    first = finished(home, docs, "A", decision="use", finished_at="2026-10-01")
+    second = finished(home, docs, "B", decision="keep", finished_at="2026-10-08")
+    warm = finished(home, docs, "C", decision="use", finished_at="2026-10-15")
+    _edit(warm, lambda s: s.update(warm={"from": "a", "run": "r1", "at": "2026-10-01T00:00:00+00:00"}))
+    started = finished(home, docs, "D", decision="keep", finished_at="2026-10-22")
+    _edit(started, lambda s: s["vary"]["settings"].update(neighbours={"tune": True, "start": 10}))
+    fixed = finished(home, docs, "E", decision="keep", finished_at="2026-10-29")
+    _edit(fixed, lambda s: s["vary"]["settings"].update(neighbours={"fixed": 10}))
+    finished(home, docs, "F", decision="use", finished_at="2026-11-01", template="faster")
+    not_run = finished(home, docs, "G", decision="keep", finished_at="2026-11-02")
+    _job(not_run, search={"generations": 0, "aborted": False, "stop_reason": "time limit: …"},
+         final={"skipped": "the search did not run", "not_run": True})
+    per_group = finished(home, docs, "H", decision="keep", finished_at="2026-11-03")
+    _job(per_group, per_group=True)
+    slug, study = _new_study(home)
+    cases = [home.study_root(slug) / case for case in study.test]
+    got = memory.defaults_study(home, study, cases)
+    assert got is not None and got[0].root == second, \
+        "C was warm-started, D set a start by hand, E fixed a setting, F is a code study, G did not search, H per group"
+    assert got[1] == second / "runs" / "r1" / "confirm" / "final" / "results.json"
+    (got[1]).unlink()
+    assert memory.defaults_study(home, study, cases)[0].root == first, "a study without its final check's runs is passed over"
+    (first / "runs" / "r1" / "confirm" / "final" / "results.json").unlink()
+    assert memory.defaults_study(home, study, cases) is None
+
+
+def test_the_warm_chain_counts_a_study_it_cannot_see(tmp_path):
+    """Decision 15c: a study on the way that is gone (deleted, in the trash) or not finished might
+    have come from the defaults study: it counts as the chain, so the line is not measured."""
+    from evolvekit.harness.study import Warm
+
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "A", decision="use", finished_at="2026-10-01")
+    other = finished(home, docs, "B", decision="use", finished_at="2026-10-08")
+    _edit(other, lambda s: s["vary"]["settings"].update(neighbours={"tune": True, "start": 10}))
+    slug, study = _new_study(home)
+
+    def warm(from_slug):
+        return Warm(from_slug=from_slug, run="r1", at="2026-10-08T00:00:00+00:00")
+
+    study.warm = warm("a")
+    assert memory.in_warm_chain(home, study, "a")
+    study.warm = warm("b")
+    assert not memory.in_warm_chain(home, study, "a"), "B started from a value set by hand: its chain ends there"
+    _edit(other, lambda s: s.update(warm={"from": "a", "run": "r1", "at": "2026-10-01T00:00:00+00:00"}))
+    assert memory.in_warm_chain(home, study, "a"), "through B, warm-started from A"
+    study.warm = warm("gone")
+    assert memory.in_warm_chain(home, study, "a"), "a study it cannot see counts as the chain"
+    shutil.rmtree(other / "runs")
+    study.warm = warm("b")
+    assert memory.in_warm_chain(home, study, "a"), "an unfinished study too"
+
+
+def test_the_warm_chain_names_the_study_it_cannot_see_so_the_line_says_why(tmp_path):
+    """Pre-merge testing: a chain that may run through `slug` only because a study on the way cannot
+    be seen says so: the defaults line then names that, never "<slug> chose this study's starting
+    point", which would assert a chain that may not exist."""
+    from evolvekit.harness.execute import chain_words, defaults_line, unseen_words
+    from evolvekit.harness.study import Warm
+
+    home, docs = Home(tmp_path / "my home"), {}
+    finished(home, docs, "A", decision="use", finished_at="2026-10-01")
+    other = finished(home, docs, "B", decision="use", finished_at="2026-10-08")
+    _edit(other, lambda s: s.update(warm={"from": "a", "run": "r1", "at": "2026-10-01T00:00:00+00:00"}))
+    slug, study = _new_study(home)
+    study.warm = Warm(from_slug="b", run="r1", at="2026-10-08T00:00:00+00:00")
+    assert memory.warm_chain_unseen(home, study, "a") is None, "A is reached through B: seen all the way"
+    study.warm = Warm(from_slug="a", run="r1", at="2026-10-08T00:00:00+00:00")
+    assert memory.warm_chain_unseen(home, study, "a") is None
+    study.warm = Warm(from_slug="gone", run="r1", at="2026-10-08T00:00:00+00:00")
+    assert memory.warm_chain_unseen(home, study, "a") == "gone"
+
+    seen = defaults_line(object(), "use", name="Depot summer", reuses=True)
+    assert seen == {"measured": False, "why": chain_words("Depot summer"), "reuses": True}
+    gap = defaults_line(object(), "use", name="Depot summer", reuses=True, unseen="gone")
+    assert gap == {"measured": False, "why": unseen_words("gone"), "reuses": True}
+    assert "Depot summer" not in gap["why"] and "(gone)" in gap["why"]

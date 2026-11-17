@@ -306,6 +306,57 @@ def test_rule_lines_by_features():
     assert "The rule puts 1 of the 4 cases to learn from in another group than its own." in lines
 
 
+def test_a_merge_fits_the_rule_again_and_reassigns_the_held_back_cases():
+    """Open question 12: B has one held-back case and joins A, its nearest; the rule over A and C is
+    then g (its gap is the widest), not f, and h -- which the three-group rule put in C by f -- goes to A."""
+    features = {"a1": {"f": 1.0, "g": 0.0}, "a2": {"f": 2.0, "g": 0.5}, "b1": {"f": 10.0, "g": 1.0},
+                "b2": {"f": 11.0, "g": 1.5}, "c1": {"f": 12.0, "g": 100.0}, "c2": {"f": 13.0, "g": 101.0},
+                "a3": {"f": 1.5, "g": 0.2}, "a4": {"f": 1.8, "g": 0.3}, "b3": {"f": 10.5, "g": 1.2},
+                "c3": {"f": 12.5, "g": 100.5}, "c4": {"f": 12.8, "g": 100.2}, "h": {"f": 11.8, "g": 1.2},
+                "u": {"f": None, "g": 100.7}}
+    labels = {"a1": "A", "a2": "A", "b1": "B", "b2": "B", "c1": "C", "c2": "C"}
+    stump = groups.rule_stump({c: features[c] for c in labels}, labels)
+    assert stump == {"feature": "f", "thresholds": [6.0, 11.5], "sides": ["A", "B", "C"], "misplaced": 0}
+    assert groups.assign(stump, features["h"]) == "C" and groups.assign(stump, features["u"]) is None
+    stale = "u: the rule cannot read it, so it goes to C, the nearest"  # true of the three-group rule only
+    doc = {"format": 2, "method": "features", "assigned": "stump", "k": 3, "features": features,
+           "notes": ["mean_x: the same in every case, so not used to tell them apart", stale],
+           "cases": list(features), "stump": stump,
+           "accuracy": {"training": {"right": 6, "of": 6}, "held_back": {"right": 5, "of": 6}},
+           "groups": {"A": {"training": ["a1", "a2"], "test": ["a3", "a4"]},
+                      "B": {"training": ["b1", "b2"], "test": ["b3"]},
+                      "C": {"training": ["c1", "c2"], "test": ["c3", "c4", "h", "u"]}}}
+    merged = groups.merge_small_groups(doc)
+    assert list(merged["groups"]) == ["A", "C"] and merged["k"] == 2
+    assert "B has 1 held-back case, so it joins A, the nearest by its features" in merged["notes"]
+    assert stale not in merged["notes"], "the rule over A and C reads u: the old note is dropped"
+    assert "mean_x: the same in every case, so not used to tell them apart" in merged["notes"], "other notes stay"
+    assert merged["stump"] == {"feature": "g", "thresholds": [50.75], "sides": ["A", "C"], "misplaced": 0}
+    assert merged["groups"]["A"] == {"training": ["a1", "a2", "b1", "b2"], "test": ["a3", "a4", "b3", "h"],
+                                     "merged_from": ["B"]}
+    assert merged["groups"]["C"]["test"] == ["c3", "c4", "u"]
+    assert merged["accuracy"] == {"training": {"right": 6, "of": 6}, "held_back": {"right": 7, "of": 7}}
+    assert doc["stump"]["feature"] == "f", "the argument is not changed"
+    assert groups.merge_small_groups(merged) == merged
+    lines = groups.rule_lines(merged, {"A": "use", "C": "use"})
+    assert lines[0] == "If g is above 50.75, use the settings of C; otherwise those of A."
+    one = groups.merge_small_groups({**doc, "groups": {"A": {"training": ["a1", "a2"], "test": ["a3"]},
+                                                       "C": {"training": ["c1", "c2"], "test": ["c3"]}}})
+    assert list(one["groups"]) == ["A"] and one["stump"] is None and "accuracy" not in one
+    assert one["groups"]["A"]["test"] == ["a3", "c3"]
+
+
+def test_rule_lines_of_a_format_1_doc_keep_their_sentence():
+    """A finished run's own copy of format 1 (no `accuracy`) keeps the sentence it was written with."""
+    doc = {"format": 1, "method": "features", "describe": {"rows_stops": "the number of rows in stops"},
+           "features": {"c0": {"rows_stops": 20.0}, "c1": {"rows_stops": 81.0}, "c2": {"rows_stops": 80.0},
+                        "c3": {"rows_stops": 82.0}},
+           "groups": {"group 1": {"training": ["c0", "c1"], "test": []}, "group 2": {"training": ["c2", "c3"], "test": []}}}
+    lines = groups.rule_lines(doc, {"group 1": "use", "group 2": "use"})
+    assert lines[1] == "The rule puts 1 of the 4 cases to learn from in another group than its own."
+    assert not any("held-back" in line for line in lines)
+
+
 def test_the_report_has_per_kind_of_case(tmp_path):
     root, run_dir = per_group_run(tmp_path, {"small": ("use", 2), "large": ("keep", 2)})
     doc = build_verdict(root, "r1")
@@ -831,3 +882,46 @@ def test_the_results_of_a_held_group_say_what_the_verdict_says_not_better(tmp_pa
     assert f"Final check (small): {doc['groups']['small']['line']}" in data["summary_text"].splitlines()
     _run_phase(run_dir, "done")
     assert jobs.results(root, "r1", document_of, group="small")["final"]["decision"] == "use", "read once all are done"
+
+
+def test_each_group_s_job_json_gets_rounds_left_within_its_own_share(tmp_path, monkeypatch):
+    """A4.1: each group's search re-plans against its own plan (its share of the hours), into its own job.json."""
+    from types import SimpleNamespace
+
+    root = per_group_study(tmp_path, sizes=[20] * 4 + [80] * 4 + [20, 20, 80, 80], held=4, tags={"small": 6, "large": 6})
+    monkeypatch.setattr(execute, "require_valid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execute, "measured", lambda _root: None)
+    monkeypatch.setattr(execute, "plan_for", lambda *args, hours, **kwargs: replace(Plan.fixed(children=4),
+                                                                                    search_s=hours * 3600.0))
+
+    def make_folder(study, harness, plan, root_, run_id, **kwargs):
+        folder = root_ / "runs" / run_id / "groups" / kwargs["group"]
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    class FakeDriver:
+        def __init__(self, config, *, run_dir, on_round=None, **kwargs):
+            self.run_dir, self.on_round = Path(run_dir), on_round
+
+        def run(self):
+            rows = [{"type": "generation_finished", "session": "s", "ts": f"2026-11-14T10:0{i}:40+00:00",
+                     "generation": i, "duration_s": 100.0, "breed_s": 10.0 if i else 0.0, "adopted": False,
+                     "children": 4 if i else 1, "round_best": 1.0, "best_fitness": 1.0} for i in (0, 1)]
+            (self.run_dir / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            assert self.on_round(1) is None
+            return SimpleNamespace(stop_reason="done", generations=1, best=None, aborted=False)
+
+    monkeypatch.setattr(execute, "write_run", make_folder)
+    monkeypatch.setattr(execute, "load_config", lambda path: None)
+    monkeypatch.setattr("evolvekit.search.driver.Driver", FakeDriver)
+    monkeypatch.setattr(execute, "_final_check", lambda study, plan, config, folder, job, log, **kw: job.finish("done"))
+    monkeypatch.setattr(execute, "apply_group_holm", lambda _run_dir: None)
+    monkeypatch.setattr(execute, "write_group_exports", lambda *args: [])
+    execute.run_per_group(root, "r1", log=lambda line: None)
+    run = json.loads((root / "runs" / "r1" / "job.json").read_text(encoding="utf-8"))
+    for name, plan in run["plan"]["groups"].items():
+        own = json.loads((root / "runs" / "r1" / run["per_group"]["dirs"][name] / "job.json").read_text(encoding="utf-8"))
+        # a round of 90 s + 4 * 2.5 s = 100 s; 60 s used of the group's own search seconds
+        assert own["plan"]["rounds_done"] == 1 and own["plan"]["measured"] == {"round_s": 100.0, "ai_child_s": 2.5}
+        assert own["plan"]["rounds_left"] == int((plan["search_s"] - 60.0) // 100.0), name
+        assert "rounds_left" not in run["plan"], "the run folder's plan holds the groups' plans, not one of its own"

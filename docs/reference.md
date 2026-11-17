@@ -88,7 +88,7 @@ live run is built from:
   | `type` | When | Carries |
   |---|---|---|
   | `run_started` | once per session, after resume | what the run *is*: objective and direction, the stages with their timeouts and seeds, the caps and stop rules, `first_generation`, `generations_planned`, `resumed`, the config path. A run directory describes itself; no config file is needed to read it. |
-  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned` and `plateau` (whether the generation was planned on a plateau; a resumed run reads it back to space its big steps, and an event from before it was recorded falls back to replaying the stop policy); then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force) |
+  | `generation_started` / `generation_finished` | around each generation, the seed's included | `children_planned` and `plateau` (whether the generation was planned on a plateau; a resumed run reads it back to space its big steps, and an event from before it was recorded falls back to replaying the stop policy); then `duration_s`, `children`, `rejected`, `best_id`, `best_fitness`, `spent_usd`, and the stop policy after the generation: `flat_generations` (generations without an improvement, what `status`'s `stop.patience` limit shows) and `stop_epsilon` (the epsilon in force); and what a study re-plans from: `round_best` (the best's fitness as the generation measured it, before a re-evaluation pooled it; `best_fitness` is after), `breed_s` (the wall seconds of writing the generation's children, 0 for the seed and for children adopted from `pending.json`), `adopted` (`true` when the generation's children were adopted from `pending.json`, written by an earlier session: `replan` leaves it out of the AI's seconds per child), `noise_sd` (the noise sd the stop policy judged it with), `tpe_ratio` (the largest log density ratio among the generation's TPE proposals, `null` without one; recorded, not read), `big_steps` (its children planned as big steps: what a settled search waits for under `stop.min_big_steps`) and `breadth_at_ceiling` (whether `adaptive_children` ended the generation at its `max`; `null` without it). An event from before these fields reads as a generation with no writing time and no noise, its best `best_fitness` |
   | `candidate_bred` | one per child | `operator`, `parent_id`, `attempts`, `ok`, and the `novelty` verdict and `reason` when it was refused |
   | `eval_started` / `eval_finished` | around every evaluator run — one pair per seed, hold-out runs included | `candidate_id`, `stage`, `seed`, `private`, `timeout_s` — and on a [per-instance stage](#one-run-per-instance-instances-workers-retries) `instance` and `attempt`; then `ok`, `duration_s`, `kpis`, `argv`, `host_busy` (how busy the whole machine was meanwhile), `cached`, and the log paths relative to the run directory. A failure adds `failure`, `stderr_tail` and `stdout_tail`. |
   | `stage_started` / `stage_finished` | around each command stage of a generation, hold-out pass included | the `candidates` entering it, `runs_per_candidate` and `workers`, and on a [racing](#one-run-per-instance-instances-workers-retries) stage `race_looks` (the compared-instance counts it reads at); then `failed`, `raced_out` (stopped for being behind, not failed) and `duration_s`. What turns a two-hour stage into "14 of 60 runs, about 50 minutes left". |
@@ -124,7 +124,7 @@ interrupted or dead.
 | `health` | `state`: `running`, `stalled` (alive, but the heartbeat went quiet or an evaluation is far past its timeout), `finished`, `interrupted`, `crashed` (a closing `run_crashed`, or a process that vanished without a word), `empty`, `missing`, `unknown` (a directory from before the event log). Then `detail` in a sentence, `stop_reason`, the generation of how many, evaluations `done` / `in_flight` / `failed` / `abandoned`, what is in flight and for how long against which timeout, the `stage` in progress (runs done of planned, candidates out, time left), `elapsed_s` across sessions, an `eta` that names its own basis, and how far along every stopping criterion is (`limits`). |
 | `progress` | The baseline (the seed), the best, and the improvement **in percent of the baseline, in the objective's own units** — with `n`, `sd` and `sem` from the individual evaluator runs, and a `verdict`: `clear`, `worse`, `within noise`, or `unknown`. The verdict is a paired comparison over the runs both candidates made, averaged within each case (instance) first, and judged on the 95 % interval over those per-case mean gains — `clear` when it lies above zero, `worse` below, `within noise` when it includes zero (the search's own reading, not `confirm`'s rule, which is a chance of a gain) — with `ci95`, `mean_gain` and `n`, the number of cases — on a stage that runs once per instance `mean_gain` and `ci95` are in percent of the baseline (from log ratios, the same unit as `confirm`) and the spread is under `log` (`mean_gain`, `sd_gain`, `ci95` on the log scale), so no log spread sits beside a percent mean; `unknown` with fewer than two cases (one instance run on many seeds is one case). It says in words that those are the cases and seeds the search selected on. With [goals in order of importance](#goals-in-order-of-importance-evaluatescorelevels), `levels` gives every level's baseline, best, change and verdict, and names the level that decides. `noise` is the run's [noise estimate](#stochastic-evaluators-seeds-n) at the final `stage` (`work/noise.json`): `repeatable` (`null` until measured), `source` (`replicates`, `calibration`, `paired` or `none`: where `sd` came from), and per measure `sd` (the noise of one run, one side of a comparison, that the search reads), `sd_across` (the across-seed estimate, always), `cv` (relative), with `runs_per_candidate` (the stage's `seeds`); `source: none` with empty maps when nothing was measured. |
 | `best` | The best candidate's code, its unified diff against the seed, its lineage, its KPIs, `replicates` (how many final-stage runs its values are the mean of: the stage's `seeds`, plus one per [re-evaluation](#stochastic-evaluators-seeds-n); 0 for a row written before it), and each declared parameter's value beside its default. |
-| `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance (absolute Spearman correlation with the ranking score, with its `n`) — a pointer to where to look, labelled as such. |
+| `parameters` | For every name on the seed's `# PARAMS:` line: every value tried with its score, a ten-bin coverage of the declared range, and an importance — a pointer to where to look, labelled as such. The importance compares **siblings**, children of one parent in one round: each child's change of the value from its parent's (along the scale the search samples on; the change of slot for a bool or a two-way choice; a child that kept the parent's value counts as a change of 0) against the change of its ranking score from the parent's, with each sibling group's own mean taken out. `importance.value` is the absolute rank correlation of the two, `importance.sign` its direction; for a choice of more than two, the share of the score changes' rank variance within sibling groups that lies between the values taken (square root). `importance.n` counts the children compared: fully evaluated, with at least one sibling, and not drawn anew (`param_lhs`, `param_lhs_typed`, `param_tpe` and `param_cross` children are left out: their change from the parent would carry the parent's own level back in). Raw values cannot be read this way: children of one elite share its value and its quality from the other settings, so a parameter that does nothing went with the score in 40–63 % of lineage-shaped searches (60 % measured, 19 % for a bool). `importance.p` is its permutation p: the share of `importance.shuffles` (999) shuffles of the score changes **within each sibling group** (`random.Random(0)`) whose correlation is at least as strong, as (1 + count) / 1000; `null` under five children compared. Under the null in lineage-shaped searches (10 rounds of 8), p < 0.1 in about 10 % (11.1 % ± 1.0 for a number, 10.1 % ± 1.0 for a bool; 6.9–12.0 % across the statistician's shapes); every run uses the same fixed set of shuffles, so the rate is about 10 %, not at most 10 %. One edge reads higher: a bool in a space of two or three settings searched almost only by local steps can read p < 0.1 in up to about 20 %, because each child there moves one setting, so flipping the switch is compared with moving another setting. Its power is modest: a number whose range moves the score by ten noise sds reads p < 0.1 in 39 % ± 2 of such searches, because a local move covers a tenth of the range; a bool worth one noise sd in 55 % ± 2. |
 | `instances` | When the evaluator reports a per-instance list KPI: baseline against best per instance, wins, losses and ties. |
 | `failures` | Every failed evaluator run, newest first, with its stage, seed, hold-out flag, exit status, duration, **command line**, stderr tail and the path of the full log; plus responses that could not be applied and candidates the static stage refused. |
 | `candidates`, `archive`, `spend`, `log_tail` | One light row per candidate (no code), the grid snapshot, USD / tokens / evaluator seconds, and the run's last console lines. |
@@ -2351,7 +2351,8 @@ rounds will run.`). When the latest run does not say use and an earlier run
 did, `study status` adds `An earlier run (<id>) says use: <its verdict
 line>`, and for a run `study pr` made a branch for, `Branch <name> pushed to
 <remote>` (or `made, not pushed`). `study verdict` prints the verdict's own sentence and its
-advice, then how much of the plan ran when less of it did, and for a study
+advice, for a warm-started study the line against the harness defaults (see
+`--warm` below), then how much of the plan ran when less of it did, and for a study
 with AI help what its AI spent (`AI: $0.87 of $1.00`, from the run's
 `usage.jsonl`; `AI: 14 requests` for a provider that counts requests); the
 report's *How it ran* says the same. Nothing else; `--json` prints the whole
@@ -2385,12 +2386,12 @@ Every command:
 | Command | Does |
 |---|---|
 | `doctor [--app PATH] [--json]` | is this computer ready: Python, evolvekit, the library home, the app, the AI provider, the harnesses |
-| `study new NAME --harness ID [--template T] [--app PATH] [--dir DIR] [--warm] [--json]` | a new study in the library home; prints its short name (`--json`: `{"slug", "root"}`); `--dir` writes a standalone folder instead; `--warm`: start from what finished studies on this harness learned: the latest `use` winner's values as the starting point, and a prior around them for the search that halves with every study since |
+| `study new NAME --harness ID [--template T] [--app PATH] [--dir DIR] [--warm] [--json]` | a new study in the library home; prints its short name (`--json`: `{"slug", "root"}`); `--dir` writes a standalone folder instead; `--warm`: start from what finished studies on this harness learned: the latest `use` winner's values as the starting point, and a prior around them for the search that halves with every later study that tuned the setting and shrinks when the cases differ |
 | `study application SLUG PATH` / `study application SLUG --detect` (`--json`) | where the study's application is, checked by the harness; or the ones found on this computer |
 | `study code SLUG [--repo PATH] [--from REF] [--brief TEXT] [--json]` | a code study: where the source is (default: the harness's own folder, while it is there), the commit it starts from (`working`: the files as they are), what to improve; exit 1 when the folder or the ref is not found |
 | `study list [--json]` | every study in the library home: its name, harness and the state line its card shows (`draft · step 3 of 7`, `running · round 2 of 6`, …) |
 | `study cases SLUG --add FILE... [--hold-back N] [--json]` | copies cases into the study, refuses the files the harness cannot read, and holds `N` back for the final check |
-| `study groups SLUG [--k N] [--json]` | groups the cases by their features (or by the tags given in the app's Cases list) and writes `groups.json`; a group needs at least two cases to learn from. `--k` (2 to 5) asks for that many groups; without it, 2 or 3, whichever has the best silhouette. The first time, each case is solved once at the starting values to read its tables (one line per case on stderr). Exit 1 when a case cannot be solved (as `study preview`) or a run of the study is going; 2 when `--k` is outside 2 to 5 |
+| `study groups SLUG [--k N] [--json]` | groups the cases by their features (or by the tags given in the app's Cases list) and writes `groups.json`; a group needs at least two cases to learn from. `--k` (2 to 5) asks for that many groups; without it, 2 or 3, whichever has the best silhouette, and one group unless that silhouette is at least 0.5 (see *Settings per kind of case*). The first time, each case is solved once at the starting values to read its tables (one line per case on stderr). Exit 1 when a case cannot be solved (as `study preview`) or a run of the study is going; 2 when `--k` is outside 2 to 5 |
 | `study check SLUG` | what is still missing; exit 2 while anything is |
 | `study start SLUG [--now] [--more H] [--wait [--timeout S]] [--json]` | starts the run, or queues it behind the study that is running; a study with a `schedule` is scheduled instead (`scheduled: next window Sat 00:00`, `--json` `{"scheduled": true, "next", "edge"}`: `edge` `start`, or `end` while a window is open), and `--now` starts it at once, as a session no window's end stops; after a finished campaign, a new one. `--more H` (a scheduled study): its finished run gets H hours more search time (`budget.hours` grows by H), spent in its next window, never now: `Scheduled 18 min more for the next window (Sat 00:00)`, `--json` `{"scheduled", "run", "hours", "next", "edge", "words"}` |
 | `study bakeoff SLUG --ref REF [--ref REF ...] [--wait [--timeout S]] [--json]` | a code study: each branch against the starting point on the held-back cases, with no search; exit 2 when a branch or the study is refused |
@@ -2450,7 +2451,55 @@ stops `wait` and `watch`, never the run.
   as it was when the run started (its results and any later final check
   read that copy, so editing the study afterwards changes nothing about the
   run) and `job.json`, which says where the job is: `search`, `check`,
-  `done`, `stopped` or `failed`.
+  `done`, `stopped` or `failed`. Its `plan` is the plan the run started
+  with; after every round the search re-plans from the rounds measured and
+  adds `rounds_done`, `rounds_left` (the rounds the search time left buys:
+  `floor((search_s - active seconds) / measured round)`, `null` until the
+  first round) and `measured` (`{"round_s", "ai_child_s"}`: the median
+  round's evaluation seconds plus `children` times the AI's measured seconds
+  per child, adopted and older rounds left out of that ratio; `null` until
+  the first round). The planned numbers stay; "At this pace about k of N
+  rounds" reads `rounds_done + rounds_left`. The search's own time stop
+  starts no round the longest of the last two would not let finish, so after
+  a slow round it may run one round fewer than `rounds_left`, which counts the
+  median round.
+  **A search that has settled ends early** (`harness/plan.py`'s `converged`, read from the
+  round events after every round, so a resumed run answers as the
+  uninterrupted one would): the bar is the starting point's best; a round
+  whose best beats it by more than the noise sd (`max(1e-6, 1e-9·|bar|,
+  noise_sd)`) moves the bar there, any other round counts as flat, and a
+  re-evaluation of the best moves the bar, never the count. After
+  `max(3, ⌈rounds / 3⌉)` flat rounds in a row -- with `stop.min_big_steps`
+  big steps tried among them in a run that takes big steps, and no round from
+  before these events among them -- the search ends with the stop reason
+  *converged: no round gained beyond the noise for k rounds*. One sd, where
+  the stop policy's patience uses half a sd: the stop policy keeps a run going
+  on any likely step, this rule ends one only when the steps have stopped.
+  Rounds or generations set by hand (`plan.adjusted`) are a decision: the run
+  re-plans, but never ends early. Measured on seeded simulations (6 planned
+  rounds, 8 combinations a round, measured sd 1, 4000 studies each): a flat
+  search is called settled within its rounds in 95.4 % ± 0.3; one gaining 1 sd
+  a round in 3.6 % ± 0.3; 0.5 sd a round in 50.4 % ± 0.8; and **0.25 sd a round
+  in 81.4 % ± 0.6** -- the cost of a one-sd bar: a slow, steady gain is called
+  settled in most studies. TPE's proposal scores (`tpe_ratio` on each
+  `generation_finished` event, the round's largest log density ratio) are
+  recorded for engineers and not read: TPE first proposes in round 2, and the
+  scores barely tell a settled search from an improving one.
+  `job.json`'s `search` then has `converged: true`, `flat_rounds`, `window`
+  and `used_s` (the active seconds when it ended). **The time saved is the
+  final check's allowance for its one extension**: the check's time left
+  counts from the run's start, so the hours the search did not use pay for
+  more runs per held-back case -- still at most 12 per case, still read at
+  most twice, and only while more runs can help (*more runs, or more cases*,
+  below). `final.saved` records it: `{"s", "spent", "why"}`, the seconds of
+  search left unspent (`search_s − used_s`, never below 0), whether the
+  extension spent them, and `why`: `extended`, `cases` (`check.limited_by`),
+  `answered` (the first read was not *keep*, or every run alike) or `at_cap`
+  (no run could be added: 12 already, no time for one, or a stop). Through
+  the real `execute._extend_check` with that allowance, null studies (no true
+  gain, 4 held-back cases × 3 runs, extended to 12) read *use* in 8.8 % ± 0.14
+  (40 000 studies, runs noisier than cases or pure run noise): under the
+  rule's 10 %. The verdict's `converged` key says where the time went.
   `python -m evolvekit study stop depot-a` ends it cleanly.
 - **The final check** runs the best combination against the starting point
   on the held-back cases, several runs per case (the plan says how many),
@@ -2825,7 +2874,21 @@ how strongly its values went with the measure in the searches, the values
 that won, and whether winners moved it up, down or both ways. It claims no
 gain of its own: a winning value comes only from a study whose final check
 said *use it*, and a strength rests on at least five fully evaluated
-combinations or says *not enough tries to tell*. The strength runs from 0 (the
+combinations or says *not enough tries to tell*. A study's strength counts
+only against chance: it compares combinations bred from the same one in the
+same round — how the measure moved when the setting moved, against how it
+moved for their siblings — and sets that against 999 shuffles among those
+siblings (the status document's `importance.p`),
+and a setting's strength is shown only when its studies' p's, combined by
+Fisher's rule, are under 0.1 — it is then the mean over all of them; else the
+page says the studies *could not tell it from chance*, and `--warm` ranks the
+setting after the ones with a strength, in the harness's order. A setting that
+does nothing is shown after three studies in about 10 % of cases (10.0 % ± 1.0
+over three lineage-shaped studies; 7.8 % ± 0.4 over two runs of 2000 studies of
+unrelated combinations); counting only the studies that beat 0.1 on their own
+would show it in about 25 % (24.8 % ± 0.7), at a
+strength (0.74) as high as a real one's.
+The strength runs from 0 (the
 setting did not go with the measure in the searches) to 1 (it went with it
 every time): it says which settings are worth tuning, not which value wins.
 Beside it, *The searches leaned to* gives each setting's median of the
@@ -2847,8 +2910,31 @@ the study's range), and with a `recommended` template and three finished
 settings studies the tuned settings are those that went most with the
 measure. Each run then draws a share of its combinations around each tuned
 setting's winner: a prior of weight one half, which halves again with every
-other study finished since that winner and is dropped below 0.05 or once four
-have. It is only a prior — it never stops the search from trying any value in
+later settings study whose search ran and tuned that setting (a code study, a
+bake-off, a study per kind of case, or one that tuned other settings does not
+count), and is dropped below 0.05: once four such studies have finished, or
+sooner when the cases differ. The
+weight also shrinks when the new study's cases are unlike the winner's: it is
+multiplied by exp(−d²/2). For each case feature both studies have, z² is the
+squared distance between the two studies' average cases in units of the spread
+of the cases within each study (counts on a log scale, as for groups), at most
+9 (three standard deviations); d² is the mean z² less what chance alone puts
+between two studies of n₁ and n₂ cases of the same kind, (1/n₁ + 1/n₂) · N /
+(N − 4) with N = n₁ + n₂, and never below 0; with four cases or fewer between
+the two studies the weight does not shrink. A feature with no spread inside either study — a fixed fleet size,
+say — cannot be measured this way and is left out (`study-run.json` names it).
+Measured with three features: two studies of the same kind keep about 90 % of
+the weight on average at four cases each, 95 % at eight and 97 % at twelve (not
+all of it: a pair that happens to lie apart shrinks, a close one cannot grow);
+at eight cases, one standard deviation apart in every feature keeps about 57 %,
+three about 2 %, which drops the prior. The features are those `study groups`
+keeps for each case (its kept tables); a warm start never solves a case for
+them, so when either study has none kept the weight does not shrink. Each run's
+`study-run.json` records the priors it applied under `priors`: `{setting:
+{value, weight, studies_since, similarity, left_out}}` (`similarity` the factor
+above, rounded to three places; `left_out` the features it could not measure);
+`"not applied: <why>"` when the other studies could not be read.
+It is only a prior — it never stops the search from trying any value in
 range, and a bool or a choice is drawn as the winner itself. The prior also
 acts on the rest of the search: `param_tpe` counts it as 4 × its weight
 observations at the winner's value in both its densities, and a `param_local`
@@ -2860,7 +2946,51 @@ each tuned setting at the winner, so there it changes nothing, while
 what it did on stderr, and `study.yaml` records it as `warm: {from, run, at,
 ranked}`. The warm start changes the starting point the final check compares
 with: the result is judged against the winner's values, not the settings in
-use before, so it suits a planner who uses the winner today. With no `use`
+use before, so it suits a planner who uses the winner today. Because the
+starting point is the previous winner, the verdict also says how the result
+stands against the harness defaults when a study that started from them
+held back the same cases: the latest finished settings study on the harness
+that was not warm-started, set no start by hand and gave no setting itself
+(fixed, or from an input settings file), and kept its final check's runs.
+The side the verdict names — the new settings on *use*, else the starting
+point — is paired run by run with that study's starting-point runs on the
+same case content (the case file's sha256, whatever it is called) and the
+same run of the final check, at least two cases, and read once by the same rule (no
+extension, no Holm): "On the same held-back cases, against the harness
+defaults (the new settings): probably better: 5.8 % lower tour length, …".
+Otherwise the line says "Against the harness defaults: not measured (…)"
+with the reason. The comparison is kept in `confirm/final/against_defaults.json`
+and is the verdict's `against_defaults` key. It is information about the
+same runs, not a second answer, and never changes what the study recommends:
+it reuses the runs the main answer was read on, so it is selected on.
+Measured on 10 000 seeded studies with no true difference anywhere (4
+held-back cases, runs noisier than cases), it says use in 6.2 % ± 0.24
+overall, 14.9 % ± 1.2 after a main *use* and 5.4 % ± 0.24 otherwise. When
+the defaults study is in the warm study's own chain (its winner, or the winner
+of a study warm-started from it, is the starting point) on the same held-back
+cases -- the usual path -- the comparison would reuse the cases that chose
+what is compared, so the line says "not measured (Depot summer chose this
+study's starting point on these same held-back cases, so they cannot tell)"
+and shows no number; `against_defaults.json` keeps `reuses: true`. A study on
+the chain that can no longer be read (deleted, in the trash, not finished) may
+have come from the defaults study, so the line is not measured then either, and
+says that study can no longer be read instead. Measured on
+that path (20 000 seeded pairs with no true difference; the 1711 whose
+defaults study said use), such a line would say use in 91.9 % ± 0.66: it
+would replay the earlier choice. The same holds, and the line is not
+measured either (naming the chain's root), when the root started from the
+defaults and held back any of the same cases while the line would be read
+against a later study from the defaults: a configuration's effect on a case
+is the same in every study, so that study's runs carry the case effects the
+root chose on. Measured with no true difference, such a line would say use
+in 76.5 % when the cases vary more than the runs and 9.9 % the other way
+round (86 % and 17 % when a run repeats exactly at its seed). The defaults
+study must also have run
+at the same time per case and on the same harness version, else the line
+says "not measured"; nothing in it can cost the study's answer (any failure
+is logged and is "not measured"). The
+two sides also ran in different sessions, so for a solver timed by the clock
+a change of machine is in the difference too. With no `use`
 study it is a plain start, and says so; a template that tunes no setting is
 left as it is. `--warm` needs the library home, not `--dir`, and is a
 command-line option for now.
@@ -2875,18 +3005,62 @@ tags that name the same folder, `Big` and `big`, are one group, and cases
 without a tag are `untagged`):
 
 ```
-python -m evolvekit study groups depot-a            # 2 or 3 groups, whichever k-means likes best
+python -m evolvekit study groups depot-a            # one group, or 2 or 3 if the cases separate clearly
 python -m evolvekit study groups depot-a --k 3      # or ask for 3 (2 to 5)
 ```
+
+Only the cases to learn from make the groups: their features, every count
+(`rows_*`) on a log scale (`log1p`, so 30 and 60 rows are as far apart as 300
+and 600), each feature standardised, then k-means. The cases are one group
+unless they separate clearly: the best silhouette (how much nearer each case
+is to its own group than to the next, 0 to 1) must be at least **0.5**
+(`MIN_SILHOUETTE`, Kaufman and Rousseeuw's "reasonable structure"); the note
+then says *the cases do not fall into clear kinds (how well they separate:
+0.45 of 1, at least 0.5 needed); all cases are one group*. The four demo-tour
+samples (30, 40, 50 and 60 stops) reach 0.455 and are one group, 0.045 below
+the line. `--k` keeps the groups asked for however clearly they separate,
+and the note gives the silhouette. Then a one-split rule is fitted over the
+cases to learn from (one feature and one or two thresholds, in the case's own
+units), and the held-back cases are put in groups **by that rule**, so the
+final check of each group checks the rule a planner will use. A held-back
+case the rule cannot read (its feature missing or not a number) goes to the
+group whose centre is nearest, else the first group, and a note says so.
+
+What 0.5 does depends on how many cases and features there are. Measured in
+a seeded simulation of the grouping itself (shapeless cases from one
+Gaussian, 2000 studies each; two kinds 4 sd apart in the first feature, the
+other features unrelated, 1000 each), the share of studies that split:
+
+| Cases to learn from | 6 | 8 | 12 |
+|---|--:|--:|--:|
+| one kind, 1 feature | 63 % ± 1.1 | 81 % ± 0.9 | 94 % ± 0.5 |
+| one kind, 2 features | 16 % ± 0.8 | 19 % ± 0.9 | 16 % ± 0.8 |
+| one kind, 3 features | 3.1 % ± 0.4 | 2.1 % ± 0.3 | 0.5 % ± 0.2 |
+| two kinds, 1 feature | 95 % ± 0.7 | 99 % ± 0.3 | 100 % |
+| two kinds, 2 features | 23 % ± 1.3 | 32 % ± 1.5 | 29 % ± 1.4 |
+| two kinds, 3 features | 3.5 % ± 0.6 | 3.4 % ± 0.6 | 0.4 % ± 0.2 |
+
+On one feature, cases of one kind usually split too; on three, two real
+kinds that differ in only one of them are seldom found. No single threshold
+does both at 6 to 12 cases; when you know the kinds, tag the cases.
 
 A group needs at least two cases to learn from, and a kind of case needs at
 least two held-back cases to be checked (`MIN_HELD_BACK`). Before the run, a
 kind of case with fewer is merged into the nearest one (the distance between
 the groups' centres in standardised features; for tagged groups, the group
 with the most held-back cases), and `merged_from` in the run's `groups.json`
-lists what joined it. `study groups` writes
+lists what joined it; for groups by features the rule is then fitted again
+over the merged groups and the held-back cases are placed by it again.
+`study groups` writes
 `groups.json` (the first time it solves each case once to read its tables;
-it refuses while a run of the study is going). Then `per_group: true` in
+it refuses while a run of the study is going) at `"format": 2`: beside
+`method`, `k`, `silhouette`, `groups` and `features` (a value that is not a
+number is `null`), it records `assigned` (how the held-back cases were placed:
+`stump`, `nearest`, `tags` or `one`), `stump` (the rule), `accuracy` (the
+rule's agreement on the cases to learn from and on the held-back cases) and
+`min_silhouette` (0.5); [docs/app.md](app.md) lists every key. A study's
+format-1 file grouped by features is out of date and is computed again; one
+grouped by tags means the same and is read as it is. Then `per_group: true` in
 `study.yaml` learns settings for each group:
 
 ```yaml
@@ -2926,7 +3100,11 @@ A finished run writes two files into `runs/<id>/downloads/`:
 the search found only where the group's own decision is use, today's
 elsewhere — and `rule.md`, which cases get which settings: for groups by
 features a one-split rule (`If the number of rows in stops is above 51, use
-the settings of group 2; otherwise those of group 1.`), for groups by tags
+the settings of group 2; otherwise those of group 1.`) and how often that
+rule agrees with the groups, the cases to learn from and the held-back
+cases apart (`The rule puts 6 of the 6 cases the search learned from in the
+group they were found in, and 2 of the 2 held-back cases in the group they
+are nearest to.`; a run written before format 2 keeps its own sentence), for groups by tags
 one line per tag (`For cases tagged large, use today's settings (large: not
 shown to beat today's).`); a merged tag is named with its group (`For cases
 tagged large or small, …`).

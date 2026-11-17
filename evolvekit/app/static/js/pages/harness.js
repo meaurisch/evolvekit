@@ -20,8 +20,16 @@
     })}</ul>`;
   }
 
+  /** A strength shows only when the studies that measured it together beat chance (`importance_of`
+      of them, Fisher's combined permutation p under 0.1); otherwise the cell says which it was. */
   function importanceCell(s) {
-    if (s.importance == null) return html`<span class="type-small ink-2">not enough tries to tell</span>`;
+    if (s.importance == null) {
+      var of = s.importance_of || 0;
+      var why = of === 0 ? "not enough tries to tell"
+        : of === 1 ? "the study could not tell it from chance"
+        : "together, the " + of + " studies could not tell it from chance";
+      return html`<span class="type-small ink-2">${why}</span>`;
+    }
     var pct = Math.max(0, Math.min(100, Math.round(s.importance * 100)));
     return html`<span class="imp"><span class="imp-bar" aria-hidden="true"><span class="imp-fill" style="width:${pct}%"></span></span>
       <span class="type-small">${EK.num(s.importance, 2)} · from ${EK.plural(s.importance_n, "study", "studies")}</span></span>`;
@@ -60,7 +68,8 @@
     // The strength's scale and what it is not (persona p4, H4): a search figure, not proof.
     var table = rows.length ? html`<div class="cases-wrap"><table class="changed-table"><thead><tr><th>Setting</th><th>Tuned in</th>
       <th>How strongly it went with the measure (0 to 1, not proof)</th><th>The searches leaned to</th><th>Winning values</th><th>Winners moved it</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <p class="type-small ink-2">0 means the setting did not go with the measure in the searches, 1 that it went with it every time. It comes from the searches, not from final checks: it says which settings are worth tuning, not which value wins.</p>`
+      <p class="type-small ink-2">0 means the setting did not go with the measure in the searches, 1 that it went with it every time. It comes from the searches, not from final checks: it says which settings are worth tuning, not which value wins.
+      A strength is shown only when the studies that measured it, taken together, could tell it from chance (under 10 %).</p>`
       : "";
     var notes = (learned.notes || []).length ? html`<section class="sub-section"><h2 class="type-heading">Left out</h2>
       <ul class="plain-list">${learned.notes.map(function (n) { return html`<li class="type-small ink-2">${n}</li>`; })}</ul></section>` : "";

@@ -373,8 +373,20 @@ def test_a_code_study_speaks_of_code_not_settings():
     assert 'what: "settings"' not in COMPARE_PAGE and "s.what" in COMPARE_PAGE, "two runs compared: each in its own words"
     details = _page_function(STUDY_PAGE, "details")
     assert "r.how_it_ran" in details, "how much of the plan ran, where the page says how the run went"
+    assert "r.saved_line" in details and details.index("r.how_it_ran") < details.index("r.saved_line"), \
+        "a settled search: where its saved time went, right after how it ran"
     assert "Math.max(0, c.tried - 1)" in details and "plus " in details, "the starting point is no combination tried"
     assert 'whatOf() === "code" ? "today’s code"' in details and "today’s settings" in details
+
+
+def test_the_line_against_the_defaults_is_the_documents_own_under_the_answer():
+    """A4.3c: a warm-started study's line against the harness defaults, rendered from the verdict
+    document only (its `line` and `note`), right under the answer's advice in the status strip."""
+    shown = _page_function(STUDY_PAGE, "againstDefaults")
+    assert "st.results.against_defaults" in shown and "a.line" in shown and "a.note" in shown
+    assert "chance" not in shown and "decision" not in shown, "nothing computed on the page"
+    strip = _page_function(STUDY_PAGE, "statusStrip")
+    assert strip.index('${x.sub || ""}</p>') < strip.index("${againstDefaults(acc)}")
 
 
 def test_no_difference_in_any_run_shows_its_line_and_no_band():

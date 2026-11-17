@@ -126,6 +126,10 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         out += ["", verdict["why_keep"]]  # why a keep whose held-back cases all improved is still keep
     if verdict.get("advice"):
         out += ["", verdict["advice"]]
+    against = verdict.get("against_defaults") or {}
+    if against.get("line"):
+        # A warm-started study: the same runs against the harness defaults, information beside the answer.
+        out += ["", against["line"] + (f" {against['note']}" if against.get("note") else "")]
     for note in notes:
         out += ["", f"Note: {note}"]
     facts = []
@@ -219,6 +223,8 @@ def render_report(verdict: dict[str, Any], results: dict[str, Any] | None = None
         # Fewer rounds ran than the plan said: the sentence says how many of how many, and why.
         ran.append(verdict["how_it_ran"].rstrip("."))
         rounds = tried = None
+    if (verdict.get("converged") or {}).get("line"):
+        ran.append(str(verdict["converged"]["line"]).rstrip("."))  # a settled search: where the time it saved went
     if candidates:
         # No search, so nothing was learned from: the branches are the candidates, and the more there are, the
         # likelier one looks ahead by chance.

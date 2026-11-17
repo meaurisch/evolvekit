@@ -26,7 +26,7 @@ from evolvekit.evaluate.types import EvalResult
 from evolvekit.prompts import Inspiration, LedgerEntry, build_messages
 from evolvekit.providers.base import Completion, Provider, ProviderError
 from evolvekit.search.params import apply_params, current_values, declared_ranges
-from evolvekit.search.tuning import Observation, propose_tpe
+from evolvekit.search.tuning import Observation, propose_tpe_scored
 from evolvekit.space import PRIOR_BAND, STEP_SCALE, Parameter, ParameterSpace
 
 if TYPE_CHECKING:  # `evolvekit.tree` is imported only when a tree problem is handled
@@ -443,13 +443,15 @@ def param_tpe(
 ) -> OperatorResult:
     """The configuration a Tree-structured Parzen Estimator rates highest, given
     every configuration evaluated so far (`search/tuning.py`) and the siblings
-    already proposed this generation (`taken`: a constant liar, counted bad).
+    already proposed this generation (`taken`: a constant liar, counted bad);
+    `meta["tpe_ratio"]` is the log density ratio it was chosen for.
     With too few observations to estimate anything it is a local step instead."""
     rng = random.Random(seed)
-    proposal = propose_tpe(space, observations, rng, taken=taken)
-    if proposal is None:
+    scored = propose_tpe_scored(space, observations, rng, taken=taken)
+    if scored is None:
         base = dict(parent.params or space.defaults())
         child = space.draw(lambda: space.perturb(base, rng, scale=scale))
         return _rendered(space, child, "param_local", fallback_of="param_tpe")
-    return _rendered(space, proposal, "param_tpe", observations=len(observations))
+    proposal, ratio = scored
+    return _rendered(space, proposal, "param_tpe", observations=len(observations), tpe_ratio=ratio)
 

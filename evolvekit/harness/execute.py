@@ -57,7 +57,8 @@ from evolvekit.harness.compile import (
     write_run,
 )
 from evolvekit.harness.manifest import Harness, load_harness
-from evolvekit.harness.plan import CHECK_SEEDS, DEFAULT_CHECK_SEEDS, Plan, make_plan
+from evolvekit.harness.plan import (CHECK_SEEDS, DEFAULT_CHECK_SEEDS, Measured, Plan, converged, make_plan, replan,
+                                    round_records)
 from evolvekit.harness.sql import schema_database, sql_problem
 from evolvekit.harness.study import Study, load_study, load_study_file, require_valid, resolve_kpi
 from evolvekit.leaderboard import rank, read_rows
@@ -374,11 +375,9 @@ def run_study(
     job = Job(run_dir, run_id=run_id, study=study.name, plan=plan.to_json())
     try:
         config = load_config(run_dir / CONFIG)
-        summary = Driver(config, run_dir=run_dir, log=log).run()
-        job.update(search={
-            "stop_reason": summary.stop_reason, "generations": summary.generations,
-            "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
-        })
+        summary = Driver(config, run_dir=run_dir, log=log,
+                         on_round=_round_hook(run_dir, job, plan, min_big_steps=_min_big_steps(config), log=log)).run()
+        job.update(search=_searched(job, summary, summary.generations))
         if summary.aborted:
             job.finish("failed", error=summary.stop_reason)
             return job.state
@@ -556,11 +555,10 @@ def run_per_group(root: str | Path, run_id: str, *, models: dict[str, Any] | Non
             group_job = _GroupJob(folder, job, run_id=run_id, study=study.name, group=name,
                                   plan=plans[name].to_json())
             config = load_config(folder / CONFIG)
-            summary = Driver(config, run_dir=folder, log=log).run()
-            group_job.update(search={
-                "stop_reason": summary.stop_reason, "generations": summary.generations,
-                "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
-            })
+            summary = Driver(config, run_dir=folder, log=log,
+                             on_round=_round_hook(folder, group_job, plans[name],
+                                                  min_big_steps=_min_big_steps(config), log=log)).run()
+            group_job.update(search=_searched(group_job, summary, summary.generations))
             if summary.aborted:
                 group_job.finish("failed", error=summary.stop_reason)
                 job.finish("failed", error=f"{name}: {summary.stop_reason}")
@@ -876,6 +874,108 @@ def final_check(root: str | Path, run_id: str, *, seeds: int | None = None,
     return job.state
 
 
+CONVERGED_KEYS = ("converged", "flat_rounds", "window", "used_s")
+"""What `_round_hook` writes into `job.json`'s `search` when the search has settled."""
+
+
+def _min_big_steps(config: Any) -> int:
+    """The big steps a plateau waits for (`stop.min_big_steps`), as the driver's
+    `StopPolicy` reads it: 0 for a run that takes none (a study compiles with
+    `big_step_every: 0`) or a config without a stop section."""
+    search, stop = getattr(config, "search", None), getattr(config, "stop", None)
+    if not getattr(search, "takes_big_steps", False):
+        return 0
+    return int(getattr(stop, "min_big_steps", 0) or 0)
+
+
+def _searched(job: Job, summary: Any, generations: int) -> dict[str, Any]:
+    """`job.json`'s `search` once the driver has returned: how it stopped, and,
+    when the round hook ended it because it settled (`summary.converged`),
+    what the hook wrote of that (`CONVERGED_KEYS`) -- kept, not overwritten,
+    and `converged: true` even when the hook's write failed. A resumed session
+    that ran no round (the settled search had no round left) keeps what the
+    session before it wrote, its stop reason included: the search it continues
+    is the one that settled. A search that ran rounds this session and did not
+    settle keeps none of them."""
+    earlier = job.state.get("search") or {}
+    reason = summary.stop_reason
+    if getattr(summary, "converged", False):
+        kept = {**{k: earlier[k] for k in CONVERGED_KEYS if k in earlier}, "converged": True}
+    elif not getattr(summary, "generations", 0) and earlier.get("converged") is True:
+        kept = {k: earlier[k] for k in CONVERGED_KEYS if k in earlier}
+        reason = earlier.get("stop_reason") or reason
+    else:
+        kept = {}
+    return {"stop_reason": reason, "generations": generations,
+            "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted, **kept}
+
+
+def _round_hook(run_dir: Path, job: Job, plan: Plan, *, min_big_steps: int = 0,
+                log: Callable[[str], None] = print) -> Callable[[int], str | None]:
+    """The driver's `on_round` for a study's search: after every round, the
+    plan re-estimated from the rounds measured (`plan.replan`) goes into
+    `job.json`'s plan -- `rounds_done`, `rounds_left`, `measured`, beside the
+    planned numbers, which stay -- and the answer is whether to end the search
+    (None: go on): `plan.converged`'s reason when the search has settled and
+    its rounds are the plan's own (rounds or generations set by hand are a
+    decision: re-estimated, never ended early). Then `job.json`'s `search`
+    says `converged`, the flat rounds, the window and the active seconds used
+    (`used_s`: what the final check counts the saved time from). It is read
+    from the events every time, so a resumed run answers as the uninterrupted
+    one would. `min_big_steps`: the big steps a plateau waits for
+    (`_min_big_steps`). A file that cannot be read or written is logged and
+    skipped: the answer never depends on the write."""
+
+    from evolvekit.events import read_events
+    from evolvekit.stopping import active_seconds
+
+    def on_round(generation: int) -> str | None:
+        try:
+            events = read_events(run_dir)
+        except OSError as exc:
+            log(f"gen {generation:<2} the plan was not re-estimated: events.jsonl could not be read ({exc})")
+            return None
+        records, used_s = tuple(round_records(events)), active_seconds(events)
+        replanned = replan(plan, Measured(records, used_s=used_s))
+        try:
+            job.update(plan={**(job.state.get("plan") or {}), **replanned.measured_json()})
+        except OSError as exc:
+            log(f"gen {generation:<2} job.json could not be rewritten with the re-estimated plan ({exc})")
+        if {"rounds", "generations"} & set(plan.adjusted):
+            return None
+        settled = converged(records, planned_rounds=plan.rounds, min_big_steps=min_big_steps)
+        if not settled.converged:
+            return None
+        try:
+            job.update(search={**(job.state.get("search") or {}), "converged": True,
+                               "flat_rounds": settled.flat_rounds, "window": settled.window, "used_s": used_s})
+        except OSError as exc:
+            log(f"gen {generation:<2} job.json could not be rewritten with the settled search ({exc})")
+        return settled.reason
+
+    return on_round
+
+
+def _stored_plan(stored: dict[str, Any], config: Any) -> Plan:
+    """The plan a resumed run re-estimates from, as far as `replan` and
+    `converged` read it: its children per round, its seconds of search, its
+    planned rounds and what was set by hand (`job.json`'s plan, else the
+    compiled run's own numbers: the rounds are its generations but the two of
+    headroom)."""
+    children = stored.get("children")
+    search_s = stored.get("search_s")
+    if not isinstance(search_s, (int, float)):
+        search_s = (config.budget.max_hours or 0.0) * 3600.0
+    rounds = stored.get("rounds")
+    if not isinstance(rounds, int) or isinstance(rounds, bool):
+        generations = getattr(config.search, "generations", None)
+        rounds = max(0, generations - 2) if isinstance(generations, int) else 0
+    adjusted = stored.get("adjusted")
+    return replace(Plan.fixed(children=int(children) if isinstance(children, int) and children > 0
+                              else config.search.children_per_generation), search_s=float(search_s),
+                   rounds=rounds, adjusted=tuple(str(a) for a in adjusted) if isinstance(adjusted, list) else ())
+
+
 def _check_plan(stored: dict[str, Any], study: Study, *, check_seeds: int | None = None) -> Plan:
     """The plan a run was started with, as far as the final check reads it
     (`plan.json`, or the copy in `job.json`): its runs per case, workers,
@@ -927,11 +1027,9 @@ def resume_study(
         job.state.pop(old, None)
     try:
         config = load_config(run_dir / CONFIG)
-        summary = Driver(config, run_dir=run_dir, log=log).run()
-        job.update(search={
-            "stop_reason": summary.stop_reason, "generations": before + summary.generations,
-            "best_id": summary.best.id if summary.best else None, "aborted": summary.aborted,
-        })
+        hook = _round_hook(run_dir, job, _stored_plan(stored, config), min_big_steps=_min_big_steps(config), log=log)
+        summary = Driver(config, run_dir=run_dir, log=log, on_round=hook).run()
+        job.update(search=_searched(job, summary, before + summary.generations))
         if summary.aborted:
             job.finish("failed", error=summary.stop_reason)
             return job.state
@@ -1272,5 +1370,225 @@ def _final_check(study: Study, plan: Plan, config: Any, run_dir: Path, job: Job,
     (cid, result), = comparison.per_candidate.items()
     decision = _decision(result)
     _write_exports(run_dir, log, up)
-    job.finish("done", final={"candidate": cid, "confirmed": decision == "use", "decision": decision,
-                              "seeds": seeds, "comparison": "confirm/final/comparison.json"})
+    final = {"candidate": cid, "confirmed": decision == "use", "decision": decision,
+             "seeds": seeds, "comparison": "confirm/final/comparison.json"}
+    if up == UP:  # a warm-started study in a library home: the same runs against the harness defaults'
+        try:
+            _against_defaults(run_dir.parent.parent, run_dir, study, comparison, decision, log)
+        except Exception as exc:  # noqa: BLE001 - a line beside the answer can never cost the answer
+            log(f"final check: {DEFAULTS_LABEL}: not measured: {type(exc).__name__}: {exc}")
+    if search.get("converged") and extend:
+        final["saved"] = _saved(job, plan, search, result, added=seeds - _first_seeds(plan))
+    job.finish("done", final=final)
+
+
+AGAINST_DEFAULTS = "against_defaults.json"
+"""In `confirm/final/`: a warm-started study's final check against the harness defaults' runs (A4.3c)."""
+DEFAULTS_LABEL = "against the harness defaults"
+DEFAULTS_ID = "defaults"
+STARTING_POINT = "starting point"
+NO_DEFAULTS = "no finished study on this application started from the harness defaults"
+OTHER_CASES = "it held back other cases"
+NO_SHARED_RUNS = "its final check has no runs on the same cases and runs"
+OTHER_TIME = "it ran at another time per case"
+OTHER_VERSION = "it ran on another version of the harness"
+UNREADABLE = "the other studies could not be read"
+
+
+def defaults_comparison(comparison: Any, decision: str, theirs: list[dict[str, Any]], *,
+                        key_of_ours: Callable[[str], str | None],
+                        key_of_theirs: Callable[[str], str | None]) -> Any:
+    """The final check's runs of the side its `decision` names -- the candidate on `use`, else the
+    starting point (the warm study's own baseline runs) -- against `theirs`, the baseline runs of a
+    study that started from the harness defaults (its `results.json`), paired run by run on the
+    same case (`key_of_*`: an instance's case content, None when unknown) and the same check seed:
+    a `Comparison` labelled `DEFAULTS_LABEL`, analysed once by the one rule (`confirm.analysed`),
+    never extended, no Holm. It is information about the same runs: its decision decides nothing.
+    Returns why not instead (`OTHER_CASES`: fewer than two held-back cases in common;
+    `NO_SHARED_RUNS`: fewer than two with a check seed both ran on every one of them)."""
+    from evolvekit.confirm import BASELINE, Comparison, analysed
+
+    cid = comparison.candidates[0]
+    ours_config, side = (cid, cid) if decision == "use" else (BASELINE, STARTING_POINT)
+    instance_of: dict[str, str] = {}
+    for instance in comparison.instances:
+        key = key_of_ours(str(instance))
+        if key is not None:
+            instance_of.setdefault(key, str(instance))
+
+    def by_case(runs: list[dict[str, Any]], config: str, key_of: Callable[[str], str | None]) -> dict:
+        out: dict[str, dict[int, list[dict[str, Any]]]] = {}
+        for run in runs:
+            if not isinstance(run, dict) or run.get("configuration") != config:
+                continue
+            key = key_of(str(run.get("instance")))
+            if key is not None:
+                out.setdefault(key, {}).setdefault(int(run["seed"]), []).append(run)
+        return out
+
+    mine, other = by_case(list(comparison.runs), ours_config, key_of_ours), by_case(theirs, BASELINE, key_of_theirs)
+    shared = [key for key in instance_of if key in other]
+    if len(shared) < 2:
+        return OTHER_CASES
+    both = {key: set(mine.get(key, {})) & set(other[key]) for key in shared}
+    cases = [key for key in shared if both[key]]
+    seeds = sorted(set.intersection(*(both[key] for key in cases))) if cases else []
+    if len(cases) < 2 or not seeds:
+        return NO_SHARED_RUNS
+    runs = [{**run, "configuration": name, "instance": instance_of[key]}
+            for key in cases for seed in seeds
+            for name, kept in ((BASELINE, other), (side, mine)) for run in kept[key][seed]]
+    return analysed(Comparison(
+        label=DEFAULTS_LABEL, objective=comparison.objective, direction=comparison.direction, stage=comparison.stage,
+        seeds=seeds, instances=[instance_of[key] for key in cases], baseline_id=DEFAULTS_ID, candidates=[side],
+        runs=runs, levels=list(comparison.levels or []), prior=comparison.prior))
+
+
+def chain_words(name: str) -> str:
+    """Why the line is not measured when a study that started from the defaults chose this study's
+    starting point on the same held-back cases (decisions 15c and 17): measured against that study,
+    it says use for no true difference in about 92 %; against a later study from the defaults on
+    those cases, about 77 % when the cases vary more than the runs (10 % the other way round)."""
+    return f"{name} chose this study's starting point on these same held-back cases, so they cannot tell"
+
+
+def unseen_words(slug: str) -> str:
+    """Why the line is not measured when a study this one's starting point came from cannot be
+    seen (deleted, in the trash, not finished: `memory.warm_chain_unseen`): it may have come from
+    the defaults study, and a line that cannot rule that out is not measured (decision 15c)."""
+    return (f"the study this one's starting point came from ({slug}) can no longer be read, so these held-back "
+            "cases may have chosen it")
+
+
+def defaults_line(against: Any, decision: str, *, name: str, reuses: bool,
+                  chose: str | None = None, unseen: str | None = None) -> dict[str, Any]:
+    """`against_defaults.json` of a `defaults_comparison` result: why not when it is a reason;
+    not measured either when the defaults study (`name`) is in this study's own warm-start chain
+    (`reuses`): its final check chose what is compared on these same cases, so the comparison
+    replays that choice (decision 15c; `reuses` is kept for engineers); nor when `chose` names the
+    chain's root, a study from the defaults that held back any of the same cases
+    (`memory.chain_defaults_study`): every later study from the defaults carries, on those cases,
+    the case effects it chose on (decision 17); else the comparison, `measured: true`, with the
+    `side` compared. `unseen`: the study on the chain that cannot be seen, when that alone makes
+    `reuses` (`memory.warm_chain_unseen`): the reason names it instead."""
+    if isinstance(against, str):
+        return {"measured": False, "why": against}
+    if reuses and chose is None and unseen is not None:
+        return {"measured": False, "why": unseen_words(unseen), "reuses": True}
+    if reuses or chose is not None:
+        return {"measured": False, "why": chain_words(chose if chose is not None else name), "reuses": True}
+    return {"measured": True, **against.to_json(), "side": "candidate" if decision == "use" else STARTING_POINT,
+            "reuses": False}
+
+
+def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, decision: str,
+                      log: Callable[[str], None]) -> None:
+    """A warm-started settings study in a library home (`root.parent.name == "studies"`): its
+    final check set against the harness defaults, written to `confirm/final/against_defaults.json`
+    -- `defaults_comparison` of the latest study that started from them (`memory.defaults_study`)
+    (`defaults_line`) with `measured: true`, `side` ("candidate" or "starting point") and
+    `numbers_from` `{study, name, run, cases, seeds}`; else `{"measured": false, "why": ...}` --
+    also when that study ran at another time per case or on another harness version, or is in
+    this one's warm-start chain (`memory.in_warm_chain`, `reuses: true`) (decision 15), or the
+    chain's root started from the defaults and held back any of the same cases
+    (`memory.chain_defaults_study`, decision 17).
+    Information beside the answer: it never changes `final`; any failure, the write included, is
+    logged and is "not measured" (or no file), never raised."""
+    if study.warm is None or study.code is not None or root.parent.name != "studies":
+        return
+    from types import SimpleNamespace
+
+    from evolvekit.harness import memory
+
+    digests: dict[Path, str | None] = {}
+
+    def key_in(folder: Path, held_back: list[str]) -> Callable[[str], str | None]:
+        # The check names a held-back case as its stage's `instance_names()` does over `UP/<case>`:
+        # the file's stem when the stems tell the cases apart, else `UP/<case>` as written.
+        named = {f"{UP}/{case}": case for case in held_back}
+        stems = [Path(case).stem for case in held_back]
+        if len(set(stems)) == len(stems):
+            named.update(zip(stems, held_back))
+
+        def key(instance: str) -> str | None:
+            name = named.get(instance)
+            if name is None:
+                return None
+            path = folder / name
+            if path not in digests:
+                digests[path] = memory.case_digest(path)
+            return digests[path]
+        return key
+
+    try:
+        home = SimpleNamespace(root=root.parent.parent, studies_dir=root.parent)
+        cases = [root / case for case in study.test]
+        found = memory.defaults_study(home, study, cases)
+        chose = memory.chain_defaults_study(home, study, cases) if found is not None else None
+        if found is None:
+            document: dict[str, Any] = {"measured": False, "why": NO_DEFAULTS}
+        else:
+            other, results = found
+            if other.study.limits.time_per_case_s != study.limits.time_per_case_s:
+                document = {"measured": False, "why": OTHER_TIME}
+            elif other.pinned.version != study.harness_version:
+                document = {"measured": False, "why": OTHER_VERSION}
+            else:
+                theirs = json.loads(results.read_text(encoding="utf-8"))
+                if not isinstance(theirs, list):
+                    raise ValueError(f"{results} holds no list of runs")
+                against = defaults_comparison(comparison, decision, theirs, key_of_ours=key_in(root, list(study.test)),
+                                              key_of_theirs=key_in(other.root, list(other.study.test)))
+                document = defaults_line(against, decision, name=other.name,
+                                         reuses=memory.in_warm_chain(home, study, other.slug),
+                                         chose=chose.name if chose is not None else None,
+                                         unseen=memory.warm_chain_unseen(home, study, other.slug))
+                if document["measured"]:
+                    document["numbers_from"] = {"study": other.slug, "name": other.name, "run": other.run,
+                                                "cases": len(against.instances), "seeds": len(against.seeds)}
+    except Exception as exc:  # noqa: BLE001 - a line beside the answer: the final check's answer stands
+        log(f"final check: {DEFAULTS_LABEL}: the other studies could not be read: {type(exc).__name__}: {exc}")
+        document = {"measured": False, "why": UNREADABLE}
+    try:
+        _atomic_write(run_dir / "confirm" / "final" / AGAINST_DEFAULTS, json.dumps(document, indent=1))
+    except Exception as exc:  # noqa: BLE001 - the same: no line, and the answer stands
+        log(f"final check: {DEFAULTS_LABEL}: not written: {type(exc).__name__}: {exc}")
+        return
+    if document["measured"]:
+        numbers = document["numbers_from"]
+        log(f"final check: {DEFAULTS_LABEL}: {numbers['study']}'s runs on {numbers['cases']} held-back cases, "
+            f"{numbers['seeds']} runs each, read once, for information")
+    else:
+        log(f"final check: {DEFAULTS_LABEL}: not measured ({document['why']})")
+
+
+def _first_seeds(plan: Plan) -> int:
+    """The runs per case of the final check's first read (`_extend_check`)."""
+    return max(1, min(int(plan.check_seeds), len(CHECK_SEEDS)))
+
+
+def _saved(job: Job, plan: Plan, search: dict[str, Any], result: dict[str, Any], *, added: int) -> dict[str, Any]:
+    """`final.saved` of a search that settled: the seconds of search it left
+    unspent (`s`: the plan's search seconds, `job.json`'s, less the active
+    seconds at convergence, `search.used_s`; never below 0), whether the
+    final check spent them (`spent`: its one extension added runs, which the
+    unspent time paid for -- `_time_left` counts from the run's start, capped at
+    12 runs per case) and `why`: `extended`; `cases` (only more held-back
+    cases could firm up the answer: `check.limited_by`); `answered` (the first
+    read already gave the answer: not `keep`, or every run alike); `at_cap`
+    (no run could be added: every case already had 12, the time left paid for
+    none, or a stop was asked for). `result` is the last read: when nothing
+    was added, the first."""
+    stored = (job.state.get("plan") or {}).get("search_s")
+    search_s = float(stored) if isinstance(stored, (int, float)) and not isinstance(stored, bool) else plan.search_s
+    used = search.get("used_s")
+    saved_s = max(0.0, search_s - (float(used) if isinstance(used, (int, float)) else search_s))
+    if added > 0:
+        why = "extended"
+    elif (job.state.get("check") or {}).get("limited_by") == "cases":
+        why = "cases"
+    elif _decision(result) != "keep" or result.get("identical"):
+        why = "answered"
+    else:
+        why = "at_cap"
+    return {"s": round(saved_s), "spent": added > 0, "why": why}
