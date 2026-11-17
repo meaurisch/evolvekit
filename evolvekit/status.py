@@ -266,6 +266,7 @@ def _permutation_p(
     statistic: Callable[[Sequence[Any], Sequence[float]], float | None] | None = None,
     *,
     rounds: Sequence[Any] | None = None,
+    centre: bool = False,
 ) -> float | None:
     """How often the scores, shuffled within each round, go with the value at least as strongly
     as they do: p = (1 + count) / (1 + PERMUTATIONS), ties counted as extreme (A4.3, S9).
@@ -273,9 +274,10 @@ def _permutation_p(
     `statistic` None is the absolute Spearman correlation, computed as one dot product of the
     centred value ranks with the shuffled score ranks (ranks are precomputed: shuffling scores
     shuffles their ranks); else `statistic(xs, shuffled ys)`, as `_correlation_ratio` for a choice of
-    more than two. Shuffling within rounds keeps a setting that only drifts along the lineage while
-    the search improves through others from looking important (decision 3). `rounds=None` is one
-    round; when every round has a single value nothing can move and p is 1. None below
+    more than two. `rounds` are the groups shuffled within (`_importance` passes sibling groups,
+    children of one parent in one round: decision 16); `centre` centres the value ranks within each
+    group first, so the statistic compares members of a group only (`_sibling_rho`). `rounds=None`
+    is one group; when every group has a single value nothing can move and p is 1. None below
     `PERMUTATION_MIN_N` values or when the statistic has no value."""
     n = len(ys)
     if n < PERMUTATION_MIN_N or len(xs) != n:
@@ -287,8 +289,17 @@ def _permutation_p(
         if _spearman(list(xs), list(ys)) is None:
             return None
         rx, ry = _ranks(list(xs)), _ranks(list(ys))
-        mean = fmean(rx)
-        cx = [r - mean for r in rx]
+        if centre:
+            sums: dict[int, list[float]] = {}
+            for key, r in zip(keys, rx):
+                sums.setdefault(key, []).append(r)
+            means = {key: fmean(v) for key, v in sums.items()}
+            cx = [r - means[key] for key, r in zip(keys, rx)]
+            if not any(abs(c) > 1e-12 for c in cx):
+                return None
+        else:
+            mean = fmean(rx)
+            cx = [r - mean for r in rx]
         my = fmean(ry)
         scale = math.sqrt(sum(c * c for c in cx) * sum((r - my) ** 2 for r in ry))
         observed = abs(sum(map(operator.mul, cx, ry)))
@@ -310,6 +321,141 @@ def _permutation_p(
 
 CATEGORICAL = ("bool", "choice")
 COVERAGE_BINS = 10
+DRAWN_ANEW = ("param_lhs", "param_lhs_typed", "param_tpe", "param_cross")
+"""Operators whose child's values are drawn afresh (or taken from a mate), not moved from the parent's:
+their change from the parent carries the parent's own level, so they give no move (decision 16)."""
+
+
+def _siblings(
+    item: Mapping[str, Any],
+    observed: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    by_id: Mapping[str, Mapping[str, Any]],
+    values_of: Callable[[Mapping[str, Any] | None], Mapping[str, Any]],
+) -> list[tuple[Any, float, str]]:
+    """The children a setting's importance compares (decision 16): per child `(its value's change
+    from its parent's, the ranking score's change from the parent's, its sibling group)`, for the
+    children that share their round and their parent with at least one other.
+
+    The change of the value is along the scale the search samples on (its position, so a log-scale
+    setting moves by its logarithm; the raw difference when a value lies outside the declared
+    range), the change of slot for a bool or a two-way choice, and, for a choice of more than two,
+    the value itself -- its categories have no order to subtract. A child that kept its parent's
+    value is compared too (a change of 0): a switch that matters is otherwise only ever moved one
+    way. A child drawn anew (`DRAWN_ANEW`) has no change of its own and is left out. Both sides
+    must be fully evaluated (a ranked child; a parent that was not rejected and has a score)."""
+    name, categorical = item["name"], item.get("type") in CATEGORICAL
+    categories = _Parameters.categories(item)
+    out: list[tuple[Any, float, str]] = []
+    for row, values in observed:
+        if name not in values or not competes(row) or fitness_of(row) is None or not row.get("parent_id"):
+            continue
+        if row.get("operator") in DRAWN_ANEW:
+            continue
+        parent = by_id.get(str(row["parent_id"]))
+        if parent is None or parent.get("rejected") or fitness_of(parent) is None:
+            continue
+        before = values_of(parent)
+        if name not in before:
+            continue
+        new, old = values[name], before[name]
+        if categorical:
+            if new not in categories or old not in categories:
+                continue
+            moved: Any = new if len(categories) > 2 else categories.index(new) - categories.index(old)
+        else:
+            a, b = _Parameters.position(item, new), _Parameters.position(item, old)
+            if a is None or b is None:
+                a, b = _number(new), _number(old)
+            if a is None or b is None:
+                continue
+            moved = a - b
+        group = json.dumps([row.get("generation"), str(row["parent_id"])], default=str)
+        out.append((moved, fitness_of(row) - fitness_of(parent), group))
+    sizes: dict[str, int] = {}
+    for _, _, group in out:
+        sizes[group] = sizes.get(group, 0) + 1
+    return [child for child in out if sizes[child[2]] > 1]
+
+
+def _sibling_rho(xs: Sequence[float], ys: Sequence[float], groups: Sequence[Any]) -> float | None:
+    """The rank correlation between the value's change and the score's change among siblings: the
+    value ranks are centred within each sibling group, so only children of one parent in one round
+    are set against each other. None without a change that differs between siblings."""
+    if len(ys) < 3 or len(set(ys)) < 2:
+        return None
+    rx, ry = _ranks(list(xs)), _ranks(list(ys))
+    members: dict[Any, list[float]] = {}
+    for group, r in zip(groups, rx):
+        members.setdefault(group, []).append(r)
+    means = {group: fmean(v) for group, v in members.items()}
+    cx = [r - means[group] for group, r in zip(groups, rx)]
+    my = fmean(ry)
+    den = math.sqrt(sum(c * c for c in cx) * sum((r - my) ** 2 for r in ry))
+    if den <= 1e-12:
+        return None
+    return sum(map(operator.mul, cx, ry)) / den
+
+
+def _sibling_ratio(groups: Sequence[Any]) -> Callable[[Sequence[Any], Sequence[float]], float | None]:
+    """For a choice of more than two: the share of the score changes' rank variance within sibling
+    groups that lies between the values the siblings took (square root)."""
+
+    def ratio(values: Sequence[Any], ys: Sequence[float]) -> float | None:
+        if len(ys) < 3 or len(set(ys)) < 2:
+            return None
+        ranks = _ranks(list(ys))
+        by_group: dict[Any, list[float]] = {}
+        cells: dict[tuple[Any, str], list[float]] = {}
+        for group, value, r in zip(groups, values, ranks):
+            by_group.setdefault(group, []).append(r)
+            cells.setdefault((group, json.dumps(value, sort_keys=True, default=str)), []).append(r)
+        means = {group: fmean(v) for group, v in by_group.items()}
+        within = sum((r - means[group]) ** 2 for group, r in zip(groups, ranks))
+        between = sum(len(v) * (fmean(v) - means[group]) ** 2 for (group, _), v in cells.items())
+        return math.sqrt(min(1.0, between / within)) if within > 1e-12 and between > 1e-12 else None
+
+    return ratio
+
+
+def _importance(
+    item: Mapping[str, Any],
+    observed: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    by_id: Mapping[str, Mapping[str, Any]],
+    values_of: Callable[[Mapping[str, Any] | None], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """How strongly moving a setting went with the score moving, among siblings (decision 16), with
+    its permutation p.
+
+    Raw values cannot be shuffled honestly: children of one elite share both its value of the
+    setting and its quality from the others, so a setting that does nothing went with the score in
+    40-63 % of lineage-shaped searches. Children of one parent in one round can: each one's change
+    from the parent is compared with its siblings' only, and the score changes are shuffled within
+    each sibling group. `value` is |the sibling rank correlation| of the value's change and the
+    score's change (for a choice of more than two, the sibling correlation ratio), `sign` its
+    direction, `n` the children compared, `p` against `PERMUTATIONS` shuffles (None under
+    `PERMUTATION_MIN_N` children). The lineage simulations in tests/test_status.py measure the
+    rates under the null and with a real effect."""
+    children = _siblings(item, observed, by_id, values_of)
+    xs, ys, groups = [c[0] for c in children], [c[1] for c in children], [c[2] for c in children]
+    many = item.get("type") in CATEGORICAL and len(_Parameters.categories(item)) > 2
+    if many:
+        statistic = _sibling_ratio(groups)
+        strength, sign = statistic(xs, ys), 0
+        p_value = _permutation_p(xs, ys, statistic, rounds=groups) if strength is not None else None
+    else:
+        rho = _sibling_rho(xs, ys, groups)
+        strength, sign = (abs(rho) if rho is not None else None), ((1 if rho > 0 else -1) if rho else 0)
+        p_value = _permutation_p(xs, ys, rounds=groups, centre=True) if strength is not None else None
+    method = (
+        "among children of one parent in one round, "
+        + ("the rank correlation ratio between the value each took and the change of its ranking score "
+           "from the parent's (square root)" if many else
+           "the absolute rank correlation between each one's change of the value from the parent's and the "
+           "change of its ranking score")
+        + ", fully evaluated children only; children drawn anew are left out"
+    )
+    return {"method": method, "value": strength, "sign": sign, "n": len(children),
+            "p": p_value, "shuffles": PERMUTATIONS}
 
 
 class _Parameters:
@@ -1574,32 +1720,7 @@ class _Run:
             for row, values in observed
             if name in values
         ]
-        generations = [row.get("generation") for row, values in observed if name in values]
-        kept = [
-            (p, generation)
-            for p, generation in zip(points, generations)
-            if p["competes"] and p["fitness"] is not None
-            and not (categorical and p["position"] is None)  # a value the declaration no longer has
-        ]
-        ranked, rounds = [p for p, _ in kept], [g for _, g in kept]
-        fitnesses = [p["fitness"] for p in ranked]
-        if categorical and len(categories) > 2:
-            method = (
-                "rank correlation ratio: the share of the ranking's variance that lies between "
-                "the categories (square root, shrunk for their number), fully evaluated candidates only"
-            )
-            strength, sign = _correlation_ratio([p["value"] for p in ranked], fitnesses), 0
-            p_value = _permutation_p([p["value"] for p in ranked], fitnesses, _correlation_ratio, rounds=rounds)                 if strength is not None else None
-        else:
-            method = (
-                "absolute Spearman rank correlation between the value and the ranking score, "
-                "fully evaluated candidates only"
-            )
-            # A two-way choice is ranked by its slot, so its sign reads "towards the second value".
-            xs = [categories.index(p["value"]) if categorical else p["value"] for p in ranked]
-            rho = _spearman(xs, fitnesses)
-            strength, sign = (abs(rho) if rho is not None else None), ((1 if rho > 0 else -1) if rho else 0)
-            p_value = _permutation_p(xs, fitnesses, rounds=rounds) if strength is not None else None
+        importance = _importance(item, observed, self.by_id, self.space.values)
         labels = [str(c).lower() if isinstance(c, bool) else str(c) for c in categories] or None
         low, high = _number(item.get("low")), _number(item.get("high"))
         if item.get("type") == "int" and low is not None and high is not None and 0 <= high - low < COVERAGE_BINS:
@@ -1651,8 +1772,7 @@ class _Run:
             "coverage": bins,
             "coverage_labels": labels,
             "levels": levels if categorical else None,
-            "importance": {"method": method, "value": strength, "sign": sign, "n": len(ranked),
-                           "p": p_value, "shuffles": PERMUTATIONS},
+            "importance": importance,
             "points": points,
         }
 

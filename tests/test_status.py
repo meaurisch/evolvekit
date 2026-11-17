@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import statistics
 import subprocess
 import sys
@@ -541,7 +542,7 @@ def test_parameters_are_ranked_by_how_strongly_they_go_with_the_score(tmp_path):
     names = [item["name"] for item in parameters["items"]]
     assert names == ["ALPHA", "STEPS"], "ALPHA orders the scores perfectly; STEPS does not"
     alpha = parameters["items"][0]
-    assert alpha["importance"]["value"] == pytest.approx(1.0) and alpha["importance"]["n"] == 6
+    assert alpha["importance"]["value"] == pytest.approx(1.0) and alpha["importance"]["n"] == 5, "five children moved it"
     assert alpha["importance"]["sign"] == 1  # a higher ALPHA goes with a higher score
     assert sum(alpha["coverage"]) == 6 and alpha["coverage"][9] == 1
     assert alpha["distinct_values"] == 6
@@ -570,20 +571,21 @@ ORDERED = [(0, 1, "a", 80.0), *[(1, k, mode, 80.0 - 10 * i)
 
 
 def test_importance_carries_a_permutation_p_with_999_shuffles(tmp_path):
-    """A4.3 (S9): beside |rho|, how often 999 shuffles of the scores within each round go with the
-    value as strongly: p = (1 + count) / 1000; none under five fully evaluated combinations."""
+    """A4.3 (S9), decision 16: the strength is read off each child's change from its parent, set
+    against its siblings' (here the seven children of the starting point, one round), with how often
+    999 shuffles go with it as strongly: p = (1 + count) / 1000; none under five children compared."""
     from evolvekit import status
 
     assert status.PERMUTATIONS == 999 and status.PERMUTATION_MIN_N == 5
     items = {i["name"]: i for i in _typed_run(tmp_path / "eight", ORDERED)["parameters"]["items"]}
     k = items["K"]["importance"]
-    assert k["value"] == pytest.approx(1.0) and k["n"] == 8 and k["shuffles"] == 999
+    assert k["value"] == pytest.approx(1.0) and k["n"] == 7 and k["shuffles"] == 999 and k["sign"] == 1
     assert k["p"] <= 0.01 and round(k["p"] * 1000) == pytest.approx(k["p"] * 1000)
     mode = items["MODE"]["importance"]
-    assert mode["value"] > 0.8 and mode["shuffles"] == 999 and mode["p"] is not None and mode["p"] < 0.1, \
-        "a three-way choice gets a p too"
+    assert mode["n"] == 7, "the two children that kept the starting point's 'a' are compared too"
+    assert mode["value"] > 0.8 and mode["shuffles"] == 999 and 0 < mode["p"] <= 1, "a three-way choice gets a p too"
     few = {i["name"]: i for i in _typed_run(tmp_path / "four", ORDERED[:4])["parameters"]["items"]}
-    assert few["K"]["importance"]["value"] == pytest.approx(1.0) and few["K"]["importance"]["n"] == 4
+    assert few["K"]["importance"]["value"] == pytest.approx(1.0) and few["K"]["importance"]["n"] == 3
     assert few["K"]["importance"]["p"] is None and few["K"]["importance"]["shuffles"] == 999
 
 
@@ -626,33 +628,137 @@ def test_the_permutation_p_is_below_0_1_in_about_10_percent_of_null_studies():
     assert five <= 0.11
 
 
-def test_a_setting_that_drifts_along_the_rounds_is_below_0_1_in_about_10_percent_when_shuffled_within_rounds():
-    """S9's round-to-round confounding (decision 3): a setting that does nothing but drifts along the
-    lineage, while the search improves through other settings, 10 rounds of 8, 1000 seeded trials
-    (random.Random(20261115)). Builder check (400 trials): within-round shuffles 9.8 % +- 1.5, a shuffle
-    over the whole run 72.5 % +- 2.2; measured here 11.0 % +- 1.0 and 76.0 % +- 1.4. Asserts within
-    rounds [7, 14] % and the whole-run shuffle >= 70 %."""
-    import random
+LINEAGE_ITEMS = {"float": {"name": "X", "type": "float", "low": 0.0, "high": 1.0},
+                 "bool": {"name": "X", "type": "bool", "default": False}}
 
+
+def lineage_rows(rng, *, kind: str = "float", effect: float = 0.0, rounds: int = 10, children: int = 8,
+                 settings: int = 6, top: int = 3, drawn: float = 0.4, step: float = 0.3, noise: float = 0.5) -> list[dict]:
+    """A lineage-shaped search, as the driver writes its rows (the A4 statistician's shapes): each round
+    breeds `children` from the `top` elites so far; a share `drawn` are drawn anew (`param_tpe`: a new
+    value and a new quality from the other settings), the rest are `param_local` moves of 1-3 of
+    `settings` settings (X moves with chance 2/settings: by sd 0.1, or a bool flips) inheriting the
+    parent's quality plus a step. The score is that quality + `effect` * X + noise (sd `noise`): X does
+    nothing at `effect` 0."""
+    start = False if kind == "bool" else 0.5
+    rows = [{"id": "c0", "generation": 0, "parent_id": None, "operator": "human-seed", "params": {"X": start},
+             "q": 0.0, "score": rng.gauss(0.0, noise), "competes": True}]
+    for g in range(1, rounds + 1):
+        elites = sorted(rows, key=lambda r: -r["score"])[:top]
+        for _ in range(children):
+            parent = rng.choice(elites)
+            px = parent["params"]["X"]
+            if rng.random() < drawn:
+                x = rng.random() < 0.5 if kind == "bool" else rng.random()
+                q, operator = rng.gauss(-0.5, 1.0), "param_tpe"
+            else:
+                moves = rng.random() < rng.randint(1, 3) / settings
+                if kind == "bool":
+                    x = (not px) if moves else px
+                else:
+                    x = min(1.0, max(0.0, px + rng.gauss(0.0, 0.1))) if moves else px
+                q, operator = parent["q"] + rng.gauss(0.0, step), "param_local"
+            rows.append({"id": f"c{len(rows)}", "generation": g, "parent_id": parent["id"], "operator": operator,
+                         "params": {"X": x}, "q": q, "score": q + effect * float(x) + rng.gauss(0.0, noise),
+                         "competes": True})
+    return rows
+
+
+def lineage_importance(rows: list[dict], kind: str = "float") -> dict:
+    """`importance` of X for these rows, through the function `_parameter` calls."""
     from evolvekit import status
 
-    rng = random.Random(20261115)
-    trials, within, whole = 1000, 0, 0
-    rounds = [g for g in range(10) for _ in range(8)]
+    return status._importance(LINEAGE_ITEMS[kind], [(r, r["params"]) for r in rows], {r["id"]: r for r in rows},
+                              lambda r: dict(r["params"]) if r else {})
+
+
+def _rate(hits: int, n: int) -> tuple[float, float]:
+    rate = hits / n
+    return rate, math.sqrt(rate * (1 - rate) / n)
+
+
+def _lineage_rate(seed: int, trials: int, **kw) -> tuple[float, float, float, int]:
+    """P(p < 0.1) of X over `trials` lineage searches, the raw values' within-round reading beside it,
+    and how many searches had a p."""
+    from evolvekit import status
+
+    rng = random.Random(seed)
+    hits = raw = n = 0
+    kind = kw.get("kind", "float")
     for _ in range(trials):
-        xs, ys, x = [], [], 0.5
-        for g in range(10):
-            x = min(1.0, max(0.0, x + rng.gauss(0.0, 0.08)))
-            for _ in range(8):
-                xs.append(min(1.0, max(0.0, x + rng.gauss(0.0, 0.05))))
-                ys.append(0.3 * g + rng.gauss(0.0, 1.0))
-        within += status._permutation_p(xs, ys, rounds=rounds) < 0.1
-        whole += status._permutation_p(xs, ys) < 0.1
-    a, b = within / trials, whole / trials
-    print(f"P(p < 0.1), drifting null: within rounds {a:.2%} +- {math.sqrt(a * (1 - a) / trials):.2%}; "
-          f"whole run {b:.2%} +- {math.sqrt(b * (1 - b) / trials):.2%}")
-    assert 0.07 <= a <= 0.14
-    assert b >= 0.70
+        rows = lineage_rows(rng, **kw)
+        got = lineage_importance(rows, kind)
+        if got["p"] is None:
+            continue
+        n += 1
+        hits += got["p"] < 0.1
+        ranked = rows[1:]
+        raw += (status._permutation_p([float(r["params"]["X"]) for r in ranked], [r["score"] for r in ranked],
+                                      rounds=[r["generation"] for r in ranked]) or 1.0) < 0.1
+    rate, se = _rate(hits, n)
+    return rate, se, raw / n, n
+
+
+def test_a_setting_that_does_nothing_in_a_lineage_shaped_search_reads_p_below_0_1_in_about_10_percent():
+    """Decision 16: children of one elite share its value and its quality, so the raw values cannot be
+    shuffled -- a setting that does nothing went with the score in 40-63 % of such searches. Siblings
+    can: 10 rounds of 8, 1000 seeded trials (random.Random(20261116)). Measured 11.1 % +- 1.0 (other shapes
+    of the statistician's: 6.9-12.0 %); the raw values shuffled within rounds on the same searches
+    60.2 %. Asserts [7.5, 14] % and the raw >= 45 %."""
+    rate, se, raw, n = _lineage_rate(20261116, 1000)
+    print(f"null number, lineage: siblings {rate:.2%} +- {se:.2%}; raw within rounds {raw:.2%} ({n} of 1000 had a p)")
+    assert 0.075 <= rate <= 0.14
+    assert raw >= 0.45
+
+
+@pytest.mark.slow
+def test_a_switch_that_does_nothing_in_a_lineage_shaped_search_reads_p_below_0_1_in_about_10_percent():
+    """The same for a bool, which a search moves one way more than the other: 1000 seeded trials
+    (random.Random(20261119)). Measured 10.1 % +- 1.0 (raw values within rounds: 19.4 %); asserts
+    [7, 13.5] %."""
+    rate, se, raw, n = _lineage_rate(20261119, 1000, kind="bool")
+    print(f"null switch, lineage: siblings {rate:.2%} +- {se:.2%}; raw within rounds {raw:.2%} ({n} of 1000 had a p)")
+    assert 0.07 <= rate <= 0.135
+
+
+@pytest.mark.slow
+def test_a_setting_that_matters_in_a_lineage_shaped_search_reads_p_below_0_1_in_about_40_percent():
+    """Power: X moves the score by 5 over its range, ten noise sds (a local move of sd 0.1 then shifts the
+    score by about 0.5, against a score change's noise of about 0.8); 500 seeded trials
+    (random.Random(20261117)). Measured 39.4 % +- 2.2; asserts [30, 48] %. Small effects at small steps are
+    not found: the reading says where to look, not what is true."""
+    rate, se, _, n = _lineage_rate(20261117, 500, effect=5.0)
+    print(f"real number (effect 5), lineage: p < 0.1 in {rate:.2%} +- {se:.2%} ({n} of 500)")
+    assert 0.30 <= rate <= 0.48
+
+
+@pytest.mark.slow
+def test_a_switch_that_matters_in_a_lineage_shaped_search_reads_p_below_0_1_in_about_55_percent():
+    """Power for a bool worth one noise sd (0.5): 500 seeded trials (random.Random(20261120)). Measured
+    55.0 % +- 2.2; asserts [45, 65] %."""
+    rate, se, _, n = _lineage_rate(20261120, 500, kind="bool", effect=0.5)
+    print(f"real switch (effect 0.5), lineage: p < 0.1 in {rate:.2%} +- {se:.2%} ({n} of 500)")
+    assert 0.45 <= rate <= 0.65
+
+
+def test_only_siblings_are_compared_and_a_child_drawn_anew_is_left_out():
+    """A child counts (`n`) when it shares its round and its parent with another counted child; one that
+    kept its parent's value is compared too (a change of 0). A `param_tpe` or `param_lhs` child's value
+    is drawn afresh: its change from the parent would carry the parent's own level back in."""
+    rows = [{"id": "c0", "generation": 0, "parent_id": None, "params": {"X": 0.5}, "score": 0.0},
+            {"id": "c1", "generation": 1, "parent_id": "c0", "operator": "param_local", "params": {"X": 0.6},
+             "score": 1.0},
+            {"id": "c2", "generation": 1, "parent_id": "c0", "operator": "param_local", "params": {"X": 0.5},
+             "score": 2.0},
+            {"id": "c3", "generation": 1, "parent_id": "c0", "operator": "param_tpe", "params": {"X": 0.9},
+             "score": 3.0},
+            {"id": "c4", "generation": 2, "parent_id": "c1", "operator": "rewrite", "params": {"X": 0.4},
+             "score": 0.5},
+            {"id": "c5", "generation": 2, "parent_id": "gone", "operator": "param_local", "params": {"X": 0.1},
+             "score": 0.5}]
+    got = lineage_importance(rows)
+    assert got["n"] == 2 and got["p"] is None, "c1 and c2 are siblings; c3 was drawn, c4 has none, c5's parent is gone"
+    assert got["value"] is None, "two points are not a correlation"
 
 
 @pytest.mark.slow

@@ -729,7 +729,8 @@ the first thing Set up lacks as `{"step", "key", "text"}`, or `null`),
 `importance_n`, `importance_of`, `importance_p`, `winners`, `direction` and
 `leaned` — `importance_of` the studies with a strength on at least five
 combinations, `importance_p` their permutation p's (the status document's
-`importance.p`, from `importance.shuffles`, 999, shuffles within each round) combined
+`importance.p`, from `importance.shuffles`, 999, shuffles of child-minus-parent
+changes among siblings, children of one parent in one round) combined
 by Fisher's rule (an item without one counts as 1), and `importance` their
 mean |ρ| over `importance_n` of them only when `importance_p` is under 0.1,
 else `null` with `importance_n` 0 — `leaned` the median of the

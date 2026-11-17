@@ -883,7 +883,7 @@ function renderParameters(doc) {
   const holder = h("div", { class: "chart", id: "strip-chart" });
   queueMicrotask(() => { const c = $("strip-chart"); if (c) c.replaceChildren(drawStrip(current, doc, c.clientWidth)); });
   return [head,
-    h("div", { class: "note", style: { marginBottom: "8px" }, title: pa.why || "" }, "How strongly each value goes with the score (rank correlation |ρ|; for a choice, the share of the ranking between its values): ↑ higher values did better, ↓ lower ones, and a switch names the value that did better. A pointer for where to look, not a verdict."),
+    h("div", { class: "note", style: { marginBottom: "8px" }, title: pa.why || "" }, "How strongly moving each parameter away from the parent's value moved the score, set against siblings (children of one parent in one round; rank correlation |ρ| of the two changes; for a choice, the share of the score changes between the values taken): ↑ raising it did better, ↓ lowering it, and a switch names the value that did better. A pointer for where to look, not a verdict."),
     rows,
     h("div", { style: { marginTop: "16px" } }, h("div", { class: "sub" }, h("h3", null, current.name + " — every value tried")), holder,
       h("div", { class: "cover", style: { marginLeft: "58px", marginRight: "16px", gridTemplateColumns: `repeat(${current.coverage.length}, 1fr)` }, title: current.coverage_labels ? "How many candidates took each value" : "How many candidates fell in each tenth of the declared range" + (current.log ? " (log scale)" : "") },

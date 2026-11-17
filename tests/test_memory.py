@@ -143,6 +143,24 @@ def test_under_the_designs_rule_a_setting_that_does_nothing_would_be_shown_in_ab
     assert fmean(shown) > 0.6, "what it would rank: noise as strong as a real effect"
 
 
+@pytest.mark.slow
+def test_a_setting_that_does_nothing_in_lineage_shaped_searches_is_shown_in_about_10_percent_after_three_studies():
+    """Decision 16 on the product's path: three lineage-shaped null studies (`test_status.lineage_rows`,
+    10 rounds of 8) read through `status._importance` and pooled by `memory._pooled`; 1000 seeded trials
+    (random.Random(20261118)). Measured 10.0 % +- 0.95 (under the earlier moved-only reading 7.9 % +- 0.85);
+    asserts [7, 13.5] %."""
+    from test_status import lineage_importance, lineage_rows
+
+    rng = random.Random(20261118)
+    shown = 0
+    for _ in range(1000):
+        studies = [lineage_importance(lineage_rows(rng)) for _ in range(3)]
+        shown += memory._pooled([(s["value"], s["n"], s["p"]) for s in studies])["importance"] is not None
+    rate = shown / 1000
+    print(f"null setting shown after three lineage studies (Fisher): {rate:.2%} +- {math.sqrt(rate * (1 - rate) / 1000):.2%}")
+    assert 0.07 <= rate <= 0.135
+
+
 def test_winners_only_from_use_studies(tmp_path):
     home, docs = Home(tmp_path / "my home"), {}
     finished(home, docs, "Spring", decision="use", best={"neighbours": 12}, finished_at="2026-10-01")
