@@ -619,6 +619,17 @@ design's text are marked **(departs)** and listed in the PR for the owner.
     the number of such children; below 5, no p. `value` reported is that statistic. Re-measured with
     a lineage simulation (the statistician's `rev_a4\sim_perm_lineage*.py` shapes) and stated in the
     docs; Fisher's "about 8 %" re-measured on the same path.
+    *Built as a sibling comparison, after measurement:* moved children shuffled within rounds still
+    read 26–37 % for a null number setting; leaving out children drawn anew fixed numbers but lost a
+    switch the lineage had fixed (power 0.4 %), and counting unmoved switches as 0 inflated the null
+    to 12–15 %. The statistic compares siblings (children of one parent in one round): the rank
+    correlation of the value's change against the score's change, value ranks centred within each
+    sibling group, permuted within sibling groups (999); a child that kept its parent's value counts
+    as a change of 0; children drawn anew and children without a sibling are left out; choices of
+    more than two use the within-sibling-group correlation ratio. Measured: null number 11.1 % ± 1.0,
+    null switch 10.1 % ± 1.0 (6.9–12.0 % across the statistician's six shapes: "about 10 %"); a
+    number worth 10 noise sd over its range found in 39 %, a switch worth 1 sd in 55 %; Fisher over
+    three null lineage studies 10.0 % ± 1.0.
 17. **The defaults line is not measured when any from-defaults study in the warm chain held back the
     same case content** (A4 statistician round 1, Important; extends decision 15c): a configuration's
     effect on a case is fixed, so a later from-defaults study's runs on those cases carry the case
