@@ -1092,6 +1092,16 @@ def _edited_cases(root: Path) -> None:
         case.write_text(case.read_text(encoding="utf-8") + "\n", encoding="utf-8")
 
 
+def _confirm_names(cases: list[str]) -> list[str]:
+    """The held-back cases named as the final check names them: `confirm` reads the stage's
+    `instance_names()` over `../../<case>` -- each file's stem when the stems tell them apart
+    (pre-merge testing: the tests named them `../../<case>`, which the product never writes)."""
+    from evolvekit.config import StageConfig
+
+    stage = StageConfig(id="full", kind="command", instances=tuple(f"../../{case}" for case in cases))
+    return list(stage.instance_names())
+
+
 def _checked(root: Path, started: str, *, base: list[float], best: list[float], decision: str = "keep",
              seeds: tuple[int, ...] = (1001, 1002, 1003)) -> tuple[Path, list[dict]]:
     """A finished run whose final check ran the starting point at `base[i]` and the best (`c1`) at
@@ -1101,11 +1111,11 @@ def _checked(root: Path, started: str, *, base: list[float], best: list[float], 
     run_dir = root / "runs" / (started[:10].replace("-", "") + "-" + started[11:19].replace(":", ""))
     finished_run(run_dir, decision=decision, started=started)
     rows = []
-    for i, case in enumerate(load_study(root).test):
+    for i, name in enumerate(_confirm_names(load_study(root).test)):
         for j, seed in enumerate(seeds):
-            rows += [{"configuration": "baseline", "instance": f"../../{case}", "seed": seed, "ok": True,
+            rows += [{"configuration": "baseline", "instance": name, "seed": seed, "ok": True,
                       "kpis": {"tour_length": base[i] + 0.3 * j}},
-                     {"configuration": "c1", "instance": f"../../{case}", "seed": seed, "ok": True,
+                     {"configuration": "c1", "instance": name, "seed": seed, "ok": True,
                       "kpis": {"tour_length": best[i] + 0.2 * j}}]
     (run_dir / "confirm" / "final" / "results.json").write_text(json.dumps(rows), encoding="utf-8")
     return run_dir, rows
@@ -1119,7 +1129,7 @@ def _against(root: Path, run_dir: Path, rows: list[dict], decision: str) -> dict
 
     study = load_study(root)
     comparison = Comparison(label="final", objective="tour_length", direction="minimize", stage="full",
-                            seeds=sorted({r["seed"] for r in rows}), instances=[f"../../{c}" for c in study.test],
+                            seeds=sorted({r["seed"] for r in rows}), instances=_confirm_names(study.test),
                             baseline_id="seed", candidates=["c1"], runs=rows)
     said: list[str] = []
     execute._against_defaults(root, run_dir, study, comparison, decision, said.append)

@@ -1502,10 +1502,18 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
 
     digests: dict[Path, str | None] = {}
 
-    def key_in(folder: Path) -> Callable[[str], str | None]:
+    def key_in(folder: Path, held_back: list[str]) -> Callable[[str], str | None]:
+        # The check names a held-back case as its stage's `instance_names()` does over `UP/<case>`:
+        # the file's stem when the stems tell the cases apart, else `UP/<case>` as written.
+        named = {f"{UP}/{case}": case for case in held_back}
+        stems = [Path(case).stem for case in held_back]
+        if len(set(stems)) == len(stems):
+            named.update(zip(stems, held_back))
+
         def key(instance: str) -> str | None:
-            # The check names a case from the run's folder (`UP/<case>`); the study names it from its own.
-            name = instance[len(UP) + 1:] if instance.startswith(UP + "/") else instance
+            name = named.get(instance)
+            if name is None:
+                return None
             path = folder / name
             if path not in digests:
                 digests[path] = memory.case_digest(path)
@@ -1529,8 +1537,8 @@ def _against_defaults(root: Path, run_dir: Path, study: Study, comparison: Any, 
                 theirs = json.loads(results.read_text(encoding="utf-8"))
                 if not isinstance(theirs, list):
                     raise ValueError(f"{results} holds no list of runs")
-                against = defaults_comparison(comparison, decision, theirs, key_of_ours=key_in(root),
-                                              key_of_theirs=key_in(other.root))
+                against = defaults_comparison(comparison, decision, theirs, key_of_ours=key_in(root, list(study.test)),
+                                              key_of_theirs=key_in(other.root, list(other.study.test)))
                 document = defaults_line(against, decision, name=other.name,
                                          reuses=memory.in_warm_chain(home, study, other.slug),
                                          chose=chose.name if chose is not None else None,
