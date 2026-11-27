@@ -147,6 +147,45 @@ def test_workers_never_exceed_the_runs():
     assert plan.workers == 2 and plan.pin_cpus == (1, 2)
 
 
+def test_resource_overrides_are_used_before_estimating_the_budget():
+    actual = _plan(overrides={"workers": 1, "pin_cpus": []})
+    expected = _plan(workers=1, pin_cpus=[])
+    assert actual.workers == 1 and actual.pin_cpus == ()
+    assert actual.final_check_s == expected.final_check_s
+    assert actual.round_s == expected.round_s
+    assert actual.search_s == expected.search_s
+    assert actual.rounds == expected.rounds
+
+
+@pytest.mark.parametrize("auto", [True, False])
+def test_study_resource_overrides_apply_to_auto_and_manual_plans(tmp_path, auto):
+    from evolvekit.harness.execute import plan_for
+    from evolvekit.harness.manifest import load_harness
+    from evolvekit.harness.study import study_from_template
+    from harness_toy import write_toy_harness
+
+    harness = load_harness(write_toy_harness(tmp_path / "toy"))
+    study = study_from_template(harness, "tune", "Resources")
+    study.training = ["a.json", "b.json", "c.json"]
+    study.test = ["held.json"]
+    study.plan = {"auto": auto, "workers": 1, "pin_cpus": [], "children": 2}
+    actual = plan_for(study, harness, {"wall_s": 5}, operators={})
+    expected = make_plan(training=3, test=1, runs_per_case=study.limits.runs_per_case,
+                         time_limit_s=study.limits.time_per_case_s, hours=study.budget.hours,
+                         measured_s=5, workers=1, pin_cpus=[],
+                         overrides={} if auto else {"children": 2})
+    assert actual.workers == 1 and actual.pin_cpus == ()
+    assert (actual.round_s, actual.final_check_s, actual.rounds) == (expected.round_s, expected.final_check_s, expected.rounds)
+    if not auto:
+        assert actual.children == 2
+
+
+@pytest.mark.parametrize("pins", [None, "2", [True], [-1], [1, 1]])
+def test_invalid_cpu_pinning_is_not_silently_ignored(pins):
+    with pytest.raises(ValueError, match="plan.pin_cpus"):
+        _plan(overrides={"pin_cpus": pins})
+
+
 def test_an_application_that_does_not_stop_itself_is_planned_on_what_it_took():
     plan = _plan(accepts_time_limit=False, measured_s=12, time_limit_s=60)
     assert plan.run_s == 12

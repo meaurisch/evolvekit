@@ -45,6 +45,7 @@ from evolvekit.app.detach import no_window_flags
 from evolvekit.harness.manifest import Harness, load_harness, resolve_code_repo
 from evolvekit.harness.probe import probe_application
 from evolvekit.harness.sdk import evk_harness as evk
+from evolvekit.expressions import Expression, ExpressionError
 
 __all__ = ["Check", "check_harness", "exit_code", "render"]
 
@@ -220,6 +221,26 @@ CHECKOUT_ID = "check"
 
 def _sample_cases(harness: Harness, samples: int) -> list[Path]:
     return sorted(p for p in (harness.root / "samples").glob("*") if p.suffix.lower() in harness.cases.formats)[:samples]
+
+
+def _random_settings(harness: Harness, rng: random.Random) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Draw inside one template's allowed domain, without combining mutually exclusive templates."""
+    domains = [
+        list(template.get("constraints") or [])
+        for template in harness.templates.values()
+    ] or [[]]
+    parsed = [[Expression.parse(c["expr"]) for c in domain if c.get("expr")] for domain in domains]
+    for _ in range(1000):
+        values = {name: s.parameter.from_unit(rng.random()) for name, s in harness.settings.items()}
+        for domain, expressions in zip(domains, parsed):
+            try:
+                valid = all(expression.holds(values) for expression in expressions)
+            except ExpressionError:
+                # Undefined arithmetic is outside the domain, just as in the search sampler.
+                valid = False
+            if valid:
+                return values, domain
+    raise HarnessError("no random settings vector met a template's expression constraints after 1000 draws")
 
 
 def _interpreter(harness: Harness, app: str) -> str:
@@ -571,8 +592,14 @@ def check_harness(folder: str | Path, app: str | None = None, *, samples: int = 
         rng = random.Random(7)
         failed = []
         for attempt in range(3):
-            values = {name: s.parameter.from_unit(rng.random()) for name, s in harness.settings.items()}
-            done, _ = runner.solve(cases[0], _study_run(harness, settings=values), values, f"random-{attempt}", limit)
+            try:
+                values, constraints = _random_settings(harness, rng)
+            except HarnessError as exc:
+                failed.append(str(exc))
+                break
+            study_run = _study_run(harness, settings=values)
+            study_run["constraints"] = constraints
+            done, _ = runner.solve(cases[0], study_run, values, f"random-{attempt}", limit)
             if done.returncode != 0:
                 failed.append(f"{values}: {runner.said(done)}")
         checks.append(_fail("random", f"a random settings vector failed: {failed[0]}",

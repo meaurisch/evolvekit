@@ -451,7 +451,7 @@
     var pct = o.pct != null ? o.pct : c.pct;
     var said = c.failed || pct == null ? "did not finish" : EK.change(pct, o.direction);
     // After the final check's decision (o.after): its word on the checked one, no figure on any.
-    var text = o.after != null ? html`${o.after ? " · " + o.after : ""}`
+    var text = c.excluded ? html` · excluded: ${c.excluded}` : o.after != null ? html`${o.after ? " · " + o.after : ""}`
       : html` · ${said}<span class="wide-only"> on the cases it learned from, not checked</span>`;
     return html`<div class="chip"><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" style="fill:var(--accent);stroke:var(--ink-1)" stroke-width="1.5"/></svg>
       <span class="chip-text"><span class="wide-only">Combination </span><span class="phone-only">No. </span>${c.n}${text}</span>

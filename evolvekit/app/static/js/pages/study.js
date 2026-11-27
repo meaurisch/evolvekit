@@ -447,6 +447,7 @@
     var c = combo(p.id);
     if (!c) return ["", ""];
     var head = "Combination " + c.n + " · round " + c.round;
+    if (c.excluded) return [head + " · excluded", c.excluded, c.pct == null ? lookWords(c) : searchChange(c.pct)];
     if (p.cs) {
       var per = (c.cases[st.tries.full_stage] || {})[p.cs];
       if (per == null) { var stages = Object.keys(c.cases); for (var i = stages.length - 1; i >= 0; i--) if (c.cases[stages[i]][p.cs] != null) { per = c.cases[stages[i]][p.cs]; break; } }
@@ -472,7 +473,7 @@
       return html`<div class="plot-empty"><p class="type-body">${msg}</p></div>`;
     }
     var family = !!st.chosen && decisionOf() === "use";
-    var keepWord = whatOf() === "code" ? "today’s code" : whatOf() === "data" ? "today’s data" : "today’s settings";
+    var keepWord = "starting point";
     if (st.view === "tries") {
       var say = sayLine(t, family);
       var planH = isLive() && st.status.time && st.status.time.hours ? st.status.time.hours * 0.85 : 0;
@@ -562,9 +563,12 @@
   }
   /** One sentence over the Tries plot: what is new, or what is marked. */
   function sayLine(t, family) {
-    var d = decisionOf();
-    if (family) return "The chosen combination and its family, back to today’s " + whatOf() + ".";
-    if (d && st.chosen) return "The checked combination is marked.";
+    if (family) return "The chosen combination and its family, back to the starting point.";
+    if (st.chosen) {
+      var r = st.results, final = (r && r.final) || {};
+      var checked = st.status.phase === "done" && ["confirmed", "unclear", "worse", "single"].indexOf(final.state) >= 0 && st.chosen === r.best_id;
+      return checked ? "The checked combination is marked." : "The selected combination is marked.";
+    }
     var best = (t.best || []).slice(-1)[0], running = (t.running || []).length;
     if (!isLive() || !best) return "";
     var ago = Math.max(0, t.now_h - best.h);
@@ -1052,7 +1056,7 @@
       var per = c.cases[st.tries.full_stage] || c.cases[Object.keys(c.cases).slice(-1)[0]] || {};
       var failed = (d.evaluations || []).filter(function (e) { return String(e.ok) === "false" || e.ok === false; });
       var parent = d.parent_id && combo(d.parent_id);
-      var body = html`<p class="type-body strong">${c.failed || c.pct == null ? "Did not finish" : EK.capital(EK.change(chipFigure(c).pct != null ? chipFigure(c).pct : c.pct, chipFigure(c).direction)) + " on the cases it learned from"
+      var body = html`<p class="type-body strong">${c.excluded ? "Excluded: " + c.excluded : c.failed || c.pct == null ? "Did not finish" : EK.capital(EK.change(chipFigure(c).pct != null ? chipFigure(c).pct : c.pct, chipFigure(c).direction)) + " on the cases it learned from"
           + (chipFigure(c).after ? "; the final check’s verdict is the answer" : ", not checked")}</p>
         <p class="type-small ink-2">${lookWords(c)}${parent ? " · comes from combination " + (parent.base ? (c.diff_stat ? "0, today’s code" : "0, today’s settings") : parent.n) : ""}</p>
         <div class="sub-section"><h3 class="type-heading">What it changed</h3>

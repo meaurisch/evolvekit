@@ -77,6 +77,22 @@ def test_copilot_cli_is_a_provider_without_embeddings(minimal_raw, tmp_path):
         build(raw, tmp_path)
 
 
+@pytest.mark.parametrize("provider", ["claude-cli", "copilot-cli"])
+@pytest.mark.parametrize("model", ["", "  "])
+def test_cli_provider_can_use_its_default_model(minimal_raw, tmp_path, provider, model):
+    raw = copy.deepcopy(minimal_raw)
+    raw["models"]["small"] = {"provider": provider, "model": model}
+    assert build(raw, tmp_path).models.small.model == ""
+
+
+@pytest.mark.parametrize("provider", ["azure", "openrouter", "fake"])
+def test_non_cli_provider_still_requires_a_model(minimal_raw, tmp_path, provider):
+    raw = copy.deepcopy(minimal_raw)
+    raw["models"]["small"] = {"provider": provider, "model": ""}
+    with pytest.raises(ConfigError, match=r"models\.small\.model"):
+        build(raw, tmp_path)
+
+
 def test_negative_price_is_rejected(minimal_raw, tmp_path):
     raw = copy.deepcopy(minimal_raw)
     raw["models"]["small"]["price_in_per_mtok"] = -1

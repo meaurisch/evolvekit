@@ -4,14 +4,17 @@ application probe (`evolvekit/harness/probe.py`)."""
 from __future__ import annotations
 
 import json
+import random
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import yaml
 
-from evolvekit.harness.check import check_harness, exit_code, render
+from evolvekit.harness import HarnessError
+from evolvekit.harness.check import _random_settings, check_harness, exit_code, render
 from evolvekit.harness.manifest import load_harness
 from evolvekit.harness.probe import probe_application, version_matches, version_words
 from harness_toy import MANIFEST, write_toy_harness
@@ -150,3 +153,47 @@ def test_a_python_harness_frozen_needs_its_app(tmp_path, monkeypatch):
     assert checks[-1].id == "probe" and not checks[-1].ok
     assert checks[-1].message == "a python harness is checked against the application's Python"
     assert checks[-1].fix == "give --app <the application's Python>"
+
+
+def test_random_vectors_respect_template_constraints_without_intersecting_templates():
+    harness = replace(load_harness(DEMO), templates={
+        "short": {"constraints": [{"says": "Few neighbours", "expr": "neighbours < 5"}]},
+        "long": {"constraints": [{"says": "Many neighbours", "expr": "neighbours > 25"}]},
+    })
+    rng = random.Random(7)
+    for _ in range(10):
+        values, constraints = _random_settings(harness, rng)
+        assert values["neighbours"] < 5 or values["neighbours"] > 25
+        assert len(constraints) == 1
+        assert constraints[0]["says"] == ("Few neighbours" if values["neighbours"] < 5 else "Many neighbours")
+
+
+def test_impossible_random_constraints_fail_explicitly():
+    harness = replace(load_harness(DEMO), templates={
+        "impossible": {"constraints": [{"says": "Impossible", "expr": "neighbours < 0"}]},
+    })
+    with pytest.raises(HarnessError, match="after 1000 draws"):
+        _random_settings(harness, random.Random(7))
+
+
+def test_a_sampled_domains_sql_constraints_reach_the_runner(tmp_path, monkeypatch):
+    from evolvekit.harness import check
+
+    constraints = [{"says": "Enough neighbours", "expr": "neighbours >= 2"},
+                   {"says": "A valid sample", "sql": "SELECT 1"}]
+    harness = replace(load_harness(DEMO), templates={"domain": {"constraints": constraints}})
+    values, matched = _random_settings(harness, random.Random(7))
+    assert matched == constraints, "SQL is not sampled in Python, but must still be enforced by the runner"
+    monkeypatch.setattr(check, "_random_settings", lambda *_: (values, matched))
+    seen = []
+    solve = check._Runner.solve
+
+    def capture(self, case, study_run, values, name, limit):
+        if name.startswith("random-"):
+            seen.append(study_run["constraints"])
+        return solve(self, case, study_run, values, name, limit)
+
+    monkeypatch.setattr(check._Runner, "solve", capture)
+    checks = check_harness(DEMO, str(SOLVER), samples=1)
+    assert next(c for c in checks if c.id == "random").ok, render(checks)
+    assert seen == [constraints] * 3

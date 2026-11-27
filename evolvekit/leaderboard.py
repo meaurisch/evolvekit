@@ -211,10 +211,10 @@ def fitness_of(row: Mapping[str, Any]) -> float | None:
 
 def competes(row: Mapping[str, Any]) -> bool:
     """Whether a row's score is comparable with the others: not rejected, all
-    the way through the final stage, and not kept out by the hold-out. A row
+    the way through the final stage, with no broken gate or hold-out veto. A row
     from before the `competes` field existed is given the benefit of the doubt,
     as it always was."""
-    return not row.get("rejected") and bool(row.get("competes", True))
+    return not row.get("rejected") and not row.get("gated") and bool(row.get("competes", True))
 
 
 def veto_reason(reference: float, margin: float = 0.0) -> str:

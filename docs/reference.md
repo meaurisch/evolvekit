@@ -1974,6 +1974,9 @@ first thing to look at when a key is wrong. `EVOLVEKIT_NO_DOTENV=1` switches the
 slot names a backend, a model, and its prices, which is what the ledger uses to
 turn tokens into USD.
 
+For `claude-cli` and `copilot-cli`, `model: ""` uses the CLI's default model.
+Other backends require a non-empty model name.
+
 | Backend | Environment | Notes |
 |---|---|---|
 | `azure` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY` (or `AZURE_OPENAI_KEY`; leave empty for keyless Entra ID via `evolvekit[entra]`), `AZURE_OPENAI_API_VERSION` (optional, defaults `2024-10-21`) | `openai.AzureOpenAI`, against classic Azure OpenAI **and** Azure AI Foundry resources — any of the `openai.azure.com` / `cognitiveservices.azure.com` / `services.ai.azure.com` endpoint forms; pasted portal paths are stripped. `models.<role>.model` is the **deployment** name. Sends `max_completion_tokens`, falling back once to `max_tokens` on older API versions. Implements `embed()`. Contract-tested against recorded responses in `tests/test_azure_contract.py`. |
@@ -2324,6 +2327,18 @@ budget:
 plan: {auto: true}         # or {auto: false, children: 2, generations: 2}: children = combinations per round, generations = rounds
 ```
 
+A multithreaded application can keep automatic round planning while limiting
+concurrent application processes and disabling single-CPU affinity:
+
+```yaml
+plan: {auto: true, workers: 1, pin_cpus: []}
+```
+
+`workers` and `pin_cpus` apply in automatic and manual plans, before their time
+budget is estimated. An empty `pin_cpus` leaves each application free to use
+its own threads; a nonempty list gives one logical CPU per worker. Omitting
+these keys preserves automatic worker selection and pinning.
+
 A manual plan (`auto: false`) sets the rounds: the search stops when they
 are done, and the hours are only the most it may take.
 
@@ -2501,6 +2516,16 @@ stops `wait` and `watch`, never the run.
   (40 000 studies, runs noisier than cases or pure run noise): under the
   rule's 10 %. The verdict's `converged` key says where the time went.
   `python -m evolvekit study stop depot-a` ends it cleanly.
+- **The Tries chart** compares each try with this run's starting point, including
+  a warm start, not necessarily the harness defaults. Changes are relative
+  percent, not percentage points. The best-so-far line and its best markers
+  count only eligible, completed full looks, using the ranking's eligibility
+  rules; a trial that breaks a guardrail remains visible as an excluded cross
+  and does not advance the line. The line averages each case's percent
+  change; the status figure compares the plain mean objective values, so their
+  magnitudes can differ. Selecting a dot does not check it: the chart calls
+  it checked only when it is the candidate of a completed final check, never
+  when that check was skipped, stopped or missing.
 - **The final check** runs the best combination against the starting point
   on the held-back cases, several runs per case (the plan says how many),
   with the paired statistics of

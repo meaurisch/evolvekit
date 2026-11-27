@@ -389,10 +389,20 @@ def make_plan(
     for an application that does not stop itself; `operators` the search's
     operator shares, whose AI time each round pays (`ai_seconds`)."""
     n, m, r = max(1, training), max(0, test), max(1, runs_per_case)
+    overrides = dict(overrides or {})
     if workers is None:
         workers, pin = plan_workers(n * r)
     else:
         pin = list(pin_cpus or [])
+    if "workers" in overrides:
+        workers = int(overrides["workers"])
+    if "pin_cpus" in overrides:
+        chosen_pins = overrides["pin_cpus"]
+        if (not isinstance(chosen_pins, (list, tuple))
+                or any(isinstance(cpu, bool) or not isinstance(cpu, int) or cpu < 0 for cpu in chosen_pins)
+                or len(set(chosen_pins)) != len(chosen_pins)):
+            raise ValueError("plan.pin_cpus must be a list of distinct nonnegative CPU IDs, or [] to disable pinning")
+        pin = list(chosen_pins)
     workers = max(1, min(workers, n * r))
     shape = _Shape(
         n=n, m=m, r=r, time_limit_s=float(time_limit_s), overhead_s=max(0.0, float(overhead_s)),
@@ -400,7 +410,6 @@ def make_plan(
         measured_s=float(measured_s if measured_s is not None else time_limit_s),
         hours=float(hours), workers=workers, pin=tuple(pin[:workers]), ai_s=ai_seconds(operators)[0],
     )
-    overrides = dict(overrides or {})
     screening = n >= 6 and accepts_time_limit and time_limit_s >= 10
     if "screening" in overrides:
         screening = bool(overrides["screening"]) and n >= 2 and accepts_time_limit
@@ -442,6 +451,8 @@ def make_plan(
         blocked, ways_out, way_fixes = "", (), ()
     if "workers" in overrides:
         adjusted.append("workers")
+    if "pin_cpus" in overrides:
+        adjusted.append("pin_cpus")
     plan = Plan(
         workers=shape.workers, pin_cpus=shape.pin, children=children, generations=generations, rounds=rounds,
         screening=screening, screen_cases=layout["q"] if screening else 0,
@@ -452,9 +463,6 @@ def make_plan(
         way_fixes=way_fixes,
         adjusted=tuple(adjusted), ai_change_s=ai_seconds(operators)[1], ai_child_s=shape.ai_s,
     )
-    if "workers" in overrides:
-        workers = max(1, min(int(overrides["workers"]), n * r))
-        plan = replace(plan, workers=workers, pin_cpus=plan.pin_cpus[:workers])
     return plan
 
 

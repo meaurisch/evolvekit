@@ -562,7 +562,7 @@ def test_a_code_studys_header_counts_no_settings():
     assert "isCode()" in head and 'EK.plural(tuned, "setting")' in head, head
 
 
-TRIES_AXIS = "% change vs today, on the cases it learned from (not checked)"
+TRIES_AXIS = "% change vs starting point, on the cases it learned from (not checked)"
 
 
 def test_the_tries_plots_axis_says_its_points_are_not_checked():
@@ -571,6 +571,47 @@ def test_the_tries_plots_axis_says_its_points_are_not_checked():
     tries = plots[plots.index("EK.triesPlot = function"):plots.index("EK.triesLegend = function")]
     assert TRIES_AXIS in tries, "the axis label, as it is (not upper-cased)"
     assert "better" not in tries.lower(), "never 'better' over unchecked points, the axis and its aria label included"
+
+
+def test_the_tries_plot_names_its_own_start_and_marks_excluded_trials():
+    out = _node((STATIC / "js" / "plots.js").read_text(encoding="utf-8"), """
+      var d = {done: true, end_h: 1, cases: ["a"], rounds: [], best: [],
+        combinations: [{id: "c1", n: 1, end_h: 0.5, pct: 10, full: true, excluded: "Safety limit exceeded"}]};
+      process.stdout.write(JSON.stringify({
+        svg: EK.triesPlot(d, {W: 900, H: 380}).svg,
+        legend: String(EK.triesLegend(d)),
+        chip: String(EK.chosenChip(d.combinations[0], {})),
+        finishedChip: String(EK.chosenChip(d.combinations[0], {after: ""}))
+      }));""")
+    assert TRIES_AXIS in out["svg"] and "STARTING POINT" in out["svg"]
+    assert "today" not in out["svg"].lower()
+    assert "excluded" in out["legend"].lower() and "does not count" in out["legend"]
+    assert "<circle" not in out["svg"], "an excluded trial is a cross, not an eligible full-look dot"
+    for key in ("chip", "finishedChip"):
+        assert "excluded" in out[key].lower() and "Safety limit exceeded" in out[key]
+
+
+def test_the_tries_caption_only_calls_the_completed_final_check_candidate_checked():
+    out = _node(_page_function(STUDY_PAGE, "decisionOf"), _page_function(STUDY_PAGE, "sayLine"), """
+      var st = {status: {phase: "done"}, chosen: "c1", results: {best_id: "c1", final: {state: "skipped"}}};
+      function isLive() { return false; }
+      function whatOf() { return "settings"; }
+      var t = {best: [], running: []}, skipped = sayLine(t, false);
+      st.results.final = {state: "unclear", decision: "keep"};
+      var checked = sayLine(t, false);
+      st.chosen = "c2";
+      var other = sayLine(t, false);
+      st.results.final = {state: "stopped"};
+      var stopped = sayLine(t, false);
+      st.results.final = {state: "missing"};
+      var missing = sayLine(t, false);
+      st.results.final = {};
+      process.stdout.write(JSON.stringify({skipped: skipped, checked: checked, other: other,
+        stopped: stopped, missing: missing, noCheck: sayLine(t, false), family: sayLine(t, true)}));""")
+    assert out["checked"] == "The checked combination is marked."
+    for key in ("skipped", "other", "stopped", "missing", "noCheck"):
+        assert out[key] == "The selected combination is marked.", out
+    assert "starting point" in out["family"] and "today" not in out["family"]
 
 
 def test_the_cases_view_never_says_better_over_search_figures():

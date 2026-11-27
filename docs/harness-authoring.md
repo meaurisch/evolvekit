@@ -382,7 +382,12 @@ values crash the application wastes whole runs. In order of preference:
 3. **An SQL constraint** on the changed request, for rules that depend on the
    data.
 
-The check solves three random settings vectors to find ranges that break.
+The check solves three random settings vectors to find ranges that break. It
+resamples vectors that violate a template's expression constraints and passes
+the matching constraints to the runner. Alternative templates are separate
+allowed domains, not constraints that must all hold together. After 1000
+draws without a valid vector, the check fails explicitly. SQL constraints
+still need the sample case and are checked by the runner.
 
 ## When the application changes
 
