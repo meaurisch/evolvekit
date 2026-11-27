@@ -13,8 +13,8 @@ built the same way for any harness:
 * a try's own number is the mean over the cases of the furthest stage it
   reached: a *full look* when that is the run's last stage (every study
   case), a *quick look* otherwise;
-* the best-so-far line counts finished full looks only, so a lucky quick look
-  on a few cases, or a full look half done, never sets it; the status strip's
+* the best-so-far line counts eligible finished full looks only, so a gated
+  try, a lucky quick look, or a full look half done never sets it; the status strip's
   one figure is `verdict.best_so_far`, not this line;
 * the final check's numbers, as far as it got, come from its own event log
   with `confirm.verdict_summary` over the cases' log gains, the one summary
@@ -37,6 +37,7 @@ from typing import Any
 
 import yaml
 
+from evolvekit.leaderboard import competes, replay_veto
 from evolvekit.stats import log_gain, pct_from_log
 
 __all__ = ["digest", "tree_run"]
@@ -124,7 +125,7 @@ def digest(run_dir: Path) -> dict[str, Any]:
 
 def _build(run_dir: Path) -> dict[str, Any]:
     events = _lines(run_dir / "events.jsonl")
-    rows = {str(r.get("id")): r for r in _lines(run_dir / "runs.jsonl") if r.get("id")}
+    rows = {str(r.get("id")): r for r in replay_veto(_lines(run_dir / "runs.jsonl")) if r.get("id")}
     started = [e for e in events if e.get("type") == "run_started"]
     empty: dict[str, Any] = {"available": False, "combinations": [], "cases": [], "rounds": [], "best": [], "running": [],
                              "parameters": [], "now_h": 0.0, "end_h": 0.0, "done": False, "restarts": [], "check": None}
@@ -202,12 +203,17 @@ def _build(run_dir: Path) -> dict[str, Any]:
         full = bool(full_stage) and furthest == full_stage
         gains = [g for g in per.get(furthest, {}).values() if g is not None]
         failed = bool(row.get("rejected")) or not gains
+        excluded = None
+        if row and not competes(row) and (full or row.get("gated") or row.get("veto") or row.get("rejected")):
+            excluded = (f"Broke a guardrail: {row['gated']}" if row.get("gated") else
+                        row.get("veto") or row.get("reject_reason") or "Not eligible for the best so far")
         number = cid.rsplit("-c", 1)[-1]
         combos.append({
             "id": cid, "n": int(number) if number.isdigit() else len(combos) + 1,
             "round": int(row.get("generation") or 0) if isinstance(row.get("generation"), int) else 0,
             "parent": row.get("parent_id"), "start_h": round(begun.get(cid, end), 4), "end_h": round(end, 4),
             "pct": None if failed else round(fmean(gains), 4), "full": full, "failed": failed,
+            "excluded": excluded,
             "cases": {stage: per[stage] for stage in reached}, "params": row.get("params") or {},
             "failed_runs": failed_evals.get(cid, 0),
             "base": cid == base,
@@ -223,7 +229,7 @@ def _build(run_dir: Path) -> dict[str, Any]:
     for c in combos:
         # Only a full look that finished every case (its row is in runs.jsonl): a look half done is the
         # mean of the cases it has, which falls as the others come in, and the line must never fall.
-        if c["base"] or not c["full"] or c["id"] not in rows or c["pct"] is None or c["pct"] <= top:
+        if c["base"] or c["excluded"] or not c["full"] or c["id"] not in rows or c["pct"] is None or c["pct"] <= top:
             continue
         top = c["pct"]
         best.append({"h": c["end_h"], "pct": c["pct"], "id": c["id"]})

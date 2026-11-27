@@ -57,7 +57,7 @@ def a_run(tmp_path: Path, *, finished=True, minimize=True) -> Path:
     write(run / "events.jsonl", events)
     write(run / "runs.jsonl", [
         {"id": "g000-c0001", "generation": 0, "operator": "human-seed", "parent_id": None, "params": {"depth": 3}},
-        {"id": "g001-c0002", "generation": 1, "operator": "param_local", "parent_id": "g000-c0001", "params": {"depth": 7}},
+        {"id": "g001-c0002", "generation": 1, "operator": "param_local", "parent_id": "g000-c0001", "params": {"depth": 7}, "competes": False},
         {"id": "g001-c0003", "generation": 1, "operator": "param_local", "parent_id": "g000-c0001", "params": {"depth": 4}},
         {"id": "g001-c0004", "generation": 1, "operator": "param_local", "parent_id": "g000-c0001", "params": {"depth": 9}, "rejected": True},
     ])
@@ -70,6 +70,7 @@ def test_a_try_is_measured_against_the_starting_point_case_by_case(tmp_path):
     by = {c["id"]: c for c in d["combinations"]}
     quick, full, failed = by["g001-c0002"], by["g001-c0003"], by["g001-c0004"]
     assert quick["full"] is False and quick["pct"] == pytest.approx(20.0)
+    assert quick["excluded"] is None, "a healthy quick look keeps its ordinary unchecked dot"
     assert full["full"] is True and full["pct"] == pytest.approx(2.0), "1 %, 2 % and 3 % (the mean of two runs on c)"
     assert full["cases"]["full"] == {"a": pytest.approx(1.0), "b": pytest.approx(2.0), "c": pytest.approx(3.0)}
     assert failed["failed"] is True and failed["pct"] is None
@@ -103,6 +104,48 @@ def test_better_means_higher_when_the_goal_is_to_maximise(tmp_path):
     by = {c["id"]: c for c in d["combinations"]}
     assert by["g001-c0002"]["pct"] == pytest.approx(-20.0)
     assert [b["id"] for b in d["best"]] == ["g000-c0001"], "nothing beat the starting point"
+
+
+@pytest.mark.parametrize("minimize", [True, False])
+@pytest.mark.parametrize("excluded", [
+    {"gated": "Safety limit exceeded", "competes": False},
+    {"gated": "Safety limit exceeded"},
+    {"competes": False, "veto": "holdout below the seed"},
+])
+def test_excluded_full_looks_never_displace_the_eligible_best(tmp_path, minimize, excluded):
+    from evolvekit.app.verdict import best_so_far
+
+    run = tmp_path / "run"
+    direction = "minimize" if minimize else "maximize"
+    # The warm start uses depth 7, not the default 3. Its measured cost is
+    # 0.4; changes are relative percent, not percentage points.
+    values = [0.4, 0.36 if minimize else 0.44, 0.2 if minimize else 0.6]
+    ids = ["g000-c0001", "g001-c0002", "g001-c0003"]
+    events = [{"type": "run_started", "ts": T0, "objective": "cost", "direction": direction,
+               "parameters": [{"name": "depth", "default": 3}]},
+              {"type": "stage_started", "ts": T0, "stage": "full"}]
+    rows = []
+    for i, (cid, value) in enumerate(zip(ids, values)):
+        events += evaluation(cid, "full", "sample", value, 2 + i * 2)
+        rows.append({"id": cid, "operator": "human-seed" if i == 0 else "param_local",
+                     "params": {"depth": 7}, "rejected": False, "competes": True,
+                     "kpis": {"cost": value}, "score": -value if minimize else value})
+    rows[-1].pop("competes")
+    rows[-1].update(excluded)
+    write(run / "events.jsonl", events)
+    write(run / "runs.jsonl", rows)
+    (run / "study.yaml").write_text("warm: {from: earlier, run: previous}\n", encoding="utf-8")
+
+    d = digest(run)
+    assert [b["id"] for b in d["best"]] == ids[:2]
+    assert d["best"][-1]["pct"] == pytest.approx(10.0)
+    blocked = next(c for c in d["combinations"] if c["id"] == ids[-1])
+    assert blocked["excluded"] and not blocked["failed"] and not blocked["best"]
+    assert blocked["pct"] == pytest.approx(50.0), "the excluded raw result can still be inspected"
+    status_best = best_so_far(run, {"kpi": "cost", "direction": "lower" if minimize else "higher"},
+                              rows=rows, job={"phase": "search"})
+    assert status_best["id"] == d["best"][-1]["id"]
+    assert status_best["pct"] == pytest.approx(d["best"][-1]["pct"])
 
 
 def test_a_running_try_says_how_far_it_got(tmp_path):
@@ -179,5 +222,28 @@ def test_one_combination_in_full_through_the_api(tmp_path):
         assert status == 404
         status, digest = get(f"/api/studies/{slug}/tries?run=20260101-000000")
         assert {c["id"]: c["failed_runs"] for c in digest["combinations"]}["g001-c0004"] == 1
+
+        run = server.home.study_root(slug) / "runs" / "20260101-000000"
+        events = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        for event in events:
+            if event.get("type") == "run_started":
+                event["objective"] = "tour_length"
+            if "kpis" in event and "cost" in event["kpis"]:
+                event["kpis"] = {"tour_length": event["kpis"]["cost"]}
+        for case in ("a", "b", "c"):
+            events += evaluation("g002-c0006", "full", case, 1, 29)
+            events[-1]["kpis"] = {"tour_length": 1}
+        write(run / "events.jsonl", events)
+        rows = [json.loads(line) for line in (run / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+        for row, value in zip(rows, (200, 120, 195.3333, 1000)):
+            row.update(kpis={"tour_length": value}, score=-value, competes=row["id"] in ("g000-c0001", "g001-c0003"))
+        rows.append({"id": "g002-c0006", "score": -1, "kpis": {"tour_length": 1}, "rejected": False,
+                     "competes": False, "gated": "Safety limit exceeded"})
+        write(run / "runs.jsonl", rows)
+        status, chart = get(f"/api/studies/{slug}/tries?run=20260101-000000")
+        status_code, summary = get(f"/api/studies/{slug}/status?run=20260101-000000")
+        assert status == status_code == 200
+        assert chart["best"][-1]["id"] == summary["best"]["id"] == "g001-c0003"
+        assert next(c for c in chart["combinations"] if c["id"] == "g002-c0006")["excluded"]
     finally:
         server.stop()

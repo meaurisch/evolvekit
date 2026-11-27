@@ -1301,10 +1301,15 @@ class ModelConfig:
             raise ConfigError(
                 f"{path}.temperature: must be within [0, 2], got {temperature}"
             )
+        model = _require(data, "model", path)
+        if provider in ("claude-cli", "copilot-cli") and isinstance(model, str) and not model.strip():
+            model = ""
+        else:
+            model = _as_str(model, f"{path}.model")
         return ModelConfig(
             role=role,
             provider=provider,
-            model=_as_str(_require(data, "model", path), f"{path}.model"),
+            model=model,
             price_in_per_mtok=price_in,
             price_out_per_mtok=price_out,
             max_tokens=_as_int(

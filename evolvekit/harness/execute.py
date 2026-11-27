@@ -248,7 +248,8 @@ def plan_for(study: Study, harness: Harness, measured: dict[str, Any], *, hours:
     the AI's time of the search's operators (`operators`, else
     `compile.study_operators` with `models`, the ones the run is compiled
     with); a bake-off searches nothing."""
-    overrides = None if study.plan.get("auto", True) else {k: v for k, v in study.plan.items() if k != "auto"}
+    allowed = {"workers", "pin_cpus"} if study.plan.get("auto", True) else set(study.plan) - {"auto"}
+    overrides = {k: v for k, v in study.plan.items() if k in allowed}
     if operators is None:
         operators = study_operators(study, models, bakeoff=bakeoff)
     return make_plan(

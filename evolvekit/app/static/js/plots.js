@@ -1,5 +1,5 @@
 /* evolvekit app: the Study page's three views, drawn from GET …/tries.
-   triesPlot   every try by when it finished and its % change vs today (not checked);
+   triesPlot   every try by when it finished and its % change vs the starting point (not checked);
                the best-so-far line (full looks only); rings for tries
                running now; the chosen combination and its family.
    casesView   a row per study case, a dot per try, the tally of wins.
@@ -88,11 +88,11 @@
     });
     out.push('<line x1="' + l + '" y1="' + f(Y(0)) + '" x2="' + (W - r) + '" y2="' + f(Y(0)) + '" style="stroke:var(--ink-1)" stroke-width="1.5"/>' +
       '<text x="' + (l - 8) + '" y="' + f(Y(0) + 4) + '" text-anchor="end" style="fill:var(--ink-2);font:500 11px var(--mono)">0</text>' +
-      '<text x="' + (l + 6) + '" y="' + f(Y(0) + 15) + '" style="fill:var(--ink-1);font:700 10px var(--sans);letter-spacing:.12em">' + esc((o.keepWord || "TODAY’S SETTINGS").toUpperCase()) + "</text>");
+      '<text x="' + (l + 6) + '" y="' + f(Y(0) + 15) + '" style="fill:var(--ink-1);font:700 10px var(--sans);letter-spacing:.12em">' + esc((o.keepWord || "STARTING POINT").toUpperCase()) + "</text>");
     out.push(axisHours(end, W, X, H, phone));
     // Every point here is unchecked, and the axis says so: no claim before the verdict (persona round 3, E5).
     out.push('<text x="' + (phone ? 2 : l) + '" y="12" style="fill:var(--ink-2);font:600 ' + (phone ? 9 : 10) + 'px var(--sans)">' +
-      "% change vs today, on the cases it learned from (not checked)</text>");
+      "% change vs starting point, on the cases it learned from (not checked)</text>");
     (d.restarts || []).forEach(function (h) {
       out.push('<line x1="' + f(X(h)) + '" y1="' + (base - 16) + '" x2="' + f(X(h)) + '" y2="' + base + '" style="stroke:var(--ink-2)" stroke-width="1.2"/>' +
         (phone ? "" : '<text x="' + f(X(h) + 4) + '" y="' + (base - 6) + '" style="fill:var(--ink-2);font:600 10px var(--sans)">restarted</text>'));
@@ -122,6 +122,12 @@
       if (c.failed || c.pct == null) {
         out.push('<path d="M' + f(x - 3.5) + " " + f(base - 9.5) + 'l7 7m0-7l-7 7" style="stroke:var(--ink-2)" stroke-width="1.4"/>');
         points.push({ id: c.id, x: x, y: base - 6 });
+        return;
+      }
+      if (c.excluded) {
+        var ey = Y(c.pct);
+        out.push('<path d="M' + f(x - 3.5) + " " + f(ey - 3.5) + 'l7 7m0-7l-7 7" style="stroke:var(--ink-2)" stroke-width="1.4"/>');
+        points.push({ id: c.id, x: x, y: ey });
         return;
       }
       if (c.pct < lo) {
@@ -158,7 +164,7 @@
       });
     }
     var n = d.cases.length;
-    var aria = "Every try so far, by time and by its % change vs today on the cases it learned from (not checked); the orange line is the best so far on all " + n + " study cases" +
+    var aria = "Every try so far, by time and by its % change vs starting point on the cases it learned from (not checked); the orange line counts eligible full looks on all " + n + " study cases" +
       (done ? "" : "; rings at now are tries still running") + ". Use the arrow keys to go from try to try, Enter to follow one.";
     return { svg: '<svg class="plot" viewBox="0 0 ' + W + " " + H + '" width="100%" role="img" tabindex="0" aria-label="' + esc(aria) + '" data-plot="tries">' + out.join("") + "</svg>", points: points };
   };
@@ -166,9 +172,10 @@
   EK.triesLegend = function (d, o) {
     var quick = d.quick_cases && d.quick_cases < d.cases.length && d.combinations.some(function (c) { return !c.full && !c.base; });
     // The line is each case's change averaged: not the strip's best so far (the plain averages), so said.
-    var it = [["line", "best so far, each case’s change averaged"], ["full", "full look, " + d.cases.length + (d.cases.length === 1 ? " case" : " cases")]];
+    var it = [["line", "eligible best so far, each case’s change averaged"], ["full", "full look, " + d.cases.length + (d.cases.length === 1 ? " case" : " cases")]];
     if (quick) it.push(["quick", "quick look, " + d.quick_cases + (d.quick_cases === 1 ? " case" : " cases")]);
     it.push(["x", "did not finish"]);
+    if (d.combinations.some(function (c) { return c.excluded; })) it.push(["x", "excluded: does not count"]);
     if (!d.done) it.push(["ring", "running"]);
     if (o && o.family) it.push(["fam", "its family: the combinations it came from"]);
     var g = {
